@@ -1,0 +1,11 @@
+# Qwen Multi-Agent Server - FastAPI Implementation
+
+# Model inference
+llama-cpp-python>=0.2.0
+
+# Web server (FastAPI)
+fastapi>=0.100.0
+uvicorn[standard]>=0.20.0
+
+# Optional
+python-dotenv>=1.0.0

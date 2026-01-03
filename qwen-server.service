@@ -1,0 +1,35 @@
+[Unit]
+Description=Qwen Multi-Agent Server (FastAPI)
+After=network.target nvidia-persistenced.service
+Wants=nvidia-persistenced.service
+
+[Service]
+Type=simple
+User=keith-merrill
+Group=keith-merrill
+WorkingDirectory=/home/keith-merrill/Dev/qwen-server
+ExecStart=/home/keith-merrill/Dev/qwen-server/venv/bin/python server.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# CUDA environment
+Environment="CUDA_HOME=/usr/local/cuda"
+Environment="LD_LIBRARY_PATH=/usr/local/cuda/lib64"
+Environment="PATH=/usr/local/cuda/bin:/usr/local/bin:/usr/bin"
+
+# Model configuration (override in .env file)
+EnvironmentFile=-/home/keith-merrill/Dev/qwen-server/.env
+
+# Resource limits
+LimitNOFILE=65536
+NoNewPrivileges=true
+
+# GPU access
+DeviceAllow=/dev/nvidia* rwm
+DeviceAllow=/dev/nvidiactl rwm
+DeviceAllow=/dev/nvidia-uvm rwm
+
+[Install]
+WantedBy=multi-user.target
