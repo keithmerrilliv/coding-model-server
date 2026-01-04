@@ -187,6 +187,29 @@ def parse_command_safely(command: str) -> List[str]:
         raise ValueError(f"Failed to parse command: {e}")
 
 
+def expand_paths_in_args(command_args: List[str]) -> List[str]:
+    """Expand tilde (~) in command arguments for proper path resolution
+
+    When using shell=False, tilde expansion doesn't happen automatically.
+    This function expands ~ in arguments that look like paths.
+    """
+    expanded_args = []
+    for arg in command_args:
+        # Expand tilde if argument starts with ~ or contains =~
+        if arg.startswith('~'):
+            expanded_args.append(os.path.expanduser(arg))
+        elif '=~' in arg:
+            # Handle cases like --file=~/path or VAR=~/path
+            key, value = arg.split('=', 1)
+            if value.startswith('~'):
+                expanded_args.append(f"{key}={os.path.expanduser(value)}")
+            else:
+                expanded_args.append(arg)
+        else:
+            expanded_args.append(arg)
+    return expanded_args
+
+
 def is_command_allowed(command_args: List[str]) -> tuple:
     """Check if command is allowed based on whitelist"""
     if not COMMAND_WHITELIST:
@@ -225,6 +248,7 @@ def run_command_async(job_id, command):
             )
         else:
             command_args = parse_command_safely(command)
+            command_args = expand_paths_in_args(command_args)
             process = subprocess.Popen(
                 command_args,
                 shell=False,
@@ -304,6 +328,7 @@ def execute_remote_command(command, async_mode=False):
                 result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=30)
             else:
                 command_args = parse_command_safely(command)
+                command_args = expand_paths_in_args(command_args)
                 result = subprocess.run(command_args, shell=False, capture_output=True, text=True, timeout=30)
 
             output = result.stdout + result.stderr

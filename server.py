@@ -130,7 +130,7 @@ class ErrorResponse(BaseModel):
 class Config:
     PORT = int(os.getenv('PORT', 5000))
     HOST = os.getenv('HOST', '0.0.0.0')
-    MODEL_PATH = os.getenv('MODEL_PATH')
+    MODEL_PATH = os.path.expanduser(os.getenv('MODEL_PATH', '')) if os.getenv('MODEL_PATH') else None
     MODEL_CONTEXT_SIZE = int(os.getenv('MODEL_CONTEXT_SIZE', 32768))
     MODEL_GPU_LAYERS = int(os.getenv('MODEL_GPU_LAYERS', 99))
 

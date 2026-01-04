@@ -4,8 +4,8 @@
 llama-cpp-python>=0.2.0
 
 # Web server (FastAPI)
-fastapi>=0.100.0
-uvicorn[standard]>=0.20.0
+fastapi>=0.121.1
+uvicorn[standard]>=0.40.0
 
 # Client dependencies
 requests>=2.31.0
