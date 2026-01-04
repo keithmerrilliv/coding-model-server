@@ -490,7 +490,12 @@ def chat(model="implementer"):
             prompt_text = f"{agent_theme['prompt']} {agent_theme['icon']} > "
             print(f"{agent_theme['color']}{prompt_text}{COLORS['ENDC']}", end="", flush=True)
 
-            payload = {"model": model, "messages": history, "stream": True}
+            # Sanitize history to remove internal flags like 'auto_send' before sending to server
+            sanitized_history = [
+                {"role": msg["role"], "content": msg["content"]} 
+                for msg in history
+            ]
+            payload = {"model": model, "messages": sanitized_history, "stream": True}
             full_response = ""
 
             try:
@@ -518,13 +523,17 @@ def chat(model="implementer"):
                                 pass
 
                 print()
-                history.append({"role": "assistant", "content": full_response})
+                
+                # Only append non-empty responses to history to avoid 422 errors on next turn
+                if full_response and full_response.strip():
+                    history.append({"role": "assistant", "content": full_response})
+                    tool_output = process_remote_commands(full_response)
 
-                tool_output = process_remote_commands(full_response)
-
-                if tool_output:
-                    history.append({"role": "user", "content": f"Tool output:\n{tool_output}", "auto_send": True})
-                    continue
+                    if tool_output:
+                        history.append({"role": "user", "content": f"Tool output:\n{tool_output}", "auto_send": True})
+                        continue
+                else:
+                    print_colored("\nWarning: Received empty response from server.", COLORS['WARNING'])
 
             except requests.exceptions.ConnectionError:
                 print_colored(f"\nConnection failed! Is the server at {LINUX_SERVER_IP} reachable?", COLORS['FAIL'])
