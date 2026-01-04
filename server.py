@@ -189,7 +189,7 @@ To run commands on the client, you MUST use this specific protocol:
             'model_config': {
                 'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/Qwen3-Coder-480B-A35B-Instruct-UD-IQ1_M.gguf',
                 'n_gpu_layers': 4,   # 4 layers on GPU (~12GB VRAM)
-                'n_ctx': 131072      # Very large context - minimal KV cache overhead with only 4 GPU layers
+                'n_ctx': 32768       # Reduced from 131K - 480B model needs less context due to compute buffer limits
             }
         },
         'reviewer': {
@@ -198,7 +198,7 @@ To run commands on the client, you MUST use this specific protocol:
             'model_config': {
                 'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/Qwen3-Coder-480B-A35B-Instruct-UD-IQ1_M.gguf',
                 'n_gpu_layers': 4,   # Shares model with architect
-                'n_ctx': 131072      # Very large context
+                'n_ctx': 32768       # Reduced from 131K - 480B model needs less context due to compute buffer limits
             }
         },
         'debugger': {
