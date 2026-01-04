@@ -15,9 +15,9 @@ StandardOutput=journal
 StandardError=journal
 
 # CUDA environment
-Environment="CUDA_HOME=/usr/local/cuda"
-Environment="LD_LIBRARY_PATH=/usr/local/cuda/lib64"
-Environment="PATH=/usr/local/cuda/bin:/usr/local/bin:/usr/bin"
+Environment="CUDA_HOME=/usr/local/cuda-13.1"
+Environment="LD_LIBRARY_PATH=/usr/local/cuda-13.1/lib64"
+Environment="PATH=/usr/local/cuda-13.1/bin:/usr/local/bin:/usr/bin"
 
 # Model configuration (override in .env file)
 EnvironmentFile=-/home/keith-merrill/Dev/qwen-server/.env
@@ -26,10 +26,14 @@ EnvironmentFile=-/home/keith-merrill/Dev/qwen-server/.env
 LimitNOFILE=65536
 NoNewPrivileges=true
 
-# GPU access
-DeviceAllow=/dev/nvidia* rwm
+# GPU access - disable device policy to allow all devices
+DevicePolicy=closed
+DeviceAllow=/dev/nvidia0 rwm
 DeviceAllow=/dev/nvidiactl rwm
+DeviceAllow=/dev/nvidia-modeset rwm
 DeviceAllow=/dev/nvidia-uvm rwm
+DeviceAllow=/dev/nvidia-uvm-tools rwm
+DeviceAllow=char-drm rwm
 
 [Install]
 WantedBy=multi-user.target

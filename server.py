@@ -133,8 +133,8 @@ class Config:
     MODEL_PATH = os.path.expanduser(os.getenv('MODEL_PATH', '')) if os.getenv('MODEL_PATH') else None
     MODEL_CONTEXT_SIZE = int(os.getenv('MODEL_CONTEXT_SIZE', 32768))
     MODEL_GPU_LAYERS = int(os.getenv('MODEL_GPU_LAYERS', 99))
-    MODEL_N_THREADS = int(os.getenv('MODEL_N_THREADS', 0))
-    MODEL_N_BATCH = int(os.getenv('MODEL_N_BATCH', 512))
+    MODEL_N_THREADS = int(os.getenv('MODEL_N_THREADS', 24))
+    MODEL_N_BATCH = int(os.getenv('MODEL_N_BATCH', 2048))
     MODEL_FLASH_ATTENTION = os.getenv('MODEL_FLASH_ATTENTION', 'true').lower() == 'true'
     MODEL_USE_MMAP = os.getenv('MODEL_USE_MMAP', 'true').lower() == 'true'
     MODEL_USE_MLOCK = os.getenv('MODEL_USE_MLOCK', 'true').lower() == 'true'
@@ -255,9 +255,9 @@ class ModelManager:
                     raise FileNotFoundError(error_msg)
 
                 logger.info("Loading model from: %s", Config.MODEL_PATH)
-                logger.info("Performance settings - threads: %d, batch: %d, flash attention: %s, mmap: %s, mlock: %s, ctx_batch: %d",
+                logger.info("Performance settings - threads: %d, batch: %d, flash attention: %s, mmap: %s, mlock: %s, ctx_batch: %d, gpu_layers: %d",
                            Config.MODEL_N_THREADS, Config.MODEL_N_BATCH, Config.MODEL_FLASH_ATTENTION,
-                           Config.MODEL_USE_MMAP, Config.MODEL_USE_MLOCK, Config.MODEL_N_CTX_BATCH)
+                           Config.MODEL_USE_MMAP, Config.MODEL_USE_MLOCK, Config.MODEL_N_CTX_BATCH, Config.MODEL_GPU_LAYERS)
 
                 try:
                     from llama_cpp import Llama
@@ -271,7 +271,7 @@ class ModelManager:
                         use_mmap=Config.MODEL_USE_MMAP,
                         use_mlock=Config.MODEL_USE_MLOCK,
                         n_ctx_batch=Config.MODEL_N_CTX_BATCH,
-                        verbose=False
+                        verbose=True
                     )
                     logger.info("Model loaded successfully with performance optimizations")
                 except Exception as e:
