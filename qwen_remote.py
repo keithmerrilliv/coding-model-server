@@ -41,7 +41,7 @@ AGENT_THEMES = {
 }
 
 # Command execution security settings
-ALLOW_SHELL_MODE = os.getenv('ALLOW_SHELL_MODE', 'false').lower() == 'true'
+ALLOW_SHELL_MODE = os.getenv('ALLOW_SHELL_MODE', 'true').lower() == 'true'
 COMMAND_WHITELIST = os.getenv('COMMAND_WHITELIST', '').split(',') if os.getenv('COMMAND_WHITELIST') else None
 
 
