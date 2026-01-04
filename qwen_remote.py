@@ -42,6 +42,7 @@ AGENT_THEMES = {
 
 # Command execution security settings
 ALLOW_SHELL_MODE = os.getenv('ALLOW_SHELL_MODE', 'true').lower() == 'true'
+ALLOW_ALL = os.getenv('ALLOW_ALL', 'false').lower() == 'true'
 COMMAND_WHITELIST = os.getenv('COMMAND_WHITELIST', '').split(',') if os.getenv('COMMAND_WHITELIST') else None
 
 
@@ -346,13 +347,17 @@ def execute_remote_command(command, async_mode=False):
         print_colored(f"   {str(e)}", COLORS['FAIL'])
         return f"Command validation failed: {str(e)}"
 
-    try:
-        choice = input(f"{COLORS['BOLD']}Allow? [y/N] > {COLORS['ENDC']}")
-    except (EOFError, KeyboardInterrupt):
-        return "User cancelled command execution."
+    if ALLOW_ALL:
+        print_colored(f"   Auto-approved (ALLOW_ALL mode enabled)", COLORS['GREEN'])
+        choice = 'y'
+    else:
+        try:
+            choice = input(f"{COLORS['BOLD']}Allow? [y/N] > {COLORS['ENDC']}")
+        except (EOFError, KeyboardInterrupt):
+            return "User cancelled command execution."
 
-    if choice.lower() != 'y':
-        return "User denied command execution."
+        if choice.lower() != 'y':
+            return "User denied command execution."
 
     if async_mode:
         job_id = job_tracker.create_job(command)
@@ -483,6 +488,11 @@ def chat(model="implementer"):
         print_colored(f"    {', '.join(COMMAND_WHITELIST[:5])}{'...' if len(COMMAND_WHITELIST) > 5 else ''}", COLORS['CYAN'])
     else:
         print_colored("  Whitelist: DISABLED (all commands allowed)", COLORS['WARNING'])
+
+    if ALLOW_ALL:
+        print_colored("  Command approval: AUTO-APPROVE ALL (⚠️  NO PROMPTS - DANGEROUS!)", COLORS['FAIL'])
+    else:
+        print_colored("  Command approval: Manual (will prompt for each command)", COLORS['GREEN'])
 
     print_colored("\nType '/exit' to quit. Type '/model <name>' to switch agents.\n", COLORS['BLUE'])
 
