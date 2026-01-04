@@ -22,12 +22,12 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__) 
 
 
-# ============================================================================
+# ============================================================================ 
 # Pydantic Models for Request/Response Validation
-# ============================================================================
+# ============================================================================ 
 
 class ChatMessage(BaseModel):
     """A single message in the chat conversation"""
@@ -123,61 +123,19 @@ class ErrorResponse(BaseModel):
     error: ErrorDetail
 
 
-# ============================================================================
+# ============================================================================ 
 # Configuration
-# ============================================================================
+# ============================================================================ 
 
 class Config:
     PORT = int(os.getenv('PORT', 5000))
     HOST = os.getenv('HOST', '0.0.0.0')
-    MODEL_PATH = os.path.expanduser(os.getenv('MODEL_PATH', '')) if os.getenv('MODEL_PATH') else None
-    MODEL_CONTEXT_SIZE = int(os.getenv('MODEL_CONTEXT_SIZE', 32768))
-    MODEL_GPU_LAYERS = int(os.getenv('MODEL_GPU_LAYERS', 99))
-    MODEL_N_THREADS = int(os.getenv('MODEL_N_THREADS', 24))
-    MODEL_N_BATCH = int(os.getenv('MODEL_N_BATCH', 2048))
-    MODEL_FLASH_ATTENTION = os.getenv('MODEL_FLASH_ATTENTION', 'true').lower() == 'true'
-    MODEL_USE_MMAP = os.getenv('MODEL_USE_MMAP', 'true').lower() == 'true'
-    MODEL_USE_MLOCK = os.getenv('MODEL_USE_MLOCK', 'true').lower() == 'true'
-    MODEL_N_CTX_BATCH = int(os.getenv('MODEL_N_CTX_BATCH', 2048))
-
-    @classmethod
-    def validate(cls) -> List[str]:
-        """Validate configuration before starting server"""
-        errors = []
-
-        if not cls.MODEL_PATH:
-            errors.append("MODEL_PATH is not set. Please set it in .env file.")
-        elif not os.path.exists(cls.MODEL_PATH):
-            errors.append(f"Model file not found: {cls.MODEL_PATH}")
-        elif not os.path.isfile(cls.MODEL_PATH):
-            errors.append(f"MODEL_PATH is not a file: {cls.MODEL_PATH}")
-        elif not os.access(cls.MODEL_PATH, os.R_OK):
-            errors.append(f"Model file is not readable: {cls.MODEL_PATH}")
-        else:
-            file_size = os.path.getsize(cls.MODEL_PATH)
-            if file_size < 1024 * 1024:
-                errors.append(f"Model file seems too small ({file_size} bytes): {cls.MODEL_PATH}")
-
-        if not 1 <= cls.PORT <= 65535:
-            errors.append(f"PORT must be between 1 and 65535, got: {cls.PORT}")
-
-        if cls.MODEL_CONTEXT_SIZE < 512:
-            errors.append(f"MODEL_CONTEXT_SIZE seems too small: {cls.MODEL_CONTEXT_SIZE}")
-
-        if cls.MODEL_GPU_LAYERS < 0:
-            errors.append(f"MODEL_GPU_LAYERS cannot be negative: {cls.MODEL_GPU_LAYERS}")
-
-        if cls.MODEL_N_THREADS < 0:
-            errors.append(f"MODEL_N_THREADS cannot be negative: {cls.MODEL_N_THREADS}")
-
-        if cls.MODEL_N_BATCH < 1:
-            errors.append(f"MODEL_N_BATCH must be at least 1: {cls.MODEL_N_BATCH}")
-
-        if cls.MODEL_N_CTX_BATCH < 1:
-            errors.append(f"MODEL_N_CTX_BATCH must be at least 1: {cls.MODEL_N_CTX_BATCH}")
-
-        return errors
-
+    
+    # Global defaults (can be overridden per model)
+    DEFAULT_CONTEXT_SIZE = int(os.getenv('MODEL_CONTEXT_SIZE', 8192))
+    DEFAULT_N_THREADS = int(os.getenv('MODEL_N_THREADS', 24))
+    DEFAULT_N_BATCH = int(os.getenv('MODEL_N_BATCH', 512))
+    
     REMOTE_EXEC_INSTRUCTION = """
 # REMOTE CLIENT EXECUTION PROTOCOL
 You are running on a remote Linux server, but the user is on a macOS client.
@@ -218,76 +176,126 @@ To run commands on the client, you MUST use this specific protocol:
     AGENTS = {
         'implementer': {
             'description': 'Code implementation agent',
-            'system_prompt': f'You are an expert software engineer. Provide clear, working code implementations.\n{REMOTE_EXEC_INSTRUCTION}'
+            'system_prompt': f'You are an expert software engineer. Provide clear, working code implementations.\n{REMOTE_EXEC_INSTRUCTION}',
+            'model_config': {
+                'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q3_K_M.gguf',
+                'n_gpu_layers': 60,  # Try to fit fully on GPU (~15GB)
+                'n_ctx': 8192
+            }
         },
         'architect': {
             'description': 'System architecture agent',
-            'system_prompt': f'You are a system architect. Design scalable, maintainable solutions.\n{REMOTE_EXEC_INSTRUCTION}'
+            'system_prompt': f'You are a system architect. Design scalable, maintainable solutions.\n{REMOTE_EXEC_INSTRUCTION}',
+            'model_config': {
+                'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/Qwen3-Coder-480B-A35B-Instruct-UD-IQ1_M.gguf',
+                'n_gpu_layers': 4,   # 4 layers on GPU (~12GB VRAM)
+                'n_ctx': 4096        # Reduced context for the massive model
+            }
         },
         'reviewer': {
             'description': 'Code review agent',
-            'system_prompt': f'You are a code reviewer. Identify issues and suggest improvements.\n{REMOTE_EXEC_INSTRUCTION}'
+            'system_prompt': f'You are a code reviewer. Identify issues and suggest improvements.\n{REMOTE_EXEC_INSTRUCTION}',
+            'model_config': {
+                'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/Qwen3-Coder-480B-A35B-Instruct-UD-IQ1_M.gguf',
+                'n_gpu_layers': 4,   # Shares model with architect
+                'n_ctx': 4096
+            }
         },
         'debugger': {
             'description': 'Debugging agent',
-            'system_prompt': f'You are a debugging expert. Analyze errors and suggest fixes.\n{REMOTE_EXEC_INSTRUCTION}'
+            'system_prompt': f'You are a debugging expert. Analyze errors and suggest fixes.\n{REMOTE_EXEC_INSTRUCTION}',
+            'model_config': {
+                'path': '/home/keith-merrill/.lmstudio/models/n00b001/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M-GGUF/qwen3-coder-30b-a3b-instruct-q4_k_m.gguf',
+                'n_gpu_layers': 0,   # All RAM (~20GB)
+                'n_ctx': 8192
+            }
         }
     }
 
+    @classmethod
+    def validate(cls) -> List[str]:
+        """Validate configuration before starting server"""
+        errors = []
+        if not 1 <= cls.PORT <= 65535:
+            errors.append(f"PORT must be between 1 and 65535, got: {cls.PORT}")
+            
+        for agent, config in cls.AGENTS.items():
+            path = config['model_config']['path']
+            if not os.path.exists(path):
+                errors.append(f"Model for {agent} not found: {path}")
+                
+        return errors
 
-# ============================================================================
+
+# ============================================================================ 
 # Model Manager
-# ============================================================================
+# ============================================================================ 
 
 class ModelManager:
     def __init__(self):
-        self.model = None
+        self.models: Dict[str, Any] = {}
         self.lock = Lock()
         self.inference_lock = Lock()
+        self.current_model_path = None
 
-    def get_model(self):
-        """Get or load the model"""
+    def get_model(self, agent_name: str):
+        """Get or load the model for the specific agent, unloading others if needed"""
+        if agent_name not in Config.AGENTS:
+            raise ValueError(f"Unknown agent: {agent_name}")
+
+        model_config = Config.AGENTS[agent_name]['model_config']
+        model_path = model_config['path']
+
         with self.lock:
-            if self.model is None:
-                if not os.path.exists(Config.MODEL_PATH):
-                    error_msg = f"Model file not found: {Config.MODEL_PATH}"
-                    logger.error(error_msg)
-                    raise FileNotFoundError(error_msg)
+            # Check if the requested model is already the currently loaded one
+            if self.current_model_path == model_path and model_path in self.models:
+                return self.models[model_path]
 
-                logger.info("Loading model from: %s", Config.MODEL_PATH)
-                logger.info("Performance settings - threads: %d, batch: %d, flash attention: %s, mmap: %s, mlock: %s, ctx_batch: %d, gpu_layers: %d",
-                           Config.MODEL_N_THREADS, Config.MODEL_N_BATCH, Config.MODEL_FLASH_ATTENTION,
-                           Config.MODEL_USE_MMAP, Config.MODEL_USE_MLOCK, Config.MODEL_N_CTX_BATCH, Config.MODEL_GPU_LAYERS)
+            logger.info("Switching models. Request for %s: %s", agent_name, model_path)
+            
+            # Unload existing models to free VRAM/RAM
+            if self.models:
+                logger.info("Unloading previous models...")
+                self.models.clear()
+                self.current_model_path = None
+                
+                # Force garbage collection to ensure VRAM is released
+                import gc
+                gc.collect()
+                
+                # Optional: specific cleanup for llama-cpp-python if needed, 
+                # but removing references and gc.collect() is usually sufficient.
 
-                try:
-                    from llama_cpp import Llama
-                    self.model = Llama(
-                        model_path=Config.MODEL_PATH,
-                        n_ctx=Config.MODEL_CONTEXT_SIZE,
-                        n_gpu_layers=Config.MODEL_GPU_LAYERS,
-                        n_threads=Config.MODEL_N_THREADS,
-                        n_batch=Config.MODEL_N_BATCH,
-                        flash_attn=Config.MODEL_FLASH_ATTENTION,
-                        use_mmap=Config.MODEL_USE_MMAP,
-                        use_mlock=Config.MODEL_USE_MLOCK,
-                        n_ctx_batch=Config.MODEL_N_CTX_BATCH,
-                        verbose=True
-                    )
-                    logger.info("Model loaded successfully with performance optimizations")
-                except Exception as e:
-                    logger.error("Failed to load model: %s", e)
-                    raise
-
-            return self.model
+            logger.info("Loading model for %s: %s", agent_name, model_path)
+            try:
+                from llama_cpp import Llama
+                model = Llama(
+                    model_path=model_path,
+                    n_ctx=model_config.get('n_ctx', Config.DEFAULT_CONTEXT_SIZE),
+                    n_gpu_layers=model_config.get('n_gpu_layers', 0),
+                    n_threads=Config.DEFAULT_N_THREADS,
+                    n_batch=Config.DEFAULT_N_BATCH,
+                    flash_attn=True,
+                    use_mmap=True,
+                    use_mlock=True,
+                    verbose=True
+                )
+                self.models[model_path] = model
+                self.current_model_path = model_path
+                logger.info("Model loaded successfully: %s", model_path)
+                return model
+            except Exception as e:
+                logger.error("Failed to load model %s: %s", model_path, e)
+                raise
 
     def is_loaded(self) -> bool:
-        """Check if model is loaded"""
-        return self.model is not None
+        """Check if any model is loaded"""
+        return len(self.models) > 0
 
 
-# ============================================================================
+# ============================================================================ 
 # ChatML Format Helpers
-# ============================================================================
+# ============================================================================ 
 
 CHATML_START = "<|im_start|>"
 CHATML_END = "<|im_end|>"
@@ -324,9 +332,9 @@ def get_model_params(max_tokens: int, temperature: float, stream: bool = False) 
     }
 
 
-# ============================================================================
+# ============================================================================ 
 # Response Builders
-# ============================================================================
+# ============================================================================ 
 
 def build_completion_response(model_id: str, text: str, usage: Dict[str, int]) -> Dict[str, Any]:
     """Build OpenAI-compatible completion response"""
@@ -366,9 +374,9 @@ def build_stream_chunk(completion_id: str, model_id: str, content: Optional[str]
     }
 
 
-# ============================================================================
+# ============================================================================ 
 # FastAPI Application
-# ============================================================================
+# ============================================================================ 
 
 app = FastAPI(
     title="Qwen Multi-Agent Server",
@@ -455,13 +463,6 @@ async def chat_completions(request: ChatCompletionRequest):
                 detail=f"Model '{request.model}' not found. Available models: {', '.join(Config.AGENTS.keys())}"
             )
 
-        # Validate max_tokens against context size
-        if request.max_tokens > Config.MODEL_CONTEXT_SIZE:
-            raise HTTPException(
-                status_code=400,
-                detail=f"'max_tokens' must be between 1 and {Config.MODEL_CONTEXT_SIZE}"
-            )
-
         agent_config = Config.AGENTS[request.model]
         prompt = build_chatml_prompt(request.messages, agent_config['system_prompt'])
 
@@ -485,7 +486,7 @@ async def chat_completions(request: ChatCompletionRequest):
 
 def sync_completion(prompt: str, model_id: str, max_tokens: int, temperature: float) -> Dict[str, Any]:
     """Generate synchronous completion"""
-    model = model_manager.get_model()
+    model = model_manager.get_model(model_id)
     params = get_model_params(max_tokens, temperature, stream=False)
 
     with model_manager.inference_lock:
@@ -494,11 +495,10 @@ def sync_completion(prompt: str, model_id: str, max_tokens: int, temperature: fl
 
     return build_completion_response(model_id, text, response['usage'])
 
-
 def stream_completion(prompt: str, model_id: str, max_tokens: int, temperature: float) -> Iterator[str]:
     """Generate streaming completion"""
     try:
-        model = model_manager.get_model()
+        model = model_manager.get_model(model_id)
         params = get_model_params(max_tokens, temperature, stream=True)
         completion_id = f"chatcmpl-{int(time.time())}"
 
@@ -518,41 +518,3 @@ def stream_completion(prompt: str, model_id: str, max_tokens: int, temperature: 
         logger.error("Error in stream_completion: %s", e, exc_info=True)
         error_chunk = {"error": {"message": str(e), "type": "server_error"}}
         yield f"data: {json.dumps(error_chunk)}\n\n"
-
-
-# ============================================================================
-# Main
-# ============================================================================
-
-if __name__ == '__main__':
-    logger.info("=" * 60)
-    logger.info("Qwen Multi-Agent Server (FastAPI)")
-    logger.info("=" * 60)
-
-    logger.info("Validating configuration...")
-    config_errors = Config.validate()
-    if config_errors:
-        logger.error("Configuration validation failed:")
-        for error in config_errors:
-            logger.error("  - %s", error)
-        logger.error("=" * 60)
-        logger.error("Server startup aborted due to configuration errors")
-        logger.error("=" * 60)
-        sys.exit(1)
-
-    logger.info("Configuration valid")
-    logger.info("Port: %d", Config.PORT)
-    logger.info("Model: %s", Config.MODEL_PATH)
-    logger.info("Model size: %.2f GB", os.path.getsize(Config.MODEL_PATH) / (1024**3))
-    logger.info("Agents: %s", list(Config.AGENTS.keys()))
-    logger.info("=" * 60)
-    logger.info("Starting server...")
-    logger.info("API docs available at: http://%s:%d/docs", Config.HOST, Config.PORT)
-
-    import uvicorn
-    uvicorn.run(
-        app,
-        host=Config.HOST,
-        port=Config.PORT,
-        log_level="info"
-    )

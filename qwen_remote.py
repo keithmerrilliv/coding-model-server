@@ -32,6 +32,14 @@ COLORS = {
     "CYAN": "\033[96m"
 }
 
+# Agent UI Themes
+AGENT_THEMES = {
+    "implementer": {"color": COLORS['GREEN'], "icon": "💻", "prompt": "Implementer", "desc": "Code Implementation"},
+    "architect":   {"color": COLORS['HEADER'], "icon": "🏗️", "prompt": "Architect", "desc": "System Design (480B Model - Slow Load)"},
+    "reviewer":    {"color": COLORS['CYAN'], "icon": "🔍", "prompt": "Reviewer", "desc": "Code Review (480B Model - Slow Load)"},
+    "debugger":    {"color": COLORS['FAIL'], "icon": "🐞", "prompt": "Debugger", "desc": "Debugging"},
+}
+
 # Command execution security settings
 ALLOW_SHELL_MODE = os.getenv('ALLOW_SHELL_MODE', 'false').lower() == 'true'
 COMMAND_WHITELIST = os.getenv('COMMAND_WHITELIST', '').split(',') if os.getenv('COMMAND_WHITELIST') else None
@@ -195,7 +203,7 @@ def expand_paths_in_args(command_args: List[str]) -> List[str]:
     """
     expanded_args = []
     for arg in command_args:
-        # Expand tilde if argument starts with ~ or contains =~
+        # Expand tilde if argument starts with ~ or contains =~ 
         if arg.startswith('~'):
             expanded_args.append(os.path.expanduser(arg))
         elif '=~' in arg:
@@ -424,7 +432,11 @@ def process_remote_commands(response_text: str) -> Optional[str]:
 
 def chat(model="implementer"):
     print_colored(f"\nQwen Remote CLI (Connected to {LINUX_SERVER_IP})", COLORS['HEADER'])
-    print_colored(f"Agent: {model}", COLORS['WARNING'])
+    
+    # Get initial theme
+    agent_theme = AGENT_THEMES.get(model, AGENT_THEMES["implementer"])
+    print_colored(f"Agent: {model} {agent_theme['icon']}", COLORS['WARNING'])
+    print_colored(f"({agent_theme['desc']})", COLORS['BLUE'])
 
     print_colored("\nSecurity Settings:", COLORS['HEADER'])
     if ALLOW_SHELL_MODE:
@@ -456,20 +468,31 @@ def chat(model="implementer"):
                 break
 
             if user_input.lower().startswith('/model '):
-                model = user_input.split(' ')[1]
-                print_colored(f"Switched to agent: {model}", COLORS['WARNING'])
+                model_name = user_input.split(' ')[1]
+                if model_name in AGENT_THEMES:
+                    model = model_name
+                    agent_theme = AGENT_THEMES[model]
+                    print_colored(f"\nSwitched to agent: {model} {agent_theme['icon']}", COLORS['WARNING'])
+                    print_colored(f"Description: {agent_theme['desc']}", COLORS['BLUE'])
+                    if model in ['architect', 'reviewer']:
+                        print_colored("NOTE: Switching to 480B model. Loading may take ~30-60 seconds.", COLORS['WARNING'])
+                else:
+                    print_colored(f"Unknown agent: {model_name}. Available: {', '.join(AGENT_THEMES.keys())}", COLORS['FAIL'])
                 continue
 
             if not (history and history[-1]["role"] == "user" and history[-1].get("auto_send", False)):
                 history.append({"role": "user", "content": user_input})
 
-            print(f"{COLORS['GREEN']}Qwen > {COLORS['ENDC']}", end="", flush=True)
+            # Use agent-specific color and prompt
+            prompt_text = f"{agent_theme['prompt']} {agent_theme['icon']} > "
+            print(f"{agent_theme['color']}{prompt_text}{COLORS['ENDC']}", end="", flush=True)
 
             payload = {"model": model, "messages": history, "stream": True}
             full_response = ""
 
             try:
-                response = requests.post(API_URL, json=payload, stream=True, timeout=600)
+                # Increased timeout for heavy model switching
+                response = requests.post(API_URL, json=payload, stream=True, timeout=1200)
                 if response.status_code != 200:
                     print_colored(f"\nError: {response.text}", COLORS['FAIL'])
                     continue
