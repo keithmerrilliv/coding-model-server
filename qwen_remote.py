@@ -315,7 +315,10 @@ def execute_remote_command(command, async_mode=False):
         print_colored(f"   {str(e)}", COLORS['FAIL'])
         return f"Command validation failed: {str(e)}"
 
-    choice = input(f"{COLORS['BOLD']}Allow? [y/N] > {COLORS['ENDC']}")
+    try:
+        choice = input(f"{COLORS['BOLD']}Allow? [y/N] > {COLORS['ENDC']}")
+    except (EOFError, KeyboardInterrupt):
+        return "User cancelled command execution."
 
     if choice.lower() != 'y':
         return "User denied command execution."
@@ -333,11 +336,11 @@ def execute_remote_command(command, async_mode=False):
     else:
         try:
             if ALLOW_SHELL_MODE:
-                result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=30)
+                result = subprocess.run(command, shell=True, capture_output=True, text=True, errors='replace', timeout=30)
             else:
                 command_args = parse_command_safely(command)
                 command_args = expand_paths_in_args(command_args)
-                result = subprocess.run(command_args, shell=False, capture_output=True, text=True, timeout=30)
+                result = subprocess.run(command_args, shell=False, capture_output=True, text=True, errors='replace', timeout=30)
 
             output = result.stdout + result.stderr
             print_colored(f"Output:\n{output}", COLORS['CYAN'])
@@ -536,4 +539,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Qwen Remote Client")
     parser.add_argument("--model", type=str, default="implementer", help="Agent model to use")
     args = parser.parse_args()
-    chat(args.model)
+    
+    try:
+        chat(args.model)
+    except Exception as e:
+        print_colored(f"\nCRITICAL CLIENT ERROR: {e}", COLORS['FAIL'])
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)

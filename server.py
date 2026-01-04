@@ -179,7 +179,7 @@ To run commands on the client, you MUST use this specific protocol:
             'system_prompt': f'You are an expert software engineer. Provide clear, working code implementations.\n{REMOTE_EXEC_INSTRUCTION}',
             'model_config': {
                 'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q3_K_M.gguf',
-                'n_gpu_layers': 60,  # Try to fit fully on GPU (~15GB)
+                'n_gpu_layers': 42,  # Optimized for RTX 5080 16GB (~14.8GB VRAM)
                 'n_ctx': 8192
             }
         },
@@ -518,3 +518,24 @@ def stream_completion(prompt: str, model_id: str, max_tokens: int, temperature: 
         logger.error("Error in stream_completion: %s", e, exc_info=True)
         error_chunk = {"error": {"message": str(e), "type": "server_error"}}
         yield f"data: {json.dumps(error_chunk)}\n\n"
+
+
+if __name__ == "__main__":
+    import uvicorn
+    
+    # Validate configuration
+    errors = Config.validate()
+    if errors:
+        for error in errors:
+            logger.error(error)
+        # We don't exit here to allow the server to start even if some models are missing
+        # The endpoints will just fail for those specific models
+        logger.warning("Starting server with configuration errors...")
+
+    uvicorn.run(
+        "server:app",
+        host=Config.HOST,
+        port=Config.PORT,
+        log_level="info",
+        reload=False
+    )
