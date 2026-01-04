@@ -178,6 +178,37 @@ def print_colored(text, color):
     print(f"{color}{text}{COLORS['ENDC']}")
 
 
+def decode_escape_sequences(text: str) -> str:
+    """Decode JSON-style escape sequences in text
+
+    When commands are transmitted through JSON, escape sequences like \n, \t, \\
+    may be present and need to be decoded before execution.
+
+    This handles common escape sequences manually to avoid issues with
+    unicode_escape codec mangling UTF-8 strings.
+    """
+    # Manually handle common escape sequences in order
+    # Note: Must process \\\\ before \\n to avoid double-processing
+    replacements = [
+        ('\\\\', '\x00'),  # Temporarily replace \\ with null char
+        ('\\n', '\n'),
+        ('\\t', '\t'),
+        ('\\r', '\r'),
+        ('\\b', '\b'),
+        ('\\f', '\f'),
+        ('\\v', '\v'),
+        ('\\"', '"'),
+        ("\\'", "'"),
+        ('\x00', '\\'),    # Replace null char back with single backslash
+    ]
+
+    result = text
+    for escaped, unescaped in replacements:
+        result = result.replace(escaped, unescaped)
+
+    return result
+
+
 def parse_command_safely(command: str) -> List[str]:
     """Parse command string into argument list safely"""
     if not ALLOW_SHELL_MODE:
@@ -408,10 +439,10 @@ def process_remote_commands(response_text: str) -> Optional[str]:
     """Process remote command markers in agent response"""
     commands = [
         (r'<<<REMOTE_EXEC_ASYNC>>>\s*(.*?)\s*<<<REMOTE_EXEC_ASYNC>>>',
-         lambda cmd: execute_remote_command(cmd.strip(), async_mode=True),
+         lambda cmd: execute_remote_command(decode_escape_sequences(cmd.strip()), async_mode=True),
          True),
         (r'<<<REMOTE_EXEC>>>\s*(.*?)\s*<<<REMOTE_EXEC>>>',
-         lambda cmd: execute_remote_command(cmd.strip(), async_mode=False),
+         lambda cmd: execute_remote_command(decode_escape_sequences(cmd.strip()), async_mode=False),
          True),
         (r'<<<REMOTE_CHECK_STATUS>>>\s*(.*?)\s*<<<REMOTE_CHECK_STATUS>>>',
          lambda job_id: check_job_status(job_id.strip()),
