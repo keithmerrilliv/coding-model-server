@@ -59,6 +59,17 @@ Configure via environment variables:
 - `ALLOW_SHELL_MODE=true` - Enable shell features (pipes, redirects, etc.)
 - `COMMAND_WHITELIST=ls,pwd,cat` - Comma-separated list of allowed commands
 
+### Performance Optimization Settings
+
+You can optimize inference speed by adjusting these environment variables in your `.env` file:
+
+- `MODEL_N_THREADS=0` - Number of CPU threads to use (0 = auto-detect CPU cores)
+- `MODEL_N_BATCH=512` - Batch size for processing (higher = faster but more memory)
+- `MODEL_FLASH_ATTENTION=true` - Enable flash attention for faster processing (if supported)
+- `MODEL_USE_MMAP=true` - Use memory mapping for faster model loading
+- `MODEL_USE_MLOCK=true` - Lock model in RAM to prevent swapping to disk
+- `MODEL_N_CTX_BATCH=2048` - Number of tokens to process at once (higher = faster but more memory)
+
 ### Remote Command Execution
 
 The agent can request to execute commands on your local machine. You will be prompted to approve each command before execution.

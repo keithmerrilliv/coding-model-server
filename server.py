@@ -133,6 +133,12 @@ class Config:
     MODEL_PATH = os.path.expanduser(os.getenv('MODEL_PATH', '')) if os.getenv('MODEL_PATH') else None
     MODEL_CONTEXT_SIZE = int(os.getenv('MODEL_CONTEXT_SIZE', 32768))
     MODEL_GPU_LAYERS = int(os.getenv('MODEL_GPU_LAYERS', 99))
+    MODEL_N_THREADS = int(os.getenv('MODEL_N_THREADS', 0))
+    MODEL_N_BATCH = int(os.getenv('MODEL_N_BATCH', 512))
+    MODEL_FLASH_ATTENTION = os.getenv('MODEL_FLASH_ATTENTION', 'true').lower() == 'true'
+    MODEL_USE_MMAP = os.getenv('MODEL_USE_MMAP', 'true').lower() == 'true'
+    MODEL_USE_MLOCK = os.getenv('MODEL_USE_MLOCK', 'true').lower() == 'true'
+    MODEL_N_CTX_BATCH = int(os.getenv('MODEL_N_CTX_BATCH', 2048))
 
     @classmethod
     def validate(cls) -> List[str]:
@@ -160,6 +166,15 @@ class Config:
 
         if cls.MODEL_GPU_LAYERS < 0:
             errors.append(f"MODEL_GPU_LAYERS cannot be negative: {cls.MODEL_GPU_LAYERS}")
+
+        if cls.MODEL_N_THREADS < 0:
+            errors.append(f"MODEL_N_THREADS cannot be negative: {cls.MODEL_N_THREADS}")
+
+        if cls.MODEL_N_BATCH < 1:
+            errors.append(f"MODEL_N_BATCH must be at least 1: {cls.MODEL_N_BATCH}")
+
+        if cls.MODEL_N_CTX_BATCH < 1:
+            errors.append(f"MODEL_N_CTX_BATCH must be at least 1: {cls.MODEL_N_CTX_BATCH}")
 
         return errors
 
@@ -240,15 +255,25 @@ class ModelManager:
                     raise FileNotFoundError(error_msg)
 
                 logger.info("Loading model from: %s", Config.MODEL_PATH)
+                logger.info("Performance settings - threads: %d, batch: %d, flash attention: %s, mmap: %s, mlock: %s, ctx_batch: %d",
+                           Config.MODEL_N_THREADS, Config.MODEL_N_BATCH, Config.MODEL_FLASH_ATTENTION,
+                           Config.MODEL_USE_MMAP, Config.MODEL_USE_MLOCK, Config.MODEL_N_CTX_BATCH)
+
                 try:
                     from llama_cpp import Llama
                     self.model = Llama(
                         model_path=Config.MODEL_PATH,
                         n_ctx=Config.MODEL_CONTEXT_SIZE,
                         n_gpu_layers=Config.MODEL_GPU_LAYERS,
+                        n_threads=Config.MODEL_N_THREADS,
+                        n_batch=Config.MODEL_N_BATCH,
+                        flash_attn=Config.MODEL_FLASH_ATTENTION,
+                        use_mmap=Config.MODEL_USE_MMAP,
+                        use_mlock=Config.MODEL_USE_MLOCK,
+                        n_ctx_batch=Config.MODEL_N_CTX_BATCH,
                         verbose=False
                     )
-                    logger.info("Model loaded successfully")
+                    logger.info("Model loaded successfully with performance optimizations")
                 except Exception as e:
                     logger.error("Failed to load model: %s", e)
                     raise
