@@ -178,9 +178,9 @@ To run commands on the client, you MUST use this specific protocol:
             'description': 'Code implementation agent',
             'system_prompt': f'You are an expert software engineer. Provide clear, working code implementations.\n{REMOTE_EXEC_INSTRUCTION}',
             'model_config': {
-                'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q3_K_M.gguf',
-                'n_gpu_layers': 42,  # Optimized for RTX 5080 16GB (~14.8GB VRAM)
-                'n_ctx': 8192
+                'path': '/home/keith-merrill/.lmstudio/models/n00b001/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M-GGUF/qwen3-coder-30b-a3b-instruct-q4_k_m.gguf',
+                'n_gpu_layers': 35,  # Reduced to prevent OOM with 131K context
+                'n_ctx': 131072      # Very large context
             }
         },
         'architect': {
@@ -189,7 +189,7 @@ To run commands on the client, you MUST use this specific protocol:
             'model_config': {
                 'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/Qwen3-Coder-480B-A35B-Instruct-UD-IQ1_M.gguf',
                 'n_gpu_layers': 4,   # 4 layers on GPU (~12GB VRAM)
-                'n_ctx': 4096        # Reduced context for the massive model
+                'n_ctx': 131072      # Very large context - minimal KV cache overhead with only 4 GPU layers
             }
         },
         'reviewer': {
@@ -198,7 +198,7 @@ To run commands on the client, you MUST use this specific protocol:
             'model_config': {
                 'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/Qwen3-Coder-480B-A35B-Instruct-UD-IQ1_M.gguf',
                 'n_gpu_layers': 4,   # Shares model with architect
-                'n_ctx': 4096
+                'n_ctx': 131072      # Very large context
             }
         },
         'debugger': {
@@ -206,8 +206,8 @@ To run commands on the client, you MUST use this specific protocol:
             'system_prompt': f'You are a debugging expert. Analyze errors and suggest fixes.\n{REMOTE_EXEC_INSTRUCTION}',
             'model_config': {
                 'path': '/home/keith-merrill/.lmstudio/models/n00b001/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M-GGUF/qwen3-coder-30b-a3b-instruct-q4_k_m.gguf',
-                'n_gpu_layers': 0,   # All RAM (~20GB)
-                'n_ctx': 8192
+                'n_gpu_layers': 35,  # Reduced to prevent OOM with 131K context
+                'n_ctx': 131072      # Very large context
             }
         }
     }
