@@ -7,5 +7,9 @@ llama-cpp-python>=0.2.0
 fastapi>=0.100.0
 uvicorn[standard]>=0.20.0
 
+# Client dependencies
+requests>=2.31.0
+websockets>=12.0
+
 # Optional
 python-dotenv>=1.0.0
