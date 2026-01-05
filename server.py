@@ -178,8 +178,8 @@ To run commands on the client, you MUST use this specific protocol:
             'description': 'Code implementation agent',
             'system_prompt': f'You are an expert software engineer. Provide clear, working code implementations.\n{REMOTE_EXEC_INSTRUCTION}',
             'model_config': {
-                'path': '/home/keith-merrill/.lmstudio/models/n00b001/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M-GGUF/qwen3-coder-30b-a3b-instruct-q4_k_m.gguf',
-                'n_gpu_layers': 22,  # Reduced layers to fit 40K context
+                'path': '/home/keith-merrill/.lmstudio/models/tp7030/Qwen3-Coder-30B-A3B-Instruct-FP8-Q6_K-GGUF/qwen3-coder-30b-a3b-instruct-fp8-q6_k.gguf',
+                'n_gpu_layers': 38,  # Reduced layers to fit 40K context
                 'n_ctx': 40960       # 40K context
             }
         },
@@ -206,7 +206,7 @@ To run commands on the client, you MUST use this specific protocol:
             'system_prompt': f'You are a debugging expert. Analyze errors and suggest fixes.\n{REMOTE_EXEC_INSTRUCTION}',
             'model_config': {
                 'path': '/home/keith-merrill/.lmstudio/models/n00b001/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M-GGUF/qwen3-coder-30b-a3b-instruct-q4_k_m.gguf',
-                'n_gpu_layers': 22,  # Reduced layers to fit 40K context
+                'n_gpu_layers': 48,  # Reduced layers to fit 40K context
                 'n_ctx': 40960       # 40K context
             }
         }
@@ -247,11 +247,17 @@ class ModelManager:
         model_path = model_config['path']
 
         with self.lock:
+            # Check for memory critical mode which forces a reload
+            force_reload = os.getenv('VRAM_CRITICAL', 'false').lower() == 'true'
+
             # Check if the requested model is already the currently loaded one
-            if self.current_model_path == model_path and model_path in self.models:
+            if self.current_model_path == model_path and model_path in self.models and not force_reload:
                 return self.models[model_path]
 
-            logger.info("Switching models. Request for %s: %s", agent_name, model_path)
+            if force_reload:
+                logger.info("VRAM_CRITICAL mode: Forcing model reload and cache eviction for %s", agent_name)
+            else:
+                logger.info("Switching models. Request for %s: %s", agent_name, model_path)
             
             # Unload existing models to free VRAM/RAM
             if self.models:
