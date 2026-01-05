@@ -134,7 +134,7 @@ class Config:
     # Global defaults (can be overridden per model)
     DEFAULT_CONTEXT_SIZE = int(os.getenv('MODEL_CONTEXT_SIZE', 8192))
     DEFAULT_N_THREADS = int(os.getenv('MODEL_N_THREADS', 24))
-    DEFAULT_N_BATCH = int(os.getenv('MODEL_N_BATCH', 512))
+    DEFAULT_N_BATCH = int(os.getenv('MODEL_N_BATCH', 128))  # Reduced to 128 to minimize compute buffer size
     
     REMOTE_EXEC_INSTRUCTION = """
 # REMOTE CLIENT EXECUTION PROTOCOL
@@ -179,8 +179,8 @@ To run commands on the client, you MUST use this specific protocol:
             'system_prompt': f'You are an expert software engineer. Provide clear, working code implementations.\n{REMOTE_EXEC_INSTRUCTION}',
             'model_config': {
                 'path': '/home/keith-merrill/.lmstudio/models/n00b001/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M-GGUF/qwen3-coder-30b-a3b-instruct-q4_k_m.gguf',
-                'n_gpu_layers': 35,  # Reduced to prevent OOM with 131K context
-                'n_ctx': 131072      # Very large context
+                'n_gpu_layers': 42,  # Optimized for RTX 5080
+                'n_ctx': 20480       # 20K - testing with n_batch=128
             }
         },
         'architect': {
@@ -188,8 +188,8 @@ To run commands on the client, you MUST use this specific protocol:
             'system_prompt': f'You are a system architect. Design scalable, maintainable solutions.\n{REMOTE_EXEC_INSTRUCTION}',
             'model_config': {
                 'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/Qwen3-Coder-480B-A35B-Instruct-UD-IQ1_M.gguf',
-                'n_gpu_layers': 4,   # 4 layers on GPU (~12GB VRAM)
-                'n_ctx': 32768       # Reduced from 131K - 480B model needs less context due to compute buffer limits
+                'n_gpu_layers': 3,   # 3 GPU layers for stability on 480B
+                'n_ctx': 32768       # 32K context
             }
         },
         'reviewer': {
@@ -197,8 +197,8 @@ To run commands on the client, you MUST use this specific protocol:
             'system_prompt': f'You are a code reviewer. Identify issues and suggest improvements.\n{REMOTE_EXEC_INSTRUCTION}',
             'model_config': {
                 'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/Qwen3-Coder-480B-A35B-Instruct-UD-IQ1_M.gguf',
-                'n_gpu_layers': 4,   # Shares model with architect
-                'n_ctx': 32768       # Reduced from 131K - 480B model needs less context due to compute buffer limits
+                'n_gpu_layers': 3,   # 3 GPU layers for stability on 480B
+                'n_ctx': 32768       # 32K context
             }
         },
         'debugger': {
@@ -206,8 +206,8 @@ To run commands on the client, you MUST use this specific protocol:
             'system_prompt': f'You are a debugging expert. Analyze errors and suggest fixes.\n{REMOTE_EXEC_INSTRUCTION}',
             'model_config': {
                 'path': '/home/keith-merrill/.lmstudio/models/n00b001/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M-GGUF/qwen3-coder-30b-a3b-instruct-q4_k_m.gguf',
-                'n_gpu_layers': 35,  # Reduced to prevent OOM with 131K context
-                'n_ctx': 131072      # Very large context
+                'n_gpu_layers': 42,  # Optimized for RTX 5080
+                'n_ctx': 20480       # 20K - testing with n_batch=128
             }
         }
     }
@@ -258,13 +258,15 @@ class ModelManager:
                 logger.info("Unloading previous models...")
                 self.models.clear()
                 self.current_model_path = None
-                
+
                 # Force garbage collection to ensure VRAM is released
                 import gc
+                import time
                 gc.collect()
-                
-                # Optional: specific cleanup for llama-cpp-python if needed, 
-                # but removing references and gc.collect() is usually sufficient.
+                gc.collect()  # Call twice to catch circular references
+                time.sleep(2)  # Give CUDA time to actually release memory
+
+                logger.info("Previous models unloaded, memory freed")
 
             logger.info("Loading model for %s: %s", agent_name, model_path)
             try:
@@ -275,7 +277,7 @@ class ModelManager:
                     n_gpu_layers=model_config.get('n_gpu_layers', 0),
                     n_threads=Config.DEFAULT_N_THREADS,
                     n_batch=Config.DEFAULT_N_BATCH,
-                    flash_attn=True,
+                    flash_attn=False,  # Disabled to prevent CUDA OOM with large contexts
                     use_mmap=True,
                     use_mlock=True,
                     verbose=True
@@ -486,23 +488,24 @@ async def chat_completions(request: ChatCompletionRequest):
 
 def sync_completion(prompt: str, model_id: str, max_tokens: int, temperature: float) -> Dict[str, Any]:
     """Generate synchronous completion"""
-    model = model_manager.get_model(model_id)
     params = get_model_params(max_tokens, temperature, stream=False)
 
     with model_manager.inference_lock:
+        model = model_manager.get_model(model_id)
         response = model(prompt, **params)
+    
     text = response['choices'][0]['text'].strip()
-
     return build_completion_response(model_id, text, response['usage'])
 
 def stream_completion(prompt: str, model_id: str, max_tokens: int, temperature: float) -> Iterator[str]:
     """Generate streaming completion"""
     try:
-        model = model_manager.get_model(model_id)
-        params = get_model_params(max_tokens, temperature, stream=True)
         completion_id = f"chatcmpl-{int(time.time())}"
-
+        
         with model_manager.inference_lock:
+            model = model_manager.get_model(model_id)
+            params = get_model_params(max_tokens, temperature, stream=True)
+
             for output in model(prompt, **params):
                 if 'choices' in output and len(output['choices']) > 0:
                     token = output['choices'][0].get('text', '')

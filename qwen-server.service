@@ -24,6 +24,7 @@ EnvironmentFile=-/home/keith-merrill/Dev/qwen-server/.env
 
 # Resource limits
 LimitNOFILE=65536
+LimitMEMLOCK=infinity
 NoNewPrivileges=true
 
 # GPU access - disable device policy to allow all devices

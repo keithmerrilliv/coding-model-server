@@ -23,7 +23,7 @@ def test_architect():
 
     start_time = time.time()
     try:
-        response = requests.post(SERVER_URL, json=payload, stream=True, timeout=1200) # Long timeout for large model load
+        response = requests.post(SERVER_URL, json=payload, stream=True, timeout=7200) # Long timeout for large model load and inference
         
         if response.status_code != 200:
             print(f"Error: {response.status_code} - {response.text}")

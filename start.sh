@@ -22,6 +22,9 @@ if [ -d "venv" ]; then
     source venv/bin/activate
 fi
 
+# Try to set unlimited locked memory for mlock support
+ulimit -l unlimited 2>/dev/null || echo "Warning: Could not set unlimited locked memory (ulimit -l)"
+
 # Start the server
 echo "Starting Qwen Multi-Agent Server (FastAPI)..."
 python server.py

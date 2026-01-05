@@ -372,17 +372,17 @@ def execute_remote_command(command, async_mode=False):
     else:
         try:
             if ALLOW_SHELL_MODE:
-                result = subprocess.run(command, shell=True, capture_output=True, text=True, errors='replace', timeout=30)
+                result = subprocess.run(command, shell=True, capture_output=True, text=True, errors='replace', timeout=240)
             else:
                 command_args = parse_command_safely(command)
                 command_args = expand_paths_in_args(command_args)
-                result = subprocess.run(command_args, shell=False, capture_output=True, text=True, errors='replace', timeout=30)
+                result = subprocess.run(command_args, shell=False, capture_output=True, text=True, errors='replace', timeout=240)
 
             output = result.stdout + result.stderr
             print_colored(f"Output:\n{output}", COLORS['CYAN'])
             return f"Command executed successfully.\nExit Code: {result.returncode}\nOutput:\n{output}"
         except subprocess.TimeoutExpired:
-            return "Command timed out (30s limit for sync commands). Consider using async mode for long-running commands."
+            return "Command timed out (240s limit for sync commands). Consider using async mode for long-running commands."
         except Exception as e:
             return f"Error executing command: {str(e)}"
 
@@ -540,8 +540,8 @@ def chat(model="implementer"):
             full_response = ""
 
             try:
-                # Increased timeout for heavy model switching
-                response = requests.post(API_URL, json=payload, stream=True, timeout=1200)
+                # Increased timeout for heavy model switching and large model inference
+                response = requests.post(API_URL, json=payload, stream=True, timeout=7200)
                 if response.status_code != 200:
                     print_colored(f"\nError: {response.text}", COLORS['FAIL'])
                     continue
@@ -555,12 +555,17 @@ def chat(model="implementer"):
                                 break
                             try:
                                 data = json.loads(data_str)
-                                if "choices" in data:
-                                    content = data["choices"][0]["delta"].get("content", "")
+                                if "choices" in data and len(data["choices"]) > 0:
+                                    delta = data["choices"][0].get("delta", {})
+                                    content = delta.get("content", "")
                                     if content:
                                         print(content, end="", flush=True)
                                         full_response += content
-                            except json.JSONDecodeError:
+                                elif "error" in data:
+                                    print_colored(f"\nServer Error: {data['error'].get('message', 'Unknown error')}", COLORS['FAIL'])
+                                    break
+                            except (json.JSONDecodeError, KeyError, IndexError):
+                                # Silently ignore malformed chunks
                                 pass
 
                 print()
@@ -573,11 +578,15 @@ def chat(model="implementer"):
                     if tool_output:
                         history.append({"role": "user", "content": f"Tool output:\n{tool_output}", "auto_send": True})
                         continue
-                else:
-                    print_colored("\nWarning: Received empty response from server.", COLORS['WARNING'])
-
+                elif not full_response:
+                    print_colored("\nWarning: Received empty response or connection closed prematurely.", COLORS['WARNING'])
+            
+            except requests.exceptions.Timeout:
+                print_colored(f"\nRequest timed out after 7200s.", COLORS['FAIL'])
             except requests.exceptions.ConnectionError:
                 print_colored(f"\nConnection failed! Is the server at {LINUX_SERVER_IP} reachable?", COLORS['FAIL'])
+            except Exception as e:
+                print_colored(f"\nUnexpected error during chat: {e}", COLORS['FAIL'])
 
         except KeyboardInterrupt:
             break
