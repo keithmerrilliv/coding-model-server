@@ -47,7 +47,7 @@ class ChatCompletionRequest(BaseModel):
     model: str = "implementer"
     messages: List[ChatMessage]
     stream: bool = False
-    max_tokens: int = Field(default=2048, ge=1, le=32768)
+    max_tokens: int = Field(default=16384, ge=1, le=32768)
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
 
     @field_validator('messages')
@@ -179,7 +179,7 @@ To run commands on the client, you MUST use this specific protocol:
             'system_prompt': f'You are an expert software engineer. Provide clear, working code implementations.\n{REMOTE_EXEC_INSTRUCTION}',
             'model_config': {
                 'path': '/home/keith-merrill/.lmstudio/models/n00b001/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M-GGUF/qwen3-coder-30b-a3b-instruct-q4_k_m.gguf',
-                'n_gpu_layers': 42,  # Optimized for RTX 5080
+                'n_gpu_layers': 33,
                 'n_ctx': 20480       # 20K - testing with n_batch=128
             }
         },
@@ -188,8 +188,8 @@ To run commands on the client, you MUST use this specific protocol:
             'system_prompt': f'You are a system architect. Design scalable, maintainable solutions.\n{REMOTE_EXEC_INSTRUCTION}',
             'model_config': {
                 'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/Qwen3-Coder-480B-A35B-Instruct-UD-IQ1_M.gguf',
-                'n_gpu_layers': 3,   # 3 GPU layers for stability on 480B
-                'n_ctx': 32768       # 32K context
+                'n_gpu_layers': 3,   # 3 GPU layers for acceleration
+                'n_ctx': 20480       # 20K context to fit in VRAM
             }
         },
         'reviewer': {
@@ -197,8 +197,8 @@ To run commands on the client, you MUST use this specific protocol:
             'system_prompt': f'You are a code reviewer. Identify issues and suggest improvements.\n{REMOTE_EXEC_INSTRUCTION}',
             'model_config': {
                 'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/Qwen3-Coder-480B-A35B-Instruct-UD-IQ1_M.gguf',
-                'n_gpu_layers': 3,   # 3 GPU layers for stability on 480B
-                'n_ctx': 32768       # 32K context
+                'n_gpu_layers': 3,   # 3 GPU layers for acceleration
+                'n_ctx': 20480       # 20K context to fit in VRAM
             }
         },
         'debugger': {
@@ -206,7 +206,7 @@ To run commands on the client, you MUST use this specific protocol:
             'system_prompt': f'You are a debugging expert. Analyze errors and suggest fixes.\n{REMOTE_EXEC_INSTRUCTION}',
             'model_config': {
                 'path': '/home/keith-merrill/.lmstudio/models/n00b001/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M-GGUF/qwen3-coder-30b-a3b-instruct-q4_k_m.gguf',
-                'n_gpu_layers': 42,  # Optimized for RTX 5080
+                'n_gpu_layers': 33,
                 'n_ctx': 20480       # 20K - testing with n_batch=128
             }
         }

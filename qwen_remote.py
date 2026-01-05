@@ -536,7 +536,14 @@ def chat(model="implementer"):
                 {"role": msg["role"], "content": msg["content"]} 
                 for msg in history
             ]
-            payload = {"model": model, "messages": sanitized_history, "stream": True}
+            # Request a large token limit to support generating massive files (e.g., pbxproj)
+            # The server/model will stop earlier if the context window (e.g., 20k or 32k) is filled.
+            payload = {
+                "model": model, 
+                "messages": sanitized_history, 
+                "stream": True,
+                "max_tokens": 30000 
+            }
             full_response = ""
 
             try:
