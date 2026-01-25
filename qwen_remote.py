@@ -76,11 +76,15 @@ def setup_readline():
 
     # Configure readline behavior
     # Enable auto-complete on tab (basic filename completion)
-    readline.parse_and_bind('tab: complete')
-
-    # Some terminals need these bindings explicitly
-    readline.parse_and_bind(r'"\e[A": history-search-backward')  # Up arrow
-    readline.parse_and_bind(r'"\e[B": history-search-forward')   # Down arrow
+    if 'libedit' in readline.__doc__:
+        readline.parse_and_bind("bind ^I rl_complete")
+        readline.parse_and_bind("bind ^[[A history-search-backward")
+        readline.parse_and_bind("bind ^[[B history-search-forward")
+    else:
+        readline.parse_and_bind('tab: complete')
+        # Some terminals need these bindings explicitly
+        readline.parse_and_bind(r'"\e[A": history-search-backward')  # Up arrow
+        readline.parse_and_bind(r'"\e[B": history-search-forward')   # Down arrow
 
 
 def save_readline_history():
@@ -951,6 +955,7 @@ def chat(model="implementer"):
             }
             
             full_response = ""
+            server_error_occurred = False
 
             try:
                 # Increased timeout for heavy model switching and large model inference
@@ -975,7 +980,10 @@ def chat(model="implementer"):
                                         print(content, end="", flush=True)
                                         full_response += content
                                 elif "error" in data:
-                                    print_colored(f"\nServer Error: {data['error'].get('message', 'Unknown error')}", COLORS['FAIL'])
+                                    error_msg = data['error'].get('message', 'Unknown error')
+                                    print_colored(f"\nServer Error: {error_msg}", COLORS['FAIL'])
+                                    if "exceed context window" in error_msg:
+                                        server_error_occurred = True
                                     break
                             except (json.JSONDecodeError, KeyError, IndexError):
                                 # Silently ignore malformed chunks
@@ -986,12 +994,16 @@ def chat(model="implementer"):
                 # Only append non-empty responses to history to avoid 422 errors on next turn
                 if full_response and full_response.strip():
                     history.append({"role": "assistant", "content": full_response})
-                    tool_output = process_remote_commands(full_response)
+                    
+                    if server_error_occurred:
+                        print_colored("\n[Client] Stopping tool execution loop due to server context error.", COLORS['WARNING'])
+                    else:
+                        tool_output = process_remote_commands(full_response)
 
-                    if tool_output:
-                        history.append({"role": "user", "content": f"Tool output:\n{tool_output}", "auto_send": True})
-                        continue
-                elif not full_response:
+                        if tool_output:
+                            history.append({"role": "user", "content": f"Tool output:\n{tool_output}", "auto_send": True})
+                            continue
+                elif not full_response and not server_error_occurred:
                     print_colored("\nWarning: Received empty response or connection closed prematurely.", COLORS['WARNING'])
             
             except requests.exceptions.Timeout:
