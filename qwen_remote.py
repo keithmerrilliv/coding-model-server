@@ -13,13 +13,27 @@ import subprocess
 import shlex
 import threading
 import uuid
+import atexit
 from datetime import datetime
 from collections import deque
 from typing import Optional, List
 
+# Readline for command history and CLI editing
+try:
+    import readline
+    READLINE_AVAILABLE = True
+except ImportError:
+    READLINE_AVAILABLE = False
+
+# History file configuration
+HISTORY_FILE = os.path.expanduser("~/.qwen_client_history")
+HISTORY_MAX_LENGTH = 1000
+
 # Configuration
 LINUX_SERVER_IP = os.getenv("QWEN_SERVER_IP", "192.168.50.101")
 API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/chat/completions"
+MEMORY_API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/memory"
+SEARCH_API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/tools/search"
 
 COLORS = {
     "HEADER": "\033[95m",
@@ -32,6 +46,7 @@ COLORS = {
     "CYAN": "\033[96m"
 }
 
+
 # Agent UI Themes
 AGENT_THEMES = {
     "implementer": {"color": COLORS['GREEN'], "icon": "💻", "prompt": "Implementer", "desc": "Code Implementation"},
@@ -39,6 +54,59 @@ AGENT_THEMES = {
     "reviewer":    {"color": COLORS['CYAN'], "icon": "🔍", "prompt": "Reviewer", "desc": "Code Review (480B Model - Slow Load)"},
     "debugger":    {"color": COLORS['FAIL'], "icon": "🐞", "prompt": "Debugger", "desc": "Debugging"},
 }
+
+# Readline history management
+def setup_readline():
+    """Configure readline for command history and editing"""
+    if not READLINE_AVAILABLE:
+        return
+
+    # Load history from file
+    try:
+        if os.path.exists(HISTORY_FILE):
+            readline.read_history_file(HISTORY_FILE)
+    except (IOError, OSError):
+        pass  # History file doesn't exist or isn't readable
+
+    # Set history length
+    readline.set_history_length(HISTORY_MAX_LENGTH)
+
+    # Register save on exit
+    atexit.register(save_readline_history)
+
+    # Configure readline behavior
+    # Enable auto-complete on tab (basic filename completion)
+    readline.parse_and_bind('tab: complete')
+
+    # Some terminals need these bindings explicitly
+    readline.parse_and_bind(r'"\e[A": history-search-backward')  # Up arrow
+    readline.parse_and_bind(r'"\e[B": history-search-forward')   # Down arrow
+
+
+def save_readline_history():
+    """Save command history to file"""
+    if not READLINE_AVAILABLE:
+        return
+    try:
+        readline.write_history_file(HISTORY_FILE)
+    except (IOError, OSError):
+        pass  # Can't write history file
+
+
+def add_to_history(line):
+    """Add a line to readline history (avoiding duplicates of the last entry)"""
+    if not READLINE_AVAILABLE:
+        return
+    if not line or not line.strip():
+        return
+    # Avoid adding duplicate of the most recent history entry
+    history_len = readline.get_current_history_length()
+    if history_len > 0:
+        last_item = readline.get_history_item(history_len)
+        if last_item == line:
+            return
+    readline.add_history(line)
+
 
 # Command execution security settings
 ALLOW_SHELL_MODE = os.getenv('ALLOW_SHELL_MODE', 'true').lower() == 'true'
@@ -440,20 +508,315 @@ def list_all_jobs():
         return result
 
 
+def save_memory(text):
+    """Send a memory/fact to the server to be saved"""
+    try:
+        response = requests.post(MEMORY_API_URL, json={"text": text}, timeout=10)
+        if response.status_code == 200:
+            print_colored(f"Memory Saved: {text[:60]}...", COLORS['GREEN'])
+            return f"Memory saved successfully."
+        else:
+            return f"Failed to save memory: {response.text}"
+    except Exception as e:
+        return f"Error saving memory: {str(e)}"
+
+
+def decode_escape_sequences(text: str) -> str:
+    """Decode JSON-style escape sequences in text
+    
+    CRITICAL: We do NOT decode \\" or \\' because that breaks shell commands 
+    that use escaped quotes for nesting (e.g. python -c "print(\"hi\")").
+    We DO decode \\n, \\t, etc. to ensure multi-line commands format correctly.
+    """
+    replacements = [
+        ('\\\\', '\x00'),  # Temporarily replace \\ with null char
+        ('\\n', '\n'),
+        ('\\t', '\t'),
+        ('\\r', '\r'),
+        ('\\b', '\b'),
+        ('\\f', '\f'),
+        ('\\v', '\v'),
+        # ('\\"', '"'),  <-- REMOVED: Breaks shell quoting
+        # ("\\'", "'"),  <-- REMOVED: Breaks shell quoting
+        ('\x00', '\\'),    # Replace null char back with single backslash
+    ]
+
+    result = text
+    for escaped, unescaped in replacements:
+        result = result.replace(escaped, unescaped)
+
+    return result
+
+
+def parse_command_safely(command: str) -> List[str]:
+    """Parse command string into argument list safely"""
+    if not ALLOW_SHELL_MODE:
+        dangerous_chars = ['|', '&', ';', '$', '`', '\n', '>', '<', '(', ')']
+        if any(char in command for char in dangerous_chars):
+            raise ValueError(
+                f"Command contains shell metacharacters. "
+                f"Set ALLOW_SHELL_MODE=true to enable shell features, "
+                f"or rewrite command without: {', '.join(dangerous_chars)}"
+            )
+
+    try:
+        return shlex.split(command)
+    except ValueError as e:
+        raise ValueError(f"Failed to parse command: {e}")
+
+
+def expand_paths_in_args(command_args: List[str]) -> List[str]:
+    """Expand tilde (~) in command arguments for proper path resolution
+
+    When using shell=False, tilde expansion doesn't happen automatically.
+    This function expands ~ in arguments that look like paths.
+    """
+    expanded_args = []
+    for arg in command_args:
+        # Expand tilde if argument starts with ~ or contains =~ 
+        if arg.startswith('~'):
+            expanded_args.append(os.path.expanduser(arg))
+        elif '=~' in arg:
+            # Handle cases like --file=~/path or VAR=~/path
+            key, value = arg.split('=', 1)
+            if value.startswith('~'):
+                expanded_args.append(f"{key}={os.path.expanduser(value)}")
+            else:
+                expanded_args.append(arg)
+        else:
+            expanded_args.append(arg)
+    return expanded_args
+
+
+def is_command_allowed(command_args: List[str]) -> tuple:
+    """Check if command is allowed based on whitelist"""
+    if not COMMAND_WHITELIST:
+        return True, "No whitelist configured (all commands allowed)"
+
+    if not command_args:
+        return False, "Empty command"
+
+    base_command = command_args[0]
+
+    if base_command in COMMAND_WHITELIST:
+        return True, f"Command '{base_command}' is whitelisted"
+
+    if '/' in base_command:
+        base_name = os.path.basename(base_command)
+        if base_name in COMMAND_WHITELIST:
+            return True, f"Command '{base_name}' is whitelisted"
+
+    return False, f"Command '{base_command}' not in whitelist: {', '.join(COMMAND_WHITELIST)}"
+
+
+def run_command_async(job_id, command):
+    """Run command in background thread and capture output in real-time"""
+    try:
+        job_tracker.update_job(job_id, status="running")
+
+        if ALLOW_SHELL_MODE:
+            process = subprocess.Popen(
+                command,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                universal_newlines=True
+            )
+        else:
+            command_args = parse_command_safely(command)
+            command_args = expand_paths_in_args(command_args)
+            process = subprocess.Popen(
+                command_args,
+                shell=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                universal_newlines=True
+            )
+
+        job_tracker.update_job(job_id, process=process)
+
+        for line in iter(process.stdout.readline, ''):
+            if line:
+                job_tracker.add_output(job_id, line.rstrip())
+
+        process.wait()
+
+        job_tracker.update_job(
+            job_id,
+            status="completed" if process.returncode == 0 else "failed",
+            exit_code=process.returncode,
+            completed_at=datetime.now().isoformat()
+        )
+
+    except Exception as e:
+        job_tracker.add_output(job_id, f"ERROR: {str(e)}")
+        job_tracker.update_job(
+            job_id,
+            status="failed",
+            exit_code=-1,
+            completed_at=datetime.now().isoformat()
+        )
+
+
+def execute_remote_command(command, async_mode=False):
+    """Execute command synchronously or asynchronously with security checks"""
+    print_colored(f"\nAgent wants to run command on your machine: {command}", COLORS['WARNING'])
+    if async_mode:
+        print_colored(f"   (async mode - will run in background)", COLORS['BLUE'])
+
+    if ALLOW_SHELL_MODE:
+        print_colored(f"   Shell mode enabled (less safe)", COLORS['WARNING'])
+    else:
+        print_colored(f"   Safe mode (shell=False)", COLORS['GREEN'])
+
+    try:
+        if not ALLOW_SHELL_MODE:
+            command_args = parse_command_safely(command)
+            allowed, msg = is_command_allowed(command_args)
+            if not allowed:
+                print_colored(f"   {msg}", COLORS['FAIL'])
+                return f"Command rejected: {msg}"
+            print_colored(f"   {msg}", COLORS['GREEN'])
+    except ValueError as e:
+        print_colored(f"   {str(e)}", COLORS['FAIL'])
+        return f"Command validation failed: {str(e)}"
+
+    if ALLOW_ALL:
+        print_colored(f"   Auto-approved (ALLOW_ALL mode enabled)", COLORS['GREEN'])
+        choice = 'y'
+    else:
+        try:
+            choice = input(f"{COLORS['BOLD']}Allow? [y/N] > {COLORS['ENDC']}")
+        except (EOFError, KeyboardInterrupt):
+            return "User cancelled command execution."
+
+        if choice.lower() != 'y':
+            return "User denied command execution."
+
+    if async_mode:
+        job_id = job_tracker.create_job(command)
+        thread = threading.Thread(target=run_command_async, args=(job_id, command), daemon=True)
+        thread.start()
+
+        print_colored(f"Command started in background", COLORS['GREEN'])
+        print_colored(f"Job ID: {job_id}", COLORS['CYAN'])
+
+        return f"Command started in background.\nJob ID: {job_id}\n\nUse <<<REMOTE_CHECK_STATUS>>>{job_id}<<<REMOTE_CHECK_STATUS>>> to check progress.\nUse <<<REMOTE_GET_OUTPUT>>>{job_id}<<<REMOTE_GET_OUTPUT>>> to get full output."
+
+    else:
+        try:
+            if ALLOW_SHELL_MODE:
+                result = subprocess.run(command, shell=True, capture_output=True, text=True, errors='replace', timeout=240)
+            else:
+                command_args = parse_command_safely(command)
+                command_args = expand_paths_in_args(command_args)
+                result = subprocess.run(command_args, shell=False, capture_output=True, text=True, errors='replace', timeout=240)
+
+            output = result.stdout + result.stderr
+            print_colored(f"Output:\n{output}", COLORS['CYAN'])
+            return f"Command executed successfully.\nExit Code: {result.returncode}\nOutput:\n{output}"
+        except subprocess.TimeoutExpired:
+            return "Command timed out (240s limit for sync commands). Consider using async mode for long-running commands."
+        except Exception as e:
+            return f"Error executing command: {str(e)}"
+
+
+def check_job_status(job_id):
+    """Check status of a background job"""
+    return job_tracker.get_status(job_id)
+
+
+def get_job_output(job_id):
+    """Get full output of a background job"""
+    job = job_tracker.get_job(job_id)
+    if not job:
+        return "Job not found"
+
+    output = job_tracker.get_full_output(job_id)
+    status = f"Job ID: {job_id}\n"
+    status += f"Status: {job['status']}\n"
+    status += f"Exit Code: {job.get('exit_code', 'N/A')}\n"
+    status += f"\nFull Output:\n{output}"
+
+    return status
+
+
+def list_all_jobs():
+    """List all jobs with their current status"""
+    stats = job_tracker.get_stats()
+
+    result = "Job Tracker Status:\n" + "=" * 60 + "\n"
+    result += f"Total Jobs: {stats['total_jobs']} / {stats['max_jobs']} (max)\n"
+    result += f"TTL for completed jobs: {stats['ttl_hours']} hours\n"
+    result += f"By Status: "
+    result += f"Pending={stats['by_status']['pending']}, "
+    result += f"Running={stats['by_status']['running']}, "
+    result += f"Completed={stats['by_status']['completed']}, "
+    result += f"Failed={stats['by_status']['failed']}\n"
+    result += "=" * 60 + "\n"
+
+    with job_tracker.lock:
+        if not job_tracker.jobs:
+            result += "\nNo jobs found."
+            return result
+
+        result += "\nJobs:\n"
+        for job_id, job in job_tracker.jobs.items():
+            result += f"\nJob ID: {job_id}\n"
+            result += f"Command: {job['command'][:60]}{'...' if len(job['command']) > 60 else ''}\n"
+            result += f"Status: {job['status']}\n"
+            result += f"Started: {job['started_at']}\n"
+            if job['completed_at']:
+                result += f"Completed: {job['completed_at']}\n"
+                result += f"Exit Code: {job['exit_code']}\n"
+            result += "-" * 60 + "\n"
+
+        return result
+
+
+def web_search(query):
+    """Send a search query to the server"""
+    try:
+        print_colored(f"Searching web for: {query}", COLORS['CYAN'])
+        response = requests.post(SEARCH_API_URL, json={"query": query}, timeout=30)
+        if response.status_code == 200:
+            result = response.json().get("result", "No results")
+            print_colored(f"\n{result}\n", COLORS['GREEN']) # Print results to console
+            return f"Search Results:\n{result}"
+        else:
+            return f"Failed to search: {response.text}"
+    except Exception as e:
+        return f"Error searching: {str(e)}"
+
+
 def process_remote_commands(response_text: str) -> Optional[str]:
     """Process remote command markers in agent response"""
+    # Note: We do NOT use decode_escape_sequences here because json.loads in the main loop
+    # has already handled standard JSON escapes. Further decoding breaks code that relies on
+    # literal escape sequences (e.g. print("a\\nb")).
+    
     commands = [
         (r'<<<REMOTE_EXEC_ASYNC>>>\s*(.*?)\s*<<<REMOTE_EXEC_ASYNC>>>',
-         lambda cmd: execute_remote_command(decode_escape_sequences(cmd.strip()), async_mode=True),
+         lambda cmd: execute_remote_command(cmd.strip(), async_mode=True),
          True),
         (r'<<<REMOTE_EXEC>>>\s*(.*?)\s*<<<REMOTE_EXEC>>>',
-         lambda cmd: execute_remote_command(decode_escape_sequences(cmd.strip()), async_mode=False),
+         lambda cmd: execute_remote_command(cmd.strip(), async_mode=False),
          True),
         (r'<<<REMOTE_CHECK_STATUS>>>\s*(.*?)\s*<<<REMOTE_CHECK_STATUS>>>',
          lambda job_id: check_job_status(job_id.strip()),
          True),
         (r'<<<REMOTE_GET_OUTPUT>>>\s*(.*?)\s*<<<REMOTE_GET_OUTPUT>>>',
          lambda job_id: get_job_output(job_id.strip()),
+         True),
+        (r'<<<SAVE_MEMORY>>>\s*(.*?)\s*<<<SAVE_MEMORY>>>',
+         lambda text: save_memory(text.strip()),
+         True),
+        (r'<<<WEB_SEARCH>>>\s*(.*?)\s*<<<WEB_SEARCH>>>',
+         lambda query: web_search(query.strip()),
          True),
         (r'<<<REMOTE_LIST_JOBS>>>',
          lambda _: list_all_jobs(),
@@ -470,6 +833,9 @@ def process_remote_commands(response_text: str) -> Optional[str]:
 
 
 def chat(model="implementer"):
+    # Initialize readline for command history and editing
+    setup_readline()
+
     print_colored(f"\nQwen Remote CLI (Connected to {LINUX_SERVER_IP})", COLORS['HEADER'])
     
     # Get initial theme
@@ -494,7 +860,11 @@ def chat(model="implementer"):
     else:
         print_colored("  Command approval: Manual (will prompt for each command)", COLORS['GREEN'])
 
-    print_colored("\nType '/exit' to quit. Type '/model <name>' to switch agents.\n", COLORS['BLUE'])
+    print_colored("\nCommands: /exit, /model <name>, /history, /history clear", COLORS['BLUE'])
+    if READLINE_AVAILABLE:
+        print_colored("Use ↑/↓ arrows to navigate history. History saved to ~/.qwen_client_history\n", COLORS['BLUE'])
+    else:
+        print_colored("(Install readline for command history support)\n", COLORS['WARNING'])
 
     history = []
 
@@ -505,11 +875,38 @@ def chat(model="implementer"):
                 user_input = history[-1]["content"]
             else:
                 user_input = input(f"{COLORS['BOLD']}You > {COLORS['ENDC']}")
+                # Add user input to readline history (for up/down arrow navigation)
+                if user_input.strip():
+                    add_to_history(user_input)
 
             if not user_input.strip():
                 continue
             if user_input.lower() in ['/exit', '/quit']:
                 break
+
+            # History management commands
+            if user_input.lower() == '/history':
+                if READLINE_AVAILABLE:
+                    history_len = readline.get_current_history_length()
+                    print_colored(f"\nCommand History ({history_len} entries):", COLORS['HEADER'])
+                    for i in range(1, min(history_len + 1, 21)):  # Show last 20
+                        idx = max(1, history_len - 20 + i)
+                        if idx <= history_len:
+                            item = readline.get_history_item(idx)
+                            print_colored(f"  {idx}: {item}", COLORS['CYAN'])
+                    if history_len > 20:
+                        print_colored(f"  ... ({history_len - 20} older entries)", COLORS['BLUE'])
+                else:
+                    print_colored("Readline not available - no history support", COLORS['WARNING'])
+                continue
+
+            if user_input.lower() == '/history clear':
+                if READLINE_AVAILABLE:
+                    readline.clear_history()
+                    print_colored("Command history cleared.", COLORS['GREEN'])
+                else:
+                    print_colored("Readline not available - no history support", COLORS['WARNING'])
+                continue
 
             if user_input.lower().startswith('/model '):
                 model_name = user_input.split(' ')[1]
@@ -544,11 +941,20 @@ def chat(model="implementer"):
                 "stream": True,
                 "max_tokens": 30000 
             }
+            
+            # Smart Reloading:
+            # If this is an auto-send (tool output), keep the model loaded for speed.
+            # If this is a new user prompt, force reload to clear VRAM/Cache for stability.
+            is_auto_send = history and history[-1]["role"] == "user" and history[-1].get("auto_send", False)
+            headers = {
+                "X-Qwen-Force-Reload": "false" if is_auto_send else "true"
+            }
+            
             full_response = ""
 
             try:
                 # Increased timeout for heavy model switching and large model inference
-                response = requests.post(API_URL, json=payload, stream=True, timeout=7200)
+                response = requests.post(API_URL, json=payload, headers=headers, stream=True, timeout=7200)
                 if response.status_code != 200:
                     print_colored(f"\nError: {response.text}", COLORS['FAIL'])
                     continue

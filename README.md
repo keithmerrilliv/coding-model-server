@@ -70,6 +70,54 @@ You can optimize inference speed by adjusting these environment variables in you
 - `MODEL_USE_MLOCK=true` - Lock model in RAM to prevent swapping to disk
 - `MODEL_N_CTX_BATCH=2048` - Number of tokens to process at once (higher = faster but more memory)
 
+### Advanced Model Configuration
+
+You can configure advanced parameters in `server.py` to control memory usage and context length.
+
+**KV Cache Offloading (RAM vs VRAM):**
+By default, the Key-Value (KV) cache is offloaded to VRAM for speed. To save VRAM (at the cost of speed), you can move it to system RAM:
+
+```python
+            'model_config': {
+                # ...
+                'offload_kqv': False,   # False = Store KV cache in RAM, True = VRAM (default)
+            }
+```
+
+**KV Cache Quantization:**
+By default, the KV cache now uses the model's standard precision (usually F16). If you are constrained by RAM or VRAM, you can enable 8-bit quantization:
+
+```python
+            'model_config': {
+                # ...
+                'type_k': 8,  # 8 = GGML_TYPE_Q8_0
+                'type_v': 8,  # 8 = GGML_TYPE_Q8_0
+            }
+```
+
+**Extending Context Length (YaRN):**
+You can extend the model's context length beyond its training limit using YaRN (Yet another RoPE extensioN).
+
+```python
+        'implementer': {
+            'description': 'Code implementation agent',
+            # ...
+            'model_config': {
+                'path': '/path/to/model.gguf',
+                'n_ctx': 65536,         # Desired context length
+                'offload_kqv': True,    # Set to False if you run out of VRAM
+                
+                # YaRN Configuration
+                'rope_scaling_type': 2, # 2 = YaRN
+                'yarn_ext_factor': -1.0,# -1 = Auto-detect based on n_ctx / train_ctx
+                'yarn_attn_factor': 1.0,
+                'yarn_beta_fast': 32.0,
+                'yarn_beta_slow': 1.0,
+                'yarn_orig_ctx': 32768  # Original training context of the model
+            }
+        },
+```
+
 ### Remote Command Execution
 
 The agent can request to execute commands on your local machine. You will be prompted to approve each command before execution.
