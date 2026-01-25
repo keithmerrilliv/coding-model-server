@@ -14,6 +14,7 @@ import shlex
 import threading
 import uuid
 import atexit
+import time
 from datetime import datetime
 from collections import deque
 from typing import Optional, List
@@ -27,6 +28,7 @@ except ImportError:
 
 # History file configuration
 HISTORY_FILE = os.path.expanduser("~/.qwen_client_history")
+CHAT_HISTORY_FILE = os.path.expanduser("~/.qwen_chat_history.json")
 HISTORY_MAX_LENGTH = 1000
 
 # Configuration
@@ -34,6 +36,7 @@ LINUX_SERVER_IP = os.getenv("QWEN_SERVER_IP", "192.168.50.101")
 API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/chat/completions"
 MEMORY_API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/memory"
 SEARCH_API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/tools/search"
+HEALTH_URL = f"http://{LINUX_SERVER_IP}:5000/health"
 
 COLORS = {
     "HEADER": "\033[95m",
@@ -54,6 +57,47 @@ AGENT_THEMES = {
     "reviewer":    {"color": COLORS['CYAN'], "icon": "🔍", "prompt": "Reviewer", "desc": "Code Review (480B Model - Slow Load)"},
     "debugger":    {"color": COLORS['FAIL'], "icon": "🐞", "prompt": "Debugger", "desc": "Debugging"},
 }
+
+def save_chat_history(history):
+    """Save full chat history to file"""
+    try:
+        with open(CHAT_HISTORY_FILE, 'w') as f:
+            json.dump(history, f, indent=2)
+    except Exception as e:
+        print_colored(f"Warning: Failed to save chat history: {e}", COLORS['WARNING'])
+
+def load_chat_history():
+    """Load chat history from file if it exists"""
+    if os.path.exists(CHAT_HISTORY_FILE):
+        try:
+            with open(CHAT_HISTORY_FILE, 'r') as f:
+                history = json.load(f)
+            print_colored(f"Found saved session with {len(history)} messages.", COLORS['CYAN'])
+            choice = input(f"{COLORS['BOLD']}Restore previous session? [Y/n] > {COLORS['ENDC']}")
+            if choice.lower() not in ['n', 'no']:
+                return history
+        except Exception as e:
+            print_colored(f"Warning: Failed to load chat history: {e}", COLORS['WARNING'])
+    return []
+
+def wait_for_server():
+    """Poll server health endpoint until it comes back online"""
+    print_colored(f"\nConnection lost. Waiting for server at {LINUX_SERVER_IP}...", COLORS['WARNING'])
+    while True:
+        try:
+            response = requests.get(HEALTH_URL, timeout=2)
+            if response.status_code == 200:
+                print_colored("\nServer is back online! Resuming...", COLORS['GREEN'])
+                return True
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+            pass
+        
+        try:
+            time.sleep(5)
+            print(".", end="", flush=True)
+        except KeyboardInterrupt:
+            print_colored("\nPolling cancelled by user.", COLORS['FAIL'])
+            return False
 
 # Readline history management
 def setup_readline():
@@ -76,7 +120,7 @@ def setup_readline():
 
     # Configure readline behavior
     # Enable auto-complete on tab (basic filename completion)
-    if 'libedit' in readline.__doc__:
+    if 'libedit' in readline.__doc__ or sys.platform == 'darwin':
         readline.parse_and_bind("bind ^I rl_complete")
         readline.parse_and_bind("bind ^[[A history-search-backward")
         readline.parse_and_bind("bind ^[[B history-search-forward")
@@ -870,7 +914,7 @@ def chat(model="implementer"):
     else:
         print_colored("(Install readline for command history support)\n", COLORS['WARNING'])
 
-    history = []
+    history = load_chat_history()
 
     while True:
         try:
@@ -927,6 +971,7 @@ def chat(model="implementer"):
 
             if not (history and history[-1]["role"] == "user" and history[-1].get("auto_send", False)):
                 history.append({"role": "user", "content": user_input})
+                save_chat_history(history)
 
             # Use agent-specific color and prompt
             prompt_text = f"{agent_theme['prompt']} {agent_theme['icon']} > "
@@ -956,62 +1001,120 @@ def chat(model="implementer"):
             
             full_response = ""
             server_error_occurred = False
-
-            try:
-                # Increased timeout for heavy model switching and large model inference
-                response = requests.post(API_URL, json=payload, headers=headers, stream=True, timeout=7200)
-                if response.status_code != 200:
-                    print_colored(f"\nError: {response.text}", COLORS['FAIL'])
-                    continue
-
-                for line in response.iter_lines():
-                    if line:
-                        line = line.decode('utf-8')
-                        if line.startswith("data: "):
-                            data_str = line[6:]
-                            if data_str == "[DONE]":
-                                break
-                            try:
-                                data = json.loads(data_str)
-                                if "choices" in data and len(data["choices"]) > 0:
-                                    delta = data["choices"][0].get("delta", {})
-                                    content = delta.get("content", "")
-                                    if content:
-                                        print(content, end="", flush=True)
-                                        full_response += content
-                                elif "error" in data:
-                                    error_msg = data['error'].get('message', 'Unknown error')
-                                    print_colored(f"\nServer Error: {error_msg}", COLORS['FAIL'])
-                                    if "exceed context window" in error_msg:
-                                        server_error_occurred = True
-                                    break
-                            except (json.JSONDecodeError, KeyError, IndexError):
-                                # Silently ignore malformed chunks
-                                pass
-
-                print()
-                
-                # Only append non-empty responses to history to avoid 422 errors on next turn
-                if full_response and full_response.strip():
-                    history.append({"role": "assistant", "content": full_response})
-                    
-                    if server_error_occurred:
-                        print_colored("\n[Client] Stopping tool execution loop due to server context error.", COLORS['WARNING'])
-                    else:
-                        tool_output = process_remote_commands(full_response)
-
-                        if tool_output:
-                            history.append({"role": "user", "content": f"Tool output:\n{tool_output}", "auto_send": True})
-                            continue
-                elif not full_response and not server_error_occurred:
-                    print_colored("\nWarning: Received empty response or connection closed prematurely.", COLORS['WARNING'])
             
-            except requests.exceptions.Timeout:
-                print_colored(f"\nRequest timed out after 7200s.", COLORS['FAIL'])
-            except requests.exceptions.ConnectionError:
-                print_colored(f"\nConnection failed! Is the server at {LINUX_SERVER_IP} reachable?", COLORS['FAIL'])
-            except Exception as e:
-                print_colored(f"\nUnexpected error during chat: {e}", COLORS['FAIL'])
+            # Progress tracking variables
+            start_time = time.time()
+            first_token_time = None
+            token_count = 0
+            stop_progress = threading.Event()
+
+            def show_progress():
+                """Display elapsed time while waiting for server"""
+                while not stop_progress.is_set():
+                    elapsed = time.time() - start_time
+                    # Use carriage return to keep progress on one line
+                    sys.stdout.write(f"\r{COLORS['BLUE']}Waiting for server... ({elapsed:.1f}s){COLORS['ENDC']}")
+                    sys.stdout.flush()
+                    time.sleep(0.1)
+                # Clear the line when done
+                sys.stdout.write("\r" + " " * 40 + "\r")
+                sys.stdout.flush()
+
+            progress_thread = threading.Thread(target=show_progress)
+            progress_thread.daemon = True
+            progress_thread.start()
+
+            while True: # Retry loop
+                try:
+                    # Increased timeout for heavy model switching and large model inference
+                    response = requests.post(API_URL, json=payload, headers=headers, stream=True, timeout=7200)
+                    if response.status_code != 200:
+                        stop_progress.set()
+                        print_colored(f"\nError: {response.text}", COLORS['FAIL'])
+                        break
+
+                    for line in response.iter_lines():
+                        if line:
+                            line = line.decode('utf-8')
+                            if line.startswith("data: "):
+                                data_str = line[6:]
+                                if data_str == "[DONE]":
+                                    break
+                                try:
+                                    data = json.loads(data_str)
+                                    if "choices" in data and len(data["choices"]) > 0:
+                                        delta = data["choices"][0].get("delta", {})
+                                        content = delta.get("content", "")
+                                        if content:
+                                            if not first_token_time:
+                                                first_token_time = time.time()
+                                                stop_progress.set() # Stop "Waiting..." timer
+                                            
+                                            print(content, end="", flush=True)
+                                            full_response += content
+                                            token_count += 1
+                                    elif "error" in data:
+                                        stop_progress.set()
+                                        error_msg = data['error'].get('message', 'Unknown error')
+                                        print_colored(f"\nServer Error: {error_msg}", COLORS['FAIL'])
+                                        if "exceed context window" in error_msg:
+                                            server_error_occurred = True
+                                        break
+                                except (json.JSONDecodeError, KeyError, IndexError):
+                                    # Silently ignore malformed chunks
+                                    pass
+                    break # Success, exit retry loop
+
+                except requests.exceptions.Timeout:
+                    stop_progress.set()
+                    print_colored(f"\nRequest timed out after 7200s.", COLORS['FAIL'])
+                    break
+                except requests.exceptions.ConnectionError:
+                    stop_progress.set()
+                    if wait_for_server():
+                        # Reset timer for retry
+                        start_time = time.time()
+                        stop_progress = threading.Event()
+                        progress_thread = threading.Thread(target=show_progress)
+                        progress_thread.start()
+                        continue # Retry request
+                    else:
+                        break # User aborted
+                except Exception as e:
+                    stop_progress.set()
+                    print_colored(f"\nUnexpected error during chat: {e}", COLORS['FAIL'])
+                    break
+
+            stop_progress.set() # Ensure timer is stopped
+            print()
+            
+            # Print generation stats
+            if token_count > 0:
+                end_time = time.time()
+                total_duration = end_time - start_time
+                ttft = first_token_time - start_time
+                gen_duration = end_time - first_token_time
+                tps = token_count / gen_duration if gen_duration > 0 else 0
+                
+                stats_msg = f"[Stats] TTFT: {ttft:.2f}s | Total: {total_duration:.2f}s | {token_count} tokens | {tps:.2f} tps"
+                print_colored(stats_msg, COLORS['BLUE'])
+            
+            # Only append non-empty responses to history to avoid 422 errors on next turn
+            if full_response and full_response.strip():
+                history.append({"role": "assistant", "content": full_response})
+                save_chat_history(history)
+                
+                if server_error_occurred:
+                    print_colored("\n[Client] Stopping tool execution loop due to server context error.", COLORS['WARNING'])
+                else:
+                    tool_output = process_remote_commands(full_response)
+
+                    if tool_output:
+                        history.append({"role": "user", "content": f"Tool output:\n{tool_output}", "auto_send": True})
+                        save_chat_history(history)
+                        continue
+            elif not full_response and not server_error_occurred:
+                print_colored("\nWarning: Received empty response or connection closed prematurely.", COLORS['WARNING'])
 
         except KeyboardInterrupt:
             break
