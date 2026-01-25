@@ -49,7 +49,7 @@ class ChatCompletionRequest(BaseModel):
     model: str = "implementer"
     messages: List[ChatMessage]
     stream: bool = False
-    max_tokens: int = Field(default=16384, ge=1, le=32768)
+    max_tokens: int = Field(default=16384, ge=1, le=524288)
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
 
     @field_validator('messages')
@@ -144,7 +144,7 @@ class Config:
     HOST = os.getenv('HOST', '0.0.0.0')
     
     # Global defaults (can be overridden per model)
-    DEFAULT_CONTEXT_SIZE = int(os.getenv('MODEL_CONTEXT_SIZE', 8192))
+    DEFAULT_CONTEXT_SIZE = int(os.getenv('MODEL_CONTEXT_SIZE', 262144))
     DEFAULT_N_THREADS = int(os.getenv('MODEL_N_THREADS', 24))
     DEFAULT_N_BATCH = int(os.getenv('MODEL_N_BATCH', 1024))  # Increased to 1024 for better prompt evaluation speed
     
@@ -203,11 +203,19 @@ To run commands on the client, you MUST use this specific protocol:
             'system_prompt': f'You are an expert software engineer. Provide clear, working code implementations.\n{REMOTE_EXEC_INSTRUCTION}',
             'model_config': {
                 'path': '/home/keith-merrill/.lmstudio/models/tp7030/Qwen3-Coder-30B-A3B-Instruct-FP8-Q6_K-GGUF/qwen3-coder-30b-a3b-instruct-fp8-q6_k.gguf',
-                'n_gpu_layers': 10,  # Reduced to 10 for 64k context
-                'n_ctx': 49152,      # 1.5x Native context
-                'n_batch': 1024,     # Improved prompt processing speed
-                'rope_scaling_type': 2,
-                'rope_freq_scale': 1.5
+                'n_gpu_layers': 25,  # Balanced for 512k context buffers
+                'n_ctx': 524288,     # 512k context
+                'n_batch': 1024,
+                'rope_scaling_type': 2, # Yarn
+                'rope_freq_scale': 1.0,
+                'yarn_ext_factor': -1.0,
+                'yarn_attn_factor': 1.0,
+                'yarn_beta_fast': 32.0,
+                'yarn_beta_slow': 1.0,
+                'yarn_orig_ctx': 32768,
+                'type_k': 8, # GGML_TYPE_Q8_0
+                'type_v': 8, # GGML_TYPE_Q8_0
+                'offload_kqv': False # Force KV cache to RAM
             }
         },
         'architect': {
@@ -215,11 +223,19 @@ To run commands on the client, you MUST use this specific protocol:
             'system_prompt': f'You are a system architect. Design scalable, maintainable solutions.\n{REMOTE_EXEC_INSTRUCTION}',
             'model_config': {
                 'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/Qwen3-Coder-480B-A35B-Instruct-UD-IQ1_M.gguf',
-                'n_gpu_layers': 2,   # Reduced to 2 for 64k context
-                'n_ctx': 49152,      # 1.5x Native context
-                'n_batch': 1024,     # Improved prompt processing speed
+                'n_gpu_layers': 4,   # Balanced for 256k context with KV in RAM
+                'n_ctx': 262144,     # 256k context
+                'n_batch': 1024,
                 'rope_scaling_type': 2,
-                'rope_freq_scale': 1.5
+                'rope_freq_scale': 1.0,
+                'yarn_ext_factor': -1.0,
+                'yarn_attn_factor': 1.0,
+                'yarn_beta_fast': 32.0,
+                'yarn_beta_slow': 1.0,
+                'yarn_orig_ctx': 32768,
+                'type_k': 8, # GGML_TYPE_Q8_0
+                'type_v': 8, # GGML_TYPE_Q8_0
+                'offload_kqv': False # Force KV cache to RAM
             }
         },
         'reviewer': {
@@ -227,11 +243,19 @@ To run commands on the client, you MUST use this specific protocol:
             'system_prompt': f'You are a code reviewer. Identify issues and suggest improvements.\n{REMOTE_EXEC_INSTRUCTION}',
             'model_config': {
                 'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/Qwen3-Coder-480B-A35B-Instruct-UD-IQ1_M.gguf',
-                'n_gpu_layers': 2,   # Reduced to 2 for 64k context
-                'n_ctx': 49152,      # 1.5x Native context
-                'n_batch': 1024,     # Improved prompt processing speed
+                'n_gpu_layers': 4,   # Balanced for 256k context with KV in RAM
+                'n_ctx': 262144,     # 256k context
+                'n_batch': 1024,
                 'rope_scaling_type': 2,
-                'rope_freq_scale': 1.5
+                'rope_freq_scale': 1.0,
+                'yarn_ext_factor': -1.0,
+                'yarn_attn_factor': 1.0,
+                'yarn_beta_fast': 32.0,
+                'yarn_beta_slow': 1.0,
+                'yarn_orig_ctx': 32768,
+                'type_k': 8, # GGML_TYPE_Q8_0
+                'type_v': 8, # GGML_TYPE_Q8_0
+                'offload_kqv': False # Force KV cache to RAM
             }
         },
         'debugger': {
@@ -239,11 +263,19 @@ To run commands on the client, you MUST use this specific protocol:
             'system_prompt': f'You are a debugging expert. Analyze errors and suggest fixes.\n{REMOTE_EXEC_INSTRUCTION}',
             'model_config': {
                 'path': '/home/keith-merrill/.lmstudio/models/n00b001/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M-GGUF/qwen3-coder-30b-a3b-instruct-q4_k_m.gguf',
-                'n_gpu_layers': 20,  # Reduced to 20 for 64k context
-                'n_ctx': 49152,      # 1.5x Native context
-                'n_batch': 1024,     # Improved prompt processing speed
+                'n_gpu_layers': 25,  # Balanced for 512k context buffers
+                'n_ctx': 524288,     # 512k context
+                'n_batch': 1024,
                 'rope_scaling_type': 2,
-                'rope_freq_scale': 1.5
+                'rope_freq_scale': 1.0,
+                'yarn_ext_factor': -1.0,
+                'yarn_attn_factor': 1.0,
+                'yarn_beta_fast': 32.0,
+                'yarn_beta_slow': 1.0,
+                'yarn_orig_ctx': 32768,
+                'type_k': 8, # GGML_TYPE_Q8_0
+                'type_v': 8, # GGML_TYPE_Q8_0
+                'offload_kqv': False # Force KV cache to RAM
             }
         }
     }
