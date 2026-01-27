@@ -11,25 +11,25 @@ if [ -f .env ]; then
     export $(grep -v '^#' .env | xargs)
 fi
 
-# Detect OS and activate appropriate virtual environment
+# Detect OS and set Python executable
 if [[ "$OSTYPE" == "darwin"* ]]; then
     # macOS
     echo "Detected macOS"
-    if [ -f "myenv/bin/activate" ]; then
-        echo "Using myenv/bin/activate"
-        source myenv/bin/activate
-    elif [ -f "venv/bin/activate" ]; then
-        echo "Using venv/bin/activate"
-        source venv/bin/activate
+    if [ -d "myenv/bin" ]; then
+        PYTHON_EXE="./myenv/bin/python3"
+    elif [ -d "venv/bin" ]; then
+        PYTHON_EXE="./venv/bin/python3"
     else
-        echo "Warning: Neither myenv/bin/activate nor venv/bin/activate found"
+        echo "Warning: Neither myenv nor venv found"
         exit 1
     fi
 else
     # Linux or other
-    echo "Detected Linux - using venv"
-    if [ -d "venv" ]; then
-        source venv/bin/activate
+    echo "Detected Linux"
+    if [ -d "venv/bin" ]; then
+        PYTHON_EXE="./venv/bin/python3"
+    elif [ -d "myenv/bin" ]; then
+        PYTHON_EXE="./myenv/bin/python3"
     else
         echo "Warning: venv not found"
         exit 1
@@ -38,4 +38,4 @@ fi
 
 # Start the client
 echo "Starting Qwen Remote Client..."
-python3 qwen_remote.py "$@"
+$PYTHON_EXE qwen_remote.py "$@"
