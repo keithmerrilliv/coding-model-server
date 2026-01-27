@@ -127,8 +127,8 @@ def setup_readline():
     else:
         readline.parse_and_bind('tab: complete')
         # Some terminals need these bindings explicitly
-        readline.parse_and_bind(r'"\e[A": history-search-backward')  # Up arrow
-        readline.parse_and_bind(r'"\e[B": history-search-forward')   # Down arrow
+        # readline.parse_and_bind(r'"\e[A": history-search-backward')  # Up arrow
+        # readline.parse_and_bind(r'"\e[B": history-search-forward')   # Down arrow
 
 
 def save_readline_history():
