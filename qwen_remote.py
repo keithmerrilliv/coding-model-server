@@ -964,7 +964,22 @@ def chat(model="implementer"):
     # If we loaded a history and it had a specific agent, switch to it
     if history and loaded_agent and loaded_agent in AGENT_THEMES:
         model = loaded_agent
+        agent_theme = AGENT_THEMES[model]  # Update theme to match loaded agent
         print_colored(f"Resuming with agent: {model}", COLORS['GREEN'])
+        
+        # Show recent context
+        if history:
+            print_colored("\n--- Previous Context ---", COLORS['HEADER'])
+            # Show last 4 messages (approx 2 exchanges)
+            start_idx = max(0, len(history) - 4)
+            for msg in history[start_idx:]:
+                role = msg["role"].capitalize()
+                content = msg["content"]
+                # Truncate very long messages for display
+                display_content = content[:200] + "..." if len(content) > 200 else content
+                color = COLORS['CYAN'] if msg["role"] == "user" else COLORS['GREEN']
+                print(f"{color}{role}: {display_content}{COLORS['ENDC']}")
+            print_colored("------------------------\n", COLORS['HEADER'])
 
     while True:
         try:
