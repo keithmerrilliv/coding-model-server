@@ -14,11 +14,15 @@ fi
 # Detect OS and activate appropriate virtual environment
 if [[ "$OSTYPE" == "darwin"* ]]; then
     # macOS
-    echo "Detected macOS - using myenv/bin/activate"
+    echo "Detected macOS"
     if [ -f "myenv/bin/activate" ]; then
+        echo "Using myenv/bin/activate"
         source myenv/bin/activate
+    elif [ -f "venv/bin/activate" ]; then
+        echo "Using venv/bin/activate"
+        source venv/bin/activate
     else
-        echo "Warning: myenv/bin/activate not found"
+        echo "Warning: Neither myenv/bin/activate nor venv/bin/activate found"
         exit 1
     fi
 else

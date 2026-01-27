@@ -122,8 +122,8 @@ def setup_readline():
     # Enable auto-complete on tab (basic filename completion)
     if 'libedit' in readline.__doc__ or sys.platform == 'darwin':
         readline.parse_and_bind("bind ^I rl_complete")
-        readline.parse_and_bind("bind ^[[A history-search-backward")
-        readline.parse_and_bind("bind ^[[B history-search-forward")
+        # history-search-backward/forward are not supported by default libedit on macOS
+        # Standard Up/Down arrows will work for previous/next history by default
     else:
         readline.parse_and_bind('tab: complete')
         # Some terminals need these bindings explicitly
