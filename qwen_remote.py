@@ -39,14 +39,15 @@ SEARCH_API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/tools/search"
 HEALTH_URL = f"http://{LINUX_SERVER_IP}:5000/health"
 
 COLORS = {
-    "HEADER": "\033[95m",
-    "BLUE": "\033[94m",
-    "GREEN": "\033[92m",
-    "WARNING": "\033[93m",
-    "FAIL": "\033[91m",
-    "ENDC": "\033[0m",
-    "BOLD": "\033[1m",
-    "CYAN": "\033[96m"
+    # Wrapped in \001 and \002 for readline compatibility
+    "HEADER": "\001\033[95m\002",
+    "BLUE": "\001\033[94m\002",
+    "GREEN": "\001\033[92m\002",
+    "WARNING": "\001\033[93m\002",
+    "FAIL": "\001\033[91m\002",
+    "ENDC": "\001\033[0m\002",
+    "BOLD": "\001\033[1m\002",
+    "CYAN": "\001\033[96m\002"
 }
 
 
@@ -300,12 +301,39 @@ class JobTracker:
                 'by_status': by_status
             }
 
+    def terminate_all(self):
+        """Terminate all running background jobs"""
+        with self.lock:
+            count = 0
+            for job_id, job in self.jobs.items():
+                if job['status'] == 'running' and job['process']:
+                    try:
+                        print(f"Terminating background job {job_id}...", end="", flush=True)
+                        job['process'].terminate()
+                        # Give it a moment to die gracefully, else kill
+                        try:
+                            job['process'].wait(timeout=0.5)
+                        except subprocess.TimeoutExpired:
+                            job['process'].kill()
+                        print(" Done.")
+                        job['status'] = 'failed'
+                        job['completed_at'] = datetime.now().isoformat()
+                        count += 1
+                    except Exception as e:
+                        print(f" Error: {e}")
+            if count > 0:
+                print(f"Terminated {count} background jobs.")
+
 
 # Initialize job tracker
 job_tracker = JobTracker(
     max_jobs=int(os.getenv('JOB_TRACKER_MAX_JOBS', 100)),
     job_ttl_hours=float(os.getenv('JOB_TRACKER_TTL_HOURS', 1))
 )
+
+# Register cleanup on exit
+atexit.register(job_tracker.terminate_all)
+
 
 
 def print_colored(text, color):
