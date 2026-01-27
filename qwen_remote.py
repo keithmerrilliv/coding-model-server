@@ -58,27 +58,44 @@ AGENT_THEMES = {
     "debugger":    {"color": COLORS['FAIL'], "icon": "🐞", "prompt": "Debugger", "desc": "Debugging"},
 }
 
-def save_chat_history(history):
-    """Save full chat history to file"""
+def save_chat_history(history, current_agent="implementer"):
+    """Save full chat history and metadata to file"""
     try:
+        data = {
+            "messages": history,
+            "last_agent": current_agent,
+            "timestamp": datetime.now().isoformat()
+        }
         with open(CHAT_HISTORY_FILE, 'w') as f:
-            json.dump(history, f, indent=2)
+            json.dump(data, f, indent=2)
     except Exception as e:
         print_colored(f"Warning: Failed to save chat history: {e}", COLORS['WARNING'])
 
 def load_chat_history():
-    """Load chat history from file if it exists"""
+    """Load chat history from file if it exists. Returns (history, last_agent)"""
     if os.path.exists(CHAT_HISTORY_FILE):
         try:
             with open(CHAT_HISTORY_FILE, 'r') as f:
-                history = json.load(f)
+                data = json.load(f)
+            
+            # Handle both old format (list) and new format (dict)
+            if isinstance(data, list):
+                history = data
+                last_agent = "implementer"
+            else:
+                history = data.get("messages", [])
+                last_agent = data.get("last_agent", "implementer")
+                
             print_colored(f"Found saved session with {len(history)} messages.", COLORS['CYAN'])
+            if last_agent != "implementer":
+                print_colored(f"Last used agent: {last_agent}", COLORS['CYAN'])
+
             choice = input(f"{COLORS['BOLD']}Restore previous session? [Y/n] > {COLORS['ENDC']}")
             if choice.lower() not in ['n', 'no']:
-                return history
+                return history, last_agent
         except Exception as e:
             print_colored(f"Warning: Failed to load chat history: {e}", COLORS['WARNING'])
-    return []
+    return [], "implementer"
 
 def wait_for_server():
     """Poll server health endpoint until it comes back online"""
@@ -914,18 +931,32 @@ def chat(model="implementer"):
     else:
         print_colored("(Install readline for command history support)\n", COLORS['WARNING'])
 
-    history = load_chat_history()
+    history, loaded_agent = load_chat_history()
+    
+    # If we loaded a history and it had a specific agent, switch to it
+    if history and loaded_agent and loaded_agent in AGENT_THEMES:
+        model = loaded_agent
+        print_colored(f"Resuming with agent: {model}", COLORS['GREEN'])
 
     while True:
         try:
-            if history and history[-1]["role"] == "user" and history[-1].get("auto_send", False):
-                print_colored("Sending tool output to agent...", COLORS['BLUE'])
-                user_input = history[-1]["content"]
-            else:
-                user_input = input(f"{COLORS['BOLD']}You > {COLORS['ENDC']}")
-                # Add user input to readline history (for up/down arrow navigation)
-                if user_input.strip():
-                    add_to_history(user_input)
+            # Use agent-specific color and prompt
+            prompt_text = f"{agent_theme['prompt']} {agent_theme['icon']} > "
+            full_prompt = f"{agent_theme['color']}{prompt_text}{COLORS['ENDC']}"
+            
+            # Pass the prompt directly to input() so readline handles it correctly
+            # This fixes the issue where previous text remains on screen when cycling history
+            try:
+                if history and history[-1]["role"] == "user" and history[-1].get("auto_send", False):
+                    print_colored("Sending tool output to agent...", COLORS['BLUE'])
+                    user_input = history[-1]["content"]
+                else:
+                    user_input = input(full_prompt)
+                    # Add user input to readline history (for up/down arrow navigation)
+                    if user_input.strip():
+                        add_to_history(user_input)
+            except EOFError:
+                break # Handle Ctrl+D gracefully
 
             if not user_input.strip():
                 continue
@@ -956,7 +987,35 @@ def chat(model="implementer"):
                     print_colored("Readline not available - no history support", COLORS['WARNING'])
                 continue
 
-            if user_input.lower().startswith('/model '):
+            # Quick Agent Switch (e.g. @architect or @architect Please design...)
+            if user_input.startswith('@'):
+                parts = user_input.split(' ', 1)
+                potential_agent = parts[0][1:].lower() # remove @
+                
+                # Handle fuzzy matching or aliases if we wanted, but strict for now
+                if potential_agent in AGENT_THEMES:
+                    model = potential_agent
+                    agent_theme = AGENT_THEMES[model]
+                    print_colored(f"\nSwitched to agent: {model} {agent_theme['icon']}", COLORS['WARNING'])
+                    print_colored(f"Description: {agent_theme['desc']}", COLORS['BLUE'])
+                    
+                    if model in ['architect', 'reviewer']:
+                        print_colored("NOTE: Switching to 480B model. Loading may take ~30-60 seconds.", COLORS['WARNING'])
+                    
+                    # If there's content after the mention, update user_input to be that content
+                    # effectively switching AND sending in one go.
+                    if len(parts) > 1:
+                        user_input = parts[1]
+                    else:
+                        # Just a switch, don't send anything
+                        continue
+                else:
+                    # If it looks like a mention but isn't a valid agent, warn but don't crash
+                    # Alternatively, we could just treat it as text. Let's warn.
+                    print_colored(f"Unknown agent '{potential_agent}'. Available: {', '.join(AGENT_THEMES.keys())}", COLORS['FAIL'])
+                    print_colored("Treating as normal text...", COLORS['BLUE'])
+
+            if user_input.lower().startswith('/model ') or user_input.lower().startswith('/m '):
                 model_name = user_input.split(' ')[1]
                 if model_name in AGENT_THEMES:
                     model = model_name
@@ -971,11 +1030,7 @@ def chat(model="implementer"):
 
             if not (history and history[-1]["role"] == "user" and history[-1].get("auto_send", False)):
                 history.append({"role": "user", "content": user_input})
-                save_chat_history(history)
-
-            # Use agent-specific color and prompt
-            prompt_text = f"{agent_theme['prompt']} {agent_theme['icon']} > "
-            print(f"{agent_theme['color']}{prompt_text}{COLORS['ENDC']}", end="", flush=True)
+                save_chat_history(history, model)
 
             # Sanitize history to remove internal flags like 'auto_send' before sending to server
             sanitized_history = [
@@ -1102,7 +1157,7 @@ def chat(model="implementer"):
             # Only append non-empty responses to history to avoid 422 errors on next turn
             if full_response and full_response.strip():
                 history.append({"role": "assistant", "content": full_response})
-                save_chat_history(history)
+                save_chat_history(history, model)
                 
                 if server_error_occurred:
                     print_colored("\n[Client] Stopping tool execution loop due to server context error.", COLORS['WARNING'])
@@ -1111,7 +1166,7 @@ def chat(model="implementer"):
 
                     if tool_output:
                         history.append({"role": "user", "content": f"Tool output:\n{tool_output}", "auto_send": True})
-                        save_chat_history(history)
+                        save_chat_history(history, model)
                         continue
             elif not full_response and not server_error_occurred:
                 print_colored("\nWarning: Received empty response or connection closed prematurely.", COLORS['WARNING'])
