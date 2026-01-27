@@ -2,6 +2,8 @@
 Description=Qwen Multi-Agent Server (FastAPI)
 After=network.target nvidia-persistenced.service
 Wants=nvidia-persistenced.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -11,8 +13,6 @@ WorkingDirectory=/home/keith-merrill/Dev/qwen-server
 ExecStart=/home/keith-merrill/Dev/qwen-server/venv/bin/python server.py
 Restart=always
 RestartSec=10
-StartLimitIntervalSec=300
-StartLimitBurst=5
 TimeoutStopSec=60
 StandardOutput=journal
 StandardError=journal
