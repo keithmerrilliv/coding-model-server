@@ -146,7 +146,9 @@ class Config:
     
     # Global defaults (can be overridden per model)
     DEFAULT_CONTEXT_SIZE = int(os.getenv('MODEL_CONTEXT_SIZE', 524288))
-    DEFAULT_N_THREADS = int(os.getenv('MODEL_N_THREADS', 8))
+    # Increased default threads to 16 to distribute load across more cores (thermal mitigation)
+    # For stricter control, set OMP_PROC_BIND=spread and OMP_NUM_THREADS in .env
+    DEFAULT_N_THREADS = int(os.getenv('MODEL_N_THREADS', 16))
     DEFAULT_N_BATCH = int(os.getenv('MODEL_N_BATCH', 2048))  # Increased to 2048 for better CPU saturation
     
     REMOTE_EXEC_INSTRUCTION = """
