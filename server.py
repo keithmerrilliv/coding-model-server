@@ -144,9 +144,9 @@ class Config:
     HOST = os.getenv('HOST', '0.0.0.0')
     
     # Global defaults (can be overridden per model)
-    DEFAULT_CONTEXT_SIZE = int(os.getenv('MODEL_CONTEXT_SIZE', 262144))
-    DEFAULT_N_THREADS = int(os.getenv('MODEL_N_THREADS', 24))
-    DEFAULT_N_BATCH = int(os.getenv('MODEL_N_BATCH', 1024))  # Increased to 1024 for better prompt evaluation speed
+    DEFAULT_CONTEXT_SIZE = int(os.getenv('MODEL_CONTEXT_SIZE', 524288))
+    DEFAULT_N_THREADS = int(os.getenv('MODEL_N_THREADS', 32)) # Updated to 32 for i9-14900KF
+    DEFAULT_N_BATCH = int(os.getenv('MODEL_N_BATCH', 2048))  # Increased to 2048 for better CPU saturation
     
     REMOTE_EXEC_INSTRUCTION = """
 # REMOTE CLIENT EXECUTION PROTOCOL
@@ -205,7 +205,7 @@ To run commands on the client, you MUST use this specific protocol:
                 'path': '/home/keith-merrill/.lmstudio/models/tp7030/Qwen3-Coder-30B-A3B-Instruct-FP8-Q6_K-GGUF/qwen3-coder-30b-a3b-instruct-fp8-q6_k.gguf',
                 'n_gpu_layers': 25,  # Balanced for 512k context buffers
                 'n_ctx': 524288,     # 512k context
-                'n_batch': 1024,
+                'n_batch': 2048,     # Local override to match new global default
                 'rope_scaling_type': 2, # Yarn
                 'rope_freq_scale': 1.0,
                 'yarn_ext_factor': -1.0,
@@ -222,10 +222,10 @@ To run commands on the client, you MUST use this specific protocol:
             'description': 'System architecture agent',
             'system_prompt': f'You are a system architect. Design scalable, maintainable solutions.\n{REMOTE_EXEC_INSTRUCTION}',
             'model_config': {
-                'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/Qwen3-Coder-480B-A35B-Instruct-UD-IQ1_M.gguf',
+                'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-480B-A3B-Instruct-GGUF/Qwen3-Coder-480B-A35B-Instruct-UD-IQ1_M.gguf',
                 'n_gpu_layers': 4,   # Balanced for 256k context with KV in RAM
                 'n_ctx': 262144,     # 256k context
-                'n_batch': 1024,
+                'n_batch': 2048,
                 'rope_scaling_type': 2,
                 'rope_freq_scale': 1.0,
                 'yarn_ext_factor': -1.0,
@@ -245,7 +245,7 @@ To run commands on the client, you MUST use this specific protocol:
                 'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/Qwen3-Coder-480B-A35B-Instruct-UD-IQ1_M.gguf',
                 'n_gpu_layers': 4,   # Balanced for 256k context with KV in RAM
                 'n_ctx': 262144,     # 256k context
-                'n_batch': 1024,
+                'n_batch': 2048,
                 'rope_scaling_type': 2,
                 'rope_freq_scale': 1.0,
                 'yarn_ext_factor': -1.0,
@@ -265,7 +265,7 @@ To run commands on the client, you MUST use this specific protocol:
                 'path': '/home/keith-merrill/.lmstudio/models/n00b001/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M-GGUF/qwen3-coder-30b-a3b-instruct-q4_k_m.gguf',
                 'n_gpu_layers': 25,  # Balanced for 512k context buffers
                 'n_ctx': 524288,     # 512k context
-                'n_batch': 1024,
+                'n_batch': 2048,
                 'rope_scaling_type': 2,
                 'rope_freq_scale': 1.0,
                 'yarn_ext_factor': -1.0,
@@ -354,6 +354,7 @@ class ModelManager:
                     n_ctx=model_config.get('n_ctx', Config.DEFAULT_CONTEXT_SIZE),
                     n_gpu_layers=model_config.get('n_gpu_layers', 0),
                     n_threads=Config.DEFAULT_N_THREADS,
+                    n_threads_batch=Config.DEFAULT_N_THREADS,
                     n_batch=model_config.get('n_batch', Config.DEFAULT_N_BATCH),
                     flash_attn=True,   # Enabled for better performance
                     type_k=model_config.get('type_k'), # None = Model default (usually F16)
