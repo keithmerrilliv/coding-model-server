@@ -145,7 +145,7 @@ class Config:
     
     # Global defaults (can be overridden per model)
     DEFAULT_CONTEXT_SIZE = int(os.getenv('MODEL_CONTEXT_SIZE', 262144))
-    DEFAULT_N_THREADS = int(os.getenv('MODEL_N_THREADS', 24))
+    DEFAULT_N_THREADS = int(os.getenv('MODEL_N_THREADS', 8))
     DEFAULT_N_BATCH = int(os.getenv('MODEL_N_BATCH', 1024))  # Increased to 1024 for better prompt evaluation speed
     
     REMOTE_EXEC_INSTRUCTION = """
