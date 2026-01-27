@@ -11,6 +11,7 @@ import logging
 from datetime import datetime
 from typing import Dict, List, Optional, Any, Literal, Iterator
 from threading import Lock
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -263,7 +264,7 @@ To run commands on the client, you MUST use this specific protocol:
             'system_prompt': f'You are a debugging expert. Analyze errors and suggest fixes.\n{REMOTE_EXEC_INSTRUCTION}',
             'model_config': {
                 'path': '/home/keith-merrill/.lmstudio/models/n00b001/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M-GGUF/qwen3-coder-30b-a3b-instruct-q4_k_m.gguf',
-                'n_gpu_layers': 25,  # Balanced for 512k context buffers
+                'n_gpu_layers': 32,  # Balanced for 512k context buffers
                 'n_ctx': 524288,     # 512k context
                 'n_batch': 2048,
                 'rope_scaling_type': 2,
@@ -311,17 +312,30 @@ class ModelManager:
         with self.lock:
             if self.models:
                 logger.info("Unloading models (Cleaning VRAM)...")
-                self.models.clear()
-                self.current_model_path = None
-
-                # Force garbage collection to ensure VRAM is released
-                import gc
-                import time
-                gc.collect()
-                gc.collect()  # Call twice to catch circular references
-                time.sleep(2)  # Give CUDA time to actually release memory
-
-                logger.info("Models unloaded, memory freed")
+                try:
+                    # Clear internal references
+                    self.models.clear()
+                    self.current_model_path = None
+                    
+                    # Force garbage collection
+                    import gc
+                    import time
+                    gc.collect()
+                    gc.collect() 
+                    
+                    # Clear CUDA cache if PyTorch is available (often used by other libs)
+                    try:
+                        import torch
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                            torch.cuda.ipc_collect()
+                    except ImportError:
+                        pass
+                    
+                    time.sleep(2) # Allow async cleanup
+                    logger.info("Models unloaded, memory freed")
+                except Exception as e:
+                    logger.error(f"Error during model unload: {e}")
 
     def get_model(self, agent_name: str, force_reload: bool = True):
         """Get or load the model for the specific agent, unloading others if needed"""
@@ -471,34 +485,49 @@ def build_stream_chunk(completion_id: str, model_id: str, content: Optional[str]
 # FastAPI Application
 # ============================================================================ 
 
+model_manager = ModelManager()
+memory_service = None
+web_search_service = None
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifecycle manager for the FastAPI app"""
+    global memory_service, web_search_service
+    
+    # Startup
+    logger.info("Server starting up...")
+    
+    # Initialize Memory Service
+    try:
+        logger.info("Initializing Memory Service...")
+        memory_service = MemoryService()
+        logger.info("Memory Service initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize memory service: {e}")
+        memory_service = None
+
+    # Initialize Web Search Service
+    try:
+        logger.info("Initializing Web Search Service...")
+        web_search_service = WebSearchService()
+        logger.info("Web Search Service initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize web search service: {e}")
+        web_search_service = None
+
+    yield
+    # Shutdown
+    logger.info("Server shutting down - unloading models...")
+    model_manager.unload_model()
+    logger.info("Server shutdown complete.")
+
 app = FastAPI(
     title="Qwen Multi-Agent Server",
     description="OpenAI-compatible API for Qwen LLM with multi-agent support",
-    version="2.0"
+    version="2.0",
+    lifespan=lifespan
 )
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-model_manager = ModelManager()
-# Initialize Memory Service
-try:
-    memory_service = MemoryService()
-except Exception as e:
-    logger.error(f"Failed to initialize memory service: {e}")
-    memory_service = None
-
-# Initialize Web Search Service
-try:
-    web_search_service = WebSearchService()
-except Exception as e:
-    logger.error(f"Failed to initialize web search service: {e}")
-    web_search_service = None
+# Memory Service and Web Search Service are now initialized in lifespan
 
 
 @app.exception_handler(HTTPException)

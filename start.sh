@@ -11,6 +11,16 @@ if [ -f .env ]; then
     export $(grep -v '^#' .env | xargs)
 fi
 
+# Ensure Python output is unbuffered
+export PYTHONUNBUFFERED=1
+
+# Check if port is available
+PORT=${PORT:-5000}
+if ss -lnt "sport = :$PORT" | grep -q ":$PORT"; then
+    echo "Error: Port $PORT is already in use. Cannot start server."
+    exit 1
+fi
+
 # Set CUDA environment if available
 if [ -d "/usr/local/cuda" ]; then
     export CUDA_HOME=/usr/local/cuda
