@@ -146,9 +146,9 @@ class Config:
     
     # Global defaults (can be overridden per model)
     DEFAULT_CONTEXT_SIZE = int(os.getenv('MODEL_CONTEXT_SIZE', 524288))
-    # Increased default threads to 16 to distribute load across more cores (thermal mitigation)
-    # For stricter control, set OMP_PROC_BIND=spread and OMP_NUM_THREADS in .env
-    DEFAULT_N_THREADS = int(os.getenv('MODEL_N_THREADS', 16))
+    # Increased default threads to 24 to match physical core count (8 P-cores + 16 E-cores)
+    # This maximizes CPU utilization for the layers not offloaded to GPU
+    DEFAULT_N_THREADS = int(os.getenv('MODEL_N_THREADS', 24))
     DEFAULT_N_BATCH = int(os.getenv('MODEL_N_BATCH', 2048))  # Increased to 2048 for better CPU saturation
     
     REMOTE_EXEC_INSTRUCTION = """
@@ -195,6 +195,12 @@ To run commands on the client, you MUST use this specific protocol:
 3. Poll with REMOTE_CHECK_STATUS every few seconds.
 4. When status is 'completed' or 'failed', use REMOTE_GET_OUTPUT to see results.
 
+# STRATEGY FOR COMPLEX TASKS
+If the task is complex or large:
+1. PLAN FIRST: Create a step-by-step plan.
+2. PHASED EXECUTION: Work on one phase at a time.
+3. INTERMEDIATE SUMMARIES: Provide brief summaries after completing each phase to maintain context.
+
 # CRITICAL RULES
 - ALWAYS wrap your code actions in <code>...</code> blocks.
 - NEVER try to use os.system() or subprocess locally for client tasks.
@@ -206,8 +212,8 @@ To run commands on the client, you MUST use this specific protocol:
             'system_prompt': f'You are an expert software engineer. Provide clear, working code implementations.\n{REMOTE_EXEC_INSTRUCTION}',
             'model_config': {
                 'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
-                'n_gpu_layers': 36,  # Aggressive optimization: ~75% layers on GPU
-                'n_ctx': 524288,     # 512k context
+                'n_gpu_layers': 33,  # Increased to 33 (Max safe layers for 42k context)
+                'n_ctx': 43008,      # 42k context (Accommodates 34k request + buffer)
                 'n_batch': 2048,     # Local override to match new global default
                 'rope_scaling_type': 2, # Yarn
                 'rope_freq_scale': 1.0,
@@ -216,9 +222,9 @@ To run commands on the client, you MUST use this specific protocol:
                 'yarn_beta_fast': 32.0,
                 'yarn_beta_slow': 1.0,
                 'yarn_orig_ctx': 32768,
-                # 'type_k': 8, # GGML_TYPE_Q8_0
-                # 'type_v': 8, # GGML_TYPE_Q8_0
-                'offload_kqv': False # Force KV cache to RAM
+                'type_k': 8, # GGML_TYPE_Q8_0
+                'type_v': 8, # GGML_TYPE_Q8_0
+                'offload_kqv': True # Enable GPU KV cache for speed
             }
         },
         'architect': {
@@ -226,8 +232,8 @@ To run commands on the client, you MUST use this specific protocol:
             'system_prompt': f'You are a system architect. Design scalable, maintainable solutions.\n{REMOTE_EXEC_INSTRUCTION}',
             'model_config': {
                 'path': '/home/keith-merrill/.lmstudio/models/Qwen/Qwen3-32B-GGUF/Qwen3-32B-Q4_K_M.gguf',
-                'n_gpu_layers': 35,  # Reduced from 40 to trade off for 128k context VRAM usage
-                'n_ctx': 131072,     # 128k context
+                'n_gpu_layers': 33,  # Increased to 33
+                'n_ctx': 43008,      # 42k context
                 'n_batch': 2048,
                 'rope_scaling_type': 2,
                 'rope_freq_scale': 1.0,
@@ -238,7 +244,7 @@ To run commands on the client, you MUST use this specific protocol:
                 'yarn_orig_ctx': 32768,
                 'type_k': 8, # GGML_TYPE_Q8_0
                 'type_v': 8, # GGML_TYPE_Q8_0
-                'offload_kqv': False # Force KV cache to RAM
+                'offload_kqv': True # Enable GPU KV cache for speed
             }
         },
         'reviewer': {
@@ -246,8 +252,8 @@ To run commands on the client, you MUST use this specific protocol:
             'system_prompt': f'You are a code reviewer. Identify issues and suggest improvements.\n{REMOTE_EXEC_INSTRUCTION}',
             'model_config': {
                 'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-14B-GGUF/Qwen3-14B-Q6_K.gguf',
-                'n_gpu_layers': 99,  # Fully offloaded to GPU (14B fits easily in 16GB VRAM)
-                'n_ctx': 262144,     # 256k context
+                'n_gpu_layers': 99,  # Fully offloaded
+                'n_ctx': 43008,      # 42k context
                 'n_batch': 2048,
                 'rope_scaling_type': 2,
                 'rope_freq_scale': 1.0,
@@ -258,7 +264,7 @@ To run commands on the client, you MUST use this specific protocol:
                 'yarn_orig_ctx': 32768,
                 'type_k': 8, # GGML_TYPE_Q8_0
                 'type_v': 8, # GGML_TYPE_Q8_0
-                'offload_kqv': False # Force KV cache to RAM (GPU RAM is for weights)
+                'offload_kqv': True # Enable GPU KV cache for speed
             }
         },
         'debugger': {
@@ -266,8 +272,8 @@ To run commands on the client, you MUST use this specific protocol:
             'system_prompt': f'You are a debugging expert. Analyze errors and suggest fixes.\n{REMOTE_EXEC_INSTRUCTION}',
             'model_config': {
                 'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
-                'n_gpu_layers': 36,  # Aggressive optimization: ~75% layers on GPU
-                'n_ctx': 524288,     # 512k context
+                'n_gpu_layers': 33,  # Increased to 33
+                'n_ctx': 43008,      # 42k context
                 'n_batch': 2048,
                 'rope_scaling_type': 2,
                 'rope_freq_scale': 1.0,
@@ -276,9 +282,9 @@ To run commands on the client, you MUST use this specific protocol:
                 'yarn_beta_fast': 32.0,
                 'yarn_beta_slow': 1.0,
                 'yarn_orig_ctx': 32768,
-                # 'type_k': 8, # GGML_TYPE_Q8_0
-                # 'type_v': 8, # GGML_TYPE_Q8_0
-                'offload_kqv': False # Force KV cache to RAM
+                'type_k': 8, # GGML_TYPE_Q8_0
+                'type_v': 8, # GGML_TYPE_Q8_0
+                'offload_kqv': True # Enable GPU KV cache for speed
             }
         }
     }
@@ -616,6 +622,13 @@ async def web_search(request: SearchRequest):
         
     result = web_search_service.search(request.query)
     return {"result": result}
+
+
+@app.post("/v1/admin/unload")
+async def unload_models():
+    """Manually unload all models to free VRAM"""
+    model_manager.unload_model()
+    return {"status": "success", "message": "All models unloaded"}
 
 
 @app.post("/v1/chat/completions")
