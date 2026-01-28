@@ -1122,15 +1122,57 @@ def chat(model="implementer"):
             progress_thread.daemon = True
             progress_thread.start()
 
-            while True: # Retry loop
+            context_retries = 0
+            MAX_CONTEXT_RETRIES = 3
+
+            while True: # Retry loop (Connection + Context)
                 try:
                     # Increased timeout for heavy model switching and large model inference
                     response = requests.post(API_URL, json=payload, headers=headers, stream=True, timeout=7200)
+                    
+                    # Handle HTTP Errors (Non-200)
                     if response.status_code != 200:
                         stop_progress.set()
-                        print_colored(f"\nError: {response.text}", COLORS['FAIL'])
+                        error_text = response.text
+                        
+                        # Check for Context Error
+                        if "exceed context window" in error_text or "context_length_exceeded" in error_text:
+                            if context_retries < MAX_CONTEXT_RETRIES:
+                                print_colored(f"\n[Client] Context limit reached. Trimming history and retrying ({context_retries+1}/{MAX_CONTEXT_RETRIES})...", COLORS['WARNING'])
+                                
+                                # Trim oldest 25% of history, but keep the last message (current prompt)
+                                if len(history) > 2:
+                                    current_prompt = history[-1]
+                                    trim_index = max(1, int(len(history) * 0.25))
+                                    # Ensure we remove pairs if possible to keep flow natural
+                                    if trim_index % 2 != 0: trim_index += 1
+                                    
+                                    # Slice: remove from beginning, keep end
+                                    # history[:-1] is past context. history[-1] is current.
+                                    trimmed_past = history[:-1][trim_index:]
+                                    history = trimmed_past + [current_prompt]
+                                    
+                                    # Update payload with new history
+                                    sanitized_history = [
+                                        {"role": msg["role"], "content": msg["content"]} 
+                                        for msg in history
+                                    ]
+                                    payload["messages"] = sanitized_history
+                                    
+                                    context_retries += 1
+                                    # Restart progress indicator
+                                    stop_progress = threading.Event()
+                                    progress_thread = threading.Thread(target=show_progress)
+                                    progress_thread.daemon = True
+                                    progress_thread.start()
+                                    continue # Retry Request
+                                else:
+                                     print_colored("\n[Client] Context limit reached, but history is too short to trim.", COLORS['FAIL'])
+                        
+                        print_colored(f"\nError: {error_text}", COLORS['FAIL'])
                         break
 
+                    # Process Stream
                     for line in response.iter_lines():
                         if line:
                             line = line.decode('utf-8')
@@ -1154,13 +1196,51 @@ def chat(model="implementer"):
                                     elif "error" in data:
                                         stop_progress.set()
                                         error_msg = data['error'].get('message', 'Unknown error')
+                                        
+                                        # Check for Context Error in Stream
+                                        if "exceed context window" in error_msg or "context_length_exceeded" in error_msg:
+                                            if context_retries < MAX_CONTEXT_RETRIES:
+                                                print_colored(f"\n[Client] Context limit reached (during generation). Trimming history and retrying ({context_retries+1}/{MAX_CONTEXT_RETRIES})...", COLORS['WARNING'])
+                                                
+                                                if len(history) > 2:
+                                                    current_prompt = history[-1]
+                                                    trim_index = max(1, int(len(history) * 0.25))
+                                                    if trim_index % 2 != 0: trim_index += 1
+                                                    
+                                                    trimmed_past = history[:-1][trim_index:]
+                                                    history = trimmed_past + [current_prompt]
+                                                    
+                                                    sanitized_history = [
+                                                        {"role": msg["role"], "content": msg["content"]} 
+                                                        for msg in history
+                                                    ]
+                                                    payload["messages"] = sanitized_history
+                                                    
+                                                    context_retries += 1
+                                                    server_error_occurred = True # Mark as error to trigger continue logic below
+                                                    break # Break inner stream loop to trigger continue
+                                        
                                         print_colored(f"\nServer Error: {error_msg}", COLORS['FAIL'])
                                         if "exceed context window" in error_msg:
                                             server_error_occurred = True
                                         break
                                 except (json.JSONDecodeError, KeyError, IndexError):
-                                    # Silently ignore malformed chunks
                                     pass
+                    
+                    # Handle Retry from Stream Error
+                    if server_error_occurred and context_retries > 0 and context_retries <= MAX_CONTEXT_RETRIES:
+                         # If we marked error AND incremented retries, it means we want to retry
+                         # Reset flags
+                         server_error_occurred = False
+                         full_response = ""
+                         token_count = 0
+                         # Restart progress
+                         stop_progress = threading.Event()
+                         progress_thread = threading.Thread(target=show_progress)
+                         progress_thread.daemon = True
+                         progress_thread.start()
+                         continue
+
                     break # Success, exit retry loop
 
                 except requests.exceptions.Timeout:
