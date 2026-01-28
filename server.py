@@ -225,9 +225,9 @@ To run commands on the client, you MUST use this specific protocol:
             'description': 'System architecture agent',
             'system_prompt': f'You are a system architect. Design scalable, maintainable solutions.\n{REMOTE_EXEC_INSTRUCTION}',
             'model_config': {
-                'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Next-80B-A3B-Instruct-GGUF/Qwen3-Next-80B-A3B-Instruct-Q3_K_M.gguf',
-                'n_gpu_layers': 29,  # Increased from 20 - Aggressive optimization
-                'n_ctx': 262144,     # 256k context
+                'path': '/home/keith-merrill/.lmstudio/models/Qwen/Qwen3-32B-GGUF/Qwen3-32B-Q4_K_M.gguf',
+                'n_gpu_layers': 35,  # Reduced from 40 to trade off for 128k context VRAM usage
+                'n_ctx': 131072,     # 128k context
                 'n_batch': 2048,
                 'rope_scaling_type': 2,
                 'rope_freq_scale': 1.0,
