@@ -36,6 +36,7 @@ LINUX_SERVER_IP = os.getenv("QWEN_SERVER_IP", "192.168.50.101")
 API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/chat/completions"
 MEMORY_API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/memory"
 SEARCH_API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/tools/search"
+UNLOAD_API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/admin/unload"
 HEALTH_URL = f"http://{LINUX_SERVER_IP}:5000/health"
 
 COLORS = {
@@ -58,6 +59,17 @@ AGENT_THEMES = {
     "reviewer":    {"color": COLORS['CYAN'], "icon": "🔍", "prompt": "Reviewer", "desc": "Code Review (480B Model - Slow Load)"},
     "debugger":    {"color": COLORS['FAIL'], "icon": "🐞", "prompt": "Debugger", "desc": "Debugging"},
 }
+
+def cleanup_server_resources():
+    """Tell the server to unload models and free VRAM"""
+    try:
+        requests.post(UNLOAD_API_URL, timeout=5)
+        # We don't print here to keep exit clean, but server logs will show it
+    except:
+        pass
+
+# Register cleanup on exit
+atexit.register(cleanup_server_resources)
 
 def save_chat_history(history, current_agent="implementer"):
     """Save full chat history and metadata to file"""
