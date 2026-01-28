@@ -55,11 +55,11 @@ COLORS = {
 
 # Agent UI Themes
 AGENT_THEMES = {
-    "implementer": {"color": COLORS['GREEN'], "icon": "💻", "prompt": "Implementer", "desc": "High-Capability Code (Qwen3-14B)"},
-    "architect":   {"color": COLORS['HEADER'], "icon": "🏗️", "prompt": "Architect", "desc": "System Design (Qwen3-32B)"},
-    "reviewer":    {"color": COLORS['CYAN'], "icon": "🔍", "prompt": "Reviewer", "desc": "Detailed Code Review (Qwen3-14B)"},
-    "debugger":    {"color": COLORS['FAIL'], "icon": "🐞", "prompt": "Debugger", "desc": "Advanced Debugging (Qwen3-14B)"},
-    "metal_implementer": {"color": COLORS['BLUE'], "icon": "🤘", "prompt": "Metal", "desc": "Specialized Metal 4 & Compute + Apple Docs (Qwen3-14B)"},
+    "implementer": {"color": COLORS['GREEN'], "icon": "💻", "prompt": "Implementer", "desc": "High-Capability Code & Feature Implementation"},
+    "architect":   {"color": COLORS['HEADER'], "icon": "🏗️", "prompt": "Architect", "desc": "System Design & Architectural Planning"},
+    "reviewer":    {"color": COLORS['CYAN'], "icon": "🔍", "prompt": "Reviewer", "desc": "Detailed Code Review & Best Practices"},
+    "debugger":    {"color": COLORS['FAIL'], "icon": "🐞", "prompt": "Debugger", "desc": "Advanced Debugging & Error Analysis"},
+    "metal_implementer": {"color": COLORS['BLUE'], "icon": "🤘", "prompt": "Metal", "desc": "Specialized Metal 4 & Compute + Apple Docs"},
 }
 
 def cleanup_server_resources():
@@ -352,267 +352,6 @@ atexit.register(job_tracker.terminate_all)
 
 def print_colored(text, color):
     print(f"{color}{text}{COLORS['ENDC']}")
-
-
-def decode_escape_sequences(text: str) -> str:
-    """Decode JSON-style escape sequences in text
-
-    When commands are transmitted through JSON, escape sequences like \n, \t, \\
-    may be present and need to be decoded before execution.
-
-    This handles common escape sequences manually to avoid issues with
-    unicode_escape codec mangling UTF-8 strings.
-    """
-    # Manually handle common escape sequences in order
-    # Note: Must process \\\\ before \\n to avoid double-processing
-    replacements = [
-        ('\\\\', '\x00'),  # Temporarily replace \\ with null char
-        ('\\n', '\n'),
-        ('\\t', '\t'),
-        ('\\r', '\r'),
-        ('\\b', '\b'),
-        ('\\f', '\f'),
-        ('\\v', '\v'),
-        ('\\"', '"'),
-        ("\\'", "'"),
-        ('\x00', '\\'),    # Replace null char back with single backslash
-    ]
-
-    result = text
-    for escaped, unescaped in replacements:
-        result = result.replace(escaped, unescaped)
-
-    return result
-
-
-def parse_command_safely(command: str) -> List[str]:
-    """Parse command string into argument list safely"""
-    if not ALLOW_SHELL_MODE:
-        dangerous_chars = ['|', '&', ';', '$', '`', '\n', '>', '<', '(', ')']
-        if any(char in command for char in dangerous_chars):
-            raise ValueError(
-                f"Command contains shell metacharacters. "
-                f"Set ALLOW_SHELL_MODE=true to enable shell features, "
-                f"or rewrite command without: {', '.join(dangerous_chars)}"
-            )
-
-    try:
-        return shlex.split(command)
-    except ValueError as e:
-        raise ValueError(f"Failed to parse command: {e}")
-
-
-def expand_paths_in_args(command_args: List[str]) -> List[str]:
-    """Expand tilde (~) in command arguments for proper path resolution
-
-    When using shell=False, tilde expansion doesn't happen automatically.
-    This function expands ~ in arguments that look like paths.
-    """
-    expanded_args = []
-    for arg in command_args:
-        # Expand tilde if argument starts with ~ or contains =~ 
-        if arg.startswith('~'):
-            expanded_args.append(os.path.expanduser(arg))
-        elif '=~' in arg:
-            # Handle cases like --file=~/path or VAR=~/path
-            key, value = arg.split('=', 1)
-            if value.startswith('~'):
-                expanded_args.append(f"{key}={os.path.expanduser(value)}")
-            else:
-                expanded_args.append(arg)
-        else:
-            expanded_args.append(arg)
-    return expanded_args
-
-
-def is_command_allowed(command_args: List[str]) -> tuple:
-    """Check if command is allowed based on whitelist"""
-    if not COMMAND_WHITELIST:
-        return True, "No whitelist configured (all commands allowed)"
-
-    if not command_args:
-        return False, "Empty command"
-
-    base_command = command_args[0]
-
-    if base_command in COMMAND_WHITELIST:
-        return True, f"Command '{base_command}' is whitelisted"
-
-    if '/' in base_command:
-        base_name = os.path.basename(base_command)
-        if base_name in COMMAND_WHITELIST:
-            return True, f"Command '{base_name}' is whitelisted"
-
-    return False, f"Command '{base_command}' not in whitelist: {', '.join(COMMAND_WHITELIST)}"
-
-
-def run_command_async(job_id, command):
-    """Run command in background thread and capture output in real-time"""
-    try:
-        job_tracker.update_job(job_id, status="running")
-
-        if ALLOW_SHELL_MODE:
-            process = subprocess.Popen(
-                command,
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                universal_newlines=True
-            )
-        else:
-            command_args = parse_command_safely(command)
-            command_args = expand_paths_in_args(command_args)
-            process = subprocess.Popen(
-                command_args,
-                shell=False,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                universal_newlines=True
-            )
-
-        job_tracker.update_job(job_id, process=process)
-
-        for line in iter(process.stdout.readline, ''):
-            if line:
-                job_tracker.add_output(job_id, line.rstrip())
-
-        process.wait()
-
-        job_tracker.update_job(
-            job_id,
-            status="completed" if process.returncode == 0 else "failed",
-            exit_code=process.returncode,
-            completed_at=datetime.now().isoformat()
-        )
-
-    except Exception as e:
-        job_tracker.add_output(job_id, f"ERROR: {str(e)}")
-        job_tracker.update_job(
-            job_id,
-            status="failed",
-            exit_code=-1,
-            completed_at=datetime.now().isoformat()
-        )
-
-
-def execute_remote_command(command, async_mode=False):
-    """Execute command synchronously or asynchronously with security checks"""
-    print_colored(f"\nAgent wants to run command on your machine: {command}", COLORS['WARNING'])
-    if async_mode:
-        print_colored(f"   (async mode - will run in background)", COLORS['BLUE'])
-
-    if ALLOW_SHELL_MODE:
-        print_colored(f"   Shell mode enabled (less safe)", COLORS['WARNING'])
-    else:
-        print_colored(f"   Safe mode (shell=False)", COLORS['GREEN'])
-
-    try:
-        if not ALLOW_SHELL_MODE:
-            command_args = parse_command_safely(command)
-            allowed, msg = is_command_allowed(command_args)
-            if not allowed:
-                print_colored(f"   {msg}", COLORS['FAIL'])
-                return f"Command rejected: {msg}"
-            print_colored(f"   {msg}", COLORS['GREEN'])
-    except ValueError as e:
-        print_colored(f"   {str(e)}", COLORS['FAIL'])
-        return f"Command validation failed: {str(e)}"
-
-    if ALLOW_ALL:
-        print_colored(f"   Auto-approved (ALLOW_ALL mode enabled)", COLORS['GREEN'])
-        choice = 'y'
-    else:
-        try:
-            choice = input(f"{COLORS['BOLD']}Allow? [y/N] > {COLORS['ENDC']}")
-        except (EOFError, KeyboardInterrupt):
-            return "User cancelled command execution."
-
-        if choice.lower() != 'y':
-            return "User denied command execution."
-
-    if async_mode:
-        job_id = job_tracker.create_job(command)
-        thread = threading.Thread(target=run_command_async, args=(job_id, command), daemon=True)
-        thread.start()
-
-        print_colored(f"Command started in background", COLORS['GREEN'])
-        print_colored(f"Job ID: {job_id}", COLORS['CYAN'])
-
-        return f"Command started in background.\nJob ID: {job_id}\n\nUse <<<REMOTE_CHECK_STATUS>>>{job_id}<<<REMOTE_CHECK_STATUS>>> to check progress.\nUse <<<REMOTE_GET_OUTPUT>>>{job_id}<<<REMOTE_GET_OUTPUT>>> to get full output."
-
-    else:
-        try:
-            if ALLOW_SHELL_MODE:
-                result = subprocess.run(command, shell=True, capture_output=True, text=True, errors='replace', timeout=240)
-            else:
-                command_args = parse_command_safely(command)
-                command_args = expand_paths_in_args(command_args)
-                result = subprocess.run(command_args, shell=False, capture_output=True, text=True, errors='replace', timeout=240)
-
-            output = result.stdout + result.stderr
-            print_colored(f"Output:\n{output}", COLORS['CYAN'])
-            return f"Command executed successfully.\nExit Code: {result.returncode}\nOutput:\n{output}"
-        except subprocess.TimeoutExpired:
-            return "Command timed out (240s limit for sync commands). Consider using async mode for long-running commands."
-        except Exception as e:
-            return f"Error executing command: {str(e)}"
-
-
-def check_job_status(job_id):
-    """Check status of a background job"""
-    return job_tracker.get_status(job_id)
-
-
-def get_job_output(job_id):
-    """Get full output of a background job"""
-    job = job_tracker.get_job(job_id)
-    if not job:
-        return "Job not found"
-
-    output = job_tracker.get_full_output(job_id)
-    status = f"Job ID: {job_id}\n"
-    status += f"Status: {job['status']}\n"
-    status += f"Exit Code: {job.get('exit_code', 'N/A')}\n"
-    status += f"\nFull Output:\n{output}"
-
-    return status
-
-
-def list_all_jobs():
-    """List all jobs with their current status"""
-    stats = job_tracker.get_stats()
-
-    result = "Job Tracker Status:\n" + "=" * 60 + "\n"
-    result += f"Total Jobs: {stats['total_jobs']} / {stats['max_jobs']} (max)\n"
-    result += f"TTL for completed jobs: {stats['ttl_hours']} hours\n"
-    result += f"By Status: "
-    result += f"Pending={stats['by_status']['pending']}, "
-    result += f"Running={stats['by_status']['running']}, "
-    result += f"Completed={stats['by_status']['completed']}, "
-    result += f"Failed={stats['by_status']['failed']}\n"
-    result += "=" * 60 + "\n"
-
-    with job_tracker.lock:
-        if not job_tracker.jobs:
-            result += "\nNo jobs found."
-            return result
-
-        result += "\nJobs:\n"
-        for job_id, job in job_tracker.jobs.items():
-            result += f"\nJob ID: {job_id}\n"
-            result += f"Command: {job['command'][:60]}{'...' if len(job['command']) > 60 else ''}\n"
-            result += f"Status: {job['status']}\n"
-            result += f"Started: {job['started_at']}\n"
-            if job['completed_at']:
-                result += f"Completed: {job['completed_at']}\n"
-                result += f"Exit Code: {job['exit_code']}\n"
-            result += "-" * 60 + "\n"
-
-        return result
 
 
 def save_memory(text):
@@ -1186,9 +925,70 @@ def chat(model="implementer"):
             if user_input.lower() in ['/exit', '/quit']:
                 break
 
+            # Quick Agent Switch (e.g. @architect or @architect Please design...)
+            if user_input.startswith('@'):
+                parts = user_input.split(' ', 1)
+                potential_agent = parts[0][1:].lower() # remove @
+                
+                # Handle fuzzy matching or aliases if we wanted, but strict for now
+                if potential_agent in AGENT_THEMES:
+                    model = potential_agent
+                    agent_theme = AGENT_THEMES[model]
+                    print_colored(f"\nSwitched to agent: {model} {agent_theme['icon']}", COLORS['WARNING'])
+                    print_colored(f"Description: {agent_theme['desc']}", COLORS['BLUE'])
+                    
+
+                    
+                    # If there's content after the mention, update user_input to be that content
+                    # effectively switching AND sending in one go.
+                    if len(parts) > 1:
+                        user_input = parts[1].strip()
+                        if not user_input:
+                            continue
+                    else:
+                        # Just a switch, don't send anything
+                        continue
+                else:
+                    # If it looks like a mention but isn't a valid agent, warn but don't crash
+                    # Alternatively, we could just treat it as text. Let's warn.
+                    print_colored(f"Unknown agent '{potential_agent}'. Available: {', '.join(AGENT_THEMES.keys())}", COLORS['FAIL'])
+                    print_colored("Treating as normal text...", COLORS['BLUE'])
+
+            # Help Command
+            if user_input.lower() == '/help':
+                print_colored("\n--- Qwen Remote CLI Help ---", COLORS['HEADER'])
+                print_colored(f"{COLORS['BOLD']}GENERAL COMMANDS:{COLORS['ENDC']}", COLORS['BLUE'])
+                print(f"  /help                - Show this help menu")
+                print(f"  /exit, /quit         - Exit the CLI and cleanup resources")
+                print(f"  /model <name>        - Switch the active agent (e.g. /model architect)")
+                print(f"  /history             - Show recent command history")
+                print(f"  /history clear       - Clear command history")
+                
+                print_colored(f"\n{COLORS['BOLD']}DOCUMENTATION TOOLS:{COLORS['ENDC']}", COLORS['BLUE'])
+                print(f"  /cupertino <query>   - Search local Apple documentation on macOS")
+                print(f"                         Example: /cupertino MTLMeshRenderPipelineDescriptor")
+                print(f"  /apple <tool> <args> - Search Apple Deep Docs on the Linux server")
+                print(f"                         Example: /apple search_swift_evolution {{\"feature\": \"actors\"}}")
+                print(f"                         Example: /apple fetch_apple_documentation {{\"url\": \"https://developer.apple.com/...\"}}")
+                
+                print_colored(f"\n{COLORS['BOLD']}AGENT SHORTCUTS:{COLORS['ENDC']}", COLORS['BLUE'])
+                print(f"  @<agent_name> [msg]  - Switch agent and optionally send message in one go")
+                print(f"                         Example: @architect Design a Metal 4 renderer")
+                print(f"                         Example: @debugger Why is this kernel crashing?")
+                
+                print_colored(f"\n{COLORS['BOLD']}AVAILABLE AGENTS:{COLORS['ENDC']}", COLORS['BLUE'])
+                for name, theme in AGENT_THEMES.items():
+                    print(f"  {name.ljust(18)} - {theme['desc']}")
+                print_colored("----------------------------\n", COLORS['HEADER'])
+                continue
+
             # Apple Documentation Search (Cupertino MCP)
             if user_input.lower().startswith('/cupertino '):
-                query = user_input.split(' ', 1)[1]
+                parts = user_input.split(' ', 1)
+                if len(parts) < 2 or not parts[1].strip():
+                    print_colored("Usage: /cupertino <query>", COLORS['FAIL'])
+                    continue
+                query = parts[1].strip()
                 result = handle_cupertino_search(query)
                 print_colored(f"\n{result}\n", COLORS['GREEN'])
                 continue
@@ -1202,12 +1002,14 @@ def chat(model="implementer"):
                     continue
                 
                 tool = parts[1]
-                args_str = parts[2] if len(parts) > 2 else "{}"
+                args_str = parts[2].strip() if len(parts) > 2 else "{}"
+                if not args_str: args_str = "{}"
                 
                 try:
                     args = json.loads(args_str)
                     if not isinstance(args, dict):
                         print_colored("Error: Arguments must be a JSON object (dictionary).", COLORS['FAIL'])
+                        print_colored("Example: /apple tool {\"key\": \"value\"}", COLORS['BLUE'])
                         continue
                         
                     payload = json.dumps({"tool": tool, "arguments": args})
@@ -1216,6 +1018,7 @@ def chat(model="implementer"):
                 except json.JSONDecodeError as e:
                     print_colored(f"Error: Invalid JSON arguments: {e}", COLORS['FAIL'])
                     print_colored("Hint: Ensure keys and values are in double quotes.", COLORS['BLUE'])
+                    print_colored("Example: /apple tool {\"query\": \"something\"}", COLORS['CYAN'])
                 continue
 
             # History management commands
@@ -1242,43 +1045,20 @@ def chat(model="implementer"):
                     print_colored("Readline not available - no history support", COLORS['WARNING'])
                 continue
 
-            # Quick Agent Switch (e.g. @architect or @architect Please design...)
-            if user_input.startswith('@'):
-                parts = user_input.split(' ', 1)
-                potential_agent = parts[0][1:].lower() # remove @
-                
-                # Handle fuzzy matching or aliases if we wanted, but strict for now
-                if potential_agent in AGENT_THEMES:
-                    model = potential_agent
-                    agent_theme = AGENT_THEMES[model]
-                    print_colored(f"\nSwitched to agent: {model} {agent_theme['icon']}", COLORS['WARNING'])
-                    print_colored(f"Description: {agent_theme['desc']}", COLORS['BLUE'])
-                    
-                    if model in ['architect', 'reviewer']:
-                        print_colored("NOTE: Switching to 480B model. Loading may take ~30-60 seconds.", COLORS['WARNING'])
-                    
-                    # If there's content after the mention, update user_input to be that content
-                    # effectively switching AND sending in one go.
-                    if len(parts) > 1:
-                        user_input = parts[1]
-                    else:
-                        # Just a switch, don't send anything
-                        continue
-                else:
-                    # If it looks like a mention but isn't a valid agent, warn but don't crash
-                    # Alternatively, we could just treat it as text. Let's warn.
-                    print_colored(f"Unknown agent '{potential_agent}'. Available: {', '.join(AGENT_THEMES.keys())}", COLORS['FAIL'])
-                    print_colored("Treating as normal text...", COLORS['BLUE'])
-
             if user_input.lower().startswith('/model ') or user_input.lower().startswith('/m '):
-                model_name = user_input.split(' ')[1]
+                parts = user_input.split(' ')
+                if len(parts) < 2 or not parts[1].strip():
+                    print_colored("Usage: /model <agent_name>", COLORS['FAIL'])
+                    print_colored(f"Available agents: {', '.join(AGENT_THEMES.keys())}", COLORS['BLUE'])
+                    continue
+                    
+                model_name = parts[1].lower()
                 if model_name in AGENT_THEMES:
                     model = model_name
                     agent_theme = AGENT_THEMES[model]
                     print_colored(f"\nSwitched to agent: {model} {agent_theme['icon']}", COLORS['WARNING'])
                     print_colored(f"Description: {agent_theme['desc']}", COLORS['BLUE'])
-                    if model in ['architect', 'reviewer']:
-                        print_colored("NOTE: Switching to 480B model. Loading may take ~30-60 seconds.", COLORS['WARNING'])
+
                 else:
                     print_colored(f"Unknown agent: {model_name}. Available: {', '.join(AGENT_THEMES.keys())}", COLORS['FAIL'])
                 continue
