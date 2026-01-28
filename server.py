@@ -409,31 +409,45 @@ class ModelManager:
 
 
 # ============================================================================ 
-# ChatML Format Helpers
+# Prompt Format Helpers
 # ============================================================================ 
 
 CHATML_START = "<|im_start|>"
 CHATML_END = "<|im_end|>"
 
 
-def format_chatml_message(role: str, content: str) -> str:
-    """Format a single message in ChatML format"""
-    return f"{CHATML_START}{role}\n{content}{CHATML_END}\n"
+def build_model_prompt(messages: List[ChatMessage], system_prompt: str, model_path: str) -> str:
+    """Build a prompt using the appropriate format for the model"""
+    
+    # Detect DeepSeek-Coder
+    is_deepseek = "deepseek" in model_path.lower()
+    
+    if is_deepseek:
+        # DeepSeek-Coder-Instruct/Alpaca format
+        parts = []
+        if system_prompt:
+            parts.append(f"### Instruction:\n{system_prompt}\n")
+        
+        for msg in messages:
+            if msg.role == "user":
+                parts.append(f"### Instruction:\n{msg.content}\n")
+            elif msg.role == "assistant":
+                parts.append(f"### Response:\n{msg.content}\n")
+        
+        parts.append("### Response:\n")
+        return "".join(parts)
+    
+    else:
+        # Standard ChatML format (Qwen)
+        parts = []
+        if system_prompt:
+            parts.append(f"{CHATML_START}system\n{system_prompt}{CHATML_END}\n")
 
+        for msg in messages:
+            parts.append(f"{CHATML_START}{msg.role}\n{msg.content}{CHATML_END}\n")
 
-def build_chatml_prompt(messages: List[ChatMessage], system_prompt: str) -> str:
-    """Build a prompt using ChatML format"""
-    parts = []
-
-    if system_prompt:
-        parts.append(format_chatml_message("system", system_prompt))
-
-    for msg in messages:
-        parts.append(format_chatml_message(msg.role, msg.content))
-
-    parts.append(f"{CHATML_START}assistant\n")
-
-    return "".join(parts)
+        parts.append(f"{CHATML_START}assistant\n")
+        return "".join(parts)
 
 
 def get_model_params(max_tokens: int, temperature: float, stream: bool = False) -> Dict[str, Any]:
@@ -441,9 +455,9 @@ def get_model_params(max_tokens: int, temperature: float, stream: bool = False) 
     return {
         "max_tokens": max_tokens,
         "temperature": temperature,
-        "stop": [CHATML_END, CHATML_START],
+        "stop": [CHATML_END, CHATML_START, "<|EOT|>", "### Response:", "### Instruction:", "###"],
         "stream": stream,
-        "repeat_penalty": 1.1,  # Added to prevent repetition loops
+        "repeat_penalty": 1.1,
         "echo": False
     }
 
@@ -664,7 +678,7 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
                 except Exception as e:
                     logger.error(f"Memory retrieval failed: {e}")
 
-        prompt = build_chatml_prompt(request.messages, system_prompt)
+        prompt = build_model_prompt(request.messages, system_prompt, agent_config['model_config']['path'])
 
         if request.stream:
             return StreamingResponse(
