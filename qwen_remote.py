@@ -54,10 +54,11 @@ COLORS = {
 
 # Agent UI Themes
 AGENT_THEMES = {
-    "implementer": {"color": COLORS['GREEN'], "icon": "💻", "prompt": "Implementer", "desc": "Code Implementation"},
-    "architect":   {"color": COLORS['HEADER'], "icon": "🏗️", "prompt": "Architect", "desc": "System Design (480B Model - Slow Load)"},
-    "reviewer":    {"color": COLORS['CYAN'], "icon": "🔍", "prompt": "Reviewer", "desc": "Code Review (480B Model - Slow Load)"},
-    "debugger":    {"color": COLORS['FAIL'], "icon": "🐞", "prompt": "Debugger", "desc": "Debugging"},
+    "implementer": {"color": COLORS['GREEN'], "icon": "💻", "prompt": "Implementer", "desc": "High-Capability Code (Qwen3-14B)"},
+    "architect":   {"color": COLORS['HEADER'], "icon": "🏗️", "prompt": "Architect", "desc": "System Design (Qwen3-32B)"},
+    "reviewer":    {"color": COLORS['CYAN'], "icon": "🔍", "prompt": "Reviewer", "desc": "Detailed Code Review (Qwen3-14B)"},
+    "debugger":    {"color": COLORS['FAIL'], "icon": "🐞", "prompt": "Debugger", "desc": "Advanced Debugging (Qwen3-14B)"},
+    "metal_implementer": {"color": COLORS['BLUE'], "icon": "🤘", "prompt": "Metal", "desc": "Specialized Metal 4 & Compute (Qwen3-14B)"},
 }
 
 def cleanup_server_resources():
