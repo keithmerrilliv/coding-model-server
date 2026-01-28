@@ -1119,9 +1119,20 @@ def chat(model="implementer"):
             stop_progress = threading.Event()
 
             def show_progress():
-                """Display elapsed time while waiting for server"""
+                """Display elapsed time while waiting for server and send heartbeats"""
+                last_heartbeat = time.time()
                 while not stop_progress.is_set():
-                    elapsed = time.time() - start_time
+                    now = time.time()
+                    elapsed = now - start_time
+                    
+                    # Heartbeat every 30 seconds to keep connection alive
+                    if now - last_heartbeat > 30:
+                        try:
+                            requests.get(HEALTH_URL, timeout=2)
+                            last_heartbeat = now
+                        except:
+                            pass # Ignore heartbeat failures
+
                     # Use carriage return to keep progress on one line
                     sys.stdout.write(f"\r{COLORS['BLUE']}Waiting for server... ({elapsed:.1f}s){COLORS['ENDC']}")
                     sys.stdout.flush()
