@@ -1104,7 +1104,7 @@ def chat(model="implementer"):
     else:
         print_colored("  Command approval: Manual (will prompt for each command)", COLORS['GREEN'])
 
-    print_colored("\nCommands: /exit, /model <name>, /history, /history clear, /cupertino <query>, /apple <tool> <args_json>", COLORS['BLUE'])
+    print_colored("\nCommands: /help, /exit, /model <name>, /history, /cupertino <query>, /apple <tool> <args>", COLORS['BLUE'])
     if READLINE_AVAILABLE:
         print_colored("Use ↑/↓ arrows to navigate history. History saved to ~/.qwen_client_history\n", COLORS['BLUE'])
     else:
@@ -1154,6 +1154,35 @@ def chat(model="implementer"):
 
             if not user_input.strip():
                 continue
+            
+            # Help Command
+            if user_input.lower() == '/help':
+                print_colored("\n--- Qwen Remote CLI Help ---", COLORS['HEADER'])
+                print_colored(f"{COLORS['BOLD']}GENERAL COMMANDS:{COLORS['ENDC']}", COLORS['BLUE'])
+                print(f"  /help                - Show this help menu")
+                print(f"  /exit, /quit         - Exit the CLI and cleanup resources")
+                print(f"  /model <name>        - Switch the active agent (e.g. /model architect)")
+                print(f"  /history             - Show recent command history")
+                print(f"  /history clear       - Clear command history")
+                
+                print_colored(f"\n{COLORS['BOLD']}DOCUMENTATION TOOLS:{COLORS['ENDC']}", COLORS['BLUE'])
+                print(f"  /cupertino <query>   - Search local Apple documentation on macOS")
+                print(f"                         Example: /cupertino MTLMeshRenderPipelineDescriptor")
+                print(f"  /apple <tool> <args> - Search Apple Deep Docs on the Linux server")
+                print(f"                         Example: /apple search_swift_evolution {{\"feature\": \"actors\"}}")
+                print(f"                         Example: /apple fetch_apple_documentation {{\"url\": \"https://developer.apple.com/...\"}}")
+                
+                print_colored(f"\n{COLORS['BOLD']}AGENT SHORTCUTS:{COLORS['ENDC']}", COLORS['BLUE'])
+                print(f"  @<agent_name> [msg]  - Switch agent and optionally send message in one go")
+                print(f"                         Example: @architect Design a Metal 4 renderer")
+                print(f"                         Example: @debugger Why is this kernel crashing?")
+                
+                print_colored(f"\n{COLORS['BOLD']}AVAILABLE AGENTS:{COLORS['ENDC']}", COLORS['BLUE'])
+                for name, theme in AGENT_THEMES.items():
+                    print(f"  {name.ljust(18)} - {theme['desc']}")
+                print_colored("----------------------------\n", COLORS['HEADER'])
+                continue
+
             if user_input.lower() in ['/exit', '/quit']:
                 break
 
