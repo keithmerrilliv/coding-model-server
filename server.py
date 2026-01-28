@@ -393,12 +393,12 @@ If the task is complex or large:
 
     AGENTS = {
         'implementer': {
-            'description': 'High-Capability Code Agent (Qwen3-14B)',
-            'system_prompt': f'You are an expert software engineer. Provide clear, working code implementations.\n{REMOTE_EXEC_INSTRUCTION}',
+            'description': 'Specialized Code Agent (Qwen2.5-Coder-14B)',
+            'system_prompt': f'You are an expert software engineer specializing in high-performance implementations. Provide clear, working code.\n{REMOTE_EXEC_INSTRUCTION}',
             'model_config': {
-                'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-14B-GGUF/Qwen3-14B-Q6_K.gguf',
+                'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen2.5-Coder-14B-Instruct-GGUF/Qwen2.5-Coder-14B-Instruct-Q6_K.gguf',
                 'n_gpu_layers': 99,  # Fully offloaded
-                'n_ctx': 43008,      # Stable context for 16GB VRAM
+                'n_ctx': 32768,      # Reduced to 32k for 16GB stability
                 'n_batch': 2048,
                 'rope_scaling_type': 2,
                 'rope_freq_scale': 1.0,
@@ -407,8 +407,8 @@ If the task is complex or large:
                 'yarn_beta_fast': 32.0,
                 'yarn_beta_slow': 1.0,
                 'yarn_orig_ctx': 32768,
-                'type_k': 8, # 8-bit KV cache for stability
-                'type_v': 8, 
+                'type_k': 8,
+                'type_v': 8,
                 'offload_kqv': True
             }
         },
@@ -438,7 +438,7 @@ If the task is complex or large:
             'model_config': {
                 'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-14B-GGUF/Qwen3-14B-Q6_K.gguf',
                 'n_gpu_layers': 99,
-                'n_ctx': 43008,
+                'n_ctx': 32768,      # Matching 32k for consistency
                 'n_batch': 2048,
                 'rope_scaling_type': 2,
                 'rope_freq_scale': 1.0,
@@ -453,12 +453,12 @@ If the task is complex or large:
             }
         },
         'debugger': {
-            'description': 'High-Capability Debugging Agent (Qwen3-14B)',
-            'system_prompt': f'You are a debugging expert. Analyze errors and suggest fixes.\n{REMOTE_EXEC_INSTRUCTION}',
+            'description': 'Specialized Debugging Agent (Qwen2.5-Coder-14B)',
+            'system_prompt': f'You are a debugging expert. Analyze errors and provide fixed, working code.\n{REMOTE_EXEC_INSTRUCTION}',
             'model_config': {
-                'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-14B-GGUF/Qwen3-14B-Q6_K.gguf',
-                'n_gpu_layers': 99,  # Fully offloaded
-                'n_ctx': 43008,
+                'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen2.5-Coder-14B-Instruct-GGUF/Qwen2.5-Coder-14B-Instruct-Q6_K.gguf',
+                'n_gpu_layers': 99,
+                'n_ctx': 32768,      # Reduced to 32k
                 'n_batch': 2048,
                 'rope_scaling_type': 2,
                 'rope_freq_scale': 1.0,
@@ -473,7 +473,7 @@ If the task is complex or large:
             }
         },
         'metal_implementer': {
-            'description': 'Specialized Metal & Graphics Agent (Qwen3-14B)',
+            'description': 'Specialized Metal & Graphics Agent (Qwen2.5-Coder-14B)',
             'system_prompt': f"""You are an expert Graphics and Compute Engineer specializing in Apple Metal (including Metal 4) and WebGPU.
 Your core expertise covers:
 1. COMPUTE: High-performance kernels, SIMD-group operations, threadgroup memory, and GPU-driven workloads.
@@ -489,9 +489,9 @@ STRATEGY:
 
 {REMOTE_EXEC_INSTRUCTION}""",
             'model_config': {
-                'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-14B-GGUF/Qwen3-14B-Q6_K.gguf',
+                'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen2.5-Coder-14B-Instruct-GGUF/Qwen2.5-Coder-14B-Instruct-Q6_K.gguf',
                 'n_gpu_layers': 99,
-                'n_ctx': 43008,
+                'n_ctx': 32768,      # Reduced to 32k
                 'n_batch': 2048,
                 'rope_scaling_type': 2,
                 'rope_freq_scale': 1.0,

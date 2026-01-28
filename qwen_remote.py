@@ -56,11 +56,11 @@ COLORS = {
 
 # Agent UI Themes
 AGENT_THEMES = {
-    "implementer": {"color": COLORS['GREEN'], "icon": "💻", "prompt": "Implementer", "desc": "High-Capability Code & Feature Implementation"},
-    "architect":   {"color": COLORS['HEADER'], "icon": "🏗️", "prompt": "Architect", "desc": "System Design & Architectural Planning"},
-    "reviewer":    {"color": COLORS['CYAN'], "icon": "🔍", "prompt": "Reviewer", "desc": "Detailed Code Review & Best Practices"},
-    "debugger":    {"color": COLORS['FAIL'], "icon": "🐞", "prompt": "Debugger", "desc": "Advanced Debugging & Error Analysis"},
-    "metal_implementer": {"color": COLORS['BLUE'], "icon": "🤘", "prompt": "Metal", "desc": "Specialized Metal 4 & Compute + Apple Docs"},
+    "implementer": {"color": COLORS['GREEN'], "icon": "💻", "prompt": "Implementer", "desc": "Specialized Code (Qwen2.5-Coder-14B)"},
+    "architect":   {"color": COLORS['HEADER'], "icon": "🏗️", "prompt": "Architect", "desc": "System Design (Qwen3-32B)"},
+    "reviewer":    {"color": COLORS['CYAN'], "icon": "🔍", "prompt": "Reviewer", "desc": "Detailed Code Review (Qwen3-14B)"},
+    "debugger":    {"color": COLORS['FAIL'], "icon": "🐞", "prompt": "Debugger", "desc": "Specialized Debugging (Qwen2.5-Coder-14B)"},
+    "metal_implementer": {"color": COLORS['BLUE'], "icon": "🤘", "prompt": "Metal", "desc": "Specialized Metal 4 & Graphics (Qwen2.5-Coder-14B)"},
 }
 
 def cleanup_server_resources():
@@ -847,6 +847,137 @@ def process_remote_commands(response_text: str) -> Optional[str]:
     return None
 
 
+def get_completion(history, model, agent_theme, headers):
+    """Internal helper to get a completion from the server with full error handling and streaming"""
+    full_response = ""
+    server_error_occurred = False
+    
+    # Sanitize history to remove internal flags like 'auto_send'
+    sanitized_history = [
+        {"role": msg["role"], "content": msg["content"]} 
+        for msg in history
+    ]
+    
+    payload = {
+        "model": model, 
+        "messages": sanitized_history, 
+        "stream": True,
+        "max_tokens": 30000 
+    }
+
+    # Progress tracking
+    start_time = time.time()
+    first_token_time = None
+    token_count = 0
+    stop_progress = threading.Event()
+
+    def show_progress():
+        last_heartbeat = time.time()
+        while not stop_progress.is_set():
+            now = time.time()
+            elapsed = now - start_time
+            if now - last_heartbeat > 30:
+                try: requests.get(HEALTH_URL, timeout=2); last_heartbeat = now
+                except: pass
+            sys.stdout.write(f"\r{COLORS['BLUE']}Waiting for {model}... ({elapsed:.1f}s){COLORS['ENDC']}")
+            sys.stdout.flush()
+            time.sleep(0.1)
+        sys.stdout.write("\r" + " " * 50 + "\r")
+        sys.stdout.flush()
+
+    progress_thread = threading.Thread(target=show_progress, daemon=True)
+    progress_thread.start()
+
+    context_retries = 0
+    MAX_CONTEXT_RETRIES = 3
+
+    while True:
+        try:
+            response = requests.post(API_URL, json=payload, headers=headers, stream=True, timeout=7200)
+            
+            if response.status_code != 200:
+                stop_progress.set()
+                error_text = response.text
+                if "exceed context window" in error_text or "context_length_exceeded" in error_text:
+                    if context_retries < MAX_CONTEXT_RETRIES:
+                        print_colored(f"\n[Client] Context limit reached. Trimming history and retrying ({context_retries+1}/{MAX_CONTEXT_RETRIES})...", COLORS['WARNING'])
+                        if len(history) > 2:
+                            trim_index = max(1, int(len(history) * 0.25))
+                            if trim_index % 2 != 0: trim_index += 1
+                            trimmed_past = history[:-1][trim_index:]
+                            history[:] = trimmed_past + [history[-1]]
+                            payload["messages"] = [{"role": m["role"], "content": m["content"]} for m in history]
+                            context_retries += 1
+                            stop_progress = threading.Event(); progress_thread = threading.Thread(target=show_progress, daemon=True); progress_thread.start()
+                            continue
+                print_colored(f"\nError: {error_text}", COLORS['FAIL'])
+                return None
+
+            for line in response.iter_lines():
+                if line:
+                    line = line.decode('utf-8')
+                    if line.startswith("data: "):
+                        data_str = line[6:]
+                        if data_str == "[DONE]": break
+                        try:
+                            data = json.loads(data_str)
+                            if "choices" in data and len(data["choices"]) > 0:
+                                delta = data["choices"][0].get("delta", {})
+                                content = delta.get("content", "")
+                                if content:
+                                    if not first_token_time:
+                                        first_token_time = time.time()
+                                        stop_progress.set()
+                                    print(content, end="", flush=True)
+                                    full_response += content
+                                    token_count += 1
+                            elif "error" in data:
+                                stop_progress.set()
+                                error_msg = data['error'].get('message', 'Unknown error')
+                                if "exceed context window" in error_msg or "context_length_exceeded" in error_msg:
+                                    if context_retries < MAX_CONTEXT_RETRIES:
+                                        print_colored(f"\n[Client] Context limit reached (during generation). Trimming and retrying...", COLORS['WARNING'])
+                                        if len(history) > 2:
+                                            trim_index = max(1, int(len(history) * 0.25))
+                                            if trim_index % 2 != 0: trim_index += 1
+                                            trimmed_past = history[:-1][trim_index:]
+                                            history[:] = trimmed_past + [history[-1]]
+                                            payload["messages"] = [{"role": m["role"], "content": m["content"]} for m in history]
+                                            context_retries += 1
+                                            server_error_occurred = True
+                                            break
+                                print_colored(f"\nServer Error: {error_msg}", COLORS['FAIL'])
+                                break
+                        except: pass
+            
+            if server_error_occurred and context_retries <= MAX_CONTEXT_RETRIES:
+                 server_error_occurred = False; full_response = ""; token_count = 0
+                 stop_progress = threading.Event(); progress_thread = threading.Thread(target=show_progress, daemon=True); progress_thread.start()
+                 continue
+            break
+
+        except requests.exceptions.ConnectionError:
+            stop_progress.set()
+            if token_count > 0: break
+            if wait_for_server():
+                start_time = time.time(); stop_progress = threading.Event(); progress_thread = threading.Thread(target=show_progress, daemon=True); progress_thread.start()
+                continue
+            return None
+        except Exception as e:
+            stop_progress.set(); print_colored(f"\nUnexpected error: {e}", COLORS['FAIL'])
+            return None
+
+    stop_progress.set()
+    print()
+    if token_count > 0:
+        end_time = time.time(); total_duration = end_time - start_time
+        ttft = first_token_time - start_time; gen_duration = end_time - first_token_time
+        tps = token_count / gen_duration if gen_duration > 0 else 0
+        print_colored(f"[Stats] {model}: TTFT: {ttft:.2f}s | Total: {total_duration:.2f}s | {token_count} tokens | {tps:.2f} tps", COLORS['CYAN'])
+    
+    return full_response
+
+
 def chat(model="implementer"):
     # Initialize readline for command history and editing
     setup_readline()
@@ -948,6 +1079,8 @@ def chat(model="implementer"):
                 print(f"  @<agent_name> [msg]  - Switch agent and optionally send message in one go")
                 print(f"                         Example: @architect Design a Metal 4 renderer")
                 print(f"                         Example: @debugger Why is this kernel crashing?")
+                print(f"  MULTI-AGENT:         - You can use multiple @ mentions in one prompt!")
+                print(f"                         Example: @architect Design X then @implementer build it.")
                 
                 print_colored(f"\n{COLORS['BOLD']}AVAILABLE AGENTS:{COLORS['ENDC']}", COLORS['BLUE'])
                 for name, theme in AGENT_THEMES.items():
@@ -1060,244 +1193,169 @@ def chat(model="implementer"):
                     print_colored("Readline not available - no history support", COLORS['WARNING'])
                 continue
 
-            if user_input.lower().startswith('/model ') or user_input.lower().startswith('/m '):
-                parts = user_input.split(' ')
-                if len(parts) < 2 or not parts[1].strip():
-                    print_colored("Usage: /model <agent_name>", COLORS['FAIL'])
-                    print_colored(f"Available agents: {', '.join(AGENT_THEMES.keys())}", COLORS['BLUE'])
-                    continue
-                    
-                model_name = parts[1].lower()
-                if model_name in AGENT_THEMES:
-                    model = model_name
-                    agent_theme = AGENT_THEMES[model]
-                    print_colored(f"\nSwitched to agent: {model} {agent_theme['icon']}", COLORS['WARNING'])
-                    print_colored(f"Description: {agent_theme['desc']}", COLORS['BLUE'])
+                        if user_input.lower().startswith('/model ') or user_input.lower().startswith('/m '):
 
-                else:
-                    print_colored(f"Unknown agent: {model_name}. Available: {', '.join(AGENT_THEMES.keys())}", COLORS['FAIL'])
-                continue
+                            parts = user_input.split(' ')
 
-            if not (history and history[-1]["role"] == "user" and history[-1].get("auto_send", False)):
-                history.append({"role": "user", "content": user_input})
-                save_chat_history(history, model)
+                            if len(parts) >= 2:
 
-            # Sanitize history to remove internal flags like 'auto_send' before sending to server
-            sanitized_history = [
-                {"role": msg["role"], "content": msg["content"]} 
-                for msg in history
-            ]
-            # Request a large token limit to support generating massive files (e.g., pbxproj)
-            # The server/model will stop earlier if the context window (e.g., 20k or 32k) is filled.
-            payload = {
-                "model": model, 
-                "messages": sanitized_history, 
-                "stream": True,
-                "max_tokens": 30000 
-            }
+                                model_name = parts[1].lower()
+
+                                if model_name in AGENT_THEMES:
+
+                                    model = model_name; agent_theme = AGENT_THEMES[model]
+
+                                    print_colored(f"\nSwitched to agent: {model}", COLORS['WARNING'])
+
+                                else: print_colored(f"Unknown agent: {model_name}", COLORS['FAIL'])
+
+                            continue
+
             
-            # Smart Reloading:
-            # If this is an auto-send (tool output), keep the model loaded for speed.
-            # If this is a new user prompt, force reload to clear VRAM/Cache for stability.
-            is_auto_send = history and history[-1]["role"] == "user" and history[-1].get("auto_send", False)
-            headers = {
-                "X-Qwen-Force-Reload": "false" if is_auto_send else "true"
-            }
-            
-            full_response = ""
-            server_error_occurred = False
-            
-            # Progress tracking variables
-            start_time = time.time()
-            first_token_time = None
-            token_count = 0
-            stop_progress = threading.Event()
 
-            def show_progress():
-                """Display elapsed time while waiting for server and send heartbeats"""
-                last_heartbeat = time.time()
-                while not stop_progress.is_set():
-                    now = time.time()
-                    elapsed = now - start_time
-                    
-                    # Heartbeat every 30 seconds to keep connection alive
-                    if now - last_heartbeat > 30:
-                        try:
-                            requests.get(HEALTH_URL, timeout=2)
-                            last_heartbeat = now
-                        except:
-                            pass # Ignore heartbeat failures
+                        # Multi-Agent Orchestration Logic
 
-                    # Use carriage return to keep progress on one line
-                    sys.stdout.write(f"\r{COLORS['BLUE']}Waiting for server... ({elapsed:.1f}s){COLORS['ENDC']}")
-                    sys.stdout.flush()
-                    time.sleep(0.1)
-                # Clear the line when done
-                sys.stdout.write("\r" + " " * 40 + "\r")
-                sys.stdout.flush()
+                        # Split input by @mentions while keeping the mentions
 
-            progress_thread = threading.Thread(target=show_progress)
-            progress_thread.daemon = True
-            progress_thread.start()
+                        # segments example: ['Initial ', '@architect', ' design ', '@implementer', ' code']
 
-            context_retries = 0
-            MAX_CONTEXT_RETRIES = 3
+                        segments = re.split(r'(@\w+)', user_input)
 
-            while True: # Retry loop (Connection + Context)
-                try:
-                    # Increased timeout for heavy model switching and large model inference
-                    response = requests.post(API_URL, json=payload, headers=headers, stream=True, timeout=7200)
-                    
-                    # Handle HTTP Errors (Non-200)
-                    if response.status_code != 200:
-                        stop_progress.set()
-                        error_text = response.text
                         
-                        # Check for Context Error
-                        if "exceed context window" in error_text or "context_length_exceeded" in error_text:
-                            if context_retries < MAX_CONTEXT_RETRIES:
-                                print_colored(f"\n[Client] Context limit reached. Trimming history and retrying ({context_retries+1}/{MAX_CONTEXT_RETRIES})...", COLORS['WARNING'])
-                                
-                                # Trim oldest 25% of history, but keep the last message (current prompt)
-                                if len(history) > 2:
-                                    current_prompt = history[-1]
-                                    trim_index = max(1, int(len(history) * 0.25))
-                                    # Ensure we remove pairs if possible to keep flow natural
-                                    if trim_index % 2 != 0: trim_index += 1
-                                    
-                                    # Slice: remove from beginning, keep end
-                                    # history[:-1] is past context. history[-1] is current.
-                                    trimmed_past = history[:-1][trim_index:]
-                                    history = trimmed_past + [current_prompt]
-                                    
-                                    # Update payload with new history
-                                    sanitized_history = [
-                                        {"role": msg["role"], "content": msg["content"]} 
-                                        for msg in history
-                                    ]
-                                    payload["messages"] = sanitized_history
-                                    
-                                    context_retries += 1
-                                    # Restart progress indicator
-                                    stop_progress = threading.Event()
-                                    progress_thread = threading.Thread(target=show_progress)
-                                    progress_thread.daemon = True
-                                    progress_thread.start()
-                                    continue # Retry Request
+
+                        # Tasks: list of (agent_name, message_content)
+
+                        tasks = []
+
+                        current_task_agent = model
+
+                        
+
+                        # Initial segment before any @ (assigned to current active agent)
+
+                        first_segment = segments[0].strip()
+
+                        if first_segment:
+
+                            tasks.append((current_task_agent, first_segment))
+
+                        
+
+                        # Process pairs of (@agent, following_text)
+
+                        for i in range(1, len(segments), 2):
+
+                            agent_name = segments[i][1:].lower()
+
+                            message_content = segments[i+1].strip() if i+1 < len(segments) else ""
+
+                            
+
+                            if agent_name in AGENT_THEMES:
+
+                                tasks.append((agent_name, message_content))
+
+                            else:
+
+                                # Not a valid agent, treat as literal text for the last active task
+
+                                if tasks:
+
+                                    tasks[-1] = (tasks[-1][0], tasks[-1][1] + " " + segments[i] + message_content)
+
                                 else:
-                                     print_colored("\n[Client] Context limit reached, but history is too short to trim.", COLORS['FAIL'])
-                        
-                        print_colored(f"\nError: {error_text}", COLORS['FAIL'])
-                        break
 
-                    # Process Stream
-                    for line in response.iter_lines():
-                        if line:
-                            line = line.decode('utf-8')
-                            if line.startswith("data: "):
-                                data_str = line[6:]
-                                if data_str == "[DONE]":
-                                    break
-                                try:
-                                    data = json.loads(data_str)
-                                    if "choices" in data and len(data["choices"]) > 0:
-                                        delta = data["choices"][0].get("delta", {})
-                                        content = delta.get("content", "")
-                                        if content:
-                                            if not first_token_time:
-                                                first_token_time = time.time()
-                                                stop_progress.set() # Stop "Waiting..." timer
-                                            
-                                            print(content, end="", flush=True)
-                                            full_response += content
-                                            token_count += 1
-                                    elif "error" in data:
-                                        stop_progress.set()
-                                        error_msg = data['error'].get('message', 'Unknown error')
-                                        
-                                        # Check for Context Error in Stream
-                                        if "exceed context window" in error_msg or "context_length_exceeded" in error_msg:
-                                            if context_retries < MAX_CONTEXT_RETRIES:
-                                                print_colored(f"\n[Client] Context limit reached (during generation). Trimming history and retrying ({context_retries+1}/{MAX_CONTEXT_RETRIES})...", COLORS['WARNING'])
-                                                
-                                                if len(history) > 2:
-                                                    current_prompt = history[-1]
-                                                    trim_index = max(1, int(len(history) * 0.25))
-                                                    if trim_index % 2 != 0: trim_index += 1
-                                                    
-                                                    trimmed_past = history[:-1][trim_index:]
-                                                    history = trimmed_past + [current_prompt]
-                                                    
-                                                    sanitized_history = [
-                                                        {"role": msg["role"], "content": msg["content"]} 
-                                                        for msg in history
-                                                    ]
-                                                    payload["messages"] = sanitized_history
-                                                    
-                                                    context_retries += 1
-                                                    server_error_occurred = True # Mark as error to trigger continue logic below
-                                                    break # Break inner stream loop to trigger continue
-                                        
-                                        print_colored(f"\nServer Error: {error_msg}", COLORS['FAIL'])
-                                        if "exceed context window" in error_msg:
-                                            server_error_occurred = True
-                                        break
-                                except (json.JSONDecodeError, KeyError, IndexError):
-                                    pass
-                    
-                    # Handle Retry from Stream Error
-                    if server_error_occurred and context_retries > 0 and context_retries <= MAX_CONTEXT_RETRIES:
-                         # If we marked error AND incremented retries, it means we want to retry
-                         # Reset flags
-                         server_error_occurred = False
-                         full_response = ""
-                         token_count = 0
-                         # Restart progress
-                         stop_progress = threading.Event()
-                         progress_thread = threading.Thread(target=show_progress)
-                         progress_thread.daemon = True
-                         progress_thread.start()
-                         continue
+                                    tasks.append((current_task_agent, segments[i] + message_content))
 
-                    break # Success, exit retry loop
-
-                except requests.exceptions.Timeout:
-                    stop_progress.set()
-                    print_colored(f"\nRequest timed out after 7200s.", COLORS['FAIL'])
-                    break
-                except requests.exceptions.ConnectionError:
-                    stop_progress.set()
-                    if token_count > 0:
-                        print_colored(f"\n[Client] Connection interrupted. Response truncated.", COLORS['WARNING'])
-                        break # Do not retry if we already output text (prevents duplicate output loop)
-
-                    if wait_for_server():
-                        # Reset timer for retry
-                        start_time = time.time()
-                        stop_progress = threading.Event()
-                        progress_thread = threading.Thread(target=show_progress)
-                        progress_thread.daemon = True
-                        progress_thread.start()
-                        continue # Retry request
-                    else:
-                        break # User aborted
-                except Exception as e:
-                    stop_progress.set()
-                    print_colored(f"\nUnexpected error during chat: {e}", COLORS['FAIL'])
-                    break
-
-            stop_progress.set() # Ensure timer is stopped
-            print()
             
-            # Print generation stats
-            if token_count > 0:
-                end_time = time.time()
-                total_duration = end_time - start_time
-                ttft = first_token_time - start_time
-                gen_duration = end_time - first_token_time
-                tps = token_count / gen_duration if gen_duration > 0 else 0
-                
-                stats_msg = f"[Stats] TTFT: {ttft:.2f}s | Total: {total_duration:.2f}s | {token_count} tokens | {tps:.2f} tps"
+
+                        # Sequential Execution
+
+                        for task_agent, task_content in tasks:
+
+                            if not task_content.strip(): continue
+
+                            
+
+                            # Switch active context for this specific task
+
+                            task_theme = AGENT_THEMES[task_agent]
+
+                            print_colored(f"\n>>> Executing task with @{task_agent} {task_theme['icon']}", COLORS['BLUE'])
+
+                            
+
+                            # Permanently update the active agent if it was explicitly mentioned
+
+                            if task_agent != model:
+
+                                model = task_agent; agent_theme = AGENT_THEMES[model]
+
+            
+
+                            # Append user prompt to history
+
+                            history.append({"role": "user", "content": task_content})
+
+                            save_chat_history(history, model)
+
+            
+
+                            # Execute with smart reloading
+
+                            # If this is an auto-send (tool output), keep model loaded. 
+
+                            # Otherwise reload for stability.
+
+                            is_auto_send = history and history[-1].get("auto_send", False)
+
+                            headers = {"X-Qwen-Force-Reload": "false" if is_auto_send else "true"}
+
+                            
+
+                            response_text = get_completion(history, model, agent_theme, headers)
+
+                            if not response_text: break
+
+                            
+
+                            # Append assistant response to history
+
+                            history.append({"role": "assistant", "content": response_text})
+
+                            save_chat_history(history, model)
+
+            
+
+                            # Process tool markers
+
+                            tool_output = process_remote_commands(response_text)
+
+                            if tool_output:
+
+                                print_colored(f"\nTool Result: {tool_output[:200]}...", COLORS['CYAN'])
+
+                                history.append({"role": "user", "content": f"Tool output:\n{tool_output}", "auto_send": True})
+
+                                # For tools, we break multi-agent turn and let the main loop re-trigger
+
+                                # This ensures the tool output is processed by the agent that requested it
+
+                                break
+
+            
+
+                    except KeyboardInterrupt:
+
+                        print_colored("\nInterrupt received. Use /exit to quit.", COLORS['WARNING'])
+
+                        continue
+
+                    except Exception as e:
+
+                        print_colored(f"\nMain Loop Error: {e}", COLORS['FAIL'])
+
+            
                 print_colored(stats_msg, COLORS['BLUE'])
             
             # Only append non-empty responses to history to avoid 422 errors on next turn
