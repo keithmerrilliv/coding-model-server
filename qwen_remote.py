@@ -35,6 +35,7 @@ HISTORY_MAX_LENGTH = 1000
 LINUX_SERVER_IP = os.getenv("QWEN_SERVER_IP", "192.168.50.101")
 API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/chat/completions"
 MEMORY_API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/memory"
+INGEST_API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/memory/ingest"
 SEARCH_API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/tools/search"
 DEEP_DOCS_API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/tools/apple_deep_docs"
 UNLOAD_API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/admin/unload"
@@ -365,6 +366,24 @@ def save_memory(text):
             return f"Failed to save memory: {response.text}"
     except Exception as e:
         return f"Error saving memory: {str(e)}"
+
+
+def ingest_pdf(path):
+    """Tell the server to ingest a local PDF file"""
+    try:
+        print_colored(f"Requesting server to ingest PDF: {path}", COLORS['CYAN'])
+        response = requests.post(INGEST_API_URL, json={"path": path}, timeout=60)
+        if response.status_code == 200:
+            result = response.json()
+            msg = f"Successfully ingested {result['filename']}: {result['chunks']} chunks from {result['pages']} pages."
+            print_colored(msg, COLORS['GREEN'])
+            return msg
+        else:
+            error_msg = f"Failed to ingest PDF: {response.text}"
+            print_colored(error_msg, COLORS['FAIL'])
+            return error_msg
+    except Exception as e:
+        return f"Error ingesting PDF: {str(e)}"
 
 
 def decode_escape_sequences(text: str) -> str:
@@ -843,7 +862,7 @@ def chat(model="implementer"):
     else:
         print_colored("  Command approval: Manual (will prompt for each command)", COLORS['GREEN'])
 
-    print_colored("\nCommands: /help, /exit, /model <name>, /history, /cupertino <query>, /apple <tool> <args>", COLORS['BLUE'])
+    print_colored("\nCommands: /help, /exit, /model <name>, /history, /cupertino <query>, /apple <tool> <args>, /ingest <path>", COLORS['BLUE'])
     if READLINE_AVAILABLE:
         print_colored("Use ↑/↓ arrows to navigate history. History saved to ~/.qwen_client_history\n", COLORS['BLUE'])
     else:
@@ -909,7 +928,8 @@ def chat(model="implementer"):
                 print(f"                         Example: /cupertino MTLMeshRenderPipelineDescriptor")
                 print(f"  /apple <tool> <args> - Search Apple Deep Docs on the Linux server")
                 print(f"                         Example: /apple search_swift_evolution {{\"feature\": \"actors\"}}")
-                print(f"                         Example: /apple fetch_apple_documentation {{\"url\": \"https://developer.apple.com/...\"}}")
+                print(f"  /ingest <path>       - Ingest a local PDF on the Linux server into memory")
+                print(f"                         Example: /ingest /home/user/Metal4_Specs.pdf")
                 
                 print_colored(f"\n{COLORS['BOLD']}AGENT SHORTCUTS:{COLORS['ENDC']}", COLORS['BLUE'])
                 print(f"  @<agent_name> [msg]  - Switch agent and optionally send message in one go")
@@ -924,6 +944,17 @@ def chat(model="implementer"):
 
             if user_input.lower() in ['/exit', '/quit']:
                 break
+
+            # Ingest PDF Command
+            if user_input.lower().startswith('/ingest '):
+                parts = user_input.split(' ', 1)
+                if len(parts) < 2 or not parts[1].strip():
+                    print_colored("Usage: /ingest <path_on_server>", COLORS['FAIL'])
+                    continue
+                path = parts[1].strip()
+                result = ingest_pdf(path)
+                print_colored(f"\n{result}\n", COLORS['GREEN'])
+                continue
 
             # Quick Agent Switch (e.g. @architect or @architect Please design...)
             if user_input.startswith('@'):
@@ -953,34 +984,6 @@ def chat(model="implementer"):
                     # Alternatively, we could just treat it as text. Let's warn.
                     print_colored(f"Unknown agent '{potential_agent}'. Available: {', '.join(AGENT_THEMES.keys())}", COLORS['FAIL'])
                     print_colored("Treating as normal text...", COLORS['BLUE'])
-
-            # Help Command
-            if user_input.lower() == '/help':
-                print_colored("\n--- Qwen Remote CLI Help ---", COLORS['HEADER'])
-                print_colored(f"{COLORS['BOLD']}GENERAL COMMANDS:{COLORS['ENDC']}", COLORS['BLUE'])
-                print(f"  /help                - Show this help menu")
-                print(f"  /exit, /quit         - Exit the CLI and cleanup resources")
-                print(f"  /model <name>        - Switch the active agent (e.g. /model architect)")
-                print(f"  /history             - Show recent command history")
-                print(f"  /history clear       - Clear command history")
-                
-                print_colored(f"\n{COLORS['BOLD']}DOCUMENTATION TOOLS:{COLORS['ENDC']}", COLORS['BLUE'])
-                print(f"  /cupertino <query>   - Search local Apple documentation on macOS")
-                print(f"                         Example: /cupertino MTLMeshRenderPipelineDescriptor")
-                print(f"  /apple <tool> <args> - Search Apple Deep Docs on the Linux server")
-                print(f"                         Example: /apple search_swift_evolution {{\"feature\": \"actors\"}}")
-                print(f"                         Example: /apple fetch_apple_documentation {{\"url\": \"https://developer.apple.com/...\"}}")
-                
-                print_colored(f"\n{COLORS['BOLD']}AGENT SHORTCUTS:{COLORS['ENDC']}", COLORS['BLUE'])
-                print(f"  @<agent_name> [msg]  - Switch agent and optionally send message in one go")
-                print(f"                         Example: @architect Design a Metal 4 renderer")
-                print(f"                         Example: @debugger Why is this kernel crashing?")
-                
-                print_colored(f"\n{COLORS['BOLD']}AVAILABLE AGENTS:{COLORS['ENDC']}", COLORS['BLUE'])
-                for name, theme in AGENT_THEMES.items():
-                    print(f"  {name.ljust(18)} - {theme['desc']}")
-                print_colored("----------------------------\n", COLORS['HEADER'])
-                continue
 
             # Apple Documentation Search (Cupertino MCP)
             if user_input.lower().startswith('/cupertino '):
