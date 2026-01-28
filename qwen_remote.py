@@ -1261,11 +1261,16 @@ def chat(model="implementer"):
                     break
                 except requests.exceptions.ConnectionError:
                     stop_progress.set()
+                    if token_count > 0:
+                        print_colored(f"\n[Client] Connection interrupted. Response truncated.", COLORS['WARNING'])
+                        break # Do not retry if we already output text (prevents duplicate output loop)
+
                     if wait_for_server():
                         # Reset timer for retry
                         start_time = time.time()
                         stop_progress = threading.Event()
                         progress_thread = threading.Thread(target=show_progress)
+                        progress_thread.daemon = True
                         progress_thread.start()
                         continue # Retry request
                     else:
