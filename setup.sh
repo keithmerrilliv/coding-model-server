@@ -40,6 +40,28 @@ pip install --upgrade pip
 echo "Installing dependencies from requirements.txt..."
 pip install -r requirements.txt
 
+# Setup external tools (MCPs)
+echo ""
+echo "Setting up external tools..."
+mkdir -p tools
+
+# Apple Deep Docs MCP
+if [ ! -d "tools/appledeepdoc-mcp" ]; then
+    echo "Cloning Apple Deep Docs MCP..."
+    git clone https://github.com/Ahrentlov/appledeepdoc-mcp.git tools/appledeepdoc-mcp
+fi
+
+echo "Setting up Apple Deep Docs MCP environment..."
+cd tools/appledeepdoc-mcp
+if [ ! -d "venv" ]; then
+    python3 -m venv venv
+fi
+source venv/bin/activate
+pip install --upgrade pip
+pip install hatchling fastmcp requests beautifulsoup4
+deactivate
+cd ../..
+
 # Create .env if it doesn't exist
 if [ ! -f ".env" ]; then
     echo "Creating .env from .env.example..."
