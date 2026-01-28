@@ -1198,12 +1198,24 @@ def chat(model="implementer"):
                 parts = user_input.split(' ', 2)
                 if len(parts) < 2:
                     print_colored("Usage: /apple <tool_name> [args_json]", COLORS['FAIL'])
+                    print_colored("Example: /apple search_swift_evolution {\"feature\": \"actors\"}", COLORS['BLUE'])
                     continue
+                
                 tool = parts[1]
-                args = parts[2] if len(parts) > 2 else "{}"
-                payload = json.dumps({"tool": tool, "arguments": json.loads(args)})
-                result = apple_deep_docs_search(payload)
-                print_colored(f"\n{result}\n", COLORS['GREEN'])
+                args_str = parts[2] if len(parts) > 2 else "{}"
+                
+                try:
+                    args = json.loads(args_str)
+                    if not isinstance(args, dict):
+                        print_colored("Error: Arguments must be a JSON object (dictionary).", COLORS['FAIL'])
+                        continue
+                        
+                    payload = json.dumps({"tool": tool, "arguments": args})
+                    result = apple_deep_docs_search(payload)
+                    print_colored(f"\n{result}\n", COLORS['GREEN'])
+                except json.JSONDecodeError as e:
+                    print_colored(f"Error: Invalid JSON arguments: {e}", COLORS['FAIL'])
+                    print_colored("Hint: Ensure keys and values are in double quotes.", COLORS['BLUE'])
                 continue
 
             # History management commands

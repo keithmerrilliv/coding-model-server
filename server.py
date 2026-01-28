@@ -158,7 +158,7 @@ class AppleDeepDocsService:
         self.venv_python = os.path.join(mcp_path, "venv/bin/python")
 
     def start(self):
-        """Start the MCP server process if not already running"""
+        """Start the MCP server process and perform handshake if not already running"""
         if self.process and self.process.poll() is None:
             return True
             
@@ -177,7 +177,49 @@ class AppleDeepDocsService:
                 bufsize=1,
                 cwd=self.mcp_path
             )
-            logger.info("Apple Deep Docs MCP server started")
+            
+            # Perform MCP Handshake
+            logger.info("Performing MCP handshake with Apple Deep Docs...")
+            
+            # 1. Send initialize
+            init_request = {
+                "jsonrpc": "2.0",
+                "id": 0,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "qwen-server", "version": "2.0"}
+                }
+            }
+            self.process.stdin.write(json.dumps(init_request) + "\n")
+            self.process.stdin.flush()
+            
+            # 2. Wait for initialize response
+            while True:
+                line = self.process.stdout.readline()
+                if not line:
+                    logger.error("Failed to receive initialize response from MCP")
+                    return False
+                line = line.strip()
+                if not line: continue
+                try:
+                    resp = json.loads(line)
+                    if resp.get("id") == 0:
+                        logger.info("MCP initialize successful")
+                        break
+                except:
+                    continue
+            
+            # 3. Send initialized notification
+            initialized_notif = {
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized"
+            }
+            self.process.stdin.write(json.dumps(initialized_notif) + "\n")
+            self.process.stdin.flush()
+            
+            logger.info("Apple Deep Docs MCP server ready")
             return True
         except Exception as e:
             logger.error(f"Error starting Apple Deep Docs MCP: {e}")
@@ -211,29 +253,47 @@ class AppleDeepDocsService:
             
             try:
                 # Write request
-                self.process.stdin.write(json.dumps(request) + "\n")
+                payload = json.dumps(request)
+                logger.info(f"Sending MCP Request: {payload[:200]}...")
+                self.process.stdin.write(payload + "\n")
                 self.process.stdin.flush()
                 
                 # Read response (blocking until line or process exit)
-                line = self.process.stdout.readline()
-                if not line:
-                    # Check stderr for clues
-                    err = self.process.stderr.read() if self.process.poll() is not None else "No output"
-                    logger.error(f"MCP Read Error: {err}")
-                    return f"Error: No response from MCP server. {err[:200]}"
+                # We loop to skip non-JSON lines (like logs or banners)
+                while True:
+                    line = self.process.stdout.readline()
+                    if not line:
+                        err = self.process.stderr.read() if self.process.poll() is not None else "No output"
+                        logger.error(f"MCP Read Error: {err}")
+                        return f"Error: No response from MCP server. {err[:200]}"
                     
-                response = json.loads(line)
-                if response.get("id") == req_id:
-                    result = response.get("result", {})
-                    # Process content (usually a list of content items)
-                    content = result.get("content", [])
-                    text_parts = []
-                    for item in content:
-                        if item.get("type") == "text":
-                            text_parts.append(item.get("text", ""))
-                    return "\n\n".join(text_parts) if text_parts else str(result)
+                    line = line.strip()
+                    logger.info(f"Received from MCP: {line[:500]}")
+                    if not line:
+                        continue
+                        
+                    try:
+                        response = json.loads(line)
+                        if response.get("id") == req_id:
+                            result = response.get("result", {})
+                            # Process content (usually a list of content items)
+                            content = result.get("content", [])
+                            text_parts = []
+                            for item in content:
+                                if item.get("type") == "text":
+                                    text_parts.append(item.get("text", ""))
+                            
+                            if text_parts:
+                                return "\n\n".join(text_parts)
+                            
+                            # If no text parts, return the whole result as string
+                            return json.dumps(result, indent=2)
+                        
+                        logger.debug(f"Skipping MCP response with mismatching ID: {response.get('id')}")
+                    except json.JSONDecodeError:
+                        logger.debug(f"Skipping non-JSON MCP output: {line[:100]}...")
+                        continue
                 
-                return f"Error: Response ID mismatch (Expected {req_id}, got {response.get('id')})"
             except Exception as e:
                 logger.error(f"Communication error with Deep Docs MCP: {e}")
                 return f"Error: Documentation fetch failed: {str(e)}"
