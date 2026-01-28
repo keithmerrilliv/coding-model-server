@@ -1193,188 +1193,90 @@ def chat(model="implementer"):
                     print_colored("Readline not available - no history support", COLORS['WARNING'])
                 continue
 
-                        if user_input.lower().startswith('/model ') or user_input.lower().startswith('/m '):
 
-                            parts = user_input.split(' ')
-
-                            if len(parts) >= 2:
-
-                                model_name = parts[1].lower()
-
-                                if model_name in AGENT_THEMES:
-
-                                    model = model_name; agent_theme = AGENT_THEMES[model]
-
-                                    print_colored(f"\nSwitched to agent: {model}", COLORS['WARNING'])
-
-                                else: print_colored(f"Unknown agent: {model_name}", COLORS['FAIL'])
-
-                            continue
-
-            
-
-                        # Multi-Agent Orchestration Logic
-
-                        # Split input by @mentions while keeping the mentions
-
-                        # segments example: ['Initial ', '@architect', ' design ', '@implementer', ' code']
-
-                        segments = re.split(r'(@\w+)', user_input)
-
-                        
-
-                        # Tasks: list of (agent_name, message_content)
-
-                        tasks = []
-
-                        current_task_agent = model
-
-                        
-
-                        # Initial segment before any @ (assigned to current active agent)
-
-                        first_segment = segments[0].strip()
-
-                        if first_segment:
-
-                            tasks.append((current_task_agent, first_segment))
-
-                        
-
-                        # Process pairs of (@agent, following_text)
-
-                        for i in range(1, len(segments), 2):
-
-                            agent_name = segments[i][1:].lower()
-
-                            message_content = segments[i+1].strip() if i+1 < len(segments) else ""
-
-                            
-
-                            if agent_name in AGENT_THEMES:
-
-                                tasks.append((agent_name, message_content))
-
-                            else:
-
-                                # Not a valid agent, treat as literal text for the last active task
-
-                                if tasks:
-
-                                    tasks[-1] = (tasks[-1][0], tasks[-1][1] + " " + segments[i] + message_content)
-
-                                else:
-
-                                    tasks.append((current_task_agent, segments[i] + message_content))
-
-            
-
-                        # Sequential Execution
-
-                        for task_agent, task_content in tasks:
-
-                            if not task_content.strip(): continue
-
-                            
-
-                            # Switch active context for this specific task
-
-                            task_theme = AGENT_THEMES[task_agent]
-
-                            print_colored(f"\n>>> Executing task with @{task_agent} {task_theme['icon']}", COLORS['BLUE'])
-
-                            
-
-                            # Permanently update the active agent if it was explicitly mentioned
-
-                            if task_agent != model:
-
-                                model = task_agent; agent_theme = AGENT_THEMES[model]
-
-            
-
-                            # Append user prompt to history
-
-                            history.append({"role": "user", "content": task_content})
-
-                            save_chat_history(history, model)
-
-            
-
-                            # Execute with smart reloading
-
-                            # If this is an auto-send (tool output), keep model loaded. 
-
-                            # Otherwise reload for stability.
-
-                            is_auto_send = history and history[-1].get("auto_send", False)
-
-                            headers = {"X-Qwen-Force-Reload": "false" if is_auto_send else "true"}
-
-                            
-
-                            response_text = get_completion(history, model, agent_theme, headers)
-
-                            if not response_text: break
-
-                            
-
-                            # Append assistant response to history
-
-                            history.append({"role": "assistant", "content": response_text})
-
-                            save_chat_history(history, model)
-
-            
-
-                            # Process tool markers
-
-                            tool_output = process_remote_commands(response_text)
-
-                            if tool_output:
-
-                                print_colored(f"\nTool Result: {tool_output[:200]}...", COLORS['CYAN'])
-
-                                history.append({"role": "user", "content": f"Tool output:\n{tool_output}", "auto_send": True})
-
-                                # For tools, we break multi-agent turn and let the main loop re-trigger
-
-                                # This ensures the tool output is processed by the agent that requested it
-
-                                break
-
-            
-
-                    except KeyboardInterrupt:
-
-                        print_colored("\nInterrupt received. Use /exit to quit.", COLORS['WARNING'])
-
-                        continue
-
-                    except Exception as e:
-
-                        print_colored(f"\nMain Loop Error: {e}", COLORS['FAIL'])
-
-            
-                print_colored(stats_msg, COLORS['BLUE'])
-            
-            # Only append non-empty responses to history to avoid 422 errors on next turn
-            if full_response and full_response.strip():
-                history.append({"role": "assistant", "content": full_response})
-                save_chat_history(history, model)
+            # Model Switch Command
+            if user_input.lower().startswith('/model ') or user_input.lower().startswith('/m '):
+                parts = user_input.split(' ')
+                if len(parts) >= 2:
+                    model_name = parts[1].lower()
+                    if model_name in AGENT_THEMES:
+                        model = model_name
+                        agent_theme = AGENT_THEMES[model]
+                        print_colored(f"\nSwitched to agent: {model}", COLORS['WARNING'])
+                    else:
+                        print_colored(f"Unknown agent: {model_name}", COLORS['FAIL'])
+                continue
+
+            # Multi-Agent Orchestration Logic
+            try:
+                # Split input by @mentions while keeping the mentions
+                # segments example: ['Initial ', '@architect', ' design ', '@implementer', ' code']
+                import re
+                segments = re.split(r'(@\w+)', user_input)
                 
-                if server_error_occurred:
-                    print_colored("\n[Client] Stopping tool execution loop due to server context error.", COLORS['WARNING'])
-                else:
-                    tool_output = process_remote_commands(full_response)
-
+                # Tasks: list of (agent_name, message_content)
+                tasks = []
+                current_task_agent = model
+                
+                # Initial segment before any @ (assigned to current active agent)
+                first_segment = segments[0].strip()
+                if first_segment:
+                    tasks.append((current_task_agent, first_segment))
+                
+                # Process pairs of (@agent, following_text)
+                for i in range(1, len(segments), 2):
+                    agent_name = segments[i][1:].lower()
+                    message_content = segments[i+1].strip() if i+1 < len(segments) else ""
+                    
+                    if agent_name in AGENT_THEMES:
+                        tasks.append((agent_name, message_content))
+                    else:
+                        # Not a valid agent, treat as literal text for the last active task
+                        if tasks:
+                            tasks[-1] = (tasks[-1][0], tasks[-1][1] + " " + segments[i] + message_content)
+                        else:
+                            tasks.append((current_task_agent, segments[i] + message_content))
+    
+                # Sequential Execution
+                for task_agent, task_content in tasks:
+                    if not task_content.strip(): continue
+                    
+                    # Switch active context for this specific task
+                    task_theme = AGENT_THEMES[task_agent]
+                    print_colored(f"\n>>> Executing task with @{task_agent} {task_theme['icon']}", COLORS['BLUE'])
+                    
+                    # Permanently update the active agent if it was explicitly mentioned
+                    if task_agent != model:
+                        model = task_agent; agent_theme = AGENT_THEMES[model]
+    
+                    # Append user prompt to history
+                    history.append({"role": "user", "content": task_content})
+                    save_chat_history(history, model)
+    
+                    # Execute with smart reloading
+                    is_auto_send = history and history[-1].get("auto_send", False)
+                    headers = {"X-Qwen-Force-Reload": "false" if is_auto_send else "true"}
+                    
+                    response_text = get_completion(history, model, agent_theme, headers)
+                    if not response_text: break
+                    
+                    # Append assistant response to history
+                    history.append({"role": "assistant", "content": response_text})
+                    save_chat_history(history, model)
+    
+                    # Process tool markers
+                    tool_output = process_remote_commands(response_text)
                     if tool_output:
+                        print_colored(f"\nTool Result: {tool_output[:200]}...", COLORS['CYAN'])
                         history.append({"role": "user", "content": f"Tool output:\n{tool_output}", "auto_send": True})
-                        save_chat_history(history, model)
-                        continue
-            elif not full_response and not server_error_occurred:
-                print_colored("\nWarning: Received empty response or connection closed prematurely.", COLORS['WARNING'])
-
+                        break
+                        
+            except KeyboardInterrupt:
+                print_colored("\nInterrupt received. Returning to prompt.", COLORS['WARNING'])
+                continue
+            except Exception as e:
+                print_colored(f"\nMain Loop Error: {e}", COLORS['FAIL'])
+                continue
         except KeyboardInterrupt:
             break
 
