@@ -205,8 +205,8 @@ To run commands on the client, you MUST use this specific protocol:
             'description': 'Code implementation agent',
             'system_prompt': f'You are an expert software engineer. Provide clear, working code implementations.\n{REMOTE_EXEC_INSTRUCTION}',
             'model_config': {
-                'path': '/home/keith-merrill/.lmstudio/models/tp7030/Qwen3-Coder-30B-A3B-Instruct-FP8-Q6_K-GGUF/qwen3-coder-30b-a3b-instruct-fp8-q6_k.gguf',
-                'n_gpu_layers': 25,  # Balanced for 512k context buffers
+                'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
+                'n_gpu_layers': 36,  # Aggressive optimization: ~75% layers on GPU
                 'n_ctx': 524288,     # 512k context
                 'n_batch': 2048,     # Local override to match new global default
                 'rope_scaling_type': 2, # Yarn
@@ -216,8 +216,8 @@ To run commands on the client, you MUST use this specific protocol:
                 'yarn_beta_fast': 32.0,
                 'yarn_beta_slow': 1.0,
                 'yarn_orig_ctx': 32768,
-                'type_k': 8, # GGML_TYPE_Q8_0
-                'type_v': 8, # GGML_TYPE_Q8_0
+                # 'type_k': 8, # GGML_TYPE_Q8_0
+                # 'type_v': 8, # GGML_TYPE_Q8_0
                 'offload_kqv': False # Force KV cache to RAM
             }
         },
@@ -225,8 +225,8 @@ To run commands on the client, you MUST use this specific protocol:
             'description': 'System architecture agent',
             'system_prompt': f'You are a system architect. Design scalable, maintainable solutions.\n{REMOTE_EXEC_INSTRUCTION}',
             'model_config': {
-                'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/Qwen3-Coder-480B-A35B-Instruct-UD-IQ1_M.gguf',
-                'n_gpu_layers': 4,   # Balanced for 256k context with KV in RAM
+                'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Next-80B-A3B-Instruct-GGUF/Qwen3-Next-80B-A3B-Instruct-Q3_K_M.gguf',
+                'n_gpu_layers': 29,  # Increased from 20 - Aggressive optimization
                 'n_ctx': 262144,     # 256k context
                 'n_batch': 2048,
                 'rope_scaling_type': 2,
@@ -245,8 +245,8 @@ To run commands on the client, you MUST use this specific protocol:
             'description': 'Code review agent',
             'system_prompt': f'You are a code reviewer. Identify issues and suggest improvements.\n{REMOTE_EXEC_INSTRUCTION}',
             'model_config': {
-                'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/Qwen3-Coder-480B-A35B-Instruct-UD-IQ1_M.gguf',
-                'n_gpu_layers': 4,   # Balanced for 256k context with KV in RAM
+                'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-14B-GGUF/Qwen3-14B-Q6_K.gguf',
+                'n_gpu_layers': 99,  # Fully offloaded to GPU (14B fits easily in 16GB VRAM)
                 'n_ctx': 262144,     # 256k context
                 'n_batch': 2048,
                 'rope_scaling_type': 2,
@@ -258,15 +258,15 @@ To run commands on the client, you MUST use this specific protocol:
                 'yarn_orig_ctx': 32768,
                 'type_k': 8, # GGML_TYPE_Q8_0
                 'type_v': 8, # GGML_TYPE_Q8_0
-                'offload_kqv': False # Force KV cache to RAM
+                'offload_kqv': False # Force KV cache to RAM (GPU RAM is for weights)
             }
         },
         'debugger': {
             'description': 'Debugging agent',
             'system_prompt': f'You are a debugging expert. Analyze errors and suggest fixes.\n{REMOTE_EXEC_INSTRUCTION}',
             'model_config': {
-                'path': '/home/keith-merrill/.lmstudio/models/n00b001/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M-GGUF/qwen3-coder-30b-a3b-instruct-q4_k_m.gguf',
-                'n_gpu_layers': 32,  # Balanced for 512k context buffers
+                'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
+                'n_gpu_layers': 36,  # Aggressive optimization: ~75% layers on GPU
                 'n_ctx': 524288,     # 512k context
                 'n_batch': 2048,
                 'rope_scaling_type': 2,
@@ -276,8 +276,8 @@ To run commands on the client, you MUST use this specific protocol:
                 'yarn_beta_fast': 32.0,
                 'yarn_beta_slow': 1.0,
                 'yarn_orig_ctx': 32768,
-                'type_k': 8, # GGML_TYPE_Q8_0
-                'type_v': 8, # GGML_TYPE_Q8_0
+                # 'type_k': 8, # GGML_TYPE_Q8_0
+                # 'type_v': 8, # GGML_TYPE_Q8_0
                 'offload_kqv': False # Force KV cache to RAM
             }
         }
@@ -731,5 +731,6 @@ if __name__ == "__main__":
         host=Config.HOST,
         port=Config.PORT,
         log_level="info",
-        reload=False
+        reload=False,
+        loop="asyncio" # Force standard asyncio loop for stability
     )
