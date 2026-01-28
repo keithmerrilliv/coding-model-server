@@ -768,21 +768,34 @@ def handle_cupertino_search(query):
     return f"Retrieved Apple Documentation for '{query}':\n\n{combined_results}"
 
 
-def apple_deep_docs_search(payload_str):
+def apple_deep_docs_search(tool, args):
     """Send a deep doc search query to the server"""
     try:
-        payload = json.loads(payload_str)
-        tool = payload.get("tool")
-        args = payload.get("arguments", {})
-        
         print_colored(f"Calling Apple Deep Docs ({tool}): {args}", COLORS['CYAN'])
         
+        payload = {"tool": tool, "arguments": args}
         response = requests.post(DEEP_DOCS_API_URL, json=payload, timeout=60)
+        
         if response.status_code == 200:
             result = response.json().get("result", "No results")
-            # Save to memory for grounding
-            save_memory(f"Apple Deep Doc ({tool}): {str(args)}\n{result[:5000]}")
-            return f"Apple Deep Docs Result ({tool}):\n{result}"
+            
+            # Format result for display and memory
+            formatted_result = ""
+            if isinstance(result, (dict, list)):
+                formatted_result = json.dumps(result, indent=2)
+            elif isinstance(result, str):
+                try:
+                    # Try to parse string as JSON for pretty printing
+                    parsed = json.loads(result)
+                    formatted_result = json.dumps(parsed, indent=2)
+                except:
+                    formatted_result = result
+            else:
+                formatted_result = str(result)
+            
+            # Save to memory for grounding (limit size)
+            save_memory(f"Apple Deep Doc ({tool}): {str(args)}\n{formatted_result[:10000]}")
+            return f"Apple Deep Docs Result ({tool}):\n{formatted_result}"
         else:
             return f"Failed to call Deep Docs: {response.text}"
     except Exception as e:
@@ -818,7 +831,7 @@ def process_remote_commands(response_text: str) -> Optional[str]:
          lambda query: handle_cupertino_search(query.strip()),
          True),
         (r'<<<APPLE_DEEP_DOCS>>>\s*(.*?)\s*<<<APPLE_DEEP_DOCS>>>',
-         lambda payload: apple_deep_docs_search(payload.strip()),
+         lambda payload_str: (lambda p: apple_deep_docs_search(p.get("tool"), p.get("arguments", {})))(json.loads(payload_str)),
          True),
         (r'<<<REMOTE_LIST_JOBS>>>',
          lambda _: list_all_jobs(),
@@ -1015,8 +1028,7 @@ def chat(model="implementer"):
                         print_colored("Example: /apple tool {\"key\": \"value\"}", COLORS['BLUE'])
                         continue
                         
-                    payload = json.dumps({"tool": tool, "arguments": args})
-                    result = apple_deep_docs_search(payload)
+                    result = apple_deep_docs_search(tool, args)
                     print_colored(f"\n{result}\n", COLORS['GREEN'])
                 except json.JSONDecodeError as e:
                     print_colored(f"Error: Invalid JSON arguments: {e}", COLORS['FAIL'])
