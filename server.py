@@ -443,6 +443,7 @@ def get_model_params(max_tokens: int, temperature: float, stream: bool = False) 
         "temperature": temperature,
         "stop": [CHATML_END, CHATML_START],
         "stream": stream,
+        "repeat_penalty": 1.1,  # Added to prevent repetition loops
         "echo": False
     }
 
