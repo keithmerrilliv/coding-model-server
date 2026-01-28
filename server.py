@@ -208,23 +208,23 @@ If the task is complex or large:
 
     AGENTS = {
         'implementer': {
-            'description': 'Code implementation agent',
+            'description': 'High-Capability Code Agent (Qwen3-14B)',
             'system_prompt': f'You are an expert software engineer. Provide clear, working code implementations.\n{REMOTE_EXEC_INSTRUCTION}',
             'model_config': {
-                'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
-                'n_gpu_layers': 33,  # Increased to 33 (Max safe layers for 42k context)
-                'n_ctx': 43008,      # 42k context (Accommodates 34k request + buffer)
-                'n_batch': 2048,     # Local override to match new global default
-                'rope_scaling_type': 2, # Yarn
+                'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-14B-GGUF/Qwen3-14B-Q6_K.gguf',
+                'n_gpu_layers': 99,  # Fully offloaded
+                'n_ctx': 43008,      # Stable context for 16GB VRAM
+                'n_batch': 2048,
+                'rope_scaling_type': 2,
                 'rope_freq_scale': 1.0,
                 'yarn_ext_factor': -1.0,
                 'yarn_attn_factor': 1.0,
                 'yarn_beta_fast': 32.0,
                 'yarn_beta_slow': 1.0,
                 'yarn_orig_ctx': 32768,
-                'type_k': 8, # GGML_TYPE_Q8_0
-                'type_v': 8, # GGML_TYPE_Q8_0
-                'offload_kqv': True # Enable GPU KV cache for speed
+                'type_k': 8, # 8-bit KV cache for stability
+                'type_v': 8, 
+                'offload_kqv': True
             }
         },
         'architect': {
@@ -232,8 +232,8 @@ If the task is complex or large:
             'system_prompt': f'You are a system architect. Design scalable, maintainable solutions.\n{REMOTE_EXEC_INSTRUCTION}',
             'model_config': {
                 'path': '/home/keith-merrill/.lmstudio/models/Qwen/Qwen3-32B-GGUF/Qwen3-32B-Q4_K_M.gguf',
-                'n_gpu_layers': 33,  # Increased to 33
-                'n_ctx': 43008,      # 42k context
+                'n_gpu_layers': 33,
+                'n_ctx': 43008,
                 'n_batch': 2048,
                 'rope_scaling_type': 2,
                 'rope_freq_scale': 1.0,
@@ -242,9 +242,9 @@ If the task is complex or large:
                 'yarn_beta_fast': 32.0,
                 'yarn_beta_slow': 1.0,
                 'yarn_orig_ctx': 32768,
-                'type_k': 8, # GGML_TYPE_Q8_0
-                'type_v': 8, # GGML_TYPE_Q8_0
-                'offload_kqv': True # Enable GPU KV cache for speed
+                'type_k': 8,
+                'type_v': 8,
+                'offload_kqv': True
             }
         },
         'reviewer': {
@@ -252,8 +252,8 @@ If the task is complex or large:
             'system_prompt': f'You are a code reviewer. Identify issues and suggest improvements.\n{REMOTE_EXEC_INSTRUCTION}',
             'model_config': {
                 'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-14B-GGUF/Qwen3-14B-Q6_K.gguf',
-                'n_gpu_layers': 99,  # Fully offloaded
-                'n_ctx': 43008,      # 42k context
+                'n_gpu_layers': 99,
+                'n_ctx': 43008,
                 'n_batch': 2048,
                 'rope_scaling_type': 2,
                 'rope_freq_scale': 1.0,
@@ -262,18 +262,18 @@ If the task is complex or large:
                 'yarn_beta_fast': 32.0,
                 'yarn_beta_slow': 1.0,
                 'yarn_orig_ctx': 32768,
-                'type_k': 8, # GGML_TYPE_Q8_0
-                'type_v': 8, # GGML_TYPE_Q8_0
-                'offload_kqv': True # Enable GPU KV cache for speed
+                'type_k': 8,
+                'type_v': 8,
+                'offload_kqv': True
             }
         },
         'debugger': {
-            'description': 'Debugging agent',
+            'description': 'High-Capability Debugging Agent (Qwen3-14B)',
             'system_prompt': f'You are a debugging expert. Analyze errors and suggest fixes.\n{REMOTE_EXEC_INSTRUCTION}',
             'model_config': {
-                'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
-                'n_gpu_layers': 33,  # Increased to 33
-                'n_ctx': 43008,      # 42k context
+                'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-14B-GGUF/Qwen3-14B-Q6_K.gguf',
+                'n_gpu_layers': 99,  # Fully offloaded
+                'n_ctx': 43008,
                 'n_batch': 2048,
                 'rope_scaling_type': 2,
                 'rope_freq_scale': 1.0,
@@ -282,9 +282,42 @@ If the task is complex or large:
                 'yarn_beta_fast': 32.0,
                 'yarn_beta_slow': 1.0,
                 'yarn_orig_ctx': 32768,
-                'type_k': 8, # GGML_TYPE_Q8_0
-                'type_v': 8, # GGML_TYPE_Q8_0
-                'offload_kqv': True # Enable GPU KV cache for speed
+                'type_k': 8,
+                'type_v': 8,
+                'offload_kqv': True
+            }
+        },
+        'metal_implementer': {
+            'description': 'Specialized Metal & Graphics Agent (Qwen3-14B)',
+            'system_prompt': f"""You are an expert Graphics and Compute Engineer specializing in Apple Metal (including Metal 4) and WebGPU.
+Your core expertise covers:
+1. COMPUTE: High-performance kernels, SIMD-group operations, threadgroup memory, and GPU-driven workloads.
+2. GRAPHICS: Render pipelines, Mesh Shaders, Ray Tracing, and advanced programmable blending.
+3. METAL 4 FEATURES: GPU Dynamic Indexing, modern binding models, and specialized Apple Silicon hardware acceleration.
+4. PERFORMANCE: Zero-copy memory management, unified memory architecture (UMA) optimizations, and residency management.
+5. SYNCHRONIZATION: Advanced use of Metal Fences, Events, and Argument Buffers for complex resource binding.
+
+STRATEGY:
+- Balanced Focus: Give equal weight to high-performance compute and sophisticated rendering pipelines.
+- Modernity: Prefer modern Metal 4 syntax and paradigms over legacy Metal 2/3.
+- Efficiency: Leverage the Unified Memory Architecture of Apple Silicon for maximum bandwidth.
+
+{REMOTE_EXEC_INSTRUCTION}""",
+            'model_config': {
+                'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-14B-GGUF/Qwen3-14B-Q6_K.gguf',
+                'n_gpu_layers': 99,
+                'n_ctx': 43008,
+                'n_batch': 2048,
+                'rope_scaling_type': 2,
+                'rope_freq_scale': 1.0,
+                'yarn_ext_factor': -1.0,
+                'yarn_attn_factor': 1.0,
+                'yarn_beta_fast': 32.0,
+                'yarn_beta_slow': 1.0,
+                'yarn_orig_ctx': 32768,
+                'type_k': 8,
+                'type_v': 8,
+                'offload_kqv': True
             }
         }
     }
