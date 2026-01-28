@@ -136,6 +136,108 @@ class SearchRequest(BaseModel):
     query: str
 
 
+import subprocess
+import shlex
+from threading import Lock
+from contextlib import asynccontextmanager
+
+# ... (existing imports)
+
+# ============================================================================ 
+# Apple Deep Docs Service (MCP Integration)
+# ============================================================================ 
+
+class AppleDeepDocsService:
+    """Service for interacting with the Apple Deep Docs MCP server on the Linux server"""
+    
+    def __init__(self, mcp_path: str):
+        self.mcp_path = mcp_path
+        self.process = None
+        self.msg_id = 1
+        self.lock = Lock()
+        self.venv_python = os.path.join(mcp_path, "venv/bin/python")
+
+    def start(self):
+        """Start the MCP server process if not already running"""
+        if self.process and self.process.poll() is None:
+            return True
+            
+        try:
+            main_py = os.path.join(self.mcp_path, "main.py")
+            if not os.path.exists(self.venv_python):
+                logger.error(f"Apple Deep Docs venv not found at {self.venv_python}")
+                return False
+                
+            self.process = subprocess.Popen(
+                [self.venv_python, main_py],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+                cwd=self.mcp_path
+            )
+            logger.info("Apple Deep Docs MCP server started")
+            return True
+        except Exception as e:
+            logger.error(f"Error starting Apple Deep Docs MCP: {e}")
+            return False
+
+    def stop(self):
+        """Stop the MCP server process"""
+        if self.process:
+            self.process.terminate()
+            self.process = None
+            logger.info("Apple Deep Docs MCP server stopped")
+
+    def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> str:
+        """Call a specific tool on the MCP server and return the result as text"""
+        if not self.start():
+            return "Error: Apple Deep Docs MCP server failed to start."
+            
+        with self.lock:
+            req_id = self.msg_id
+            self.msg_id += 1
+            
+            request = {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "method": "tools/call",
+                "params": {
+                    "name": tool_name,
+                    "arguments": arguments
+                }
+            }
+            
+            try:
+                # Write request
+                self.process.stdin.write(json.dumps(request) + "\n")
+                self.process.stdin.flush()
+                
+                # Read response (blocking until line or process exit)
+                line = self.process.stdout.readline()
+                if not line:
+                    # Check stderr for clues
+                    err = self.process.stderr.read() if self.process.poll() is not None else "No output"
+                    logger.error(f"MCP Read Error: {err}")
+                    return f"Error: No response from MCP server. {err[:200]}"
+                    
+                response = json.loads(line)
+                if response.get("id") == req_id:
+                    result = response.get("result", {})
+                    # Process content (usually a list of content items)
+                    content = result.get("content", [])
+                    text_parts = []
+                    for item in content:
+                        if item.get("type") == "text":
+                            text_parts.append(item.get("text", ""))
+                    return "\n\n".join(text_parts) if text_parts else str(result)
+                
+                return f"Error: Response ID mismatch (Expected {req_id}, got {response.get('id')})"
+            except Exception as e:
+                logger.error(f"Communication error with Deep Docs MCP: {e}")
+                return f"Error: Documentation fetch failed: {str(e)}"
+
 # ============================================================================ 
 # Configuration
 # ============================================================================ 
@@ -188,6 +290,24 @@ To run commands on the client, you MUST use this specific protocol:
    final_answer("<<<WEB_SEARCH>>>\nSearch Query\n<<<WEB_SEARCH>>>")
    </code>
    Use this to look up up-to-date information, documentation, or solve errors you don't know about.
+
+7. APPLE DOCUMENTATION (Cupertino MCP):
+   <code>
+   final_answer("<<<CUPERTINO>>>\nAPI or Framework Name\n<<<CUPERTINO>>>")
+   </code>
+   Use this to search the local Apple Developer documentation on the user's macOS machine. This is the preferred source for Metal 4, Swift, and Apple platform APIs. Results are automatically indexed for RAG.
+
+8. APPLE DEEP SEARCH (Server-side MCP):
+   <code>
+   final_answer("<<<APPLE_DEEP_DOCS>>>\n{\"tool\": \"TOOL_NAME\", \"arguments\": {\"arg\": \"val\"}}\n<<<APPLE_DEEP_DOCS>>>")
+   </code>
+   Use this for advanced Apple documentation searches on the server. Available tools:
+   - fetch_apple_documentation: {"url": "https://developer.apple.com/..."}
+   - search_apple_online: {"query": "term"}
+   - search_swift_evolution: {"feature": "term"}
+   - search_swift_repos: {"query": "term"}
+   - search_wwdc_notes: {"query": "term"}
+   - search_human_interface_guidelines: {"query": "term"}
 
 # WORKFLOW FOR BUILDS/LONG TASKS
 1. Start with REMOTE_EXEC_ASYNC.
@@ -544,11 +664,12 @@ def build_stream_chunk(completion_id: str, model_id: str, content: Optional[str]
 model_manager = ModelManager()
 memory_service = None
 web_search_service = None
+apple_deep_docs_service = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifecycle manager for the FastAPI app"""
-    global memory_service, web_search_service
+    global memory_service, web_search_service, apple_deep_docs_service
     
     # Startup
     logger.info("Server starting up...")
@@ -571,10 +692,25 @@ async def lifespan(app: FastAPI):
         logger.error(f"Failed to initialize web search service: {e}")
         web_search_service = None
 
+    # Initialize Apple Deep Docs Service
+    try:
+        logger.info("Initializing Apple Deep Docs Service...")
+        mcp_path = os.path.join(os.getcwd(), "tools/appledeepdoc-mcp")
+        apple_deep_docs_service = AppleDeepDocsService(mcp_path)
+        if apple_deep_docs_service.start():
+            logger.info("Apple Deep Docs Service initialized successfully")
+        else:
+            logger.error("Apple Deep Docs Service failed to start")
+    except Exception as e:
+        logger.error(f"Failed to initialize Apple Deep Docs Service: {e}")
+        apple_deep_docs_service = None
+
     yield
     # Shutdown
     logger.info("Server shutting down - unloading models...")
     model_manager.unload_model()
+    if apple_deep_docs_service:
+        apple_deep_docs_service.stop()
     logger.info("Server shutdown complete.")
 
 app = FastAPI(
@@ -583,8 +719,6 @@ app = FastAPI(
     version="2.0",
     lifespan=lifespan
 )
-# Memory Service and Web Search Service are now initialized in lifespan
-
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
@@ -669,6 +803,22 @@ async def web_search(request: SearchRequest):
         raise HTTPException(status_code=503, detail="Web search service not initialized")
         
     result = web_search_service.search(request.query)
+    return {"result": result}
+
+
+class DeepDocRequest(BaseModel):
+    """Request for Apple Deep Docs"""
+    tool: str
+    arguments: Dict[str, Any]
+
+
+@app.post("/v1/tools/apple_deep_docs")
+async def apple_deep_docs(request: DeepDocRequest):
+    """Perform an Apple Documentation search using the server-side MCP"""
+    if not apple_deep_docs_service:
+        raise HTTPException(status_code=503, detail="Apple Deep Docs service not initialized")
+        
+    result = apple_deep_docs_service.call_tool(request.tool, request.arguments)
     return {"result": result}
 
 

@@ -36,6 +36,7 @@ LINUX_SERVER_IP = os.getenv("QWEN_SERVER_IP", "192.168.50.101")
 API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/chat/completions"
 MEMORY_API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/memory"
 SEARCH_API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/tools/search"
+DEEP_DOCS_API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/tools/apple_deep_docs"
 UNLOAD_API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/admin/unload"
 HEALTH_URL = f"http://{LINUX_SERVER_IP}:5000/health"
 
@@ -58,7 +59,7 @@ AGENT_THEMES = {
     "architect":   {"color": COLORS['HEADER'], "icon": "🏗️", "prompt": "Architect", "desc": "System Design (Qwen3-32B)"},
     "reviewer":    {"color": COLORS['CYAN'], "icon": "🔍", "prompt": "Reviewer", "desc": "Detailed Code Review (Qwen3-14B)"},
     "debugger":    {"color": COLORS['FAIL'], "icon": "🐞", "prompt": "Debugger", "desc": "Advanced Debugging (Qwen3-14B)"},
-    "metal_implementer": {"color": COLORS['BLUE'], "icon": "🤘", "prompt": "Metal", "desc": "Specialized Metal 4 & Compute (Qwen3-14B)"},
+    "metal_implementer": {"color": COLORS['BLUE'], "icon": "🤘", "prompt": "Metal", "desc": "Specialized Metal 4 & Compute + Apple Docs (Qwen3-14B)"},
 }
 
 def cleanup_server_resources():
@@ -899,6 +900,137 @@ def web_search(query):
         return f"Error searching: {str(e)}"
 
 
+class CupertinoMCPClient:
+    """Client for interacting with the Cupertino MCP server on macOS"""
+    
+    def __init__(self):
+        self.process = None
+        self.msg_id = 1
+        self.lock = threading.Lock()
+
+    def start(self):
+        """Start the Cupertino MCP server process"""
+        if self.process and self.process.poll() is None:
+            return True
+            
+        try:
+            # Find cupertino executable
+            cupertino_path = subprocess.check_output(["which", "cupertino"], text=True).strip()
+            if not cupertino_path:
+                return False
+                
+            self.process = subprocess.Popen(
+                [cupertino_path, "serve"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1
+            )
+            return True
+        except Exception as e:
+            print_colored(f"Error starting Cupertino MCP: {e}", COLORS['FAIL'])
+            return False
+
+    def _send_request(self, method, params):
+        """Send a JSON-RPC request to the MCP server and wait for response"""
+        if not self.start():
+            return {"error": "Cupertino MCP not found or failed to start"}
+            
+        with self.lock:
+            req_id = self.msg_id
+            self.msg_id += 1
+            
+            request = {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "method": method,
+                "params": params
+            }
+            
+            try:
+                self.process.stdin.write(json.dumps(request) + "\n")
+                self.process.stdin.flush()
+                
+                # Wait for response line
+                line = self.process.stdout.readline()
+                if not line:
+                    return {"error": "No response from Cupertino MCP"}
+                    
+                response = json.loads(line)
+                if response.get("id") == req_id:
+                    return response.get("result", {})
+                return {"error": "Response ID mismatch"}
+            except Exception as e:
+                return {"error": f"Communication error: {e}"}
+
+    def search(self, query):
+        """Search Apple documentation using the MCP tool"""
+        # Cupertino usually exposes tools. Let's try the 'search_docs' tool.
+        # Format based on standard MCP tool invocation
+        params = {
+            "name": "search_docs",
+            "arguments": {"query": query}
+        }
+        return self._send_request("tools/call", params)
+
+    def read_resource(self, uri):
+        """Read a specific documentation resource"""
+        return self._send_request("resources/read", {"uri": uri})
+
+cupertino_client = CupertinoMCPClient()
+
+
+def handle_cupertino_search(query):
+    """Execute search via Cupertino MCP and save to server memory"""
+    print_colored(f"Searching Apple Documentation for: {query}...", COLORS['BLUE'])
+    
+    result = cupertino_client.search(query)
+    if "error" in result:
+        error_msg = f"Cupertino Error: {result['error']}"
+        print_colored(error_msg, COLORS['FAIL'])
+        return error_msg
+        
+    # Process results (Cupertino results are typically tool-call output objects)
+    # result['content'] is usually a list of text objects
+    content_list = result.get("content", [])
+    text_results = []
+    for item in content_list:
+        if item.get("type") == "text":
+            text_results.append(item.get("text", ""))
+            
+    combined_results = "\n\n".join(text_results)
+    if not combined_results:
+        return "No documentation found for that query."
+        
+    # Save the retrieved docs to the Linux server's memory for future grounding
+    print_colored("Saving retrieved documentation to server memory...", COLORS['CYAN'])
+    save_memory(f"Apple Documentation ({query}):\n{combined_results[:5000]}") # Save first 5k chars
+    
+    return f"Retrieved Apple Documentation for '{query}':\n\n{combined_results}"
+
+
+def apple_deep_docs_search(payload_str):
+    """Send a deep doc search query to the server"""
+    try:
+        payload = json.loads(payload_str)
+        tool = payload.get("tool")
+        args = payload.get("arguments", {})
+        
+        print_colored(f"Calling Apple Deep Docs ({tool}): {args}", COLORS['CYAN'])
+        
+        response = requests.post(DEEP_DOCS_API_URL, json=payload, timeout=60)
+        if response.status_code == 200:
+            result = response.json().get("result", "No results")
+            # Save to memory for grounding
+            save_memory(f"Apple Deep Doc ({tool}): {str(args)}\n{result[:5000]}")
+            return f"Apple Deep Docs Result ({tool}):\n{result}"
+        else:
+            return f"Failed to call Deep Docs: {response.text}"
+    except Exception as e:
+        return f"Error in Deep Docs call: {str(e)}"
+
+
 def process_remote_commands(response_text: str) -> Optional[str]:
     """Process remote command markers in agent response"""
     # Note: We do NOT use decode_escape_sequences here because json.loads in the main loop
@@ -923,6 +1055,12 @@ def process_remote_commands(response_text: str) -> Optional[str]:
          True),
         (r'<<<WEB_SEARCH>>>\s*(.*?)\s*<<<WEB_SEARCH>>>',
          lambda query: web_search(query.strip()),
+         True),
+        (r'<<<CUPERTINO>>>\s*(.*?)\s*<<<CUPERTINO>>>',
+         lambda query: handle_cupertino_search(query.strip()),
+         True),
+        (r'<<<APPLE_DEEP_DOCS>>>\s*(.*?)\s*<<<APPLE_DEEP_DOCS>>>',
+         lambda payload: apple_deep_docs_search(payload.strip()),
          True),
         (r'<<<REMOTE_LIST_JOBS>>>',
          lambda _: list_all_jobs(),
@@ -966,7 +1104,7 @@ def chat(model="implementer"):
     else:
         print_colored("  Command approval: Manual (will prompt for each command)", COLORS['GREEN'])
 
-    print_colored("\nCommands: /exit, /model <name>, /history, /history clear", COLORS['BLUE'])
+    print_colored("\nCommands: /exit, /model <name>, /history, /history clear, /cupertino <query>, /apple <tool> <args_json>", COLORS['BLUE'])
     if READLINE_AVAILABLE:
         print_colored("Use ↑/↓ arrows to navigate history. History saved to ~/.qwen_client_history\n", COLORS['BLUE'])
     else:
@@ -1018,6 +1156,26 @@ def chat(model="implementer"):
                 continue
             if user_input.lower() in ['/exit', '/quit']:
                 break
+
+            # Apple Documentation Search (Cupertino MCP)
+            if user_input.lower().startswith('/cupertino '):
+                query = user_input.split(' ', 1)[1]
+                result = handle_cupertino_search(query)
+                print_colored(f"\n{result}\n", COLORS['GREEN'])
+                continue
+
+            # Apple Deep Docs Search (Server-side MCP)
+            if user_input.lower().startswith('/apple '):
+                parts = user_input.split(' ', 2)
+                if len(parts) < 2:
+                    print_colored("Usage: /apple <tool_name> [args_json]", COLORS['FAIL'])
+                    continue
+                tool = parts[1]
+                args = parts[2] if len(parts) > 2 else "{}"
+                payload = json.dumps({"tool": tool, "arguments": json.loads(args)})
+                result = apple_deep_docs_search(payload)
+                print_colored(f"\n{result}\n", COLORS['GREEN'])
+                continue
 
             # History management commands
             if user_input.lower() == '/history':
