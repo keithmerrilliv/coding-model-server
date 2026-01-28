@@ -136,6 +136,11 @@ class SearchRequest(BaseModel):
     query: str
 
 
+class IngestRequest(BaseModel):
+    """Request to ingest a local file"""
+    path: str
+
+
 import subprocess
 import shlex
 from threading import Lock
@@ -880,6 +885,19 @@ async def apple_deep_docs(request: DeepDocRequest):
         
     result = apple_deep_docs_service.call_tool(request.tool, request.arguments)
     return {"result": result}
+
+
+@app.post("/v1/memory/ingest")
+async def ingest_memory(request: IngestRequest):
+    """Ingest a local PDF file into long-term memory"""
+    if not memory_service:
+        raise HTTPException(status_code=503, detail="Memory service not initialized")
+        
+    result = memory_service.ingest_pdf(request.path)
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+        
+    return result
 
 
 @app.post("/v1/admin/unload")
