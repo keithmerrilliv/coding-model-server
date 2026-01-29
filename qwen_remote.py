@@ -920,6 +920,23 @@ def process_remote_commands(response_text: str) -> Optional[str]:
     return "\n\n".join(results) if results else None
 
 
+def extract_fallback_commands(response_text: str) -> List[str]:
+    """Extract shell commands from markdown code blocks when <<<REMOTE_EXEC>>> markers are missing.
+
+    Catches the common failure mode where the model writes a correct command
+    inside a fenced code block instead of using the marker protocol.
+    """
+    commands = []
+
+    # Match fenced code blocks: ```bash ... ```, ```shell ... ```, ```sh ... ```, or plain ``` ... ```
+    for m in re.finditer(r'```(?:bash|shell|sh|zsh)?\s*\n(.+?)```', response_text, re.DOTALL):
+        block = m.group(1).strip()
+        if block:
+            commands.append(block)
+
+    return commands
+
+
 def get_completion(history, model, agent_theme, headers):
     """Internal helper to get a completion from the server with full error handling and streaming"""
     full_response = ""
@@ -1355,13 +1372,43 @@ def chat(model="implementer"):
                     history.append({"role": "assistant", "content": response_text})
                     save_chat_history(history, model)
     
-                    # Process tool markers (executes ALL commands in the response)
+                    # ── Execute commands found in the response ──
                     tool_output = process_remote_commands(response_text)
+
                     if tool_output:
+                        # Happy path: model used <<<REMOTE_EXEC>>> markers correctly
                         cmd_count = tool_output.count("[Command ")
                         label = f"{cmd_count} command(s) executed" if cmd_count > 1 else "Tool result"
                         print_colored(f"\n{label}. Sending output back to agent...", COLORS['CYAN'])
                         history.append({"role": "user", "content": f"Tool output:\n{tool_output}", "auto_send": True})
+                        break
+
+                    # Fallback: model wrote commands in code blocks instead of markers
+                    fallback_cmds = extract_fallback_commands(response_text)
+                    if fallback_cmds:
+                        print_colored("\nAgent used code blocks instead of markers. Extracting commands...", COLORS['WARNING'])
+                        results = []
+                        for i, cmd in enumerate(fallback_cmds):
+                            result = execute_remote_command(cmd.strip())
+                            if result:
+                                results.append(f"[Command {i+1}] {result}")
+                        if results:
+                            combined = "\n\n".join(results)
+                            print_colored(f"\n{len(results)} fallback command(s) executed. Sending output back to agent...", COLORS['CYAN'])
+                            history.append({"role": "user", "content": f"Tool output:\n{combined}", "auto_send": True})
+                            break
+
+                    # Last resort: no commands at all — auto-retry once
+                    # Check the user message (history[-2]) to see if we already retried
+                    already_retried = len(history) >= 2 and history[-2].get("_retried")
+                    if not already_retried:
+                        print_colored("\nAgent gave advice instead of executing. Retrying...", COLORS['WARNING'])
+                        history.append({
+                            "role": "user",
+                            "content": "You did not execute any commands. Do not explain — act. Use <<<REMOTE_EXEC>>> blocks to perform the task now.",
+                            "auto_send": True,
+                            "_retried": True,
+                        })
                         break
                         
             except KeyboardInterrupt:

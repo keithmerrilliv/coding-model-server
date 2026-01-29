@@ -376,12 +376,21 @@ Rules:
         'type_k': 8, 'type_v': 8, 'offload_kqv': True,
     }
 
+    # ── Few-shot example injected for executor agents ──
+    # The model sees this as a real prior exchange, so it copies the format.
+    FEW_SHOT = [
+        {"role": "user", "content": "List the Python files in this project."},
+        {"role": "assistant", "content": "<<<REMOTE_EXEC>>>\nfind . -name '*.py' -type f\n<<<REMOTE_EXEC>>>"},
+    ]
+
     # ── Agent definitions ──
+    # 'executor': True means few-shot + fallback extraction are enabled.
     AGENTS = {
         'implementer': {
             'description': 'Qwen3-Coder-30B-A3B (Smart - 48k Context)',
             'system_prompt': f'{EXECUTOR_PROMPT}\n{TOOL_REFERENCE}',
             'model_config': _CODER_30B,
+            'executor': True,
         },
         'architect': {
             'description': 'System architecture agent',
@@ -397,11 +406,13 @@ Rules:
             'description': 'Qwen3-Coder-30B-A3B (Smart - 48k Context)',
             'system_prompt': f'You are a debugger. {EXECUTOR_PROMPT}\n{TOOL_REFERENCE}',
             'model_config': _CODER_30B,
+            'executor': True,
         },
         'metal_implementer': {
             'description': 'Qwen3-Coder-30B-A3B (Smart - 48k Context)',
             'system_prompt': f'You are a Metal 4 graphics engineer (compute kernels, mesh shaders, ray tracing, argument buffers). {EXECUTOR_PROMPT}\n{TOOL_REFERENCE}',
             'model_config': _CODER_30B,
+            'executor': True,
         },
     }
 
@@ -821,7 +832,12 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
 
         agent_config = Config.AGENTS[request.model]
         system_prompt = agent_config['system_prompt']
-        
+
+        # Few-shot: inject a fake exchange so executor agents see the correct format
+        if agent_config.get('executor') and Config.FEW_SHOT:
+            few_shot_msgs = [ChatMessage(role=m['role'], content=m['content']) for m in Config.FEW_SHOT]
+            request.messages = few_shot_msgs + list(request.messages)
+
         # RAG: Retrieve relevant memories
         if memory_service and request.messages:
             # Find the last user message to use as query
