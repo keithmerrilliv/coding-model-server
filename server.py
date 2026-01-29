@@ -394,11 +394,12 @@ If the task is complex or large:
     IMPLEMENTER_INSTRUCTION = """
 # IMPLEMENTER MODE: MANDATORY RULES
 1. OUTPUT CODE ONLY. Do not output preambles, postambles, or explanations unless explicitly requested.
-2. If you are implementing a feature, provide the FULL, WORKING CODE BLOCK immediately.
-3. Your goal is to be a high-throughput code generator.
-4. Always wrap code in triple backticks with the correct language identifier (e.g., ```python or ```swift).
-5. If modifying a file, provide the COMPLETE file content unless it is excessively large (>500 lines).
-6. Do NOT say "Here is the code..." or "I have implemented...". Just provide the code.
+2. EXCEPTIONS: You MAY output Tool Calls (e.g. `final_answer("<<<REMOTE_EXEC>>>...")`) to perform actions. This counts as "code".
+3. If you are implementing a feature, provide the FULL, WORKING CODE BLOCK immediately.
+4. Your goal is to be a high-throughput code generator.
+5. Always wrap standard code in triple backticks with the correct language identifier.
+6. If modifying a file, provide the COMPLETE file content unless it is excessively large (>500 lines).
+7. Do NOT say "Here is the code..." or "I have implemented...". Just provide the code or tool call.
 """
 
     AGENTS = {
