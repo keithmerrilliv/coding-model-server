@@ -395,21 +395,22 @@ If the task is complex or large:
 # IMPLEMENTER MODE: MANDATORY RULES
 1. OUTPUT CODE ONLY. Do not output preambles, postambles, or explanations unless explicitly requested.
 2. EXCEPTIONS: You MAY output Tool Calls (e.g. `final_answer("<<<REMOTE_EXEC>>>...")`) to perform actions. This counts as "code".
-3. If you are implementing a feature, provide the FULL, WORKING CODE BLOCK immediately.
-4. Your goal is to be a high-throughput code generator.
-5. Always wrap standard code in triple backticks with the correct language identifier.
-6. If modifying a file, provide the COMPLETE file content unless it is excessively large (>500 lines).
-7. Do NOT say "Here is the code..." or "I have implemented...". Just provide the code or tool call.
+3. CHUNKING: You have a 32k context limit. Do not read or write massive files in one go. Read relevant sections using `sed` or `grep`, and apply changes in small, verified chunks.
+4. EXPLORATION: BEFORE writing code, you MUST explore the codebase. Use `ls -R`, `find`, and `grep` to locate relevant files. verify file paths before editing.
+5. If you are implementing a feature, provide the FULL, WORKING CODE BLOCK for the specific chunk you are working on.
+6. Your goal is to be a high-throughput code generator.
+7. Always wrap standard code in triple backticks with the correct language identifier.
+8. Do NOT say "Here is the code..." or "I have implemented...". Just provide the code or tool call.
 """
 
     AGENTS = {
         'implementer': {
-            'description': 'DeepSeek-R1-Distill-Qwen-7B (128k Context)',
+            'description': 'Qwen3-Coder-30B-A3B (Smart - 32k Context)',
             'system_prompt': f'You are an elite code generator. {IMPLEMENTER_INSTRUCTION}\n{REMOTE_EXEC_INSTRUCTION}',
             'model_config': {
-                'path': '/home/keith-merrill/.lmstudio/models/unsloth/DeepSeek-R1-Distill-Qwen-7B-GGUF/DeepSeek-R1-Distill-Qwen-7B-Q4_K_M.gguf',
+                'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
                 'n_gpu_layers': 99,
-                'n_ctx': 131072, # 128k Context for ICL
+                'n_ctx': 32768, # 32k Context
                 'n_batch': 2048,
                 'rope_scaling_type': 2,
                 'rope_freq_scale': 1.0,
@@ -418,8 +419,8 @@ If the task is complex or large:
                 'yarn_beta_fast': 32.0,
                 'yarn_beta_slow': 1.0,
                 'yarn_orig_ctx': 32768,
-                'type_k': 1, # FP16 for stability
-                'type_v': 1, # FP16 for stability
+                'type_k': 8, # Q8 Cache for quality
+                'type_v': 8, # Q8 Cache for quality
                 'offload_kqv': True
             }
         },
@@ -464,12 +465,12 @@ If the task is complex or large:
             }
         },
         'debugger': {
-            'description': 'DeepSeek-R1-Distill-Qwen-7B (128k Context)',
+            'description': 'Qwen3-Coder-30B-A3B (Smart - 32k Context)',
             'system_prompt': f'You are a master of debugging. {IMPLEMENTER_INSTRUCTION}\n{REMOTE_EXEC_INSTRUCTION}',
             'model_config': {
-                'path': '/home/keith-merrill/.lmstudio/models/unsloth/DeepSeek-R1-Distill-Qwen-7B-GGUF/DeepSeek-R1-Distill-Qwen-7B-Q4_K_M.gguf',
+                'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
                 'n_gpu_layers': 99,
-                'n_ctx': 131072, # 128k Context
+                'n_ctx': 32768, # 32k Context
                 'n_batch': 2048,
                 'rope_scaling_type': 2,
                 'rope_freq_scale': 1.0,
@@ -478,13 +479,13 @@ If the task is complex or large:
                 'yarn_beta_fast': 32.0,
                 'yarn_beta_slow': 1.0,
                 'yarn_orig_ctx': 32768,
-                'type_k': 1,
-                'type_v': 1,
+                'type_k': 8,
+                'type_v': 8,
                 'offload_kqv': True
             }
         },
         'metal_implementer': {
-            'description': 'DeepSeek-R1-Distill-Qwen-7B (128k Context)',
+            'description': 'Qwen3-Coder-30B-A3B (Smart - 32k Context)',
             'system_prompt': f"""You are an elite Graphics Programming Engine specializing in Apple Metal 4.
 {IMPLEMENTER_INSTRUCTION}
 
@@ -495,9 +496,9 @@ Your core expertise covers:
 
 {REMOTE_EXEC_INSTRUCTION}""",
             'model_config': {
-                'path': '/home/keith-merrill/.lmstudio/models/unsloth/DeepSeek-R1-Distill-Qwen-7B-GGUF/DeepSeek-R1-Distill-Qwen-7B-Q4_K_M.gguf',
+                'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
                 'n_gpu_layers': 99,
-                'n_ctx': 131072, # 128k Context for ICL
+                'n_ctx': 32768, # 32k Context
                 'n_batch': 2048,
                 'rope_scaling_type': 2,
                 'rope_freq_scale': 1.0,
@@ -506,8 +507,8 @@ Your core expertise covers:
                 'yarn_beta_fast': 32.0,
                 'yarn_beta_slow': 1.0,
                 'yarn_orig_ctx': 32768,
-                'type_k': 1,
-                'type_v': 1,
+                'type_k': 8,
+                'type_v': 8,
                 'offload_kqv': True
             }
         }
