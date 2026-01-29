@@ -15,6 +15,7 @@ import threading
 import uuid
 import atexit
 import time
+import tempfile
 from datetime import datetime
 from collections import deque
 from typing import Optional, List
@@ -596,16 +597,62 @@ def execute_remote_command(command, async_mode=False):
 
     else:
         try:
+            # Create a temp file to capture output
+            # We keep it if output is large so the agent can inspect it later
+            with tempfile.NamedTemporaryFile(mode='w+', delete=False, prefix='qwen_cmd_', suffix='.log') as tmp:
+                tmp_path = tmp.name
+
+            # Run process redirecting stdout/stderr to the temp file
             if ALLOW_SHELL_MODE:
-                result = subprocess.run(command, shell=True, capture_output=True, text=True, errors='replace', timeout=240)
+                with open(tmp_path, 'w') as f:
+                    result = subprocess.run(command, shell=True, stdout=f, stderr=subprocess.STDOUT, text=True, errors='replace', timeout=240)
             else:
                 command_args = parse_command_safely(command)
                 command_args = expand_paths_in_args(command_args)
-                result = subprocess.run(command_args, shell=False, capture_output=True, text=True, errors='replace', timeout=240)
+                with open(tmp_path, 'w') as f:
+                    result = subprocess.run(command_args, shell=False, stdout=f, stderr=subprocess.STDOUT, text=True, errors='replace', timeout=240)
 
-            output = result.stdout + result.stderr
-            print_colored(f"Output:\n{output}", COLORS['CYAN'])
-            return f"Command executed successfully.\nExit Code: {result.returncode}\nOutput:\n{output}"
+            # Analyze output file
+            MAX_DISPLAY_CHARS = 12000 # ~3k tokens safe limit
+            with open(tmp_path, 'r', errors='replace') as f:
+                content = f.read()
+            
+            output_len = len(content)
+            
+            if output_len > MAX_DISPLAY_CHARS:
+                head = content[:4000]
+                tail = content[-4000:]
+                
+                # Simple grep for errors/warnings in the truncated middle
+                middle = content[4000:-4000]
+                error_lines = []
+                for line in middle.splitlines():
+                    if 'error' in line.lower() or 'fail' in line.lower() or 'warning' in line.lower():
+                        error_lines.append(line.strip())
+                
+                summary = "\n".join(error_lines[:20]) # Limit summary size
+                if len(error_lines) > 20:
+                    summary += f"\n... ({len(error_lines) - 20} more error lines omitted) ..."
+                
+                final_output = (
+                    f"{head}\n"
+                    f"\n... [OUTPUT TRUNCATED: {output_len} chars total] ...\n"
+                    f"... [Full log preserved at: {tmp_path}] ...\n"
+                    f"... [Summary of hidden errors/warnings]:\n{summary}\n"
+                    f"\n... [TAIL] ...\n"
+                    f"{tail}"
+                )
+            else:
+                final_output = content
+                # If small enough, clean up the temp file to reduce clutter
+                try:
+                    os.remove(tmp_path)
+                except:
+                    pass
+
+            print_colored(f"Output:\n{final_output}", COLORS['CYAN'])
+            return f"Command executed successfully.\nExit Code: {result.returncode}\nOutput:\n{final_output}"
+
         except subprocess.TimeoutExpired:
             return "Command timed out (240s limit for sync commands). Consider using async mode for long-running commands."
         except Exception as e:
