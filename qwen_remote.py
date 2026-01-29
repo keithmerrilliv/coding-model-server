@@ -854,12 +854,17 @@ def apple_deep_docs_search(tool, args):
 
 
 def process_remote_commands(response_text: str) -> Optional[str]:
-    """Process remote command markers in agent response"""
+    """Process ALL remote command markers in agent response.
+
+    Finds and executes every tool marker in the response, in order of appearance.
+    Returns aggregated output from all commands, or None if no markers found.
+    """
     # Note: We do NOT use decode_escape_sequences here because json.loads in the main loop
     # has already handled standard JSON escapes. Further decoding breaks code that relies on
     # literal escape sequences (e.g. print("a\\nb")).
-    
-    commands = [
+
+    # Define all command patterns with their handlers
+    command_defs = [
         (r'<<<REMOTE_EXEC_ASYNC>>>\s*(.*?)\s*<<<REMOTE_EXEC_ASYNC>>>',
          lambda cmd: execute_remote_command(cmd.strip(), async_mode=True),
          True),
@@ -889,13 +894,30 @@ def process_remote_commands(response_text: str) -> Optional[str]:
          False),
     ]
 
-    for pattern, handler, has_capture in commands:
-        match = re.search(pattern, response_text, re.DOTALL)
-        if match:
-            arg = match.group(1) if has_capture else None
-            return handler(arg)
+    # Find ALL matches across all command types, sorted by position in the response
+    all_matches = []
+    for pattern, handler, has_capture in command_defs:
+        for match in re.finditer(pattern, response_text, re.DOTALL):
+            all_matches.append((match.start(), match, handler, has_capture))
 
-    return None
+    if not all_matches:
+        return None
+
+    # Sort by position in the response text (execute in order of appearance)
+    all_matches.sort(key=lambda x: x[0])
+
+    # Execute all commands and aggregate results
+    results = []
+    for i, (_, match, handler, has_capture) in enumerate(all_matches):
+        arg = match.group(1) if has_capture else None
+        try:
+            result = handler(arg)
+            if result:
+                results.append(f"[Command {i+1}] {result}")
+        except Exception as e:
+            results.append(f"[Command {i+1}] Error: {str(e)}")
+
+    return "\n\n".join(results) if results else None
 
 
 def get_completion(history, model, agent_theme, headers):
@@ -1333,10 +1355,12 @@ def chat(model="implementer"):
                     history.append({"role": "assistant", "content": response_text})
                     save_chat_history(history, model)
     
-                    # Process tool markers
+                    # Process tool markers (executes ALL commands in the response)
                     tool_output = process_remote_commands(response_text)
                     if tool_output:
-                        print_colored(f"\nTool Result: {tool_output[:200]}...", COLORS['CYAN'])
+                        cmd_count = tool_output.count("[Command ")
+                        label = f"{cmd_count} command(s) executed" if cmd_count > 1 else "Tool result"
+                        print_colored(f"\n{label}. Sending output back to agent...", COLORS['CYAN'])
                         history.append({"role": "user", "content": f"Tool output:\n{tool_output}", "auto_send": True})
                         break
                         
