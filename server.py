@@ -142,13 +142,8 @@ class IngestRequest(BaseModel):
 
 
 import subprocess
-import shlex
-from threading import Lock
-from contextlib import asynccontextmanager
 
-# ... (existing imports)
-
-# ============================================================================ 
+# ============================================================================
 # Apple Deep Docs Service (MCP Integration)
 # ============================================================================ 
 

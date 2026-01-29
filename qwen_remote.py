@@ -437,33 +437,6 @@ def ingest_pdf(path):
         return f"Error ingesting PDF: {str(e)}"
 
 
-def decode_escape_sequences(text: str) -> str:
-    """Decode JSON-style escape sequences in text
-    
-    CRITICAL: We do NOT decode \\" or \\' because that breaks shell commands 
-    that use escaped quotes for nesting (e.g. python -c "print(\"hi\")").
-    We DO decode \\n, \\t, etc. to ensure multi-line commands format correctly.
-    """
-    replacements = [
-        ('\\\\', '\x00'),  # Temporarily replace \\ with null char
-        ('\\n', '\n'),
-        ('\\t', '\t'),
-        ('\\r', '\r'),
-        ('\\b', '\b'),
-        ('\\f', '\f'),
-        ('\\v', '\v'),
-        # ('\\"', '"'),  <-- REMOVED: Breaks shell quoting
-        # ("\\'", "'"),  <-- REMOVED: Breaks shell quoting
-        ('\x00', '\\'),    # Replace null char back with single backslash
-    ]
-
-    result = text
-    for escaped, unescaped in replacements:
-        result = result.replace(escaped, unescaped)
-
-    return result
-
-
 def parse_command_safely(command: str) -> List[str]:
     """Parse command string into argument list safely"""
     if not ALLOW_SHELL_MODE:
@@ -538,7 +511,6 @@ def run_command_async(job_id, command):
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
-                universal_newlines=True
             )
         else:
             command_args = parse_command_safely(command)
@@ -550,7 +522,6 @@ def run_command_async(job_id, command):
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
-                universal_newlines=True
             )
 
         job_tracker.update_job(job_id, process=process)
@@ -859,10 +830,6 @@ def process_remote_commands(response_text: str) -> Optional[str]:
     Finds and executes every tool marker in the response, in order of appearance.
     Returns aggregated output from all commands, or None if no markers found.
     """
-    # Note: We do NOT use decode_escape_sequences here because json.loads in the main loop
-    # has already handled standard JSON escapes. Further decoding breaks code that relies on
-    # literal escape sequences (e.g. print("a\\nb")).
-
     # Define all command patterns with their handlers
     command_defs = [
         (r'<<<REMOTE_EXEC_ASYNC>>>\s*(.*?)\s*<<<REMOTE_EXEC_ASYNC>>>',
@@ -1221,9 +1188,7 @@ def chat(model="implementer"):
                     agent_theme = AGENT_THEMES[model]
                     print_colored(f"\nSwitched to agent: {model} {agent_theme['icon']}", COLORS['WARNING'])
                     print_colored(f"Description: {agent_theme['desc']}", COLORS['BLUE'])
-                    
 
-                    
                     # If there's content after the mention, update user_input to be that content
                     # effectively switching AND sending in one go.
                     if len(parts) > 1:
@@ -1319,7 +1284,6 @@ def chat(model="implementer"):
             try:
                 # Split input by @mentions while keeping the mentions
                 # segments example: ['Initial ', '@architect', ' design ', '@implementer', ' code']
-                import re
                 segments = re.split(r'(@\w+)', user_input)
                 
                 # Tasks: list of (agent_name, message_content)
