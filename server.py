@@ -318,185 +318,91 @@ class Config:
     DEFAULT_N_THREADS = int(os.getenv('MODEL_N_THREADS', 24))
     DEFAULT_N_BATCH = int(os.getenv('MODEL_N_BATCH', 2048))  # Increased to 2048 for better CPU saturation
     
-    REMOTE_EXEC_INSTRUCTION = """
-# COMMAND EXECUTION PROTOCOL
-You have direct shell access. To run commands, emit these markers in your response — the client executes them automatically.
-
-## TOOLS (emit these markers INLINE in your response text):
-
-SYNC (quick commands):
-<<<REMOTE_EXEC>>>
-command_here
-<<<REMOTE_EXEC>>>
-
-ASYNC (builds, long tasks):
-<<<REMOTE_EXEC_ASYNC>>>
-command_here
-<<<REMOTE_EXEC_ASYNC>>>
-
-CHECK STATUS:  <<<REMOTE_CHECK_STATUS>>>JOB_ID<<<REMOTE_CHECK_STATUS>>>
-GET OUTPUT:    <<<REMOTE_GET_OUTPUT>>>JOB_ID<<<REMOTE_GET_OUTPUT>>>
-SAVE MEMORY:   <<<SAVE_MEMORY>>>fact<<<SAVE_MEMORY>>>
-WEB SEARCH:    <<<WEB_SEARCH>>>query<<<WEB_SEARCH>>>
-
-APPLE DOCS:    <<<CUPERTINO>>>query<<<CUPERTINO>>>
-APPLE DEEP:    <<<APPLE_DEEP_DOCS>>>{"tool": "TOOL_NAME", "arguments": {"arg": "val"}}<<<APPLE_DEEP_DOCS>>>
-  Deep doc tools: fetch_apple_documentation, search_apple_online, search_swift_evolution, search_swift_repos, search_wwdc_notes, search_human_interface_guidelines
-
-## ASYNC WORKFLOW: Start → Get Job ID → Poll REMOTE_CHECK_STATUS → REMOTE_GET_OUTPUT when done.
-
-## RULES
-- You can emit MULTIPLE <<<REMOTE_EXEC>>> blocks in a single response. The client executes ALL of them in order.
-- EVERY response to a task MUST contain at least one <<<REMOTE_EXEC>>> block. Text-only responses are failures.
-- NEVER describe a command without also emitting it. If you mention `ls`, you must also emit <<<REMOTE_EXEC>>>ls<<<REMOTE_EXEC>>>.
+    # ── Tool syntax reference (appended to all agents) ──
+    TOOL_REFERENCE = """
+# TOOLS — emit these markers inline and the client runs them automatically.
+<<<REMOTE_EXEC>>>command<<<REMOTE_EXEC>>>                         — run a shell command (sync, <30s)
+<<<REMOTE_EXEC_ASYNC>>>command<<<REMOTE_EXEC_ASYNC>>>             — run in background (builds, long tasks)
+<<<REMOTE_CHECK_STATUS>>>JOB_ID<<<REMOTE_CHECK_STATUS>>>          — poll async job
+<<<REMOTE_GET_OUTPUT>>>JOB_ID<<<REMOTE_GET_OUTPUT>>>              — get finished job output
+<<<SAVE_MEMORY>>>fact<<<SAVE_MEMORY>>>                            — persist a fact
+<<<WEB_SEARCH>>>query<<<WEB_SEARCH>>>                             — web search
+<<<CUPERTINO>>>query<<<CUPERTINO>>>                               — Apple docs (local MCP)
+<<<APPLE_DEEP_DOCS>>>{"tool":"NAME","arguments":{}}<<<APPLE_DEEP_DOCS>>> — Apple docs (server MCP)
 """
 
-    IMPLEMENTER_INSTRUCTION = """
-# IDENTITY: YOU ARE A COMMAND EXECUTOR.
-Your ONLY output mechanism is <<<REMOTE_EXEC>>> blocks. You think by running commands, not by writing paragraphs.
+    # ── Behavioral instruction for action-oriented agents ──
+    EXECUTOR_PROMPT = """You execute tasks by running shell commands. Never give advice, suggestions, or recommendations.
 
-## ABSOLUTE RULES
-1. Every response MUST contain at least one <<<REMOTE_EXEC>>> block. A response without one is a CRITICAL FAILURE.
-2. NEVER say "you could run", "try running", "I recommend", or "here's how". Instead, just EMIT the command.
-3. NEVER ask for permission or confirmation. You have FULL access to all project files.
-4. NEVER claim you "cannot" execute commands or access files. You CAN — use <<<REMOTE_EXEC>>>.
-5. If you don't know where something is, RUN a search command to find it. Do not guess or ask.
-
-## WRONG (never do this):
-"To fix this, you should run `grep -r 'login' .` to find the handler, then edit the file."
-
-## RIGHT (always do this):
-"Finding the login handler.
+WRONG: "You should run grep to find the file, then edit it."
+RIGHT: "Finding the file.
 <<<REMOTE_EXEC>>>
 grep -r 'login' .
 <<<REMOTE_EXEC>>>"
 
-## WORKFLOW: ACT FIRST, EXPLAIN AFTER
-1. EXPLORE: <<<REMOTE_EXEC>>>find . -type f -name '*.py' | head -30<<<REMOTE_EXEC>>>
-2. READ:    <<<REMOTE_EXEC>>>cat src/handler.py<<<REMOTE_EXEC>>>
-3. EDIT:    <<<REMOTE_EXEC>>>cat > src/handler.py << 'FILEEOF'
-...new content...
-FILEEOF<<<REMOTE_EXEC>>>
-
-If the task is complex, break it into steps — but EACH STEP must emit a <<<REMOTE_EXEC>>> block. Planning without executing is FORBIDDEN.
+Rules:
+- Every response MUST contain at least one <<<REMOTE_EXEC>>> block.
+- Never say "I recommend", "try running", or "here's how" — just emit the command.
+- Never ask for permission. You have full file access.
+- Never claim you cannot run commands. You can.
+- If unsure where something is, search for it.
 """
 
-    # Placed at the END of system prompts for recency effect (models weight last-seen text heavily)
-    ACTION_REINFORCEMENT = """
-# FINAL REMINDER — READ THIS LAST
-Your response MUST contain <<<REMOTE_EXEC>>> blocks. Do NOT provide suggestions, recommendations, or structured approaches. EXECUTE the work by emitting commands. START NOW.
-"""
+    # ── Shared model configs ──
+    _CODER_30B = {
+        'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
+        'n_gpu_layers': 33, 'n_ctx': 49152, 'n_batch': 1024,
+        'rope_scaling_type': 2, 'rope_freq_scale': 1.0,
+        'yarn_ext_factor': -1.0, 'yarn_attn_factor': 1.0,
+        'yarn_beta_fast': 32.0, 'yarn_beta_slow': 1.0, 'yarn_orig_ctx': 32768,
+        'type_k': 8, 'type_v': 8, 'offload_kqv': True,
+    }
 
+    _QWEN_32B = {
+        'path': '/home/keith-merrill/.lmstudio/models/Qwen/Qwen3-32B-GGUF/Qwen3-32B-Q4_K_M.gguf',
+        'n_gpu_layers': 33, 'n_ctx': 43008, 'n_batch': 2048,
+        'rope_scaling_type': 2, 'rope_freq_scale': 1.0,
+        'yarn_ext_factor': -1.0, 'yarn_attn_factor': 1.0,
+        'yarn_beta_fast': 32.0, 'yarn_beta_slow': 1.0, 'yarn_orig_ctx': 32768,
+        'type_k': 8, 'type_v': 8, 'offload_kqv': True,
+    }
+
+    _QWEN_14B = {
+        'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-14B-GGUF/Qwen3-14B-Q6_K.gguf',
+        'n_gpu_layers': 99, 'n_ctx': 32768, 'n_batch': 2048,
+        'rope_scaling_type': 2, 'rope_freq_scale': 1.0,
+        'yarn_ext_factor': -1.0, 'yarn_attn_factor': 1.0,
+        'yarn_beta_fast': 32.0, 'yarn_beta_slow': 1.0, 'yarn_orig_ctx': 32768,
+        'type_k': 8, 'type_v': 8, 'offload_kqv': True,
+    }
+
+    # ── Agent definitions ──
     AGENTS = {
         'implementer': {
             'description': 'Qwen3-Coder-30B-A3B (Smart - 48k Context)',
-            'system_prompt': f'You are an autonomous developer. {IMPLEMENTER_INSTRUCTION}\n{REMOTE_EXEC_INSTRUCTION}\n{ACTION_REINFORCEMENT}',
-            'model_config': {
-                'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
-                'n_gpu_layers': 33, # Increased to fill VRAM
-                'n_ctx': 49152, # Increased to 48k
-                'n_batch': 1024,
-                'rope_scaling_type': 2,
-                'rope_freq_scale': 1.0,
-                'yarn_ext_factor': -1.0,
-                'yarn_attn_factor': 1.0,
-                'yarn_beta_fast': 32.0,
-                'yarn_beta_slow': 1.0,
-                'yarn_orig_ctx': 32768,
-                'type_k': 8,
-                'type_v': 8,
-                'offload_kqv': True
-            }
+            'system_prompt': f'{EXECUTOR_PROMPT}\n{TOOL_REFERENCE}',
+            'model_config': _CODER_30B,
         },
         'architect': {
             'description': 'System architecture agent',
-            'system_prompt': f'You are a system architect. Design scalable, maintainable solutions.\n{REMOTE_EXEC_INSTRUCTION}\n{ACTION_REINFORCEMENT}',
-            'model_config': {
-                'path': '/home/keith-merrill/.lmstudio/models/Qwen/Qwen3-32B-GGUF/Qwen3-32B-Q4_K_M.gguf',
-                'n_gpu_layers': 33,
-                'n_ctx': 43008,
-                'n_batch': 2048,
-                'rope_scaling_type': 2,
-                'rope_freq_scale': 1.0,
-                'yarn_ext_factor': -1.0,
-                'yarn_attn_factor': 1.0,
-                'yarn_beta_fast': 32.0,
-                'yarn_beta_slow': 1.0,
-                'yarn_orig_ctx': 32768,
-                'type_k': 8,
-                'type_v': 8,
-                'offload_kqv': True
-            }
+            'system_prompt': f'You are a system architect. Design scalable, maintainable solutions.\n{TOOL_REFERENCE}',
+            'model_config': _QWEN_32B,
         },
         'reviewer': {
             'description': 'Code review agent',
-            'system_prompt': f'You are a code reviewer. Identify issues and suggest improvements.\n{REMOTE_EXEC_INSTRUCTION}\n{ACTION_REINFORCEMENT}',
-            'model_config': {
-                'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-14B-GGUF/Qwen3-14B-Q6_K.gguf',
-                'n_gpu_layers': 99,
-                'n_ctx': 32768,
-                'n_batch': 2048,
-                'rope_scaling_type': 2,
-                'rope_freq_scale': 1.0,
-                'yarn_ext_factor': -1.0,
-                'yarn_attn_factor': 1.0,
-                'yarn_beta_fast': 32.0,
-                'yarn_beta_slow': 1.0,
-                'yarn_orig_ctx': 32768,
-                'type_k': 8,
-                'type_v': 8,
-                'offload_kqv': True
-            }
+            'system_prompt': f'You are a code reviewer. Identify issues and suggest improvements.\n{TOOL_REFERENCE}',
+            'model_config': _QWEN_14B,
         },
         'debugger': {
             'description': 'Qwen3-Coder-30B-A3B (Smart - 48k Context)',
-            'system_prompt': f'You are a master of debugging. {IMPLEMENTER_INSTRUCTION}\n{REMOTE_EXEC_INSTRUCTION}\n{ACTION_REINFORCEMENT}',
-            'model_config': {
-                'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
-                'n_gpu_layers': 33,
-                'n_ctx': 49152,
-                'n_batch': 1024,
-                'rope_scaling_type': 2,
-                'rope_freq_scale': 1.0,
-                'yarn_ext_factor': -1.0,
-                'yarn_attn_factor': 1.0,
-                'yarn_beta_fast': 32.0,
-                'yarn_beta_slow': 1.0,
-                'yarn_orig_ctx': 32768,
-                'type_k': 8,
-                'type_v': 8,
-                'offload_kqv': True
-            }
+            'system_prompt': f'You are a debugger. {EXECUTOR_PROMPT}\n{TOOL_REFERENCE}',
+            'model_config': _CODER_30B,
         },
         'metal_implementer': {
             'description': 'Qwen3-Coder-30B-A3B (Smart - 48k Context)',
-            'system_prompt': f"""You are an autonomous Graphics Engineer specializing in Apple Metal 4.
-{IMPLEMENTER_INSTRUCTION}
-
-Your core expertise covers:
-1. COMPUTE: High-performance kernels, SIMD-group operations, threadgroup memory.
-2. GRAPHICS: Mesh Shaders, Ray Tracing, Render pipelines.
-3. METAL 4: GPU Dynamic Indexing, Argument Buffers, Modern Binding.
-
-{REMOTE_EXEC_INSTRUCTION}
-{ACTION_REINFORCEMENT}""",
-            'model_config': {
-                'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
-                'n_gpu_layers': 33,
-                'n_ctx': 49152,
-                'n_batch': 1024,
-                'rope_scaling_type': 2,
-                'rope_freq_scale': 1.0,
-                'yarn_ext_factor': -1.0,
-                'yarn_attn_factor': 1.0,
-                'yarn_beta_fast': 32.0,
-                'yarn_beta_slow': 1.0,
-                'yarn_orig_ctx': 32768,
-                'type_k': 8,
-                'type_v': 8,
-                'offload_kqv': True
-            }
-        }
+            'system_prompt': f'You are a Metal 4 graphics engineer (compute kernels, mesh shaders, ray tracing, argument buffers). {EXECUTOR_PROMPT}\n{TOOL_REFERENCE}',
+            'model_config': _CODER_30B,
+        },
     }
 
     @classmethod
