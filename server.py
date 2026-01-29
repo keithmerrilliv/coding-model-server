@@ -346,10 +346,16 @@ Rules:
     # ── Shared model configs ──
     _CODER_30B = {
         'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
-        'n_gpu_layers': 33, 'n_ctx': 49152, 'n_batch': 1024,
-        'rope_scaling_type': 2, 'rope_freq_scale': 1.0,
-        'yarn_ext_factor': -1.0, 'yarn_attn_factor': 1.0,
-        'yarn_beta_fast': 32.0, 'yarn_beta_slow': 1.0, 'yarn_orig_ctx': 32768,
+        'n_gpu_layers': 24, # Reduced to fit larger context
+        'n_ctx': 81920, # 80k Context
+        'n_batch': 1024,
+        'rope_scaling_type': 2,
+        'rope_freq_scale': 1.0,
+        'yarn_ext_factor': -1.0,
+        'yarn_attn_factor': 1.0,
+        'yarn_beta_fast': 32.0,
+        'yarn_beta_slow': 1.0,
+        'yarn_orig_ctx': 32768,
         'type_k': 8, 'type_v': 8, 'offload_kqv': True,
     }
 
@@ -382,7 +388,7 @@ Rules:
     # 'executor': True means few-shot + fallback extraction are enabled.
     AGENTS = {
         'implementer': {
-            'description': 'Qwen3-Coder-30B-A3B (Smart - 48k Context)',
+            'description': 'Qwen3-Coder-30B-A3B (Smart - 80k Context)',
             'system_prompt': f'{EXECUTOR_PROMPT}\n{TOOL_REFERENCE}',
             'model_config': _CODER_30B,
             'executor': True,
@@ -398,13 +404,13 @@ Rules:
             'model_config': _QWEN_14B,
         },
         'debugger': {
-            'description': 'Qwen3-Coder-30B-A3B (Smart - 48k Context)',
+            'description': 'Qwen3-Coder-30B-A3B (Smart - 80k Context)',
             'system_prompt': f'You are a debugger. {EXECUTOR_PROMPT}\n{TOOL_REFERENCE}',
             'model_config': _CODER_30B,
             'executor': True,
         },
         'metal_implementer': {
-            'description': 'Qwen3-Coder-30B-A3B (Smart - 48k Context)',
+            'description': 'Qwen3-Coder-30B-A3B (Smart - 80k Context)',
             'system_prompt': f'You are a Metal 4 graphics engineer (compute kernels, mesh shaders, ray tracing, argument buffers). {EXECUTOR_PROMPT}\n{TOOL_REFERENCE}',
             'model_config': _CODER_30B,
             'executor': True,

@@ -923,7 +923,7 @@ def process_remote_commands(response_text: str) -> Optional[str]:
     # Execute all commands and aggregate results
     results = []
     total_len = 0
-    GLOBAL_MAX_LEN = 24000 # ~6k tokens global cap for tool outputs in one turn
+    GLOBAL_MAX_LEN = 40000 # ~10k tokens global cap for tool outputs in one turn
 
     for i, (_, match, handler, has_capture) in enumerate(all_matches):
         if total_len > GLOBAL_MAX_LEN:
@@ -1411,7 +1411,7 @@ def chat(model="implementer"):
                         print_colored("\nAgent used code blocks instead of markers. Extracting commands...", COLORS['WARNING'])
                         results = []
                         total_len = 0
-                        GLOBAL_MAX_LEN = 24000 # ~6k tokens global cap
+                        GLOBAL_MAX_LEN = 40000 # ~10k tokens global cap
 
                         for i, cmd in enumerate(fallback_cmds):
                             if total_len > GLOBAL_MAX_LEN:
