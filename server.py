@@ -346,7 +346,7 @@ Rules:
     # ── Shared model configs ──
     _CODER_30B = {
         'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
-        'n_gpu_layers': 33, # Maximize based on 1.5GB headroom
+        'n_gpu_layers': 32, # Dialed back for slightly more headroom
         'n_ctx': 81920, # 80k Context
         'n_batch': 1024,
         'rope_scaling_type': 2,
