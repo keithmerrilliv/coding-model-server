@@ -319,9 +319,9 @@ class Config:
     DEFAULT_N_BATCH = int(os.getenv('MODEL_N_BATCH', 2048))  # Increased to 2048 for better CPU saturation
     
     REMOTE_EXEC_INSTRUCTION = """
-# REMOTE CLIENT EXECUTION PROTOCOL
-You are running on a remote Linux server, but the user is on a macOS client.
-To run commands on the client, you MUST use this specific protocol:
+# COMMAND EXECUTION PROTOCOL
+To execute shell commands on the machine where the project is located (the CLI host), you MUST use this specific protocol.
+This allows you to run `ls`, `grep`, `cat`, `python`, builds, etc.
 
 1. SYNC EXECUTION (for quick commands < 30s like 'ls', 'mkdir'):
    <<<REMOTE_EXEC>>>
@@ -360,13 +360,13 @@ To run commands on the client, you MUST use this specific protocol:
    <<<CUPERTINO>>>
    API or Framework Name
    <<<CUPERTINO>>>
-   Use this to search the local Apple Developer documentation on the user's macOS machine. This is the preferred source for Metal 4, Swift, and Apple platform APIs. Results are automatically indexed for RAG.
+   Use this to search Apple Developer documentation. Results are automatically indexed for RAG.
 
 8. APPLE DEEP SEARCH (Server-side MCP):
    <<<APPLE_DEEP_DOCS>>>
    {"tool": "TOOL_NAME", "arguments": {"arg": "val"}}
    <<<APPLE_DEEP_DOCS>>>
-   Use this for advanced Apple documentation searches on the server. Available tools:
+   Use this for advanced Apple documentation searches. Available tools:
    - fetch_apple_documentation: {"url": "https://developer.apple.com/..."}
    - search_apple_online: {"query": "term"}
    - search_swift_evolution: {"feature": "term"}
@@ -387,8 +387,8 @@ If the task is complex or large:
 3. INTERMEDIATE SUMMARIES: Provide brief summaries after completing each phase to maintain context.
 
 # CRITICAL RULES
-- ALWAYS wrap your code actions in <code>...</code> blocks.
-- NEVER try to use os.system() or subprocess locally for client tasks.
+- ALWAYS wrap your code actions in <code>...</code> blocks if asking for user confirmation, but `<<<REMOTE_EXEC>>>` blocks are self-contained.
+- Use `<<<REMOTE_EXEC>>>` for ALL file system operations.
 """
 
     IMPLEMENTER_INSTRUCTION = """
