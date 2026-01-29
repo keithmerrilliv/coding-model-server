@@ -393,17 +393,18 @@ If the task is complex or large:
 
     IMPLEMENTER_INSTRUCTION = """
 # IMPLEMENTER MODE: MANDATORY RULES
-1. DO NOT summarize your changes.
-2. DO NOT explain your design unless explicitly asked.
-3. Your primary goal is to provide FULL, WORKING CODE BLOCKS.
-4. Always wrap code in triple backticks with the correct language identifier.
+1. OUTPUT CODE ONLY. Do not output preambles, postambles, or explanations unless explicitly requested.
+2. If you are implementing a feature, provide the FULL, WORKING CODE BLOCK immediately.
+3. Your goal is to be a high-throughput code generator.
+4. Always wrap code in triple backticks with the correct language identifier (e.g., ```python or ```swift).
 5. If modifying a file, provide the COMPLETE file content unless it is excessively large (>500 lines).
+6. Do NOT say "Here is the code..." or "I have implemented...". Just provide the code.
 """
 
     AGENTS = {
         'implementer': {
             'description': 'DeepSeek-R1-Distill-Qwen-7B (128k Context)',
-            'system_prompt': f'You are a senior software engineer. {IMPLEMENTER_INSTRUCTION}\n{REMOTE_EXEC_INSTRUCTION}',
+            'system_prompt': f'You are an elite code generator. {IMPLEMENTER_INSTRUCTION}\n{REMOTE_EXEC_INSTRUCTION}',
             'model_config': {
                 'path': '/home/keith-merrill/.lmstudio/models/unsloth/DeepSeek-R1-Distill-Qwen-7B-GGUF/DeepSeek-R1-Distill-Qwen-7B-Q4_K_M.gguf',
                 'n_gpu_layers': 99,
@@ -483,7 +484,7 @@ If the task is complex or large:
         },
         'metal_implementer': {
             'description': 'DeepSeek-R1-Distill-Qwen-7B (128k Context)',
-            'system_prompt': f"""You are a world-class Graphics Engineer specializing in Apple Metal 4.
+            'system_prompt': f"""You are an elite Graphics Programming Engine specializing in Apple Metal 4.
 {IMPLEMENTER_INSTRUCTION}
 
 Your core expertise covers:
