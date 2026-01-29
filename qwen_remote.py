@@ -1431,9 +1431,13 @@ def chat(model="implementer"):
                             break
 
                     # Last resort: no commands at all — auto-retry once
-                    # Check the user message (history[-2]) to see if we already retried
-                    already_retried = len(history) >= 2 and history[-2].get("_retried")
-                    if not already_retried:
+                    # Only retry if the agent failed to act on a DIRECT user prompt.
+                    # If the last message was a tool output (auto_send=True), the agent is allowed to summarize and finish.
+                    last_msg_to_agent = history[-2] if len(history) >= 2 else {}
+                    is_direct_user_prompt = last_msg_to_agent.get("role") == "user" and not last_msg_to_agent.get("auto_send")
+                    already_retried = last_msg_to_agent.get("_retried")
+
+                    if is_direct_user_prompt and not already_retried:
                         print_colored("\nAgent gave advice instead of executing. Retrying...", COLORS['WARNING'])
                         history.append({
                             "role": "user",
