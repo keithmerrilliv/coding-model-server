@@ -613,32 +613,32 @@ def execute_remote_command(command, async_mode=False):
                     result = subprocess.run(command_args, shell=False, stdout=f, stderr=subprocess.STDOUT, text=True, errors='replace', timeout=240)
 
             # Analyze output file
-            MAX_DISPLAY_CHARS = 12000 # ~3k tokens safe limit
+            MAX_DISPLAY_CHARS = 8000 # ~2k tokens safe limit
             with open(tmp_path, 'r', errors='replace') as f:
                 content = f.read()
             
             output_len = len(content)
             
             if output_len > MAX_DISPLAY_CHARS:
-                head = content[:4000]
-                tail = content[-4000:]
+                head = content[:2500]
+                tail = content[-2500:]
                 
                 # Simple grep for errors/warnings in the truncated middle
-                middle = content[4000:-4000]
+                middle = content[2500:-2500]
                 error_lines = []
                 for line in middle.splitlines():
                     if 'error' in line.lower() or 'fail' in line.lower() or 'warning' in line.lower():
                         error_lines.append(line.strip())
                 
-                summary = "\n".join(error_lines[:20]) # Limit summary size
-                if len(error_lines) > 20:
-                    summary += f"\n... ({len(error_lines) - 20} more error lines omitted) ..."
+                summary = "\n".join(error_lines[:15]) # Limit summary size
+                if len(error_lines) > 15:
+                    summary += f"\n... ({len(error_lines) - 15} more error lines omitted) ..."
                 
                 final_output = (
                     f"{head}\n"
-                    f"\n... [OUTPUT TRUNCATED: {output_len} chars total] ...\n"
-                    f"... [Full log preserved at: {tmp_path}] ...\n"
-                    f"... [Summary of hidden errors/warnings]:\n{summary}\n"
+                    f"\n... [TRUNCATED: {output_len} chars] ...\n"
+                    f"... [Log: {tmp_path}] ...\n"
+                    f"... [Error Summary]:\n{summary}\n"
                     f"\n... [TAIL] ...\n"
                     f"{tail}"
                 )
@@ -922,14 +922,25 @@ def process_remote_commands(response_text: str) -> Optional[str]:
 
     # Execute all commands and aggregate results
     results = []
+    total_len = 0
+    GLOBAL_MAX_LEN = 24000 # ~6k tokens global cap for tool outputs in one turn
+
     for i, (_, match, handler, has_capture) in enumerate(all_matches):
+        if total_len > GLOBAL_MAX_LEN:
+            results.append(f"\n... [OMITTED {len(all_matches) - i} ADDITIONAL COMMANDS TO PREVENT CONTEXT OVERFLOW] ...")
+            break
+
         arg = match.group(1) if has_capture else None
         try:
             result = handler(arg)
             if result:
-                results.append(f"[Command {i+1}] {result}")
+                res_str = f"[Command {i+1}] {result}"
+                results.append(res_str)
+                total_len += len(res_str)
         except Exception as e:
-            results.append(f"[Command {i+1}] Error: {str(e)}")
+            err_str = f"[Command {i+1}] Error: {str(e)}"
+            results.append(err_str)
+            total_len += len(err_str)
 
     return "\n\n".join(results) if results else None
 
@@ -1399,10 +1410,20 @@ def chat(model="implementer"):
                     if fallback_cmds:
                         print_colored("\nAgent used code blocks instead of markers. Extracting commands...", COLORS['WARNING'])
                         results = []
+                        total_len = 0
+                        GLOBAL_MAX_LEN = 24000 # ~6k tokens global cap
+
                         for i, cmd in enumerate(fallback_cmds):
+                            if total_len > GLOBAL_MAX_LEN:
+                                results.append(f"\n... [OMITTED {len(fallback_cmds) - i} FALLBACK COMMANDS TO PREVENT CONTEXT OVERFLOW] ...")
+                                break
+                            
                             result = execute_remote_command(cmd.strip())
                             if result:
-                                results.append(f"[Command {i+1}] {result}")
+                                res_str = f"[Command {i+1}] {result}"
+                                results.append(res_str)
+                                total_len += len(res_str)
+                        
                         if results:
                             combined = "\n\n".join(results)
                             print_colored(f"\n{len(results)} fallback command(s) executed. Sending output back to agent...", COLORS['CYAN'])
