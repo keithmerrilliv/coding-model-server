@@ -585,7 +585,7 @@ def get_model_params(max_tokens: int, temperature: float, stream: bool = False) 
         "temperature": temperature,
         "stop": [CHATML_END, CHATML_START, "<|EOT|>", "### Response:", "### Instruction:", "###"],
         "stream": stream,
-        "repeat_penalty": 1.1,
+        "repeat_penalty": 1.15,
         "echo": False
     }
 
