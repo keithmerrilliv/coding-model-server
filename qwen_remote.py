@@ -40,6 +40,7 @@ SEARCH_API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/tools/search"
 DEEP_DOCS_API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/tools/apple_deep_docs"
 UNLOAD_API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/admin/unload"
 HEALTH_URL = f"http://{LINUX_SERVER_IP}:5000/health"
+MODELS_URL = f"http://{LINUX_SERVER_IP}:5000/v1/models"
 
 COLORS = {
     # Wrapped in \001 and \002 for readline compatibility
@@ -53,15 +54,65 @@ COLORS = {
     "CYAN": "\001\033[96m\002"
 }
 
-
-# Agent UI Themes
-AGENT_THEMES = {
-    "implementer": {"color": COLORS['GREEN'], "icon": "💻", "prompt": "Implementer", "desc": "Specialized Code (Qwen2.5-Coder-14B)"},
-    "architect":   {"color": COLORS['HEADER'], "icon": "🏗️", "prompt": "Architect", "desc": "System Design (Qwen3-32B)"},
-    "reviewer":    {"color": COLORS['CYAN'], "icon": "🔍", "prompt": "Reviewer", "desc": "Detailed Code Review (Qwen3-14B)"},
-    "debugger":    {"color": COLORS['FAIL'], "icon": "🐞", "prompt": "Debugger", "desc": "Specialized Debugging (Qwen2.5-Coder-14B)"},
-    "metal_implementer": {"color": COLORS['BLUE'], "icon": "🤘", "prompt": "Metal", "desc": "Specialized Metal 4 & Graphics (Qwen2.5-Coder-14B)"},
+# Theme definitions (Visuals only)
+THEME_STYLES = {
+    "implementer": {"color": COLORS['GREEN'], "icon": "💻", "prompt": "Implementer"},
+    "architect":   {"color": COLORS['HEADER'], "icon": "🏗️", "prompt": "Architect"},
+    "reviewer":    {"color": COLORS['CYAN'], "icon": "🔍", "prompt": "Reviewer"},
+    "debugger":    {"color": COLORS['FAIL'], "icon": "🐞", "prompt": "Debugger"},
+    "metal_implementer": {"color": COLORS['BLUE'], "icon": "🤘", "prompt": "Metal"},
+    "default":     {"color": COLORS['WARNING'], "icon": "🤖", "prompt": "Agent"},
 }
+
+# This will be populated from the server
+AGENT_THEMES = {}
+
+def fetch_available_models():
+    """Fetch available models from the server and populate AGENT_THEMES"""
+    global AGENT_THEMES
+    try:
+        response = requests.get(MODELS_URL, timeout=5)
+        if response.status_code == 200:
+            data = response.json().get("data", [])
+            AGENT_THEMES.clear()
+            for model in data:
+                mid = model["id"]
+                # Get style or fallback to default
+                style = THEME_STYLES.get(mid, THEME_STYLES["default"])
+                
+                AGENT_THEMES[mid] = {
+                    "color": style["color"],
+                    "icon": style["icon"],
+                    "prompt": style["prompt"],
+                    "desc": model["description"]  # Description from server
+                }
+            # print_colored(f"Loaded {len(AGENT_THEMES)} agents from server.", COLORS['GREEN'])
+        else:
+            print_colored(f"Failed to fetch models: {response.status_code}", COLORS['FAIL'])
+            _load_fallback_themes()
+    except Exception as e:
+        # Fallback to hardcoded defaults if server is unreachable
+        _load_fallback_themes()
+
+def _load_fallback_themes():
+    """Load default themes if server is unreachable"""
+    global AGENT_THEMES
+    AGENT_THEMES.clear()
+    defaults = {
+        "implementer": "Code Agent (Offline)",
+        "architect": "System Design (Offline)",
+        "reviewer": "Code Review (Offline)",
+        "debugger": "Debugging (Offline)",
+        "metal_implementer": "Metal & Graphics (Offline)"
+    }
+    for mid, desc in defaults.items():
+        style = THEME_STYLES.get(mid, THEME_STYLES["default"])
+        AGENT_THEMES[mid] = {
+            "color": style["color"],
+            "icon": style["icon"],
+            "prompt": style["prompt"],
+            "desc": desc
+        }
 
 def cleanup_server_resources():
     """Tell the server to unload models and free VRAM"""
@@ -981,11 +1032,29 @@ def get_completion(history, model, agent_theme, headers):
 def chat(model="implementer"):
     # Initialize readline for command history and editing
     setup_readline()
+    
+    # Load available models from server
+    fetch_available_models()
 
     print_colored(f"\nQwen Remote CLI (Connected to {LINUX_SERVER_IP})", COLORS['HEADER'])
     
     # Get initial theme
-    agent_theme = AGENT_THEMES.get(model, AGENT_THEMES["implementer"])
+    if model not in AGENT_THEMES:
+        if "implementer" in AGENT_THEMES:
+            model = "implementer"
+        elif AGENT_THEMES:
+            model = list(AGENT_THEMES.keys())[0]
+        else:
+            # Absolute fallback if no agents loaded
+            AGENT_THEMES["default"] = {
+                "color": COLORS['WARNING'], 
+                "icon": "❓", 
+                "prompt": "Agent", 
+                "desc": "Unknown Agent"
+            }
+            model = "default"
+            
+    agent_theme = AGENT_THEMES[model]
     print_colored(f"Agent: {model} {agent_theme['icon']}", COLORS['WARNING'])
     print_colored(f"({agent_theme['desc']})", COLORS['BLUE'])
 

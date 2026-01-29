@@ -391,14 +391,23 @@ If the task is complex or large:
 - NEVER try to use os.system() or subprocess locally for client tasks.
 """
 
+    IMPLEMENTER_INSTRUCTION = """
+# IMPLEMENTER MODE: MANDATORY RULES
+1. DO NOT summarize your changes.
+2. DO NOT explain your design unless explicitly asked.
+3. Your primary goal is to provide FULL, WORKING CODE BLOCKS.
+4. Always wrap code in triple backticks with the correct language identifier.
+5. If modifying a file, provide the COMPLETE file content unless it is excessively large (>500 lines).
+"""
+
     AGENTS = {
         'implementer': {
-            'description': 'Specialized Code Agent (Qwen2.5-Coder-14B)',
-            'system_prompt': f'You are an expert software engineer specializing in high-performance implementations. Provide clear, working code.\n{REMOTE_EXEC_INSTRUCTION}',
+            'description': 'DeepSeek-R1-Distill-Qwen-7B (128k Context)',
+            'system_prompt': f'You are a senior software engineer. {IMPLEMENTER_INSTRUCTION}\n{REMOTE_EXEC_INSTRUCTION}',
             'model_config': {
-                'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen2.5-Coder-14B-Instruct-GGUF/Qwen2.5-Coder-14B-Instruct-Q6_K.gguf',
-                'n_gpu_layers': 99,  # Fully offloaded
-                'n_ctx': 32768,      # Reduced to 32k for 16GB stability
+                'path': '/home/keith-merrill/.lmstudio/models/unsloth/DeepSeek-R1-Distill-Qwen-7B-GGUF/DeepSeek-R1-Distill-Qwen-7B-Q4_K_M.gguf',
+                'n_gpu_layers': 99,
+                'n_ctx': 131072, # 128k Context for ICL
                 'n_batch': 2048,
                 'rope_scaling_type': 2,
                 'rope_freq_scale': 1.0,
@@ -407,8 +416,8 @@ If the task is complex or large:
                 'yarn_beta_fast': 32.0,
                 'yarn_beta_slow': 1.0,
                 'yarn_orig_ctx': 32768,
-                'type_k': 8,
-                'type_v': 8,
+                'type_k': 1, # FP16 for stability
+                'type_v': 1, # FP16 for stability
                 'offload_kqv': True
             }
         },
@@ -438,7 +447,7 @@ If the task is complex or large:
             'model_config': {
                 'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-14B-GGUF/Qwen3-14B-Q6_K.gguf',
                 'n_gpu_layers': 99,
-                'n_ctx': 32768,      # Matching 32k for consistency
+                'n_ctx': 32768,
                 'n_batch': 2048,
                 'rope_scaling_type': 2,
                 'rope_freq_scale': 1.0,
@@ -453,12 +462,12 @@ If the task is complex or large:
             }
         },
         'debugger': {
-            'description': 'Specialized Debugging Agent (Qwen2.5-Coder-14B)',
-            'system_prompt': f'You are a debugging expert. Analyze errors and provide fixed, working code.\n{REMOTE_EXEC_INSTRUCTION}',
+            'description': 'DeepSeek-R1-Distill-Qwen-7B (128k Context)',
+            'system_prompt': f'You are a master of debugging. {IMPLEMENTER_INSTRUCTION}\n{REMOTE_EXEC_INSTRUCTION}',
             'model_config': {
-                'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen2.5-Coder-14B-Instruct-GGUF/Qwen2.5-Coder-14B-Instruct-Q6_K.gguf',
+                'path': '/home/keith-merrill/.lmstudio/models/unsloth/DeepSeek-R1-Distill-Qwen-7B-GGUF/DeepSeek-R1-Distill-Qwen-7B-Q4_K_M.gguf',
                 'n_gpu_layers': 99,
-                'n_ctx': 32768,      # Reduced to 32k
+                'n_ctx': 131072, # 128k Context
                 'n_batch': 2048,
                 'rope_scaling_type': 2,
                 'rope_freq_scale': 1.0,
@@ -467,31 +476,26 @@ If the task is complex or large:
                 'yarn_beta_fast': 32.0,
                 'yarn_beta_slow': 1.0,
                 'yarn_orig_ctx': 32768,
-                'type_k': 8,
-                'type_v': 8,
+                'type_k': 1,
+                'type_v': 1,
                 'offload_kqv': True
             }
         },
         'metal_implementer': {
-            'description': 'Specialized Metal & Graphics Agent (Qwen2.5-Coder-14B)',
-            'system_prompt': f"""You are an expert Graphics and Compute Engineer specializing in Apple Metal (including Metal 4) and WebGPU.
-Your core expertise covers:
-1. COMPUTE: High-performance kernels, SIMD-group operations, threadgroup memory, and GPU-driven workloads.
-2. GRAPHICS: Render pipelines, Mesh Shaders, Ray Tracing, and advanced programmable blending.
-3. METAL 4 FEATURES: GPU Dynamic Indexing, modern binding models, and specialized Apple Silicon hardware acceleration.
-4. PERFORMANCE: Zero-copy memory management, unified memory architecture (UMA) optimizations, and residency management.
-5. SYNCHRONIZATION: Advanced use of Metal Fences, Events, and Argument Buffers for complex resource binding.
+            'description': 'DeepSeek-R1-Distill-Qwen-7B (128k Context)',
+            'system_prompt': f"""You are a world-class Graphics Engineer specializing in Apple Metal 4.
+{IMPLEMENTER_INSTRUCTION}
 
-STRATEGY:
-- Balanced Focus: Give equal weight to high-performance compute and sophisticated rendering pipelines.
-- Modernity: Prefer modern Metal 4 syntax and paradigms over legacy Metal 2/3.
-- Efficiency: Leverage the Unified Memory Architecture of Apple Silicon for maximum bandwidth.
+Your core expertise covers:
+1. COMPUTE: High-performance kernels, SIMD-group operations, threadgroup memory.
+2. GRAPHICS: Mesh Shaders, Ray Tracing, Render pipelines.
+3. METAL 4: GPU Dynamic Indexing, Argument Buffers, Modern Binding.
 
 {REMOTE_EXEC_INSTRUCTION}""",
             'model_config': {
-                'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen2.5-Coder-14B-Instruct-GGUF/Qwen2.5-Coder-14B-Instruct-Q6_K.gguf',
+                'path': '/home/keith-merrill/.lmstudio/models/unsloth/DeepSeek-R1-Distill-Qwen-7B-GGUF/DeepSeek-R1-Distill-Qwen-7B-Q4_K_M.gguf',
                 'n_gpu_layers': 99,
-                'n_ctx': 32768,      # Reduced to 32k
+                'n_ctx': 131072, # 128k Context for ICL
                 'n_batch': 2048,
                 'rope_scaling_type': 2,
                 'rope_freq_scale': 1.0,
@@ -500,8 +504,8 @@ STRATEGY:
                 'yarn_beta_fast': 32.0,
                 'yarn_beta_slow': 1.0,
                 'yarn_orig_ctx': 32768,
-                'type_k': 8,
-                'type_v': 8,
+                'type_k': 1,
+                'type_v': 1,
                 'offload_kqv': True
             }
         }
@@ -637,10 +641,10 @@ CHATML_END = "<|im_end|>"
 def build_model_prompt(messages: List[ChatMessage], system_prompt: str, model_path: str) -> str:
     """Build a prompt using the appropriate format for the model"""
     
-    # Detect DeepSeek-Coder
-    is_deepseek = "deepseek" in model_path.lower()
+    # Detect DeepSeek-Coder (original) vs DeepSeek-R1-Distill-Qwen (ChatML)
+    is_legacy_deepseek = "deepseek" in model_path.lower() and "qwen" not in model_path.lower()
     
-    if is_deepseek:
+    if is_legacy_deepseek:
         # DeepSeek-Coder-Instruct/Alpaca format
         parts = []
         if system_prompt:
@@ -656,7 +660,7 @@ def build_model_prompt(messages: List[ChatMessage], system_prompt: str, model_pa
         return "".join(parts)
     
     else:
-        # Standard ChatML format (Qwen)
+        # Standard ChatML format (Qwen, DeepSeek-R1-Distill-Qwen)
         parts = []
         if system_prompt:
             parts.append(f"{CHATML_START}system\n{system_prompt}{CHATML_END}\n")
