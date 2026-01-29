@@ -1432,7 +1432,7 @@ def chat(model="implementer"):
 
                     # Last resort: no commands at all — auto-retry once
                     # Only allow no-command responses if they explicitly contain a summary completion phrase.
-                    completion_phrases = ["complete summary", "work summary", "complete implementation status", "final report"]
+                    completion_phrases = ["complete summary", "work summary", "complete implementation status", "final report", "implementation complete"]
                     is_finishing_summary = any(phrase in response_text.lower() for phrase in completion_phrases)
                     
                     last_msg_to_agent = history[-2] if len(history) >= 2 else {}
