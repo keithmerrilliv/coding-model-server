@@ -1431,17 +1431,18 @@ def chat(model="implementer"):
                             break
 
                     # Last resort: no commands at all — auto-retry once
-                    # Only retry if the agent failed to act on a DIRECT user prompt.
-                    # If the last message was a tool output (auto_send=True), the agent is allowed to summarize and finish.
+                    # Only allow no-command responses if they explicitly contain a summary completion phrase.
+                    completion_phrases = ["complete summary", "work summary", "complete implementation status", "final report"]
+                    is_finishing_summary = any(phrase in response_text.lower() for phrase in completion_phrases)
+                    
                     last_msg_to_agent = history[-2] if len(history) >= 2 else {}
-                    is_direct_user_prompt = last_msg_to_agent.get("role") == "user" and not last_msg_to_agent.get("auto_send")
                     already_retried = last_msg_to_agent.get("_retried")
 
-                    if is_direct_user_prompt and not already_retried:
+                    if not is_finishing_summary and not already_retried:
                         print_colored("\nAgent gave advice instead of executing. Retrying...", COLORS['WARNING'])
                         history.append({
                             "role": "user",
-                            "content": "You did not execute any commands. Do not explain — act. Use <<<REMOTE_EXEC>>> blocks to perform the task now.",
+                            "content": "You did not execute any commands. Do not explain — act. Use <<<REMOTE_EXEC>>> blocks to perform the task now. If you are finished, provide a 'complete summary' or 'work summary'.",
                             "auto_send": True,
                             "_retried": True,
                         })
