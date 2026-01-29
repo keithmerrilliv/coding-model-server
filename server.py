@@ -405,13 +405,13 @@ If the task is complex or large:
 
     AGENTS = {
         'implementer': {
-            'description': 'Qwen3-Coder-30B-A3B (Smart - 32k Context)',
+            'description': 'Qwen3-Coder-30B-A3B (Smart - 64k Context)',
             'system_prompt': f'You are an elite code generator. {IMPLEMENTER_INSTRUCTION}\n{REMOTE_EXEC_INSTRUCTION}',
             'model_config': {
                 'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
-                'n_gpu_layers': 20, # Reduced for 18GB model on 16GB VRAM
-                'n_ctx': 32768, # 32k Context
-                'n_batch': 2048,
+                'n_gpu_layers': 35, # Increased based on headroom
+                'n_ctx': 65536, # 64k Context
+                'n_batch': 1024, # Optimal batch for 5080
                 'rope_scaling_type': 2,
                 'rope_freq_scale': 1.0,
                 'yarn_ext_factor': -1.0,
@@ -465,13 +465,13 @@ If the task is complex or large:
             }
         },
         'debugger': {
-            'description': 'Qwen3-Coder-30B-A3B (Smart - 32k Context)',
+            'description': 'Qwen3-Coder-30B-A3B (Smart - 64k Context)',
             'system_prompt': f'You are a master of debugging. {IMPLEMENTER_INSTRUCTION}\n{REMOTE_EXEC_INSTRUCTION}',
             'model_config': {
                 'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
-                'n_gpu_layers': 20, # Reduced for 18GB model
-                'n_ctx': 32768, # 32k Context
-                'n_batch': 2048,
+                'n_gpu_layers': 35,
+                'n_ctx': 65536,
+                'n_batch': 1024,
                 'rope_scaling_type': 2,
                 'rope_freq_scale': 1.0,
                 'yarn_ext_factor': -1.0,
@@ -485,7 +485,7 @@ If the task is complex or large:
             }
         },
         'metal_implementer': {
-            'description': 'Qwen3-Coder-30B-A3B (Smart - 32k Context)',
+            'description': 'Qwen3-Coder-30B-A3B (Smart - 64k Context)',
             'system_prompt': f"""You are an elite Graphics Programming Engine specializing in Apple Metal 4.
 {IMPLEMENTER_INSTRUCTION}
 
@@ -497,9 +497,9 @@ Your core expertise covers:
 {REMOTE_EXEC_INSTRUCTION}""",
             'model_config': {
                 'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
-                'n_gpu_layers': 20, # Reduced for 18GB model
-                'n_ctx': 32768, # 32k Context
-                'n_batch': 2048,
+                'n_gpu_layers': 35,
+                'n_ctx': 65536,
+                'n_batch': 1024,
                 'rope_scaling_type': 2,
                 'rope_freq_scale': 1.0,
                 'yarn_ext_factor': -1.0,
