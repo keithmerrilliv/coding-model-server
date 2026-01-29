@@ -416,13 +416,13 @@ You are an autonomous developer working on a Linux server. Your goal is to compl
 
     AGENTS = {
         'implementer': {
-            'description': 'Qwen3-Coder-30B-A3B (Smart - 64k Context)',
+            'description': 'Qwen3-Coder-30B-A3B (Smart - 32k Context)',
             'system_prompt': f'You are an autonomous developer. {IMPLEMENTER_INSTRUCTION}\n{REMOTE_EXEC_INSTRUCTION}',
             'model_config': {
                 'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
-                'n_gpu_layers': 35, # Increased based on headroom
-                'n_ctx': 65536, # 64k Context
-                'n_batch': 1024, # Optimal batch for 5080
+                'n_gpu_layers': 25, # Reduced to fix OOM
+                'n_ctx': 32768, # Reduced to 32k to fix OOM
+                'n_batch': 1024,
                 'rope_scaling_type': 2,
                 'rope_freq_scale': 1.0,
                 'yarn_ext_factor': -1.0,
@@ -430,8 +430,8 @@ You are an autonomous developer working on a Linux server. Your goal is to compl
                 'yarn_beta_fast': 32.0,
                 'yarn_beta_slow': 1.0,
                 'yarn_orig_ctx': 32768,
-                'type_k': 8, # Q8 Cache for quality
-                'type_v': 8, # Q8 Cache for quality
+                'type_k': 8,
+                'type_v': 8,
                 'offload_kqv': True
             }
         },
@@ -476,12 +476,12 @@ You are an autonomous developer working on a Linux server. Your goal is to compl
             }
         },
         'debugger': {
-            'description': 'Qwen3-Coder-30B-A3B (Smart - 64k Context)',
+            'description': 'Qwen3-Coder-30B-A3B (Smart - 32k Context)',
             'system_prompt': f'You are a master of debugging. {IMPLEMENTER_INSTRUCTION}\n{REMOTE_EXEC_INSTRUCTION}',
             'model_config': {
                 'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
-                'n_gpu_layers': 35,
-                'n_ctx': 65536,
+                'n_gpu_layers': 25,
+                'n_ctx': 32768,
                 'n_batch': 1024,
                 'rope_scaling_type': 2,
                 'rope_freq_scale': 1.0,
@@ -496,7 +496,7 @@ You are an autonomous developer working on a Linux server. Your goal is to compl
             }
         },
         'metal_implementer': {
-            'description': 'Qwen3-Coder-30B-A3B (Smart - 64k Context)',
+            'description': 'Qwen3-Coder-30B-A3B (Smart - 32k Context)',
             'system_prompt': f"""You are an autonomous Graphics Engineer specializing in Apple Metal 4.
 {IMPLEMENTER_INSTRUCTION}
 
@@ -508,8 +508,8 @@ Your core expertise covers:
 {REMOTE_EXEC_INSTRUCTION}""",
             'model_config': {
                 'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
-                'n_gpu_layers': 35,
-                'n_ctx': 65536,
+                'n_gpu_layers': 25,
+                'n_ctx': 32768,
                 'n_batch': 1024,
                 'rope_scaling_type': 2,
                 'rope_freq_scale': 1.0,
