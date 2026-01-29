@@ -324,48 +324,48 @@ You are running on a remote Linux server, but the user is on a macOS client.
 To run commands on the client, you MUST use this specific protocol:
 
 1. SYNC EXECUTION (for quick commands < 30s like 'ls', 'mkdir'):
-   <code>
-   final_answer("<<<REMOTE_EXEC>>>\nCOMMAND_TO_RUN\n<<<REMOTE_EXEC>>>")
-   </code>
+   <<<REMOTE_EXEC>>>
+   COMMAND_TO_RUN
+   <<<REMOTE_EXEC>>>
 
 2. ASYNC EXECUTION (for long tasks like builds, downloads):
-   <code>
-   final_answer("<<<REMOTE_EXEC_ASYNC>>>\nCOMMAND_TO_RUN\n<<<REMOTE_EXEC_ASYNC>>>")
-   </code>
+   <<<REMOTE_EXEC_ASYNC>>>
+   COMMAND_TO_RUN
+   <<<REMOTE_EXEC_ASYNC>>>
    Returns a Job ID immediately.
 
 3. CHECK STATUS (monitor async jobs):
-   <code>
-   final_answer("<<<REMOTE_CHECK_STATUS>>>\nJOB_ID\n<<<REMOTE_CHECK_STATUS>>>")
-   </code>
+   <<<REMOTE_CHECK_STATUS>>>
+   JOB_ID
+   <<<REMOTE_CHECK_STATUS>>>
 
 4. GET OUTPUT (when job is completed):
-   <code>
-   final_answer("<<<REMOTE_GET_OUTPUT>>>\nJOB_ID\n<<<REMOTE_GET_OUTPUT>>>")
-   </code>
+   <<<REMOTE_GET_OUTPUT>>>
+   JOB_ID
+   <<<REMOTE_GET_OUTPUT>>>
 
 5. SAVE KNOWLEDGE (Long-term memory):
-   <code>
-   final_answer("<<<SAVE_MEMORY>>>\nFact to remember\n<<<SAVE_MEMORY>>>")
-   </code>
+   <<<SAVE_MEMORY>>>
+   Fact to remember
+   <<<SAVE_MEMORY>>>
    Use this to save architectural decisions, user preferences, or important facts for future reference.
 
 6. WEB SEARCH (DuckDuckGo):
-   <code>
-   final_answer("<<<WEB_SEARCH>>>\nSearch Query\n<<<WEB_SEARCH>>>")
-   </code>
+   <<<WEB_SEARCH>>>
+   Search Query
+   <<<WEB_SEARCH>>>
    Use this to look up up-to-date information, documentation, or solve errors you don't know about.
 
 7. APPLE DOCUMENTATION (Cupertino MCP):
-   <code>
-   final_answer("<<<CUPERTINO>>>\nAPI or Framework Name\n<<<CUPERTINO>>>")
-   </code>
+   <<<CUPERTINO>>>
+   API or Framework Name
+   <<<CUPERTINO>>>
    Use this to search the local Apple Developer documentation on the user's macOS machine. This is the preferred source for Metal 4, Swift, and Apple platform APIs. Results are automatically indexed for RAG.
 
 8. APPLE DEEP SEARCH (Server-side MCP):
-   <code>
-   final_answer("<<<APPLE_DEEP_DOCS>>>\n{\"tool\": \"TOOL_NAME\", \"arguments\": {\"arg\": \"val\"}}\n<<<APPLE_DEEP_DOCS>>>")
-   </code>
+   <<<APPLE_DEEP_DOCS>>>
+   {"tool": "TOOL_NAME", "arguments": {"arg": "val"}}
+   <<<APPLE_DEEP_DOCS>>>
    Use this for advanced Apple documentation searches on the server. Available tools:
    - fetch_apple_documentation: {"url": "https://developer.apple.com/..."}
    - search_apple_online: {"query": "term"}
@@ -411,7 +411,7 @@ You are an autonomous developer working on a Linux server. Your goal is to compl
 ## RULES
 1. **USE TOOLS:** Do not guess file paths. Check them first.
 2. **BE CONCISE:** Do not waste tokens on long explanations. State your action ("Searching for X...") and then DO IT.
-3. **TOOL SYNTAX:** To run commands, you MUST use the `final_answer("<<<REMOTE_EXEC>>>...")` format defined below.
+3. **TOOL SYNTAX:** To run commands, use the `<<<REMOTE_EXEC>>>` block format defined below.
 """
 
     AGENTS = {
