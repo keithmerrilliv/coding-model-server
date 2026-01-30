@@ -42,6 +42,7 @@ DEEP_DOCS_API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/tools/apple_deep_docs"
 UNLOAD_API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/admin/unload"
 HEALTH_URL = f"http://{LINUX_SERVER_IP}:5000/health"
 MODELS_URL = f"http://{LINUX_SERVER_IP}:5000/v1/models"
+ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
 
 COLORS = {
     "HEADER": "\033[95m",
@@ -122,8 +123,8 @@ def _load_fallback_themes():
 def cleanup_server_resources():
     """Tell the server to unload models and free VRAM"""
     try:
-        requests.post(UNLOAD_API_URL, timeout=5)
-        # We don't print here to keep exit clean, but server logs will show it
+        headers = {"X-Admin-Key": ADMIN_API_KEY} if ADMIN_API_KEY else {}
+        requests.post(UNLOAD_API_URL, headers=headers, timeout=5)
     except Exception:
         pass
 
