@@ -5,4 +5,4 @@ venv/
 .env
 qwen_memory_db/
 server.log
-tools/server_stats.csv
+tools/
