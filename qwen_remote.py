@@ -552,7 +552,147 @@ def run_command_async(job_id, command):
 
 def execute_remote_command(command, async_mode=False):
     """Execute command synchronously or asynchronously with security checks"""
-    print_colored(f"\nAgent wants to run command on your machine: {command}", COLORS['WARNING'])
+    # Use the chunked version by default for better handling of large outputs
+    return execute_remote_command_chunked(command, async_mode, chunk_output=True)
+
+
+def chunk_large_output(content, chunk_size=6000, overlap=500):
+    """
+    Split large output into chunks with overlap to preserve context.
+
+    Args:
+        content (str): The large output content to chunk
+        chunk_size (int): Maximum size of each chunk in characters
+        overlap (int): Number of overlapping characters between chunks
+
+    Returns:
+        dict: Contains 'chunks' list, 'total_chunks', 'chunk_size', and 'original_length'
+    """
+    if len(content) <= chunk_size:
+        return {
+            'chunks': [content],
+            'total_chunks': 1,
+            'chunk_size': chunk_size,
+            'original_length': len(content),
+            'needs_chunking': False
+        }
+
+    chunks = []
+    start = 0
+    content_len = len(content)
+
+    while start < content_len:
+        end = start + chunk_size
+
+        # If this is the last chunk, include the remainder
+        if end >= content_len:
+            chunk = content[start:]
+        else:
+            # Find a good breaking point (try to break at line boundaries)
+            actual_end = end
+            while actual_end < content_len and content[actual_end] != '\n' and actual_end < end + 200:
+                actual_end += 1
+
+            if actual_end < end + 200:  # Found a newline within reasonable distance
+                chunk = content[start:actual_end + 1]
+            else:  # No newline found, just take the chunk
+                chunk = content[start:end]
+
+        chunks.append(chunk)
+        chunk_len = len(chunk)
+
+        # Calculate next start position with overlap
+        if chunk_len < chunk_size:
+            # Last chunk, no need to continue
+            break
+
+        # Move start forward, accounting for overlap
+        next_start = start + chunk_len - overlap
+        if next_start >= content_len:
+            break
+        start = next_start
+
+    return {
+        'chunks': chunks,
+        'total_chunks': len(chunks),
+        'chunk_size': chunk_size,
+        'original_length': len(content),
+        'needs_chunking': True
+    }
+
+
+def get_chunk_for_display(content, chunk_idx=None, chunk_size=6000, overlap=500, log_path=None):
+    """
+    Get a specific chunk or a summary of chunks for display in the context window.
+
+    Args:
+        content (str): The full content to chunk
+        chunk_idx (int, optional): Specific chunk index to return (-1 for all chunks)
+        chunk_size (int): Size of each chunk
+        overlap (int): Overlap between chunks
+        log_path (str, optional): Path to the log file for reference
+
+    Returns:
+        str: Formatted output for display
+    """
+    chunk_result = chunk_large_output(content, chunk_size, overlap)
+
+    if not chunk_result['needs_chunking']:
+        return content
+
+    if chunk_idx is not None and 0 <= chunk_idx < len(chunk_result['chunks']):
+        # Return specific chunk
+        return f"[CHUNK {chunk_idx + 1}/{chunk_result['total_chunks']}]\n{chunk_result['chunks'][chunk_idx]}"
+    elif chunk_idx == -1:
+        # Return all chunks (for when space permits)
+        result = []
+        for i, chunk in enumerate(chunk_result['chunks']):
+            result.append(f"[CHUNK {i + 1}/{chunk_result['total_chunks']}]\n{chunk}")
+        return "\n--- CHUNK BREAK ---\n".join(result)
+    else:
+        # Return first chunk + last chunk + error summary (similar to current approach but more structured)
+        first_chunk = chunk_result['chunks'][0]
+        last_chunk = chunk_result['chunks'][-1]
+
+        # Look for errors in all chunks
+        all_error_lines = []
+        for i, chunk in enumerate(chunk_result['chunks'][1:-1]):  # Skip first and last which are displayed fully
+            for line in chunk.splitlines():
+                if 'error' in line.lower() or 'fail' in line.lower() or 'warning' in line.lower():
+                    all_error_lines.append(f"(Chunk {i+2}) {line.strip()}")
+
+        # Limit error lines to prevent overflow
+        error_summary = ""
+        if all_error_lines:
+            error_summary = "\n... [ERROR/WARNING SUMMARY] ...\n" + "\n".join(all_error_lines[:20])
+            if len(all_error_lines) > 20:
+                error_summary += f"\n... ({len(all_error_lines) - 20} more error lines omitted) ..."
+
+        log_ref = f"... [Log: {log_path}] ..." if log_path else ""
+
+        return (
+            f"[CHUNK 1/{chunk_result['total_chunks']} - FIRST]\n{first_chunk}\n"
+            f"\n... [CHUNKED: {chunk_result['original_length']} chars in {chunk_result['total_chunks']} chunks] ...\n"
+            f"{log_ref}\n"
+            f"{error_summary}\n"
+            f"\n[CHUNK {chunk_result['total_chunks']}/{chunk_result['total_chunks']} - LAST]\n{last_chunk}"
+        )
+
+
+def execute_remote_command_chunked(command, async_mode=False, chunk_output=True):
+    """
+    Execute command with optional chunked output handling for large outputs.
+
+    Args:
+        command (str): Command to execute
+        async_mode (bool): Whether to run in async mode
+        chunk_output (bool): Whether to use chunked output handling
+
+    Returns:
+        str: Result of command execution
+    """
+    """Execute command synchronously or asynchronously with security checks"""
+    print_colored(f"\nAgent wants to run command: {command}", COLORS['WARNING'])
     if async_mode:
         print_colored(f"   (async mode - will run in background)", COLORS['BLUE'])
 
@@ -613,42 +753,61 @@ def execute_remote_command(command, async_mode=False):
                     result = subprocess.run(command_args, shell=False, stdout=f, stderr=subprocess.STDOUT, text=True, errors='replace', timeout=240)
 
             # Analyze output file
-            MAX_DISPLAY_CHARS = 8000 # ~2k tokens safe limit
             with open(tmp_path, 'r', errors='replace') as f:
                 content = f.read()
-            
+
             output_len = len(content)
-            
-            if output_len > MAX_DISPLAY_CHARS:
-                head = content[:2500]
-                tail = content[-2500:]
-                
-                # Simple grep for errors/warnings in the truncated middle
-                middle = content[2500:-2500]
-                error_lines = []
-                for line in middle.splitlines():
-                    if 'error' in line.lower() or 'fail' in line.lower() or 'warning' in line.lower():
-                        error_lines.append(line.strip())
-                
-                summary = "\n".join(error_lines[:15]) # Limit summary size
-                if len(error_lines) > 15:
-                    summary += f"\n... ({len(error_lines) - 15} more error lines omitted) ..."
-                
-                final_output = (
-                    f"{head}\n"
-                    f"\n... [TRUNCATED: {output_len} chars] ...\n"
-                    f"... [Log: {tmp_path}] ...\n"
-                    f"... [Error Summary]:\n{summary}\n"
-                    f"\n... [TAIL] ...\n"
-                    f"{tail}"
-                )
+
+            # Use chunked processing if output is large and chunking is enabled
+            if chunk_output and output_len > 8000:  # Same threshold as original
+                final_output = get_chunk_for_display(content, chunk_size=6000, overlap=500, log_path=tmp_path)
+
+                # Store chunk info in a way that can be accessed later if needed
+                chunk_info_path = tmp_path + '.chunks'
+                chunk_result = chunk_large_output(content, chunk_size=6000, overlap=500)
+
+                # Save chunk metadata for potential later retrieval
+                with open(chunk_info_path, 'w') as f:
+                    json.dump({
+                        'total_chunks': chunk_result['total_chunks'],
+                        'original_length': chunk_result['original_length'],
+                        'chunk_size': chunk_result['chunk_size'],
+                        'file_path': tmp_path
+                    }, f)
             else:
-                final_output = content
-                # If small enough, clean up the temp file to reduce clutter
-                try:
-                    os.remove(tmp_path)
-                except:
-                    pass
+                # Use original logic for smaller outputs
+                MAX_DISPLAY_CHARS = 8000 # ~2k tokens safe limit
+
+                if output_len > MAX_DISPLAY_CHARS:
+                    head = content[:2500]
+                    tail = content[-2500:]
+
+                    # Simple grep for errors/warnings in the truncated middle
+                    middle = content[2500:-2500]
+                    error_lines = []
+                    for line in middle.splitlines():
+                        if 'error' in line.lower() or 'fail' in line.lower() or 'warning' in line.lower():
+                            error_lines.append(line.strip())
+
+                    summary = "\n".join(error_lines[:15]) # Limit summary size
+                    if len(error_lines) > 15:
+                        summary += f"\n... ({len(error_lines) - 15} more error lines omitted) ..."
+
+                    final_output = (
+                        f"{head}\n"
+                        f"\n... [TRUNCATED: {output_len} chars] ...\n"
+                        f"... [Log: {tmp_path}] ...\n"
+                        f"... [Error Summary]:\n{summary}\n"
+                        f"\n... [TAIL] ...\n"
+                        f"{tail}"
+                    )
+                else:
+                    final_output = content
+                    # If small enough, clean up the temp file to reduce clutter
+                    try:
+                        os.remove(tmp_path)
+                    except:
+                        pass
 
             print_colored(f"Output:\n{final_output}", COLORS['CYAN'])
             return f"Command executed successfully.\nExit Code: {result.returncode}\nOutput:\n{final_output}"
