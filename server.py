@@ -326,6 +326,15 @@ class Config:
 <<<APPLE_DEEP_DOCS>>>{"tool":"NAME","arguments":{}}<<<APPLE_DEEP_DOCS>>> — Apple docs (server MCP)
 """
 
+    # ── Restricted tools for Architect (No shell execution) ──
+    ARCHITECT_TOOL_REFERENCE = """
+# TOOLS — emit these markers inline and the client runs them automatically.
+<<<SAVE_MEMORY>>>fact<<<SAVE_MEMORY>>>                            — persist a fact
+<<<WEB_SEARCH>>>query<<<WEB_SEARCH>>>                             — web search
+<<<CUPERTINO>>>query<<<CUPERTINO>>>                               — Apple docs (local MCP)
+<<<APPLE_DEEP_DOCS>>>{"tool":"NAME","arguments":{}}<<<APPLE_DEEP_DOCS>>> — Apple docs (server MCP)
+"""
+
     # ── Behavioral instruction for action-oriented agents ──
     EXECUTOR_PROMPT = """You execute tasks by running shell commands. Never give advice, suggestions, or recommendations.
 
@@ -361,7 +370,16 @@ Rules:
 
     _QWEN_32B = {
         'path': '/home/keith-merrill/.lmstudio/models/Qwen/Qwen3-32B-GGUF/Qwen3-32B-Q4_K_M.gguf',
-        'n_gpu_layers': 33, 'n_ctx': 43008, 'n_batch': 2048,
+        'n_gpu_layers': 35, 'n_ctx': 43008, 'n_batch': 2048,
+        'rope_scaling_type': 2, 'rope_freq_scale': 1.0,
+        'yarn_ext_factor': -1.0, 'yarn_attn_factor': 1.0,
+        'yarn_beta_fast': 32.0, 'yarn_beta_slow': 1.0, 'yarn_orig_ctx': 32768,
+        'type_k': 8, 'type_v': 8, 'offload_kqv': True,
+    }
+
+    _QWEN_480B = {
+        'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/Qwen3-Coder-480B-A35B-Instruct-UD-IQ1_M.gguf',
+        'n_gpu_layers': 4, 'n_ctx': 49152, 'n_batch': 512,
         'rope_scaling_type': 2, 'rope_freq_scale': 1.0,
         'yarn_ext_factor': -1.0, 'yarn_attn_factor': 1.0,
         'yarn_beta_fast': 32.0, 'yarn_beta_slow': 1.0, 'yarn_orig_ctx': 32768,
@@ -395,12 +413,12 @@ Rules:
         },
         'architect': {
             'description': 'System architecture agent',
-            'system_prompt': f'You are a system architect. Design scalable, maintainable solutions.\n{TOOL_REFERENCE}',
-            'model_config': _QWEN_32B,
+            'system_prompt': f'You are a system architect. Design scalable, maintainable solutions. You are encouraged to provide detailed advice, feedback, and suggestions. Note that you are not intended to implement the architectures you create; implementation is handled by the implementer agents.\n{ARCHITECT_TOOL_REFERENCE}',
+            'model_config': _QWEN_480B,
         },
         'reviewer': {
             'description': 'Code review agent',
-            'system_prompt': f'You are a code reviewer. Identify issues and suggest improvements.\n{TOOL_REFERENCE}',
+            'system_prompt': f'You are a code reviewer. Identify issues and suggest improvements. You are encouraged to provide detailed advice and recommendations.\n{TOOL_REFERENCE}',
             'model_config': _QWEN_14B,
         },
         'debugger': {
