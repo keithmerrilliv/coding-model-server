@@ -344,6 +344,7 @@ class Config:
 <<<REMOTE_EXEC_ASYNC>>>command<<<REMOTE_EXEC_ASYNC>>>             — run in background (builds, long tasks)
 <<<REMOTE_CHECK_STATUS>>>JOB_ID<<<REMOTE_CHECK_STATUS>>>          — poll async job
 <<<REMOTE_GET_OUTPUT>>>JOB_ID<<<REMOTE_GET_OUTPUT>>>              — get finished job output
+<<<READ_FILE>>>path<<<READ_FILE>>>                                — read file content (safe, fast)
 <<<SAVE_MEMORY>>>fact<<<SAVE_MEMORY>>>                            — persist a fact
 <<<WEB_SEARCH>>>query<<<WEB_SEARCH>>>                             — web search
 <<<CUPERTINO>>>query<<<CUPERTINO>>>                               — Apple docs (local MCP)
@@ -353,6 +354,7 @@ class Config:
     # ── Restricted tools for Architect (No shell execution) ──
     ARCHITECT_TOOL_REFERENCE = """
 # TOOLS — emit these markers inline and the client runs them automatically.
+<<<READ_FILE>>>path<<<READ_FILE>>>                                — read file content (safe, fast)
 <<<SAVE_MEMORY>>>fact<<<SAVE_MEMORY>>>                            — persist a fact
 <<<WEB_SEARCH>>>query<<<WEB_SEARCH>>>                             — web search
 <<<CUPERTINO>>>query<<<CUPERTINO>>>                               — Apple docs (local MCP)
@@ -443,7 +445,7 @@ Rules:
         'reviewer': {
             'description': 'Code review agent',
             'system_prompt': f'You are a code reviewer. Identify issues and suggest improvements. You are encouraged to provide detailed advice and recommendations.\n{TOOL_REFERENCE}',
-            'model_config': _QWEN_14B,
+            'model_config': _CODER_30B,
         },
         'debugger': {
             'description': 'Qwen3-Coder-30B-A3B (Smart - 80k Context)',

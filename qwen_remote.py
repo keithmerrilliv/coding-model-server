@@ -1076,6 +1076,31 @@ def apple_deep_docs_search(tool, args):
         return f"Error in Deep Docs call: {str(e)}"
 
 
+# Global queue for interrupted multi-agent chains
+PENDING_TASKS = []
+
+def read_file_content(path):
+    """Read content of a local file safely"""
+    try:
+        # Expand user path
+        full_path = os.path.expanduser(path)
+        if not os.path.exists(full_path):
+            return f"Error: File not found: {path}"
+            
+        # Basic security check - prevent reading outside of home/project if needed
+        # For now, we trust the agent as it's running locally under user permissions
+        
+        with open(full_path, 'r', encoding='utf-8', errors='replace') as f:
+            content = f.read()
+            
+        size = len(content)
+        if size > 100000:
+            return f"Error: File too large ({size} bytes). Use head/tail via shell or read specific lines."
+            
+        return f"File: {path}\nContent:\n{content}"
+    except Exception as e:
+        return f"Error reading file: {str(e)}"
+
 def process_remote_commands(response_text: str) -> Optional[str]:
     """Process ALL remote command markers in agent response.
 
@@ -1095,6 +1120,9 @@ def process_remote_commands(response_text: str) -> Optional[str]:
          True),
         (r'<<<REMOTE_GET_OUTPUT>>>\s*(.*?)\s*<<<REMOTE_GET_OUTPUT>>>',
          lambda job_id: get_job_output(job_id.strip()),
+         True),
+        (r'<<<READ_FILE>>>\s*(.*?)\s*<<<READ_FILE>>>',
+         lambda path: read_file_content(path.strip()),
          True),
         (r'<<<SAVE_MEMORY>>>\s*(.*?)\s*<<<SAVE_MEMORY>>>',
          lambda text: save_memory(text.strip()),
@@ -1303,6 +1331,7 @@ def get_completion(history, model, agent_theme, headers):
 
 
 def chat(model="implementer"):
+    global PENDING_TASKS
     # Initialize readline for command history and editing
     setup_readline()
     
@@ -1529,55 +1558,55 @@ def chat(model="implementer"):
                 else:
                     print_colored("Readline not available - no history support", COLORS['WARNING'])
                 continue
-
-
-            # Model Switch Command
-            if user_input.lower().startswith('/model ') or user_input.lower().startswith('/m '):
-                parts = user_input.split(' ')
-                if len(parts) >= 2:
-                    model_name = parts[1].lower()
-                    if model_name in AGENT_THEMES:
-                        model = model_name
-                        agent_theme = AGENT_THEMES[model]
-                        print_colored(f"\nSwitched to agent: {model}", COLORS['WARNING'])
-                    else:
-                        print_colored(f"Unknown agent: {model_name}", COLORS['FAIL'])
-                continue
-
-            # Multi-Agent Orchestration Logic
-            try:
-                # Split input by @mentions while keeping the mentions
-                # segments example: ['Initial ', '@architect', ' design ', '@implementer', ' code']
-                segments = re.split(r'(@\w+)', user_input)
+            
+            # Resume Interrupted Chain
+            if user_input.lower() == '/resume':
+                if not PENDING_TASKS:
+                    print_colored("No interrupted tasks to resume.", COLORS['WARNING'])
+                    continue
                 
-                # Tasks: list of (agent_name, message_content)
-                tasks = []
-                current_task_agent = model
-                
-                # Initial segment before any @ (assigned to current active agent)
-                first_segment = segments[0].strip()
-                if first_segment:
-                    tasks.append((current_task_agent, first_segment))
-                
-                # Process pairs of (@agent, following_text)
-                for i in range(1, len(segments), 2):
-                    agent_name = segments[i][1:].lower()
-                    message_content = segments[i+1].strip() if i+1 < len(segments) else ""
+                print_colored(f"Resuming {len(PENDING_TASKS)} pending tasks...", COLORS['GREEN'])
+                # Pop all pending tasks to run them
+                tasks = list(PENDING_TASKS)
+                PENDING_TASKS.clear()
+            else:
+                # Normal Multi-Agent Orchestration Logic
+                try:
+                    # Split input by @mentions while keeping the mentions
+                    # segments example: ['Initial ', '@architect', ' design ', '@implementer', ' code']
+                    segments = re.split(r'(@\w+)', user_input)
                     
-                    if agent_name in AGENT_THEMES:
-                        tasks.append((agent_name, message_content))
-                    else:
-                        # Not a valid agent, treat as literal text for the last active task
-                        if tasks:
-                            tasks[-1] = (tasks[-1][0], tasks[-1][1] + " " + segments[i] + message_content)
+                    # Tasks: list of (agent_name, message_content)
+                    tasks = []
+                    current_task_agent = model
+                    
+                    # Initial segment before any @ (assigned to current active agent)
+                    first_segment = segments[0].strip()
+                    if first_segment:
+                        tasks.append((current_task_agent, first_segment))
+                    
+                    # Process pairs of (@agent, following_text)
+                    for i in range(1, len(segments), 2):
+                        agent_name = segments[i][1:].lower()
+                        message_content = segments[i+1].strip() if i+1 < len(segments) else ""
+                        
+                        if agent_name in AGENT_THEMES:
+                            tasks.append((agent_name, message_content))
                         else:
-                            tasks.append((current_task_agent, segments[i] + message_content))
-    
-                # Sequential Execution — each task runs an inner loop that handles
-                # tool-output round-trips inline, then proceeds to the next task.
+                            # Not a valid agent, treat as literal text for the last active task
+                            if tasks:
+                                tasks[-1] = (tasks[-1][0], tasks[-1][1] + " " + segments[i] + message_content)
+                            else:
+                                tasks.append((current_task_agent, segments[i] + message_content))
+                except Exception as e:
+                    print_colored(f"Error parsing tasks: {e}", COLORS['FAIL'])
+                    tasks = []
+
+            # Execute Tasks Loop (shared by both normal input and /resume)
+            try:
                 for task_idx, (task_agent, task_content) in enumerate(tasks):
                     if not task_content.strip(): continue
-
+                    
                     # Switch active context for this specific task
                     task_theme = AGENT_THEMES[task_agent]
                     print_colored(f"\n>>> Executing task with @{task_agent} {task_theme['icon']}", COLORS['BLUE'])
@@ -1665,10 +1694,21 @@ def chat(model="implementer"):
                         break
 
                     if task_aborted:
+                        remaining_tasks = tasks[task_idx+1:]
+                        if remaining_tasks:
+                            PENDING_TASKS.extend(remaining_tasks)
+                            print_colored(f"\n⚠️  Task aborted. Saved {len(remaining_tasks)} pending tasks.", COLORS['WARNING'])
+                            print_colored("   Type '/resume' to retry/continue.", COLORS['BLUE'])
                         break  # stop processing remaining tasks
                         
             except KeyboardInterrupt:
-                print_colored("\nInterrupt received. Returning to prompt.", COLORS['WARNING'])
+                print_colored("\nInterrupt received.", COLORS['WARNING'])
+                remaining_tasks = tasks[task_idx+1:]
+                if remaining_tasks:
+                    PENDING_TASKS.extend(remaining_tasks)
+                    remaining_agents = [t[0] for t in remaining_tasks]
+                    print_colored(f"⚠️  Skipped remaining tasks for: {', '.join(remaining_agents)}", COLORS['WARNING'])
+                    print_colored("   Type '/resume' to continue later.", COLORS['BLUE'])
                 continue
             except Exception as e:
                 print_colored(f"\nMain Loop Error: {e}", COLORS['FAIL'])
