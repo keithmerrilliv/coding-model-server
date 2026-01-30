@@ -1591,13 +1591,15 @@ def chat(model="implementer"):
 
                     # Last resort: no commands at all — auto-retry once
                     # Only allow no-command responses if they explicitly contain a summary completion phrase.
+                    # EXEMPTION: 'architect' and 'reviewer' are allowed to give advice/designs without commands.
                     completion_phrases = ["complete summary", "work summary", "complete implementation status", "final report", "implementation complete", "summary"]
                     is_finishing_summary = any(phrase in response_text.lower() for phrase in completion_phrases)
+                    is_exempt_agent = model in ["architect", "reviewer"]
                     
                     last_msg_to_agent = history[-2] if len(history) >= 2 else {}
                     already_retried = last_msg_to_agent.get("_retried")
 
-                    if not is_finishing_summary and not already_retried:
+                    if not is_finishing_summary and not already_retried and not is_exempt_agent:
                         print_colored("\nAgent gave advice instead of executing. Retrying...", COLORS['WARNING'])
                         history.append({
                             "role": "user",
