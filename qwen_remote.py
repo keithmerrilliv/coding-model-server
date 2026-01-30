@@ -44,15 +44,19 @@ HEALTH_URL = f"http://{LINUX_SERVER_IP}:5000/health"
 MODELS_URL = f"http://{LINUX_SERVER_IP}:5000/v1/models"
 
 COLORS = {
-    # Wrapped in \001 and \002 for readline compatibility
-    "HEADER": "\001\033[95m\002",
-    "BLUE": "\001\033[94m\002",
-    "GREEN": "\001\033[92m\002",
-    "WARNING": "\001\033[93m\002",
-    "FAIL": "\001\033[91m\002",
-    "ENDC": "\001\033[0m\002",
-    "BOLD": "\001\033[1m\002",
-    "CYAN": "\001\033[96m\002"
+    "HEADER": "\033[95m",
+    "BLUE": "\033[94m",
+    "GREEN": "\033[92m",
+    "WARNING": "\033[93m",
+    "FAIL": "\033[91m",
+    "ENDC": "\033[0m",
+    "BOLD": "\033[1m",
+    "CYAN": "\033[96m"
+}
+
+# Colors with readline non-printing escape codes (ONLY for input prompts)
+PROMPT_COLORS = {
+    k: f"\001{v}\002" for k, v in COLORS.items()
 }
 
 # Theme definitions (Visuals only)
@@ -120,17 +124,23 @@ def cleanup_server_resources():
     try:
         requests.post(UNLOAD_API_URL, timeout=5)
         # We don't print here to keep exit clean, but server logs will show it
-    except:
+    except Exception:
         pass
 
 # Register cleanup on exit
 atexit.register(cleanup_server_resources)
 
+_INTERNAL_KEYS = {"auto_send", "_retried", "_retried_prompt"}
+
 def save_chat_history(history, current_agent="implementer"):
-    """Save full chat history and metadata to file"""
+    """Save full chat history and metadata to file, stripping internal keys"""
     try:
+        cleaned = []
+        for msg in history:
+            clean_msg = {k: v for k, v in msg.items() if k not in _INTERNAL_KEYS}
+            cleaned.append(clean_msg)
         data = {
-            "messages": history,
+            "messages": cleaned,
             "last_agent": current_agent,
             "timestamp": datetime.now().isoformat()
         }
@@ -205,7 +215,7 @@ def setup_readline():
 
     # Configure readline behavior
     # Enable auto-complete on tab (basic filename completion)
-    if 'libedit' in readline.__doc__ or sys.platform == 'darwin':
+    if (readline.__doc__ and 'libedit' in readline.__doc__) or sys.platform == 'darwin':
         readline.parse_and_bind("bind ^I rl_complete")
         # history-search-backward/forward are not supported by default libedit on macOS
         # Standard Up/Down arrows will work for previous/next history by default
@@ -302,7 +312,13 @@ class JobTracker:
 
     def get_job(self, job_id):
         with self.lock:
-            return self.jobs.get(job_id)
+            job = self.jobs.get(job_id)
+            if job is None:
+                return None
+            # Return a shallow copy with output as a list to avoid exposing live state
+            snapshot = dict(job)
+            snapshot["output"] = list(job["output"])
+            return snapshot
 
     def update_job(self, job_id, **kwargs):
         with self.lock:
@@ -401,6 +417,20 @@ job_tracker = JobTracker(
 # Register cleanup on exit
 atexit.register(job_tracker.terminate_all)
 
+# Track temporary files for cleanup on exit
+_temp_files = set()
+
+def _cleanup_temp_files():
+    """Remove all tracked temporary files on exit"""
+    for path in list(_temp_files):
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except Exception:
+            pass
+    _temp_files.clear()
+
+atexit.register(_cleanup_temp_files)
 
 
 def print_colored(text, color):
@@ -741,6 +771,7 @@ def execute_remote_command_chunked(command, async_mode=False, chunk_output=True)
             # We keep it if output is large so the agent can inspect it later
             with tempfile.NamedTemporaryFile(mode='w+', delete=False, prefix='qwen_cmd_', suffix='.log') as tmp:
                 tmp_path = tmp.name
+            _temp_files.add(tmp_path)
 
             # Run process redirecting stdout/stderr to the temp file
             if ALLOW_SHELL_MODE:
@@ -764,6 +795,7 @@ def execute_remote_command_chunked(command, async_mode=False, chunk_output=True)
 
                 # Store chunk info in a way that can be accessed later if needed
                 chunk_info_path = tmp_path + '.chunks'
+                _temp_files.add(chunk_info_path)
                 chunk_result = chunk_large_output(content, chunk_size=6000, overlap=500)
 
                 # Save chunk metadata for potential later retrieval
@@ -806,7 +838,7 @@ def execute_remote_command_chunked(command, async_mode=False, chunk_output=True)
                     # If small enough, clean up the temp file to reduce clutter
                     try:
                         os.remove(tmp_path)
-                    except:
+                    except Exception:
                         pass
 
             print_colored(f"Output:\n{final_output}", COLORS['CYAN'])
@@ -918,6 +950,19 @@ class CupertinoMCPClient:
             print_colored(f"Error starting Cupertino MCP: {e}", COLORS['FAIL'])
             return False
 
+    def stop(self):
+        """Stop the Cupertino MCP server process"""
+        if self.process:
+            try:
+                self.process.terminate()
+                self.process.wait(timeout=2)
+            except Exception:
+                try:
+                    self.process.kill()
+                except Exception:
+                    pass
+            self.process = None
+
     def _send_request(self, method, params):
         """Send a JSON-RPC request to the MCP server and wait for response"""
         if not self.start():
@@ -965,6 +1010,7 @@ class CupertinoMCPClient:
         return self._send_request("resources/read", {"uri": uri})
 
 cupertino_client = CupertinoMCPClient()
+atexit.register(cupertino_client.stop)
 
 
 def handle_cupertino_search(query):
@@ -1016,7 +1062,7 @@ def apple_deep_docs_search(tool, args):
                     # Try to parse string as JSON for pretty printing
                     parsed = json.loads(result)
                     formatted_result = json.dumps(parsed, indent=2)
-                except:
+                except Exception:
                     formatted_result = result
             else:
                 formatted_result = str(result)
@@ -1142,7 +1188,7 @@ def get_completion(history, model, agent_theme, headers):
     # Progress tracking
     start_time = time.time()
     first_token_time = None
-    token_count = 0
+    chunk_count = 0
     stop_progress = threading.Event()
 
     def show_progress():
@@ -1152,7 +1198,7 @@ def get_completion(history, model, agent_theme, headers):
             elapsed = now - start_time
             if now - last_heartbeat > 30:
                 try: requests.get(HEALTH_URL, timeout=2); last_heartbeat = now
-                except: pass
+                except Exception: pass
             sys.stdout.write(f"\r{COLORS['BLUE']}Waiting for {model}... ({elapsed:.1f}s){COLORS['ENDC']}")
             sys.stdout.flush()
             time.sleep(0.1)
@@ -1177,8 +1223,10 @@ def get_completion(history, model, agent_theme, headers):
                         print_colored(f"\n[Client] Context limit reached. Trimming history and retrying ({context_retries+1}/{MAX_CONTEXT_RETRIES})...", COLORS['WARNING'])
                         if len(history) > 2:
                             trim_index = max(1, int(len(history) * 0.25))
-                            if trim_index % 2 != 0: trim_index += 1
-                            trimmed_past = history[:-1][trim_index:]
+                            # Walk forward until we land on a "user" message to keep valid conversation structure
+                            while trim_index < len(history) - 1 and history[trim_index]["role"] != "user":
+                                trim_index += 1
+                            trimmed_past = history[trim_index:-1]
                             history[:] = trimmed_past + [history[-1]]
                             payload["messages"] = [{"role": m["role"], "content": m["content"]} for m in history]
                             context_retries += 1
@@ -1204,7 +1252,7 @@ def get_completion(history, model, agent_theme, headers):
                                         stop_progress.set()
                                     print(content, end="", flush=True)
                                     full_response += content
-                                    token_count += 1
+                                    chunk_count += 1
                             elif "error" in data:
                                 stop_progress.set()
                                 error_msg = data['error'].get('message', 'Unknown error')
@@ -1213,8 +1261,10 @@ def get_completion(history, model, agent_theme, headers):
                                         print_colored(f"\n[Client] Context limit reached (during generation). Trimming and retrying...", COLORS['WARNING'])
                                         if len(history) > 2:
                                             trim_index = max(1, int(len(history) * 0.25))
-                                            if trim_index % 2 != 0: trim_index += 1
-                                            trimmed_past = history[:-1][trim_index:]
+                                            # Walk forward until we land on a "user" message to keep valid conversation structure
+                                            while trim_index < len(history) - 1 and history[trim_index]["role"] != "user":
+                                                trim_index += 1
+                                            trimmed_past = history[trim_index:-1]
                                             history[:] = trimmed_past + [history[-1]]
                                             payload["messages"] = [{"role": m["role"], "content": m["content"]} for m in history]
                                             context_retries += 1
@@ -1222,17 +1272,17 @@ def get_completion(history, model, agent_theme, headers):
                                             break
                                 print_colored(f"\nServer Error: {error_msg}", COLORS['FAIL'])
                                 break
-                        except: pass
+                        except Exception: pass
             
             if server_error_occurred and context_retries <= MAX_CONTEXT_RETRIES:
-                 server_error_occurred = False; full_response = ""; token_count = 0
+                 server_error_occurred = False; full_response = ""; chunk_count = 0
                  stop_progress = threading.Event(); progress_thread = threading.Thread(target=show_progress, daemon=True); progress_thread.start()
                  continue
             break
 
         except requests.exceptions.ConnectionError:
             stop_progress.set()
-            if token_count > 0: break
+            if chunk_count > 0: break
             if wait_for_server():
                 start_time = time.time(); stop_progress = threading.Event(); progress_thread = threading.Thread(target=show_progress, daemon=True); progress_thread.start()
                 continue
@@ -1243,11 +1293,11 @@ def get_completion(history, model, agent_theme, headers):
 
     stop_progress.set()
     print()
-    if token_count > 0:
+    if chunk_count > 0:
         end_time = time.time(); total_duration = end_time - start_time
         ttft = first_token_time - start_time; gen_duration = end_time - first_token_time
-        tps = token_count / gen_duration if gen_duration > 0 else 0
-        print_colored(f"[Stats] {model}: TTFT: {ttft:.2f}s | Total: {total_duration:.2f}s | {token_count} tokens | {tps:.2f} tps", COLORS['CYAN'])
+        cps = chunk_count / gen_duration if gen_duration > 0 else 0
+        print_colored(f"[Stats] {model}: TTFT: {ttft:.2f}s | Total: {total_duration:.2f}s | {chunk_count} chunks | {cps:.2f} chunks/s", COLORS['CYAN'])
     
     return full_response
 
@@ -1329,20 +1379,17 @@ def chat(model="implementer"):
     while True:
         try:
             # Use agent-specific color and prompt
+            # Wrap ANSI codes with \001/\002 so readline correctly computes prompt width
+            raw_color = agent_theme['color']
             prompt_text = f"{agent_theme['prompt']} {agent_theme['icon']} > "
-            full_prompt = f"{agent_theme['color']}{prompt_text}{COLORS['ENDC']}"
+            full_prompt = f"\001{raw_color}\002{prompt_text}\001{COLORS['ENDC']}\002"
             
             # Pass the prompt directly to input() so readline handles it correctly
-            # This fixes the issue where previous text remains on screen when cycling history
             try:
-                if history and history[-1]["role"] == "user" and history[-1].get("auto_send", False):
-                    print_colored("Sending tool output to agent...", COLORS['BLUE'])
-                    user_input = history[-1]["content"]
-                else:
-                    user_input = input(full_prompt)
-                    # Add user input to readline history (for up/down arrow navigation)
-                    if user_input.strip():
-                        add_to_history(user_input)
+                user_input = input(full_prompt)
+                # Add user input to readline history (for up/down arrow navigation)
+                if user_input.strip():
+                    add_to_history(user_input)
             except EOFError:
                 break # Handle Ctrl+D gracefully
 
@@ -1526,88 +1573,99 @@ def chat(model="implementer"):
                         else:
                             tasks.append((current_task_agent, segments[i] + message_content))
     
-                # Sequential Execution
-                for task_agent, task_content in tasks:
+                # Sequential Execution — each task runs an inner loop that handles
+                # tool-output round-trips inline, then proceeds to the next task.
+                for task_idx, (task_agent, task_content) in enumerate(tasks):
                     if not task_content.strip(): continue
-                    
+
                     # Switch active context for this specific task
                     task_theme = AGENT_THEMES[task_agent]
                     print_colored(f"\n>>> Executing task with @{task_agent} {task_theme['icon']}", COLORS['BLUE'])
-                    
+
                     # Permanently update the active agent if it was explicitly mentioned
                     if task_agent != model:
                         model = task_agent; agent_theme = AGENT_THEMES[model]
-    
+
                     # Append user prompt to history
                     history.append({"role": "user", "content": task_content})
                     save_chat_history(history, model)
-    
-                    # Execute with smart reloading
-                    is_auto_send = history and history[-1].get("auto_send", False)
-                    headers = {"X-Qwen-Force-Reload": "false" if is_auto_send else "true"}
-                    
-                    response_text = get_completion(history, model, agent_theme, headers)
-                    if not response_text: break
-                    
-                    # Append assistant response to history
-                    history.append({"role": "assistant", "content": response_text})
-                    save_chat_history(history, model)
-    
-                    # ── Execute commands found in the response ──
-                    tool_output = process_remote_commands(response_text)
 
-                    if tool_output:
-                        # Happy path: model used <<<REMOTE_EXEC>>> markers correctly
-                        cmd_count = tool_output.count("[Command ")
-                        label = f"{cmd_count} command(s) executed" if cmd_count > 1 else "Tool result"
-                        print_colored(f"\n{label}. Sending output back to agent...", COLORS['CYAN'])
-                        history.append({"role": "user", "content": f"Tool output:\n{tool_output}", "auto_send": True})
-                        break
+                    # Inner loop: keep sending tool output back until the agent
+                    # produces a response with no actionable commands.
+                    force_reload_override = True  # first call for this task uses force reload
+                    task_aborted = False
+                    while True:
+                        headers = {"X-Qwen-Force-Reload": "true" if force_reload_override else "false"}
 
-                    # Fallback: model wrote commands in code blocks instead of markers
-                    fallback_cmds = extract_fallback_commands(response_text)
-                    if fallback_cmds:
-                        print_colored("\nAgent used code blocks instead of markers. Extracting commands...", COLORS['WARNING'])
-                        results = []
-                        total_len = 0
-                        GLOBAL_MAX_LEN = 40000 # ~10k tokens global cap
-
-                        for i, cmd in enumerate(fallback_cmds):
-                            if total_len > GLOBAL_MAX_LEN:
-                                results.append(f"\n... [OMITTED {len(fallback_cmds) - i} FALLBACK COMMANDS TO PREVENT CONTEXT OVERFLOW] ...")
-                                break
-                            
-                            result = execute_remote_command(cmd.strip())
-                            if result:
-                                res_str = f"[Command {i+1}] {result}"
-                                results.append(res_str)
-                                total_len += len(res_str)
-                        
-                        if results:
-                            combined = "\n\n".join(results)
-                            print_colored(f"\n{len(results)} fallback command(s) executed. Sending output back to agent...", COLORS['CYAN'])
-                            history.append({"role": "user", "content": f"Tool output:\n{combined}", "auto_send": True})
+                        response_text = get_completion(history, model, agent_theme, headers)
+                        if not response_text:
+                            task_aborted = True
                             break
 
-                    # Last resort: no commands at all — auto-retry once
-                    # Only allow no-command responses if they explicitly contain a summary completion phrase.
-                    # EXEMPTION: 'architect' and 'reviewer' are allowed to give advice/designs without commands.
-                    completion_phrases = ["complete summary", "work summary", "complete implementation status", "final report", "implementation complete", "summary"]
-                    is_finishing_summary = any(phrase in response_text.lower() for phrase in completion_phrases)
-                    is_exempt_agent = model in ["architect", "reviewer"]
-                    
-                    last_msg_to_agent = history[-2] if len(history) >= 2 else {}
-                    already_retried = last_msg_to_agent.get("_retried")
+                        # Append assistant response to history
+                        history.append({"role": "assistant", "content": response_text})
+                        save_chat_history(history, model)
 
-                    if not is_finishing_summary and not already_retried and not is_exempt_agent:
-                        print_colored("\nAgent gave advice instead of executing. Retrying...", COLORS['WARNING'])
-                        history.append({
-                            "role": "user",
-                            "content": "You did not execute any commands. Do not explain — act. Use <<<REMOTE_EXEC>>> blocks to perform the task now. If you are finished, provide a 'complete summary' or 'work summary'.",
-                            "auto_send": True,
-                            "_retried": True,
-                        })
+                        # After the first round-trip, reuse the loaded model
+                        force_reload_override = False
+
+                        # ── Execute commands found in the response ──
+                        tool_output = process_remote_commands(response_text)
+
+                        if not tool_output:
+                            # Fallback: model wrote commands in code blocks instead of markers
+                            fallback_cmds = extract_fallback_commands(response_text)
+                            if fallback_cmds:
+                                print_colored("\nAgent used code blocks instead of markers. Extracting commands...", COLORS['WARNING'])
+                                results = []
+                                total_len = 0
+                                GLOBAL_MAX_LEN = 40000
+
+                                for i, cmd in enumerate(fallback_cmds):
+                                    if total_len > GLOBAL_MAX_LEN:
+                                        results.append(f"\n... [OMITTED {len(fallback_cmds) - i} FALLBACK COMMANDS TO PREVENT CONTEXT OVERFLOW] ...")
+                                        break
+
+                                    result = execute_remote_command(cmd.strip())
+                                    if result:
+                                        res_str = f"[Command {i+1}] {result}"
+                                        results.append(res_str)
+                                        total_len += len(res_str)
+
+                                if results:
+                                    tool_output = "\n\n".join(results)
+
+                        if tool_output:
+                            cmd_count = tool_output.count("[Command ")
+                            label = f"{cmd_count} command(s) executed" if cmd_count > 1 else "Tool result"
+                            print_colored(f"\n{label}. Sending output back to agent...", COLORS['CYAN'])
+                            history.append({"role": "user", "content": f"Tool output:\n{tool_output}"})
+                            save_chat_history(history, model)
+                            continue  # loop back to get the agent's next response
+
+                        # No commands found — check if we should auto-retry once
+                        completion_phrases = ["complete summary", "work summary", "complete implementation status", "final report", "implementation complete", "summary"]
+                        is_finishing_summary = any(phrase in response_text.lower() for phrase in completion_phrases)
+                        is_exempt_agent = model in ["architect", "reviewer"]
+
+                        last_msg_to_agent = history[-2] if len(history) >= 2 else {}
+                        already_retried = last_msg_to_agent.get("_retried")
+
+                        if not is_finishing_summary and not already_retried and not is_exempt_agent:
+                            print_colored("\nAgent gave advice instead of executing. Retrying...", COLORS['WARNING'])
+                            history.append({
+                                "role": "user",
+                                "content": "You did not execute any commands. Do not explain — act. Use <<<REMOTE_EXEC>>> blocks to perform the task now. If you are finished, provide a 'complete summary' or 'work summary'.",
+                                "_retried": True,
+                            })
+                            save_chat_history(history, model)
+                            continue  # one more round-trip
+
+                        # Agent is done with this task (summary or exempt agent)
                         break
+
+                    if task_aborted:
+                        break  # stop processing remaining tasks
                         
             except KeyboardInterrupt:
                 print_colored("\nInterrupt received. Returning to prompt.", COLORS['WARNING'])

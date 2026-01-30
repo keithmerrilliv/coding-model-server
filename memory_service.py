@@ -13,12 +13,15 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+MEMORY_RELEVANCE_THRESHOLD = float(os.getenv('MEMORY_RELEVANCE_THRESHOLD', '0.35'))
+
+
 class MemoryService:
     def __init__(self, persist_directory: str = "qwen_memory_db"):
         self.persist_directory = persist_directory
         self._collection = None
         self._embedding_model = None
-        
+
         # Initialize automatically
         self._init_db()
 
@@ -142,36 +145,57 @@ class MemoryService:
             logger.error(f"Failed to ingest PDF {file_path}: {e}")
             return {"error": str(e)}
 
-    def search_memory(self, query: str, n_results: int = 3) -> List[str]:
-        """Search for relevant memories"""
+    def search_memory(self, query: str, n_results: int = 3) -> List[Dict[str, Any]]:
+        """Search for relevant memories, filtered by cosine distance threshold.
+
+        Returns a list of dicts with 'document' and 'distance' keys.
+        """
         if not query or not query.strip():
             return []
-            
+
         try:
             query_embedding = self._get_embedding(query)
-            
+
             results = self._collection.query(
                 query_embeddings=[query_embedding],
-                n_results=n_results
+                n_results=n_results,
+                include=["documents", "distances"]
             )
-            
-            # Flatten results (Chroma returns list of lists)
+
             documents = results['documents'][0] if results['documents'] else []
-            return documents
-            
+            distances = results['distances'][0] if results.get('distances') else []
+
+            filtered = []
+            for doc, dist in zip(documents, distances):
+                if dist <= MEMORY_RELEVANCE_THRESHOLD:
+                    filtered.append({"document": doc, "distance": dist})
+
+            return filtered
+
         except Exception as e:
             logger.error(f"Error searching memory: {e}")
             return []
 
     def get_context_string(self, query: str, max_tokens: int = 1000) -> str:
-        """Get a formatted string of relevant memories for prompt injection"""
+        """Get a formatted string of relevant memories for prompt injection.
+
+        Truncates output to approximately max_tokens (estimated at 4 chars/token).
+        """
         memories = self.search_memory(query, n_results=5)
-        
+
         if not memories:
             return ""
-            
-        context_str = "## RELEVANT MEMORIES (FACTS & DECISIONS):\n"
+
+        char_budget = max_tokens * 4
+        header = "## RELEVANT MEMORIES (FACTS & DECISIONS):\n"
+        context_str = header
         for i, mem in enumerate(memories, 1):
-            context_str += f"{i}. {mem}\n"
-            
+            entry = f"{i}. {mem['document']}\n"
+            if len(context_str) + len(entry) > char_budget:
+                break
+            context_str += entry
+
+        if context_str == header:
+            return ""
+
         return context_str + "\n"

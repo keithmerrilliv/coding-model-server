@@ -7,13 +7,15 @@ import os
 import sys
 import json
 import time
+import uuid
+import subprocess
 import logging
 from datetime import datetime
 from typing import Dict, List, Optional, Any, Literal, Iterator
-from threading import Lock
+from threading import Lock, Thread
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Header, Depends
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
@@ -141,15 +143,13 @@ class IngestRequest(BaseModel):
     path: str
 
 
-import subprocess
-
 # ============================================================================
 # Apple Deep Docs Service (MCP Integration)
-# ============================================================================ 
+# ============================================================================
 
 class AppleDeepDocsService:
     """Service for interacting with the Apple Deep Docs MCP server on the Linux server"""
-    
+
     def __init__(self, mcp_path: str):
         self.mcp_path = mcp_path
         self.process = None
@@ -157,17 +157,39 @@ class AppleDeepDocsService:
         self.lock = Lock()
         self.venv_python = os.path.join(mcp_path, "venv/bin/python")
 
+    def _readline_with_timeout(self, timeout: float = 30) -> Optional[str]:
+        """Read a line from the MCP subprocess stdout with a timeout.
+
+        Uses a background thread so a hung subprocess doesn't block forever.
+        Returns the line string, or None on timeout / EOF.
+        """
+        result = [None]
+
+        def _read():
+            try:
+                result[0] = self.process.stdout.readline()
+            except Exception:
+                result[0] = None
+
+        reader = Thread(target=_read, daemon=True)
+        reader.start()
+        reader.join(timeout)
+        if reader.is_alive():
+            logger.error("MCP readline timed out after %.1f seconds", timeout)
+            return None
+        return result[0]
+
     def start(self):
         """Start the MCP server process and perform handshake if not already running"""
         if self.process and self.process.poll() is None:
             return True
-            
+
         try:
             main_py = os.path.join(self.mcp_path, "main.py")
             if not os.path.exists(self.venv_python):
                 logger.error(f"Apple Deep Docs venv not found at {self.venv_python}")
                 return False
-                
+
             self.process = subprocess.Popen(
                 [self.venv_python, main_py],
                 stdin=subprocess.PIPE,
@@ -177,10 +199,10 @@ class AppleDeepDocsService:
                 bufsize=1,
                 cwd=self.mcp_path
             )
-            
+
             # Perform MCP Handshake
             logger.info("Performing MCP handshake with Apple Deep Docs...")
-            
+
             # 1. Send initialize
             init_request = {
                 "jsonrpc": "2.0",
@@ -194,10 +216,10 @@ class AppleDeepDocsService:
             }
             self.process.stdin.write(json.dumps(init_request) + "\n")
             self.process.stdin.flush()
-            
-            # 2. Wait for initialize response
+
+            # 2. Wait for initialize response (with timeout)
             while True:
-                line = self.process.stdout.readline()
+                line = self._readline_with_timeout(timeout=30)
                 if not line:
                     logger.error("Failed to receive initialize response from MCP")
                     return False
@@ -208,7 +230,7 @@ class AppleDeepDocsService:
                     if resp.get("id") == 0:
                         logger.info("MCP initialize successful")
                         break
-                except:
+                except Exception:
                     continue
             
             # 3. Send initialized notification
@@ -305,6 +327,8 @@ class AppleDeepDocsService:
 class Config:
     PORT = int(os.getenv('PORT', 5000))
     HOST = os.getenv('HOST', '0.0.0.0')
+    ADMIN_API_KEY = os.getenv('ADMIN_API_KEY', '')
+    INGEST_ALLOWED_DIR = os.getenv('INGEST_ALLOWED_DIR', '')
     
     # Global defaults (can be overridden per model)
     DEFAULT_CONTEXT_SIZE = int(os.getenv('MODEL_CONTEXT_SIZE', 524288))
@@ -354,7 +378,7 @@ Rules:
 
     # ── Shared model configs ──
     _CODER_30B = {
-        'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
+        'path': os.getenv('MODEL_PATH_CODER_30B', '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf'),
         'n_gpu_layers': 32, # Dialed back for slightly more headroom
         'n_ctx': 81920, # 80k Context
         'n_batch': 1024,
@@ -369,7 +393,7 @@ Rules:
     }
 
     _QWEN_32B = {
-        'path': '/home/keith-merrill/.lmstudio/models/Qwen/Qwen3-32B-GGUF/Qwen3-32B-Q4_K_M.gguf',
+        'path': os.getenv('MODEL_PATH_QWEN_32B', '/home/keith-merrill/.lmstudio/models/Qwen/Qwen3-32B-GGUF/Qwen3-32B-Q4_K_M.gguf'),
         'n_gpu_layers': 35, 'n_ctx': 43008, 'n_batch': 2048,
         'rope_scaling_type': 2, 'rope_freq_scale': 1.0,
         'yarn_ext_factor': -1.0, 'yarn_attn_factor': 1.0,
@@ -378,7 +402,7 @@ Rules:
     }
 
     _QWEN_480B = {
-        'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/Qwen3-Coder-480B-A35B-Instruct-UD-IQ1_M.gguf',
+        'path': os.getenv('MODEL_PATH_QWEN_480B', '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/Qwen3-Coder-480B-A35B-Instruct-UD-IQ1_M.gguf'),
         'n_gpu_layers': 4, 'n_ctx': 49152, 'n_batch': 512,
         'rope_scaling_type': 2, 'rope_freq_scale': 1.0,
         'yarn_ext_factor': -1.0, 'yarn_attn_factor': 1.0,
@@ -387,7 +411,7 @@ Rules:
     }
 
     _QWEN_14B = {
-        'path': '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-14B-GGUF/Qwen3-14B-Q6_K.gguf',
+        'path': os.getenv('MODEL_PATH_QWEN_14B', '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-14B-GGUF/Qwen3-14B-Q6_K.gguf'),
         'n_gpu_layers': 99, 'n_ctx': 32768, 'n_batch': 2048,
         'rope_scaling_type': 2, 'rope_freq_scale': 1.0,
         'yarn_ext_factor': -1.0, 'yarn_attn_factor': 1.0,
@@ -450,9 +474,20 @@ Rules:
         return errors
 
 
-# ============================================================================ 
+# ============================================================================
+# Security Dependencies
+# ============================================================================
+
+async def verify_admin_key(x_admin_key: Optional[str] = Header(None)):
+    """Verify admin API key if ADMIN_API_KEY is configured"""
+    if Config.ADMIN_API_KEY:
+        if not x_admin_key or x_admin_key != Config.ADMIN_API_KEY:
+            raise HTTPException(status_code=401, detail="Invalid or missing admin API key")
+
+
+# ============================================================================
 # Model Manager
-# ============================================================================ 
+# ============================================================================
 
 class ModelManager:
     def __init__(self):
@@ -615,7 +650,7 @@ def get_model_params(max_tokens: int, temperature: float, stream: bool = False) 
 def build_completion_response(model_id: str, text: str, usage: Dict[str, int]) -> Dict[str, Any]:
     """Build OpenAI-compatible completion response"""
     return {
-        "id": f"chatcmpl-{int(time.time())}",
+        "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
         "object": "chat.completion",
         "created": int(time.time()),
         "model": model_id,
@@ -713,6 +748,14 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=os.getenv("CORS_ORIGINS", "*").split(","),
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
     """Custom HTTP exception handler for OpenAI-compatible error format"""
@@ -773,7 +816,7 @@ async def list_models():
 
 
 @app.post("/v1/memory")
-async def save_memory(request: MemoryRequest):
+def save_memory(request: MemoryRequest):
     """Save a memory/fact to the long-term storage"""
     if not memory_service:
         raise HTTPException(status_code=503, detail="Memory service not initialized")
@@ -790,7 +833,7 @@ async def save_memory(request: MemoryRequest):
 
 
 @app.post("/v1/tools/search")
-async def web_search(request: SearchRequest):
+def web_search(request: SearchRequest):
     """Perform a web search using DuckDuckGo"""
     if not web_search_service:
         raise HTTPException(status_code=503, detail="Web search service not initialized")
@@ -806,7 +849,7 @@ class DeepDocRequest(BaseModel):
 
 
 @app.post("/v1/tools/apple_deep_docs")
-async def apple_deep_docs(request: DeepDocRequest):
+def apple_deep_docs(request: DeepDocRequest):
     """Perform an Apple Documentation search using the server-side MCP"""
     if not apple_deep_docs_service:
         raise HTTPException(status_code=503, detail="Apple Deep Docs service not initialized")
@@ -816,27 +859,39 @@ async def apple_deep_docs(request: DeepDocRequest):
 
 
 @app.post("/v1/memory/ingest")
-async def ingest_memory(request: IngestRequest):
+def ingest_memory(request: IngestRequest):
     """Ingest a local PDF file into long-term memory"""
     if not memory_service:
         raise HTTPException(status_code=503, detail="Memory service not initialized")
-        
-    result = memory_service.ingest_pdf(request.path)
+
+    # Path security validation
+    normalized = os.path.normpath(request.path)
+    if '..' in normalized.split(os.sep):
+        raise HTTPException(status_code=400, detail="Path traversal not allowed")
+    if not os.path.isabs(normalized):
+        raise HTTPException(status_code=400, detail="Only absolute paths are allowed")
+    if Config.INGEST_ALLOWED_DIR:
+        allowed = os.path.normpath(Config.INGEST_ALLOWED_DIR)
+        if not normalized.startswith(allowed + os.sep) and normalized != allowed:
+            raise HTTPException(status_code=403, detail=f"Path must be under {allowed}")
+
+    result = memory_service.ingest_pdf(normalized)
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
-        
+
     return result
 
 
-@app.post("/v1/admin/unload")
-async def unload_models():
+@app.post("/v1/admin/unload", dependencies=[Depends(verify_admin_key)])
+def unload_models():
     """Manually unload all models to free VRAM"""
-    model_manager.unload_model()
+    with model_manager.inference_lock:
+        model_manager.unload_model()
     return {"status": "success", "message": "All models unloaded"}
 
 
 @app.post("/v1/chat/completions")
-async def chat_completions(request: ChatCompletionRequest, raw_request: Request):
+def chat_completions(request: ChatCompletionRequest, raw_request: Request):
     """Handle chat completion requests (OpenAI-compatible)"""
     try:
         # Validate model exists
@@ -846,8 +901,8 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
                 detail=f"Model '{request.model}' not found. Available models: {', '.join(Config.AGENTS.keys())}"
             )
 
-        # Check for reload flag (default to True for safety)
-        force_reload = raw_request.headers.get("X-Qwen-Force-Reload", "true").lower() == "true"
+        # Check for reload flag (default to False to reuse loaded model)
+        force_reload = raw_request.headers.get("X-Qwen-Force-Reload", "false").lower() == "true"
 
         agent_config = Config.AGENTS[request.model]
         system_prompt = agent_config['system_prompt']
@@ -908,9 +963,14 @@ def sync_completion(prompt: str, model_id: str, max_tokens: int, temperature: fl
             model_manager.unload_model()
 
 def stream_completion(prompt: str, model_id: str, max_tokens: int, temperature: float, force_reload: bool) -> Iterator[str]:
-    """Generate streaming completion"""
+    """Generate streaming completion.
+
+    The inference_lock is held for the full duration of streaming intentionally.
+    llama-cpp-python is not thread-safe, so concurrent inference on the same
+    model instance would cause undefined behavior or crashes.
+    """
     try:
-        completion_id = f"chatcmpl-{int(time.time())}"
+        completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
         
         with model_manager.inference_lock:
             model = model_manager.get_model(model_id, force_reload=force_reload)
