@@ -42,5 +42,15 @@ This project establishes a robust, local LLM infrastructure using the Qwen model
     *   Implemented persistent agent state (client remembers the last used agent).
     *   Fixed readline artifacts for a cleaner UI.
 
+### Phase 3: Robustness & Capability Expansion (Jan 28 - Jan 29)
+*   **Architect Upgrade:** Switched Architect agent to `Qwen3-Coder-480B` (IQ1_M) loaded in RAM, providing massive reasoning capabilities. Introduced `<<<READ_FILE>>>` tool to allow safe, read-only code access without shell risks.
+*   **Robust Multi-Agent Workflow:**
+    *   Implemented a **Task Queue** (`PENDING_TASKS`) and `/resume` command to handle interrupted workflows (e.g., when a tool execution pauses a multi-agent chain).
+    *   Added chunking to tool outputs to prevent context overflow from large logs.
+*   **Reviewer Upgrade:** Upgraded Reviewer agent to use the 30B model (shared with Implementer) for deeper logic analysis.
+*   **Server Stability:**
+    *   Fixed event loop blocking in MCP tools (`apple_deep_docs`) by making endpoints synchronous.
+    *   Optimized `qwen_remote.py` prompt colors and interruption handling.
+
 ## 5. Current Status
-The project is functional and stable. The server safely manages resource-intensive models, and the client provides a smooth developer experience with features like history navigation, quick agent switching, and safe remote execution.
+The project is functional and stable. The server safely manages resource-intensive models (including a 480B parameter model), and the client provides a smooth developer experience with features like history navigation, quick agent switching, safe remote execution, and robust multi-agent orchestration.

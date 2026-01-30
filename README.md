@@ -51,6 +51,10 @@ python3 qwen_remote.py
 
 - `/exit` or `/quit` - Exit the client
 - `/model <name>` - Switch to a different agent model
+- `/resume` - Resume interrupted multi-agent tasks (e.g., after a tool execution break)
+- `/history` - Show command history
+- `/cupertino <query>` - Search Apple documentation (macOS only)
+- `/ingest <path>` - Ingest a PDF file into memory
 
 ### Security Settings
 
@@ -131,3 +135,8 @@ The agent can request to execute commands on your local machine. You will be pro
 **Sync commands** (immediate):
 - Agent uses `<<<REMOTE_EXEC>>>command<<<REMOTE_EXEC>>>`
 - Runs with 30-second timeout
+
+**File Reading** (safe, fast):
+- Agent uses `<<<READ_FILE>>>path<<<READ_FILE>>>`
+- Reads file content without using shell commands (Architect safe)
+
