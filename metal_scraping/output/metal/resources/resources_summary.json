@@ -1,0 +1,22 @@
+{
+  "wwdc_video_searches": {
+    "WWDC Metal tutorial": "success",
+    "Apple developer Metal performance": "success"
+  },
+  "related_framework_queries": {
+    "CoreGraphics Metal integration": "success",
+    "SpriteKit Metal support": "success",
+    "SceneKit Metal rendering": "success"
+  },
+  "tools_documentation": {
+    "Metal Shader Debugger": "success",
+    "Xcode Metal profiling": "success"
+  },
+  "timestamp": 1769767100.2934542,
+  "total_wwdc_searches": 2,
+  "successful_wwdc_searches": 2,
+  "total_framework_queries": 3,
+  "successful_framework_retrievals": 3,
+  "total_tool_docs": 2,
+  "successful_tool_doc_retrievals": 2
+}

@@ -1,0 +1,20 @@
+{
+  "api_documentation": {
+    "MTLDevice": "success",
+    "MTLCommandQueue": "success",
+    "MTLBuffer": "success",
+    "MTLTexture": "success",
+    "MTLRenderPipeline": "success",
+    "MTLComputePipeline": "success"
+  },
+  "deep_docs_queries": {
+    "Metal framework": "success",
+    "MTLDevice protocol": "success",
+    "Metal rendering pipeline": "success"
+  },
+  "timestamp": 1769767100.234004,
+  "total_api_entities": 6,
+  "successful_api_lookups": 6,
+  "total_deepdoc_queries": 3,
+  "successful_deepdoc_queries": 3
+}

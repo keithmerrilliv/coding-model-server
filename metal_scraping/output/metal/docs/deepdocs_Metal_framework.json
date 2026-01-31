@@ -1,0 +1,10 @@
+{
+  "query": {
+    "tool": "search_apple_online",
+    "arguments": {
+      "query": "Metal framework"
+    }
+  },
+  "found_results": true,
+  "timestamp": 1769767100.233731
+}

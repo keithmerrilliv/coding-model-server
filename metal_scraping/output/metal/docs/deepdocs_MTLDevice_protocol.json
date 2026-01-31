@@ -1,0 +1,10 @@
+{
+  "query": {
+    "tool": "search_apple_online",
+    "arguments": {
+      "query": "MTLDevice protocol"
+    }
+  },
+  "found_results": true,
+  "timestamp": 1769767100.2338262
+}

@@ -1,0 +1,15 @@
+{
+  "tool_query": {
+    "tool": "search_apple_online",
+    "arguments": {
+      "query": "Xcode Metal profiling"
+    }
+  },
+  "documentation_found": true,
+  "sections_available": [
+    "Overview",
+    "Usage",
+    "Best Practices"
+  ],
+  "timestamp": 1769767100.293374
+}
