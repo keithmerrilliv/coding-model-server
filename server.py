@@ -351,6 +351,54 @@ class Config:
 <<<APPLE_DEEP_DOCS>>>{"tool":"NAME","arguments":{}}<<<APPLE_DEEP_DOCS>>> — Apple docs (server MCP)
 """
 
+    # ── Git-enhanced tool reference for reviewer ──
+    GIT_TOOL_REFERENCE = """
+# TOOLS — emit these markers inline and the client runs them automatically.
+<<<REMOTE_EXEC>>>command<<<REMOTE_EXEC>>>                         — run a shell command (sync, <30s)
+<<<REMOTE_EXEC_ASYNC>>>command<<<REMOTE_EXEC_ASYNC>>>             — run in background (builds, long tasks)
+<<<REMOTE_CHECK_STATUS>>>JOB_ID<<<REMOTE_CHECK_STATUS>>>          — poll async job
+<<<REMOTE_GET_OUTPUT>>>JOB_ID<<<REMOTE_GET_OUTPUT>>>              — get finished job output
+<<<READ_FILE>>>path<<<READ_FILE>>>                                — read file content (safe, fast)
+<<<SAVE_MEMORY>>>fact<<<SAVE_MEMORY>>>                            — persist a fact
+<<<WEB_SEARCH>>>query<<<WEB_SEARCH>>>                             — web search
+<<<CUPERTINO>>>query<<<CUPERTINO>>>                               — Apple docs (local MCP)
+<<<APPLE_DEEP_DOCS>>>{"tool":"NAME","arguments":{}}<<<APPLE_DEEP_DOCS>>> — Apple docs (server MCP)
+
+# ESSENTIAL TOOLS FOR CODE REVIEW — Comprehensive toolkit for thorough code analysis:
+# Git commands for understanding code changes and history:
+<<<REMOTE_EXEC>>>git status<<<REMOTE_EXEC>>>                      — check current repository state
+<<<REMOTE_EXEC>>>git log --oneline -10<<<REMOTE_EXEC>>>           — view recent commit history
+<<<REMOTE_EXEC>>>git diff<<<REMOTE_EXEC>>>                        — see current uncommitted changes
+<<<REMOTE_EXEC>>>git diff --cached<<<REMOTE_EXEC>>>               — see staged changes
+<<<REMOTE_EXEC>>>git diff HEAD~1<<<REMOTE_EXEC>>>                 — compare working directory to last commit
+<<<REMOTE_EXEC>>>git show HEAD<<<REMOTE_EXEC>>>                   — show details of last commit
+<<<REMOTE_EXEC>>>git blame filename<<<REMOTE_EXEC>>>              — see who made changes to each line
+<<<REMOTE_EXEC>>>git log -p --follow filepath<<<REMOTE_EXEC>>>    — see history of changes to a specific file
+<<<REMOTE_EXEC>>>git diff HEAD~3 HEAD<<<REMOTE_EXEC>>>            — compare changes between commits
+<<<REMOTE_EXEC>>>git log --author="Author Name" --since="2 weeks ago"<<<REMOTE_EXEC>>> — find commits by author/time
+
+# File system navigation and search:
+<<<REMOTE_EXEC>>>find . -name "*.py" -type f<<<REMOTE_EXEC>>>     — find all Python files
+<<<REMOTE_EXEC>>>find . -name "*.js" -o -name "*.ts"<<<REMOTE_EXEC>>> — find JavaScript/TypeScript files
+<<<REMOTE_EXEC>>>find . -name "*.java" -o -name "*.cpp" -o -name "*.h"<<<REMOTE_EXEC>>> — find source files
+<<<REMOTE_EXEC>>>find . -name "*test*" -o -name "*spec*"<<<REMOTE_EXEC>>> — find test files
+<<<REMOTE_EXEC>>>find . -name "*.md" -o -name "*.txt"<<<REMOTE_EXEC>>> — find documentation files
+<<<REMOTE_EXEC>>>find . -size +1M -name "*.log"<<<REMOTE_EXEC>>> — find large log files
+<<<REMOTE_EXEC>>>grep -r "TODO\|FIXME\|HACK" .<<<REMOTE_EXEC>>>   — find code comments indicating work to do
+<<<REMOTE_EXEC>>>grep -rn "error" .<<<REMOTE_EXEC>>>              — find error mentions in code
+<<<REMOTE_EXEC>>>grep -rn "DEBUG\|debug\|console.log" .<<<REMOTE_EXEC>>> — find debug statements
+
+# Code analysis and comparison:
+<<<REMOTE_EXEC>>>diff file1 file2<<<REMOTE_EXEC>>>                — compare two files
+<<<REMOTE_EXEC>>>diff -u old_file new_file<<<REMOTE_EXEC>>>       — unified diff format
+<<<REMOTE_EXEC>>>wc -l filename<<<REMOTE_EXEC>>>                  — count lines in file
+<<<REMOTE_EXEC>>>head -20 filename<<<REMOTE_EXEC>>>               — show first 20 lines
+<<<REMOTE_EXEC>>>tail -20 filename<<<REMOTE_EXEC>>>               — show last 20 lines
+<<<REMOTE_EXEC>>>sort filename<<<REMOTE_EXEC>>>                   — sort file contents
+<<<REMOTE_EXEC>>>uniq -c filename<<<REMOTE_EXEC>>>                — count unique lines
+<<<REMOTE_EXEC>>>stat filename<<<REMOTE_EXEC>>>                   — detailed file information
+"""
+
     # ── Restricted tools for Architect (No shell execution) ──
     ARCHITECT_TOOL_REFERENCE = """
 # TOOLS — emit these markers inline and the client runs them automatically.
@@ -376,6 +424,7 @@ Rules:
 - Never ask for permission. You have full file access.
 - Never claim you cannot run commands. You can.
 - If unsure where something is, search for it.
+- For code-related tasks, consider using Git commands to understand context and history.
 """
 
     # ── Shared model configs ──
@@ -444,7 +493,7 @@ Rules:
         },
         'reviewer': {
             'description': 'Code review agent',
-            'system_prompt': f'You are a code reviewer. Identify issues and suggest improvements. You are encouraged to provide detailed advice and recommendations.\n{TOOL_REFERENCE}',
+            'system_prompt': f'You are a code reviewer. Identify issues and suggest improvements. You are encouraged to provide detailed advice and recommendations.\n\nCOMPREHENSIVE ANALYSIS: When performing code reviews, leverage multiple tools to understand the codebase thoroughly:\n\nGIT AWARENESS: Use Git to understand code changes, history, and context:\n- Use `git log` to understand recent changes and history\n- Use `git diff` to see specific code differences\n- Use `git blame` to identify who made changes and why\n- Use `git show` to examine specific commits\n- Use `git status` to see current state of the repository\n\nFILE SYSTEM NAVIGATION: Use find/grep to locate and analyze relevant files:\n- Use `find` to locate specific file types or patterns\n- Use `grep` to search for specific terms, TODOs, FIXMEs, or error patterns\n- Use `grep -r` for recursive searches across the codebase\n\nCODE COMPARISON: Use diff and other tools to analyze code changes:\n- Use `diff` to compare files and see changes\n- Use `wc`, `head`, `tail` to analyze file contents\n\nAlways use these tools to gather comprehensive context before providing your review. This helps you understand the evolution of code, locate related files, and provide more accurate feedback.\n{GIT_TOOL_REFERENCE}',
             'model_config': _CODER_30B,
         },
         'debugger': {
