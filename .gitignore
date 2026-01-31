@@ -6,3 +6,4 @@ venv/
 qwen_memory_db/
 server.log
 tools/
+.DS_Store
