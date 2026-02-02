@@ -118,6 +118,12 @@ def main():
                 master_summary['modules'].get('resources', {})
             ]
         )
+        
+        # Run ingestion step
+        print("\n" + "="*60)
+        print("RUNNING MEMORY INGESTION")
+        print('='*60)
+        subprocess.run([sys.executable, 'ingest_scraped_data.py'])
     
     print("\n" + "="*60)
     print("METAL DOCUMENTATION SCRAPING COMPLETED")
