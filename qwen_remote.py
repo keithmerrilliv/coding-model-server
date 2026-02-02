@@ -1389,7 +1389,7 @@ def handle_user_command(user_input, history, model, agent_theme):
             print_colored("Starting Metal documentation scraper on the server...", COLORS['CYAN'])
             
         # Run the main.py scraper orchestrator with optional argument
-        scrape_cmd = f"cd metal_scraping && python3 main.py{framework_arg}"
+        scrape_cmd = f"cd scraping && python3 main.py{framework_arg}"
         result = execute_remote_command(scrape_cmd, async_mode=False)
         print_colored(f"\n{result}\n", COLORS['GREEN'])
         return True, model
