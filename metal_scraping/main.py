@@ -78,6 +78,13 @@ def main():
     """Main execution function"""
     print("APPLE METAL DOCUMENTATION SCRAPER")
     print("Using MCP Tools (Cupertino, Apple Deep Docs)")
+    
+    # Check for framework argument
+    framework_filter = None
+    if len(sys.argv) > 1:
+        framework_filter = sys.argv[1]
+        print(f"Target Framework: {framework_filter}")
+    
     print("="*50)
     
     # Create output directory

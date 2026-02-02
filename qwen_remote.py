@@ -1350,7 +1350,8 @@ def handle_user_command(user_input, history, model, agent_theme):
         print(f"                         Example: /apple search_swift_evolution {{\"feature\": \"actors\"}}")
         print(f"  /ingest <path>       - Ingest a local PDF on the Linux server into memory")
         print(f"                         Example: /ingest /home/user/Metal4_Specs.pdf")
-        print(f"  /scrape              - Run the Metal documentation scraper on the server")
+        print(f"  /scrape [framework]  - Run the documentation scraper (default: Metal)")
+        print(f"                         Example: /scrape MetalFX")
         
         print_colored(f"\n{COLORS['BOLD']}AGENT SHORTCUTS:{COLORS['ENDC']}", COLORS['BLUE'])
         print(f"  @<agent_name> [msg]  - Switch agent and optionally send message in one go")
@@ -1377,10 +1378,18 @@ def handle_user_command(user_input, history, model, agent_theme):
         return True, model
 
     # Scrape Documentation Command
-    if user_input.lower() == '/scrape':
-        print_colored("Starting Metal documentation scraper on the server...", COLORS['CYAN'])
-        # Run the main.py scraper orchestrator
-        scrape_cmd = "cd metal_scraping && python3 main.py"
+    if user_input.lower().startswith('/scrape'):
+        parts = user_input.split(' ', 1)
+        framework_arg = ""
+        
+        if len(parts) > 1 and parts[1].strip():
+            framework_arg = f" {parts[1].strip()}"
+            print_colored(f"Starting documentation scraper for '{parts[1].strip()}' on the server...", COLORS['CYAN'])
+        else:
+            print_colored("Starting Metal documentation scraper on the server...", COLORS['CYAN'])
+            
+        # Run the main.py scraper orchestrator with optional argument
+        scrape_cmd = f"cd metal_scraping && python3 main.py{framework_arg}"
         result = execute_remote_command(scrape_cmd, async_mode=False)
         print_colored(f"\n{result}\n", COLORS['GREEN'])
         return True, model
