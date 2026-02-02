@@ -7,3 +7,4 @@ qwen_memory_db/
 server.log
 tools/
 .DS_Store
+server_stats.csv
