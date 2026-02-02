@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Metal Guides and Specifications Scraper using Apple MCP Tools
+Generic Guides and Specifications Scraper using Apple MCP Tools
 
-This script focuses on Metal guides, tutorials and specification documents.
+This script focuses on framework guides, tutorials and specification documents.
 """
 
 import os
@@ -14,20 +14,21 @@ import time
 from dotenv import load_dotenv
 load_dotenv()
 
-class MetalGuidesScraper:
-    def __init__(self):
-        self.output_dir = "output/metal/guides"
+class GenericGuidesScraper:
+    def __init__(self, framework):
+        self.framework = framework
+        self.output_dir = f"output/{framework}/guides"
         os.makedirs(self.output_dir, exist_ok=True)
-        
+
     def scrape_programming_guides(self):
-        """Use Apple Deep Docs to get programming guides"""
-        print("Scraping Metal Programming Guides...")
+        """Use Cupertino to get programming guides"""
+        print(f"Scraping {self.framework} Programming Guides...")
 
         guide_topics = [
-            "Metal Programming Guide",
-            "Metal Performance Shaders",
-            "Metal Shader Debugging",
-            "Working with Metal Devices"
+            f"{self.framework.title()} Programming Guide",
+            f"{self.framework.title()} Performance Shaders",
+            f"{self.framework.title()} Shader Debugging",
+            f"Working with {self.framework.title()} Devices"
         ]
 
         results = {}
@@ -42,11 +43,11 @@ class MetalGuidesScraper:
                 apple_deep_docs_path = os.getenv('APPLE_DEEP_DOCS_PATH', '/default/path/not/set')
                 if os.path.exists(apple_deep_docs_path):
                     # If we wanted to use apple-deep-docs, we would call it like this:
-                    # result = subprocess.run([apple_deep_docs_path, '--query', f'Metal {topic}'], capture_output=True, text=True, timeout=30)
+                    # result = subprocess.run([apple_deep_docs_path, '--query', f'{self.framework} {topic}'], capture_output=True, text=True, timeout=30)
                     # But since it's an MCP server, we'll stick with cupertino
                     pass
-
-                result = subprocess.run(['cupertino', 'search', f'Metal {topic}'], capture_output=True, text=True, timeout=30)
+                
+                result = subprocess.run(['cupertino', 'search', f'{self.framework} {topic}'], capture_output=True, text=True, timeout=30)
                 tool_used = 'cupertino'
 
                 if result.returncode == 0:
@@ -88,14 +89,14 @@ class MetalGuidesScraper:
                 results[topic] = "failed"
 
         return results
-    
+
     def scrape_specifications(self):
-        """Get Metal specification documents"""
-        print("Retrieving Metal Specification Documents...")
+        """Get framework specification documents"""
+        print(f"Retrieving {self.framework} Specification Documents...")
 
         spec_docs = [
-            "Metal Shading Language Specification",
-            "Metal Framework Reference"
+            f"{self.framework.title()} Shading Language Specification",
+            f"{self.framework.title()} Framework Reference"
         ]
 
         results = {}
@@ -105,14 +106,17 @@ class MetalGuidesScraper:
 
                 result_file = f"{self.output_dir}/{doc.replace(' ', '_')}_spec.json"
 
-                # Try to use apple-deep-docs if available, otherwise fall back to cupertino
-                try:
-                    result = subprocess.run(['apple-deep-docs', '--query', doc], capture_output=True, text=True, timeout=30)
-                    tool_used = 'apple-deep-docs'
-                except FileNotFoundError:
-                    # apple-deep-docs not available, fall back to cupertino
-                    result = subprocess.run(['cupertino', 'search', doc], capture_output=True, text=True, timeout=30)
-                    tool_used = 'cupertino'
+                # apple-deep-docs is an MCP server that doesn't work with command-line args
+                # Fall back to cupertino which is known to work
+                apple_deep_docs_path = os.getenv('APPLE_DEEP_DOCS_PATH', '/default/path/not/set')
+                if os.path.exists(apple_deep_docs_path):
+                    # If we wanted to use apple-deep-docs, we would call it like this:
+                    # result = subprocess.run([apple_deep_docs_path, '--query', doc], capture_output=True, text=True, timeout=30)
+                    # But since it's an MCP server, we'll stick with cupertino
+                    pass
+                
+                result = subprocess.run(['cupertino', 'search', doc], capture_output=True, text=True, timeout=30)
+                tool_used = 'cupertino'
 
                 if result.returncode == 0:
                     actual_result = {
@@ -143,41 +147,43 @@ class MetalGuidesScraper:
                 results[doc] = "failed"
 
         return results
-    
+
     def run(self):
         """Execute all guide and specification scraping tasks"""
-        
+
         # Get programming guides
         guide_results = self.scrape_programming_guides()
-        
-        # Retrieve specifications 
+
+        # Retrieve specifications
         spec_results = self.scrape_specifications()
-        
+
         # Create summary report
         summary = {
             'programming_guides': guide_results,
-            'specification_documents': spec_results,  
+            'specification_documents': spec_results,
             'timestamp': time.time(),
             'total_guides': len(guide_results),
             'successful_guide_retrievals': sum(1 for v in guide_results.values() if v == "success"),
             'total_specs': len(spec_results),
             'successful_spec_retrievals': sum(1 for v in spec_results.values() if v == "success")
         }
-        
+
         with open(f"{self.output_dir}/guides_summary.json", "w") as f:
             json.dump(summary, f, indent=2)
-            
-        print("\nProgramming Guide Results:")
+
+        print(f"\n{self.framework} Programming Guide Results:")
         for topic, status in guide_results.items():
             print(f"  {topic}: {status}")
-            
-        print("\nSpecification Document Results:")  
+
+        print(f"\n{self.framework} Specification Document Results:")
         for doc, status in spec_results.items():
             print(f"  {doc}: {status}")
-                
+
         return summary
 
 if __name__ == "__main__":
-    scraper = MetalGuidesScraper()
-    results = scraper.run() 
+    import sys
+    framework = sys.argv[1] if len(sys.argv) > 1 else "metal"
+    scraper = GenericGuidesScraper(framework)
+    results = scraper.run()
     print(f"\nCompleted with {results['successful_guide_retrievals']}/{results['total_guides']} guides and {results['successful_spec_retrievals']}/{results['total_specs']} specs retrieved")

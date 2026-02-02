@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Metal Additional Resources Scraper using Apple MCP Tools
+Generic Additional Resources Scraper using Apple MCP Tools
 
-This script retrieves WWDC videos, related frameworks and additional resources.
+This script retrieves WWDC videos, related frameworks and additional resources for any framework.
 """
 
 import os
@@ -14,18 +14,19 @@ import time
 from dotenv import load_dotenv
 load_dotenv()
 
-class MetalResourcesScraper:
-    def __init__(self):
-        self.output_dir = "output/metal/resources"
+class GenericResourcesScraper:
+    def __init__(self, framework):
+        self.framework = framework
+        self.output_dir = f"output/{framework}/resources"
         os.makedirs(self.output_dir, exist_ok=True)
-        
+
     def scrape_wwdc_videos(self):
-        """Use Web Search to find WWDC videos about Metal"""
-        print("Searching for WWDC Videos on Metal...")
+        """Use Cupertino to find WWDC videos about the framework"""
+        print(f"Searching for WWDC Videos on {self.framework}...")
 
         search_queries = [
-            "WWDC Metal tutorial",
-            "Apple developer Metal performance"
+            f"WWDC {self.framework} tutorial",
+            f"Apple developer {self.framework} performance"
         ]
 
         results = {}
@@ -43,7 +44,7 @@ class MetalResourcesScraper:
                     # result = subprocess.run([apple_deep_docs_path, '--query', query], capture_output=True, text=True, timeout=30)
                     # But since it's an MCP server, we'll stick with cupertino
                     pass
-
+                
                 result = subprocess.run(['cupertino', 'search', query], capture_output=True, text=True, timeout=30)
                 tool_used = 'cupertino'
 
@@ -94,15 +95,15 @@ class MetalResourcesScraper:
                 results[query] = "failed"
 
         return results
-    
+
     def find_related_frameworks(self):
         """Use Cupertino to identify related frameworks"""
-        print("Identifying Related Frameworks...")
+        print(f"Identifying Related {self.framework} Frameworks...")
 
         framework_queries = [
-            "CoreGraphics Metal integration",
-            "SpriteKit Metal support",
-            "SceneKit Metal rendering"
+            f"CoreGraphics {self.framework} integration",
+            f"SpriteKit {self.framework} support",
+            f"SceneKit {self.framework} rendering"
         ]
 
         results = {}
@@ -120,7 +121,7 @@ class MetalResourcesScraper:
                     # result = subprocess.run([apple_deep_docs_path, '--query', query], capture_output=True, text=True, timeout=30)
                     # But since it's an MCP server, we'll stick with cupertino
                     pass
-
+                
                 result = subprocess.run(['cupertino', 'search', query], capture_output=True, text=True, timeout=30)
                 tool_used = 'cupertino'
 
@@ -155,14 +156,14 @@ class MetalResourcesScraper:
                 results[query] = "failed"
 
         return results
-    
+
     def get_tools_documentation(self):
-        """Use Apple Deep Docs for tools documentation"""
-        print("Retrieving Tools Documentation...")
+        """Use Cupertino for tools documentation"""
+        print(f"Retrieving {self.framework} Tools Documentation...")
 
         tool_queries = [
-            "Metal Shader Debugger",
-            "Xcode Metal profiling"
+            f"{self.framework.title()} Shader Debugger",
+            f"Xcode {self.framework} profiling"
         ]
 
         results = {}
@@ -180,7 +181,7 @@ class MetalResourcesScraper:
                     # result = subprocess.run([apple_deep_docs_path, '--query', query], capture_output=True, text=True, timeout=30)
                     # But since it's an MCP server, we'll stick with cupertino
                     pass
-
+                
                 result = subprocess.run(['cupertino', 'search', query], capture_output=True, text=True, timeout=30)
                 tool_used = 'cupertino'
 
@@ -222,56 +223,58 @@ class MetalResourcesScraper:
                 results[query] = "failed"
 
         return results
-    
+
     def run(self):
         """Execute all resource scraping tasks"""
-        
+
         # Find WWDC videos
         wwdc_results = self.scrape_wwdc_videos()
-        
-        # Identify related frameworks 
+
+        # Identify related frameworks
         framework_results = self.find_related_frameworks()
-        
-        # Get tools documentation  
+
+        # Get tools documentation
         tool_doc_results = self.get_tools_documentation()
-        
+
         # Create summary report
         summary = {
             'wwdc_video_searches': wwdc_results,
-            'related_framework_queries': framework_results,  
+            'related_framework_queries': framework_results,
             'tools_documentation': tool_doc_results,
             'timestamp': time.time(),
             'total_wwdc_searches': len(wwdc_results),
             'successful_wwdc_searches': sum(1 for v in wwdc_results.values() if v == "success"),
-            'total_framework_queries': len(framework_results), 
-            'successful_framework_retrievals': sum(1 for v in framework_results.values() if v == "success"),  
+            'total_framework_queries': len(framework_results),
+            'successful_framework_retrievals': sum(1 for v in framework_results.values() if v == "success"),
             'total_tool_docs': len(tool_doc_results),
-            'successful_tool_doc_retrievals': sum(1 for v in tool_doc_results.values() if v == "success")   
+            'successful_tool_doc_retrievals': sum(1 for v in tool_doc_results.values() if v == "success")
         }
-        
+
         with open(f"{self.output_dir}/resources_summary.json", "w") as f:
             json.dump(summary, f, indent=2)
-            
-        print("\nWWDC Video Search Results:")
+
+        print(f"\n{self.framework} WWDC Video Search Results:")
         for query, status in wwdc_results.items():
             print(f"  {query}: {status}")
-            
-        print("\nRelated Framework Query Results:")  
+
+        print(f"\n{self.framework} Related Framework Query Results:")
         for query, status in framework_results.items():
             print(f"  {query}: {status}")
-                
-        print("\nTools Documentation Results:")
+
+        print(f"\n{self.framework} Tools Documentation Results:")
         for query, status in tool_doc_results.items():
-            print(f"  {query}: {status}") 
-                
+            print(f"  {query}: {status}")
+
         return summary
 
 if __name__ == "__main__":
-    scraper = MetalResourcesScraper()
-    results = scraper.run() 
-    fmt = "\nCompleted with {} WWDC searches, {} framework queries and {} tools docs retrieved"
+    import sys
+    framework = sys.argv[1] if len(sys.argv) > 1 else "metal"
+    scraper = GenericResourcesScraper(framework)
+    results = scraper.run()
+    fmt = f"\nCompleted with {{}} WWDC searches, {{}} framework queries and {{}} tools docs retrieved"
     print(fmt.format(
         results['successful_wwdc_searches'],
-        results['successful_framework_retrievals'], 
+        results['successful_framework_retrievals'],
         results['successful_tool_doc_retrievals']
     ))

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Metal Documentation Scraper using Apple MCP Tools
+Generic Documentation Scraper using Apple MCP Tools
 
-This script uses Cupertino and Apple Deep Docs commands instead of raw HTML scraping.
+This script uses Cupertino and Apple Deep Docs commands to scrape documentation for any framework.
 """
 
 import os
@@ -14,48 +14,49 @@ import time
 from dotenv import load_dotenv
 load_dotenv()
 
-class MetalDocScraper:
-    def __init__(self):
-        self.output_dir = "output/metal/docs"
+class GenericDocScraper:
+    def __init__(self, framework):
+        self.framework = framework
+        self.output_dir = f"output/{framework}/docs"
         os.makedirs(self.output_dir, exist_ok=True)
-        
+
     def scrape_api_docs_with_cupertino(self):
         """Use Cupertino tool to get core API documentation"""
-        print("Scraping Metal framework APIs with Cupertino...")
+        print(f"Scraping {self.framework} framework APIs with Cupertino...")
 
-        # Common Metal classes and protocols
-        metal_entities = [
-            "MTLDevice",
-            "MTLCommandQueue",
-            "MTLBuffer",
-            "MTLTexture",
-            "MTLRenderPipeline",
-            "MTLComputePipeline"
+        # Common classes and protocols for the framework
+        framework_entities = [
+            f"{self.framework.title()}Device",
+            f"{self.framework.title()}CommandQueue",
+            f"{self.framework.title()}Buffer",
+            f"{self.framework.title()}Texture",
+            f"{self.framework.title()}RenderPipeline",
+            f"{self.framework.title()}ComputePipeline"
         ]
 
         results = {}
-        for entity in metal_entities:
+        for entity in framework_entities:
             try:
                 print(f"  Querying Cupertino for '{entity}'...")
 
                 # Make actual call to Cupertino tool
                 result = subprocess.run(['cupertino', 'search', entity], capture_output=True, text=True, timeout=30)
-
+                
                 if result.returncode == 0:
                     # Parse the results from Cupertino
                     data = result.stdout
-
+                    
                     actual_result = {
                         'entity': entity,
                         'status': 'found',
                         'data': data,
                         'timestamp': time.time()
                     }
-
+                    
                     result_file = f"{self.output_dir}/{entity.replace(' ', '_')}_cupertino.json"
                     with open(result_file, 'w') as f:
                         json.dump(actual_result, f, indent=2)
-
+                        
                     results[entity] = "success"
                 else:
                     # Handle case where Cupertino didn't find the entity
@@ -65,13 +66,13 @@ class MetalDocScraper:
                         'error': result.stderr,
                         'timestamp': time.time()
                     }
-
+                    
                     result_file = f"{self.output_dir}/{entity.replace(' ', '_')}_cupertino.json"
                     with open(result_file, 'w') as f:
                         json.dump(error_result, f, indent=2)
-
+                        
                     results[entity] = "not found"
-
+                    
             except subprocess.TimeoutExpired:
                 print(f"    Timeout querying '{entity}' with Cupertino")
                 results[entity] = "timeout"
@@ -80,15 +81,15 @@ class MetalDocScraper:
                 results[entity] = "failed"
 
         return results
-    
+
     def scrape_with_apple_deep_docs(self):
         """Use Apple Deep Docs to get structured documentation"""
-        print("Scraping with Apple Deep Docs...")
+        print(f"Scraping {self.framework} documentation with Apple Deep Docs...")
 
         queries = [
-            "Metal framework",
-            "MTLDevice protocol",
-            "Metal rendering pipeline"
+            f"{self.framework} framework",
+            f"{self.framework.title()}Device protocol", 
+            f"{self.framework} rendering pipeline"
         ]
 
         results = {}
@@ -105,7 +106,7 @@ class MetalDocScraper:
                     # result = subprocess.run([apple_deep_docs_path, '--query', query], capture_output=True, text=True, timeout=30)
                     # But since it's an MCP server, we'll stick with cupertino
                     pass
-
+                
                 result = subprocess.run(['cupertino', 'search', query], capture_output=True, text=True, timeout=30)
                 tool_used = 'cupertino'
 
@@ -145,16 +146,16 @@ class MetalDocScraper:
                 results[query] = "failed"
 
         return results
-    
+
     def run(self):
         """Execute all documentation scraping tasks"""
-        
+
         # Scrape API documentation using Cupertino
         api_results = self.scrape_api_docs_with_cupertino()
-        
+
         # Get structured data with Apple Deep Docs
         deep_doc_results = self.scrape_with_apple_deep_docs()
-        
+
         # Create summary report
         summary = {
             'api_documentation': api_results,
@@ -162,24 +163,26 @@ class MetalDocScraper:
             'timestamp': time.time(),
             'total_api_entities': len(api_results),
             'successful_api_lookups': sum(1 for v in api_results.values() if v == "success"),
-            'total_deepdoc_queries': len(deep_doc_results), 
+            'total_deepdoc_queries': len(deep_doc_results),
             'successful_deepdoc_queries': sum(1 for v in deep_doc_results.values() if v == "success")
         }
-        
+
         with open(f"{self.output_dir}/summary.json", "w") as f:
             json.dump(summary, f, indent=2)
-            
-        print("\nAPI Documentation Results:")
+
+        print(f"\n{self.framework} API Documentation Results:")
         for entity, status in api_results.items():
             print(f"  {entity}: {status}")
-            
-        print("\nDeep Docs Query Results:")  
+
+        print(f"\n{self.framework} Deep Docs Query Results:")
         for query, status in deep_doc_results.items():
             print(f"  {query}: {status}")
-                
+
         return summary
 
 if __name__ == "__main__":
-    scraper = MetalDocScraper()
-    results = scraper.run() 
+    import sys
+    framework = sys.argv[1] if len(sys.argv) > 1 else "metal"
+    scraper = GenericDocScraper(framework)
+    results = scraper.run()
     print(f"\nCompleted with {results['successful_api_lookups']}/{results['total_api_entities']} API lookups successful")

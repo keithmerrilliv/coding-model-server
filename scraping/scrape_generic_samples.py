@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Metal Sample Code Scraper using Apple MCP Tools
+Generic Sample Code Scraper using Apple MCP Tools
 
-This script focuses on retrieving Metal sample code and examples.
+This script focuses on retrieving framework sample code and examples.
 """
 
 import os
@@ -14,19 +14,20 @@ import time
 from dotenv import load_dotenv
 load_dotenv()
 
-class MetalSampleScraper:
-    def __init__(self):
-        self.output_dir = "output/metal/samples"
+class GenericSampleScraper:
+    def __init__(self, framework):
+        self.framework = framework
+        self.output_dir = f"output/{framework}/samples"
         os.makedirs(self.output_dir, exist_ok=True)
-        
+
     def find_sample_projects(self):
-        """Use Web Search to locate sample projects"""
-        print("Searching for Metal Sample Projects...")
+        """Use Cupertino to locate sample projects"""
+        print(f"Searching for {self.framework} Sample Projects...")
 
         search_queries = [
-            "Metal sample code GitHub apple",
-            "Apple developer Metal examples",
-            "Metal tutorial sample projects"
+            f"{self.framework} sample code GitHub apple",
+            f"Apple developer {self.framework} examples",
+            f"{self.framework} tutorial sample projects"
         ]
 
         results = {}
@@ -44,7 +45,7 @@ class MetalSampleScraper:
                     # result = subprocess.run([apple_deep_docs_path, '--query', query], capture_output=True, text=True, timeout=30)
                     # But since it's an MCP server, we'll stick with cupertino
                     pass
-
+                
                 result = subprocess.run(['cupertino', 'search', query], capture_output=True, text=True, timeout=30)
                 tool_used = 'cupertino'
 
@@ -59,7 +60,7 @@ class MetalSampleScraper:
                             import re
                             matches = re.findall(r'\b[A-Z][a-zA-Z\s-]*\b', line)
                             for match in matches:
-                                if len(match) > 3 and not any(word in match.lower() for word in ['the', 'and', 'for', 'with', 'metal']):
+                                if len(match) > 3 and not any(word in match.lower() for word in ['the', 'and', 'for', 'with', self.framework.lower()]):
                                     potential_samples.append(match.strip())
 
                     actual_result = {
@@ -92,15 +93,15 @@ class MetalSampleScraper:
                 results[query] = "failed"
 
         return results
-    
+
     def retrieve_sample_content(self):
-        """Use Cupertino and Deep Docs to get sample content"""
-        print("Retrieving Sample Code Content...")
+        """Use Cupertino to get sample content"""
+        print(f"Retrieving {self.framework} Sample Code Content...")
 
         sample_types = [
-            "Simple Vertex Shader",
-            "Fragment Shading Example",
-            "Compute Kernel Sample"
+            f"Simple {self.framework.title()} Shader",
+            f"{self.framework.title()} Rendering Example",
+            f"{self.framework.title()} Compute Sample"
         ]
 
         results = {}
@@ -110,14 +111,17 @@ class MetalSampleScraper:
 
                 result_file = f"{self.output_dir}/{sample.replace(' ', '_')}_code.json"
 
-                # Try to use apple-deep-docs if available, otherwise fall back to cupertino
-                try:
-                    result = subprocess.run(['apple-deep-docs', '--query', f'Metal {sample}'], capture_output=True, text=True, timeout=30)
-                    tool_used = 'apple-deep-docs'
-                except FileNotFoundError:
-                    # apple-deep-docs not available, fall back to cupertino
-                    result = subprocess.run(['cupertino', 'search', f'Metal {sample}'], capture_output=True, text=True, timeout=30)
-                    tool_used = 'cupertino'
+                # apple-deep-docs is an MCP server that doesn't work with command-line args
+                # Fall back to cupertino which is known to work
+                apple_deep_docs_path = os.getenv('APPLE_DEEP_DOCS_PATH', '/default/path/not/set')
+                if os.path.exists(apple_deep_docs_path):
+                    # If we wanted to use apple-deep-docs, we would call it like this:
+                    # result = subprocess.run([apple_deep_docs_path, '--query', f'{self.framework} {sample}'], capture_output=True, text=True, timeout=30)
+                    # But since it's an MCP server, we'll stick with cupertino
+                    pass
+                
+                result = subprocess.run(['cupertino', 'search', f'{self.framework} {sample}'], capture_output=True, text=True, timeout=30)
+                tool_used = 'cupertino'
 
                 if result.returncode == 0:
                     # Count potential files and estimate lines of code from the response
@@ -157,41 +161,43 @@ class MetalSampleScraper:
                 results[sample] = "failed"
 
         return results
-    
+
     def run(self):
         """Execute all sample code scraping tasks"""
-        
+
         # Find samples via web search
         search_results = self.find_sample_projects()
-        
-        # Retrieve actual sample content 
+
+        # Retrieve actual sample content
         content_results = self.retrieve_sample_content()
-        
+
         # Create summary report
         summary = {
             'web_searches': search_results,
-            'sample_retrievals': content_results,  
+            'sample_retrievals': content_results,
             'timestamp': time.time(),
             'total_searches': len(search_results),
             'successful_searches': sum(1 for v in search_results.values() if v == "success"),
-            'total_samples': len(content_results), 
+            'total_samples': len(content_results),
             'successful_sample_retrievals': sum(1 for v in content_results.values() if v == "success")
         }
-        
+
         with open(f"{self.output_dir}/samples_summary.json", "w") as f:
             json.dump(summary, f, indent=2)
-            
-        print("\nWeb Search Results:")
+
+        print(f"\n{self.framework} Web Search Results:")
         for query, status in search_results.items():
             print(f"  {query}: {status}")
-            
-        print("\nSample Content Retrieval Results:")  
+
+        print(f"\n{self.framework} Sample Content Retrieval Results:")
         for sample, status in content_results.items():
             print(f"  {sample}: {status}")
-                
+
         return summary
 
 if __name__ == "__main__":
-    scraper = MetalSampleScraper()
-    results = scraper.run() 
+    import sys
+    framework = sys.argv[1] if len(sys.argv) > 1 else "metal"
+    scraper = GenericSampleScraper(framework)
+    results = scraper.run()
     print(f"\nCompleted with {results['successful_searches']}/{results['total_searches']} searches and {results['successful_sample_retrievals']}/{results['total_samples']} samples retrieved")
