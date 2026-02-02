@@ -8,4 +8,4 @@ server.log
 tools/
 .DS_Store
 appledeepdoc-mcp/
-metal_scraping/output
+scraping/output
