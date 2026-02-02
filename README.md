@@ -21,6 +21,18 @@ Qwen Multi-Agent Server with Remote Client
 
 The server will start on port 5000 by default.
 
+## Apple Documentation Scraper
+
+The system includes a comprehensive Apple documentation scraping feature that can:
+
+- Scrape documentation for any Apple framework (Metal, UIKit, AVFoundation, CoreData, Photos, etc.)
+- Integrate with Cupertino and Apple Deep Docs MCP servers for comprehensive documentation access
+- Ingest scraped data into the RAG database for enhanced AI knowledge
+- Support environment-based configuration for server connections
+- Generate structured output for each framework
+
+For detailed information about the scraping system, see [scraping/README.md](scraping/README.md).
+
 ## Client Usage
 
 ### Starting the Client
@@ -54,6 +66,7 @@ python3 qwen_remote.py
 - `/resume` - Resume interrupted multi-agent tasks (e.g., after a tool execution break)
 - `/history` - Show command history
 - `/cupertino <query>` - Search Apple documentation (macOS only)
+- `/scrape <framework>` - Scrape documentation for a specific Apple framework
 - `/ingest <path>` - Ingest a PDF file into memory
 
 ### Security Settings
@@ -110,7 +123,7 @@ You can extend the model's context length beyond its training limit using YaRN (
                 'path': '/path/to/model.gguf',
                 'n_ctx': 65536,         # Desired context length
                 'offload_kqv': True,    # Set to False if you run out of VRAM
-                
+
                 # YaRN Configuration
                 'rope_scaling_type': 2, # 2 = YaRN
                 'yarn_ext_factor': -1.0,# -1 = Auto-detect based on n_ctx / train_ctx
@@ -139,4 +152,3 @@ The agent can request to execute commands on your local machine. You will be pro
 **File Reading** (safe, fast):
 - Agent uses `<<<READ_FILE>>>path<<<READ_FILE>>>`
 - Reads file content without using shell commands (Architect safe)
-

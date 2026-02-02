@@ -1,101 +1,192 @@
-# Metal Documentation Scraper
+# Apple Documentation Scraper
 
-This project contains a suite of tools for scraping Apple's Metal framework documentation using MCP tools (Cupertino and Apple Deep Docs).
+A comprehensive system for scraping Apple framework documentation using multiple tools and techniques.
 
-## Project Structure
+## Features
 
-- `main.py` - Main orchestrator script that runs all scrapers
-- `scrape_metal_docs.py` - Scrapes Metal API documentation
-- `scrape_metal_guides.py` - Retrieves Metal programming guides
-- `scrape_metal_samples.py` - Finds Metal sample code and examples
-- `scrape_metal_resources.py` - Gathers additional resources like WWDC videos
-- `scrape_metal_docs_updated.py` - Updated version of the docs scraper
-- `check_config.py` - Checks environment configuration
-- `CONFIGURATION.md` - Detailed setup instructions
-- `output/` - Directory for scraped documentation output
+- **Generic Framework Support**: Works with any Apple framework (Metal, UIKit, AVFoundation, CoreData, Photos, etc.)
+- **Dual Tool Integration**: Uses both Cupertino and Apple Deep Docs MCP server for comprehensive documentation access
+- **Enhanced Web Scraping**: Improved search patterns for better documentation discovery
+- **Memory Ingestion**: Automatically sends scraped data to RAG database for AI knowledge enhancement
+- **Environment Configuration**: Flexible configuration via environment variables
+
+## Architecture
+
+```
+scraping/
+├── main.py                    # Main orchestrator
+├── scrape_generic_docs.py     # API documentation scraper
+├── scrape_generic_guides.py   # Programming guides scraper
+├── scrape_generic_samples.py  # Sample code scraper
+├── scrape_generic_resources.py # Additional resources scraper
+├── ingest_scraped_data.py    # Memory ingestion module
+├── mcp_client.py             # MCP protocol client
+├── start_scraping_with_server.py # Server startup script
+├── output/                   # Generated output (gitignored)
+│   └── {framework}/          # Framework-specific output
+│       ├── docs/             # API documentation
+│       ├── guides/           # Programming guides
+│       ├── samples/          # Sample code
+│       └── resources/        # Additional resources
+└── ...
+```
 
 ## Prerequisites
 
-To run these scripts successfully, you need to install the following open-source tools:
+- Python 3.10+
+- Cupertino tool installed
+- Xcode (for local documentation access with Apple Deep Docs)
 
-1. **Cupertino** - Open-source tool for Apple documentation access ([GitHub](https://github.com/mihaelamj/cupertino))
-2. **Apple Deep Docs** - Open-source documentation search tool ([GitHub](https://github.com/Ahrentlov/appledeepdoc-mcp))
+## Installation
 
-These tools provide access to Apple's public documentation without requiring internal Apple access.
+1. Clone the repository
+2. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+3. Install Cupertino tool if not already installed
+4. Set up environment variables in `.env` file
 
 ## Configuration
 
-1. First, install the required tools:
+Create a `.env` file in the root directory with the following variables:
 
-   **Cupertino:**
-   ```bash
-   # Follow installation instructions from https://github.com/mihaelamj/cupertino
-   # Typically involves cloning the repo and installing dependencies
-   git clone https://github.com/mihaelamj/cupertino.git
-   cd cupertino
-   pip install -r requirements.txt
-   # Make sure the cupertino command is available in your PATH
-   ```
+```env
+# Scraping Configuration
+APPLE_DEEP_DOCS_PATH=/path/to/appledeepdoc-mcp/run.sh
 
-   **Apple Deep Docs:**
-   ```bash
-   # Follow installation instructions from https://github.com/Ahrentlov/appledeepdoc-mcp
-   git clone https://github.com/Ahrentlov/appledeepdoc-mcp.git
-   cd appledeepdoc-mcp
-   # Follow the setup instructions in the repository
-   # Make sure the apple-deep-docs command is available in your PATH
-   ```
-
-2. Check if your environment has the required tools:
-   ```bash
-   python check_config.py
-   ```
-
-3. Install required Python dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-## Running the Scraper
-
-### Individual Modules
-Run individual scraping modules:
-```bash
-python scrape_metal_docs.py
-python scrape_metal_guides.py
-python scrape_metal_samples.py
-python scrape_metal_resources.py
+# Server Configuration
+QWEN_SERVER_IP=192.168.50.101
+QWEN_SERVER_PORT=5000
 ```
 
-### Full Suite
-Run all scrapers using the main orchestrator:
+## Usage
+
+### Basic Scraping
+
+To scrape documentation for a specific framework:
+
 ```bash
-python main.py
+cd scraping
+python main.py <framework_name>
 ```
 
-## Output
+Examples:
+```bash
+python main.py metal      # Metal framework
+python main.py uikit      # UIKit framework
+python main.py coredata   # CoreData framework
+python main.py avfoundation # AVFoundation framework
+```
 
-The scraped documentation will be saved in the `output/metal/` directory:
-- `docs/` - Metal API documentation
+### Standalone Ingestion
+
+To run memory ingestion separately:
+
+```bash
+python ingest_scraped_data.py <framework_name>
+```
+
+### MCP Server Mode
+
+To start the Apple Deep Docs MCP server and run scraping:
+
+```bash
+python start_scraping_with_server.py <framework_name>
+```
+
+## Scraping Modules
+
+### 1. API Documentation Scraper (`scrape_generic_docs.py`)
+- Searches for framework-specific classes and protocols
+- Uses Cupertino for public documentation
+- Integrates with Apple Deep Docs MCP server when available
+- Generates comprehensive API documentation
+
+### 2. Guides Scraper (`scrape_generic_guides.py`)
+- Retrieves programming guides and tutorials
+- Finds best practices and fundamentals
+- Locates framework references and specifications
+
+### 3. Samples Scraper (`scrape_generic_samples.py`)
+- Searches for sample projects on GitHub
+- Finds example applications and code snippets
+- Discovers tutorial projects and demos
+
+### 4. Resources Scraper (`scrape_generic_resources.py`)
+- Locates WWDC videos and sessions
+- Identifies related frameworks and integrations
+- Retrieves tool documentation and profiling guides
+
+## MCP Server Integration
+
+The system integrates with the Apple Deep Docs MCP server for access to:
+
+- Hidden Xcode documentation
+- Apple Developer API documentation
+- Swift Evolution Proposals
+- Swift Open Source Repositories
+- WWDC Session Notes
+- Human Interface Guidelines
+
+When the MCP server is not available, the system gracefully falls back to Cupertino-based scraping.
+
+## Memory Ingestion
+
+Scraped documentation is automatically ingested into the RAG database:
+
+- All JSON output files are processed
+- Content is sent to the configured server endpoint
+- Framework-specific categorization is maintained
+- Ready for AI retrieval and knowledge enhancement
+
+## Output Structure
+
+The system generates structured output in `scraping/output/{framework}/`:
+
+- `docs/` - API documentation and class references
 - `guides/` - Programming guides and tutorials
-- `samples/` - Sample code and examples
-- `resources/` - Additional resources like WWDC videos
+- `samples/` - Sample code and example projects
+- `resources/` - WWDC videos, related frameworks, and tools
+- `master_summary.json` - Aggregated summary of all modules
 
-A master summary will be created at `output/master_summary.json`.
+## Environment Variables
 
-## Important Notes
-
-- The scripts currently contain placeholder code for MCP tools since they simulate API calls
-- When MCP tools are available, replace the placeholder sections with actual tool calls
-- The output directory is ignored by Git (see `.gitignore`) to avoid committing large amounts of scraped data
-- These tools are intended for internal Apple use with proper authorization to access internal documentation
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `APPLE_DEEP_DOCS_PATH` | Path to Apple Deep Docs MCP server | - |
+| `QWEN_SERVER_IP` | IP address of Qwen server | 127.0.0.1 |
+| `QWEN_SERVER_PORT` | Port of Qwen server | 5000 |
 
 ## Troubleshooting
 
-If the scripts don't work as expected:
+### Server Connection Issues
+- Verify that the Qwen server is running at the configured IP and port
+- Check firewall settings if connecting to remote server
+- Ensure network connectivity to the server
 
-1. Run `python check_config.py` to verify tool availability
-2. Check that both `cupertino` and `apple-deep-docs` commands are accessible in your PATH
-3. If `apple-deep-docs` is not available, the scripts will automatically fall back to using `cupertino` for all searches
-4. Review the installation instructions above to ensure both tools are properly installed
-5. Check that you have internet connectivity as these tools require online access to Apple's documentation
+### MCP Server Issues
+- Confirm Xcode is installed for local documentation access
+- Verify the MCP server path in environment variables
+- Check that the server is properly configured for your AI tools
+
+### Scraping Problems
+- Ensure Cupertino tool is installed and accessible
+- Verify internet connectivity for web-based searches
+- Check that the framework name is spelled correctly
+
+## Development
+
+### Adding New Scraping Modules
+1. Create a new scraper class following the generic pattern
+2. Implement the required interface methods
+3. Add to the main orchestrator in `main.py`
+
+### Extending Search Patterns
+- Modify search queries in each scraper module
+- Add new framework-specific patterns
+- Enhance result parsing for better extraction
+
+## License
+
+MIT
