@@ -12,6 +12,10 @@ import json
 import requests
 import time
 
+# Load environment variables
+from dotenv import load_dotenv
+load_dotenv()
+
 def load_json_file(filepath):
     """Load JSON content from a file"""
     try:
@@ -29,8 +33,13 @@ def ingest_content(content, source_type, source_name):
     # Create a structured memory entry
     memory_text = f"[{source_type}] {source_name}\n\n{content}"
 
+    # Get server details from environment variables
+    server_ip = os.getenv('QWEN_SERVER_IP', '127.0.0.1')
+    server_port = os.getenv('QWEN_SERVER_PORT', '5000')
+    server_url = f"http://{server_ip}:{server_port}/v1/memory"
+
     try:
-        response = requests.post("http://127.0.0.1:5000/v1/memory", json={"text": memory_text}, timeout=10)
+        response = requests.post(server_url, json={"text": memory_text}, timeout=10)
         if response.status_code == 200:
             return True
         else:
@@ -175,10 +184,14 @@ def main():
     print("="*50)
 
     # Wait for server to be potentially ready if this is running in a chain
+    server_ip = os.getenv('QWEN_SERVER_IP', '127.0.0.1')
+    server_port = os.getenv('QWEN_SERVER_PORT', '5000')
+    server_health_url = f"http://{server_ip}:{server_port}/health"
+
     try:
-        requests.get("http://127.0.0.1:5000/health", timeout=5)
+        requests.get(server_health_url, timeout=5)
     except Exception:
-        print("Warning: Memory server might not be reachable at localhost:5000")
+        print(f"Warning: Memory server might not be reachable at {server_ip}:{server_port}")
 
     total_ingested = 0
 

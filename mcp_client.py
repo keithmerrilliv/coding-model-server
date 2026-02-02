@@ -12,9 +12,14 @@ import threading
 import queue
 import os
 
+# Load environment variables
+from dotenv import load_dotenv
+load_dotenv()
+
 class MCPClient:
-    def __init__(self, server_cmd):
-        self.server_cmd = server_cmd
+    def __init__(self, server_cmd=None):
+        # Use server command from environment variable or default
+        self.server_cmd = server_cmd or os.getenv('APPLE_DEEP_DOCS_PATH', './run.sh')
         self.process = None
         self.response_queue = queue.Queue()
         self.running = False
