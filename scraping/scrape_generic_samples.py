@@ -14,6 +14,17 @@ import time
 from dotenv import load_dotenv
 load_dotenv()
 
+# Import MCP client
+try:
+    import sys
+    import os
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from mcp_client import call_mcp_tool, search_docs, search_apple_online
+    MCP_AVAILABLE = True
+except ImportError:
+    MCP_AVAILABLE = False
+    print("MCP client not available, will use Cupertino only")
+
 class GenericSampleScraper:
     def __init__(self, framework):
         self.framework = framework
@@ -24,10 +35,16 @@ class GenericSampleScraper:
         """Use Cupertino to locate sample projects"""
         print(f"Searching for {self.framework} Sample Projects...")
 
+        # More diverse search queries for better coverage
         search_queries = [
             f"{self.framework} sample code GitHub apple",
             f"Apple developer {self.framework} examples",
-            f"{self.framework} tutorial sample projects"
+            f"{self.framework} tutorial sample projects",
+            f"{self.framework} demo projects",
+            f"{self.framework} example app",
+            f"open source {self.framework} project",
+            f"{self.framework} code example",
+            f"{self.framework} sample application"
         ]
 
         results = {}
@@ -45,7 +62,7 @@ class GenericSampleScraper:
                     # result = subprocess.run([apple_deep_docs_path, '--query', query], capture_output=True, text=True, timeout=30)
                     # But since it's an MCP server, we'll stick with cupertino
                     pass
-                
+
                 result = subprocess.run(['cupertino', 'search', query], capture_output=True, text=True, timeout=30)
                 tool_used = 'cupertino'
 
@@ -55,18 +72,18 @@ class GenericSampleScraper:
                     potential_samples = []
                     for line in data.split('\n'):
                         # Look for common sample-related keywords
-                        if any(keyword in line.lower() for keyword in ['sample', 'example', 'tutorial', 'demo', 'rendering', 'shaders']):
+                        if any(keyword in line.lower() for keyword in ['sample', 'example', 'tutorial', 'demo', 'project', 'app', 'application', 'code']):
                             # Extract potential sample names from the line
                             import re
                             matches = re.findall(r'\b[A-Z][a-zA-Z\s-]*\b', line)
                             for match in matches:
-                                if len(match) > 3 and not any(word in match.lower() for word in ['the', 'and', 'for', 'with', self.framework.lower()]):
+                                if len(match) > 3 and not any(word in match.lower() for word in ['the', 'and', 'for', 'with', self.framework.lower(), 'apple', 'developer', 'open', 'source']):
                                     potential_samples.append(match.strip())
 
                     actual_result = {
                         'query': query,
                         'sample_links_found': len(potential_samples),
-                        'potential_samples': potential_samples[:3] if potential_samples else [],
+                        'potential_samples': potential_samples[:5] if potential_samples else [],
                         'data': data,
                         'tool_used': tool_used,
                         'timestamp': time.time()

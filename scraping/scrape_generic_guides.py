@@ -14,6 +14,17 @@ import time
 from dotenv import load_dotenv
 load_dotenv()
 
+# Import MCP client
+try:
+    import sys
+    import os
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from mcp_client import call_mcp_tool, search_docs, search_apple_online
+    MCP_AVAILABLE = True
+except ImportError:
+    MCP_AVAILABLE = False
+    print("MCP client not available, will use Cupertino only")
+
 class GenericGuidesScraper:
     def __init__(self, framework):
         self.framework = framework
@@ -24,11 +35,16 @@ class GenericGuidesScraper:
         """Use Cupertino to get programming guides"""
         print(f"Scraping {self.framework} Programming Guides...")
 
+        # More generic guide topics that apply to most frameworks
         guide_topics = [
             f"{self.framework.title()} Programming Guide",
-            f"{self.framework.title()} Performance Shaders",
-            f"{self.framework.title()} Shader Debugging",
-            f"Working with {self.framework.title()} Devices"
+            f"{self.framework.title()} Best Practices",
+            f"{self.framework.title()} Tutorial",
+            f"{self.framework.title()} Getting Started",
+            f"How to use {self.framework.title()}",
+            f"{self.framework.title()} Overview",
+            f"{self.framework.title()} Fundamentals",
+            f"{self.framework.title()} Advanced Guide"
         ]
 
         results = {}
@@ -46,7 +62,7 @@ class GenericGuidesScraper:
                     # result = subprocess.run([apple_deep_docs_path, '--query', f'{self.framework} {topic}'], capture_output=True, text=True, timeout=30)
                     # But since it's an MCP server, we'll stick with cupertino
                     pass
-                
+
                 result = subprocess.run(['cupertino', 'search', f'{self.framework} {topic}'], capture_output=True, text=True, timeout=30)
                 tool_used = 'cupertino'
 
@@ -56,7 +72,7 @@ class GenericGuidesScraper:
                     # Look for common section headers in the response
                     sections = []
                     for line in data.split('\n'):
-                        if any(header in line.lower() for header in ['introduction', 'setup', 'implementation', 'overview', 'usage', 'best practices']):
+                        if any(header in line.lower() for header in ['introduction', 'setup', 'implementation', 'overview', 'usage', 'best practices', 'tutorial', 'getting started', 'advanced', 'fundamentals']):
                             sections.append(line.strip())
 
                     actual_result = {

@@ -14,6 +14,17 @@ import time
 from dotenv import load_dotenv
 load_dotenv()
 
+# Import MCP client
+try:
+    import sys
+    import os
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from mcp_client import call_mcp_tool, search_docs, search_apple_online
+    MCP_AVAILABLE = True
+except ImportError:
+    MCP_AVAILABLE = False
+    print("MCP client not available, will use Cupertino only")
+
 class GenericResourcesScraper:
     def __init__(self, framework):
         self.framework = framework
@@ -24,9 +35,16 @@ class GenericResourcesScraper:
         """Use Cupertino to find WWDC videos about the framework"""
         print(f"Searching for WWDC Videos on {self.framework}...")
 
+        # More comprehensive search queries for WWDC content
         search_queries = [
             f"WWDC {self.framework} tutorial",
-            f"Apple developer {self.framework} performance"
+            f"Apple developer {self.framework} performance",
+            f"WWDC {self.framework} session",
+            f"WWDC {self.framework} 2023",
+            f"WWDC {self.framework} 2022",
+            f"WWDC {self.framework} best practices",
+            f"{self.framework} WWDC video",
+            f"WWDC {self.framework} introduction"
         ]
 
         results = {}
@@ -44,7 +62,7 @@ class GenericResourcesScraper:
                     # result = subprocess.run([apple_deep_docs_path, '--query', query], capture_output=True, text=True, timeout=30)
                     # But since it's an MCP server, we'll stick with cupertino
                     pass
-                
+
                 result = subprocess.run(['cupertino', 'search', query], capture_output=True, text=True, timeout=30)
                 tool_used = 'cupertino'
 
@@ -57,8 +75,8 @@ class GenericResourcesScraper:
                     titles = re.findall(r'"([^"]*)"', data)  # Look for quoted titles
 
                     video_sessions = []
-                    for i, year in enumerate(years[:2]):
-                        title = titles[i] if i < len(titles) else f'WWDC Video {year}'
+                    for i, year in enumerate(years[:3]):  # Get up to 3 videos
+                        title = titles[i] if i < len(titles) else f'WWDC {self.framework} Video {year}'
                         video_sessions.append({
                             'year': int(year),
                             'title': title,
