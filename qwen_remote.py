@@ -1494,7 +1494,25 @@ def handle_user_command(user_input, history, model, agent_theme):
         else:
             print_colored("Readline not available - cannot clear command history", COLORS['WARNING'])
         return True, model
-    
+
+    # Model switch command
+    if user_input.lower().startswith('/model '):
+        parts = user_input.split(' ', 1)
+        if len(parts) < 2 or not parts[1].strip():
+            print_colored("Usage: /model <name>", COLORS['FAIL'])
+            print_colored(f"Available models: {', '.join(AGENT_THEMES.keys())}", COLORS['BLUE'])
+            return True, model
+
+        requested_model = parts[1].strip().lower()
+        if requested_model in AGENT_THEMES:
+            model = requested_model
+            agent_theme = AGENT_THEMES[model]
+            print_colored(f"\nSwitched to agent: {model} {agent_theme['icon']}", COLORS['WARNING'])
+            print_colored(f"Description: {agent_theme['desc']}", COLORS['BLUE'])
+        else:
+            print_colored(f"Unknown agent '{requested_model}'. Available: {', '.join(AGENT_THEMES.keys())}", COLORS['FAIL'])
+        return True, model
+
     return False, model
 
 
