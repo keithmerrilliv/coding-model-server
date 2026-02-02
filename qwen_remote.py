@@ -7,7 +7,6 @@ import sys
 import os
 import json
 import argparse
-import requests
 import re
 import subprocess
 import shlex
@@ -19,6 +18,7 @@ import tempfile
 from datetime import datetime
 from collections import deque
 from typing import Optional, List
+import requests
 
 # Readline for command history and CLI editing
 try:
@@ -1331,8 +1331,283 @@ def get_completion(history, model, agent_theme, headers):
     return full_response
 
 
+def handle_user_command(user_input, history, model, agent_theme):
+    """Handle special slash commands. Returns (should_continue, updated_model)"""
+    # Help Command
+    if user_input.lower() == '/help':
+        print_colored("\n--- Qwen Remote CLI Help ---", COLORS['HEADER'])
+        print_colored(f"{COLORS['BOLD']}GENERAL COMMANDS:{COLORS['ENDC']}", COLORS['BLUE'])
+        print(f"  /help                - Show this help menu")
+        print(f"  /exit, /quit         - Exit the CLI and cleanup resources")
+        print(f"  /model <name>        - Switch the active agent (e.g. /model architect)")
+        print(f"  /history             - Show recent command history")
+        print(f"  /history clear       - Clear command history")
+        
+        print_colored(f"\n{COLORS['BOLD']}DOCUMENTATION TOOLS:{COLORS['ENDC']}", COLORS['BLUE'])
+        print(f"  /cupertino <query>   - Search local Apple documentation on macOS")
+        print(f"                         Example: /cupertino MTLMeshRenderPipelineDescriptor")
+        print(f"  /apple <tool> <args> - Search Apple Deep Docs on the Linux server")
+        print(f"                         Example: /apple search_swift_evolution {{\"feature\": \"actors\"}}")
+        print(f"  /ingest <path>       - Ingest a local PDF on the Linux server into memory")
+        print(f"                         Example: /ingest /home/user/Metal4_Specs.pdf")
+        print(f"  /scrape              - Run the Metal documentation scraper on the server")
+        
+        print_colored(f"\n{COLORS['BOLD']}AGENT SHORTCUTS:{COLORS['ENDC']}", COLORS['BLUE'])
+        print(f"  @<agent_name> [msg]  - Switch agent and optionally send message in one go")
+        print(f"                         Example: @architect Design a Metal 4 renderer")
+        print(f"                         Example: @debugger Why is this kernel crashing?")
+        print(f"  MULTI-AGENT:         - You can use multiple @ mentions in one prompt!")
+        print(f"                         Example: @architect Design X then @implementer build it.")
+        
+        print_colored(f"\n{COLORS['BOLD']}AVAILABLE AGENTS:{COLORS['ENDC']}", COLORS['BLUE'])
+        for name, theme in AGENT_THEMES.items():
+            print(f"  {name.ljust(18)} - {theme['desc']}")
+        print_colored("----------------------------\n", COLORS['HEADER'])
+        return True, model
+
+    # Ingest PDF Command
+    if user_input.lower().startswith('/ingest '):
+        parts = user_input.split(' ', 1)
+        if len(parts) < 2 or not parts[1].strip():
+            print_colored("Usage: /ingest <path_on_server>", COLORS['FAIL'])
+            return True, model
+        path = parts[1].strip()
+        result = ingest_pdf(path)
+        print_colored(f"\n{result}\n", COLORS['GREEN'])
+        return True, model
+
+    # Scrape Documentation Command
+    if user_input.lower() == '/scrape':
+        print_colored("Starting Metal documentation scraper on the server...", COLORS['CYAN'])
+        # Run the main.py scraper orchestrator
+        scrape_cmd = "cd metal_scraping && python3 main.py"
+        result = execute_remote_command(scrape_cmd, async_mode=False)
+        print_colored(f"\n{result}\n", COLORS['GREEN'])
+        return True, model
+
+    # Quick Agent Switch (e.g. @architect or @architect Please design...)
+    if user_input.startswith('@'):
+        parts = user_input.split(' ', 1)
+        potential_agent = parts[0][1:].lower() # remove @
+        
+        # Handle fuzzy matching or aliases if we wanted, but strict for now
+        if potential_agent in AGENT_THEMES:
+            model = potential_agent
+            agent_theme = AGENT_THEMES[model]
+            print_colored(f"\nSwitched to agent: {model} {agent_theme['icon']}", COLORS['WARNING'])
+            print_colored(f"Description: {agent_theme['desc']}", COLORS['BLUE'])
+
+            # If there's content after the mention, update user_input to be that content
+            # effectively switching AND sending in one go.
+            if len(parts) > 1:
+                # Modifying user_input here won't affect the caller directly unless returned
+                # This specific logic for @ handling is complex to extract cleanly without changing flow
+                # So we return the new model but return False to indicate "don't continue loop, process as task"
+                return False, model 
+            else:
+                # Just a switch, don't send anything
+                return True, model
+        else:
+            # If it looks like a mention but isn't a valid agent, warn but don't crash
+            # Alternatively, we could just treat it as text. Let's warn.
+            print_colored(f"Unknown agent '{potential_agent}'. Available: {', '.join(AGENT_THEMES.keys())}", COLORS['FAIL'])
+            print_colored("Treating as normal text...", COLORS['BLUE'])
+            return False, model
+
+    # Apple Documentation Search (Cupertino MCP)
+    if user_input.lower().startswith('/cupertino '):
+        parts = user_input.split(' ', 1)
+        if len(parts) < 2 or not parts[1].strip():
+            print_colored("Usage: /cupertino <query>", COLORS['FAIL'])
+            return True, model
+        query = parts[1].strip()
+        result = handle_cupertino_search(query)
+        print_colored(f"\n{result}\n", COLORS['GREEN'])
+        return True, model
+
+    # Apple Deep Docs Search (Server-side MCP)
+    if user_input.lower().startswith('/apple '):
+        parts = user_input.split(' ', 2)
+        if len(parts) < 2:
+            print_colored("Usage: /apple <tool_name> [args_json]", COLORS['FAIL'])
+            print_colored("Example: /apple search_swift_evolution {\"feature\": \"actors\"}", COLORS['BLUE'])
+            return True, model
+        
+        tool = parts[1]
+        args_str = parts[2].strip() if len(parts) > 2 else "{}"
+        if not args_str: args_str = "{}"
+        
+        try:
+            args = json.loads(args_str)
+            if not isinstance(args, dict):
+                print_colored("Error: Arguments must be a JSON object (dictionary).", COLORS['FAIL'])
+                print_colored("Example: /apple tool {\"key\": \"value\"}", COLORS['BLUE'])
+                return True, model
+                
+            result = apple_deep_docs_search(tool, args)
+            print_colored(f"\n{result}\n", COLORS['GREEN'])
+        except json.JSONDecodeError as e:
+            print_colored(f"Error: Invalid JSON arguments: {e}", COLORS['FAIL'])
+            print_colored("Hint: Ensure keys and values are in double quotes.", COLORS['BLUE'])
+            print_colored("Example: /apple tool {\"query\": \"something\"}", COLORS['CYAN'])
+        return True, model
+
+    # History management commands
+    if user_input.lower() == '/history':
+        if READLINE_AVAILABLE:
+            history_len = readline.get_current_history_length()
+            print_colored(f"\nCommand History ({history_len} entries):", COLORS['HEADER'])
+            for i in range(1, min(history_len + 1, 21)):  # Show last 20
+                idx = max(1, history_len - 20 + i)
+                if idx <= history_len:
+                    item = readline.get_history_item(idx)
+                    print_colored(f"  {idx}: {item}", COLORS['CYAN'])
+            if history_len > 20:
+                print_colored(f"  ... ({history_len - 20} older entries)", COLORS['BLUE'])
+        else:
+            # Fallback: show recent chat history when readline is unavailable
+            if history:
+                recent = history[-20:]
+                print_colored(f"\nChat History ({len(history)} messages, showing last {len(recent)}):", COLORS['HEADER'])
+                for msg in recent:
+                    role = msg["role"].capitalize()
+                    content = msg["content"][:120]
+                    color = COLORS['CYAN'] if msg["role"] == "user" else COLORS['GREEN']
+                    print_colored(f"  {role}: {content}", color)
+            else:
+                print_colored("No chat history available.", COLORS['WARNING'])
+        return True, model
+
+    if user_input.lower() == '/history clear':
+        if READLINE_AVAILABLE:
+            readline.clear_history()
+            print_colored("Command history cleared.", COLORS['GREEN'])
+        else:
+            print_colored("Readline not available - cannot clear command history", COLORS['WARNING'])
+        return True, model
+    
+    return False, model
+
+
+def process_agent_tasks(tasks, history, initial_model, agent_theme):
+    """Execute a list of agent tasks sequentially"""
+    model = initial_model
+    task_idx = 0
+
+    try:
+        for task_idx, (task_agent, task_content) in enumerate(tasks):
+            if not task_content.strip(): continue
+            
+            # Switch active context for this specific task
+            task_theme = AGENT_THEMES[task_agent]
+            print_colored(f"\n>>> Executing task with @{task_agent} {task_theme['icon']}", COLORS['BLUE'])
+
+            # Permanently update the active agent if it was explicitly mentioned
+            if task_agent != model:
+                model = task_agent
+                agent_theme = AGENT_THEMES[model]
+
+            # Append user prompt to history
+            history.append({"role": "user", "content": task_content})
+            save_chat_history(history, model)
+
+            # Inner loop: keep sending tool output back until the agent
+            # produces a response with no actionable commands.
+            force_reload_override = True  # first call for this task uses force reload
+            task_aborted = False
+            while True:
+                headers = {"X-Qwen-Force-Reload": "true" if force_reload_override else "false"}
+
+                response_text = get_completion(history, model, agent_theme, headers)
+                if not response_text:
+                    task_aborted = True
+                    break
+
+                # Append assistant response to history
+                history.append({"role": "assistant", "content": response_text})
+                save_chat_history(history, model)
+
+                # After the first round-trip, reuse the loaded model
+                force_reload_override = False
+
+                # ── Execute commands found in the response ──
+                tool_output = process_remote_commands(response_text)
+
+                if not tool_output:
+                    # Fallback: model wrote commands in code blocks instead of markers
+                    fallback_cmds = extract_fallback_commands(response_text)
+                    if fallback_cmds:
+                        print_colored("\nAgent used code blocks instead of markers. Extracting commands...", COLORS['WARNING'])
+                        results = []
+                        total_len = 0
+                        GLOBAL_MAX_LEN = 40000
+
+                        for i, cmd in enumerate(fallback_cmds):
+                            if total_len > GLOBAL_MAX_LEN:
+                                results.append(f"\n... [OMITTED {len(fallback_cmds) - i} FALLBACK COMMANDS TO PREVENT CONTEXT OVERFLOW] ...")
+                                break
+
+                            result = execute_remote_command(cmd.strip())
+                            if result:
+                                res_str = f"[Command {i+1}] {result}"
+                                results.append(res_str)
+                                total_len += len(res_str)
+
+                        if results:
+                            tool_output = "\n\n".join(results)
+
+                if tool_output:
+                    cmd_count = tool_output.count("[Command ")
+                    label = f"{cmd_count} command(s) executed" if cmd_count > 1 else "Tool result"
+                    print_colored(f"\n{label}. Sending output back to agent...", COLORS['CYAN'])
+                    history.append({"role": "user", "content": f"Tool output:\n{tool_output}"})
+                    save_chat_history(history, model)
+                    continue  # loop back to get the agent's next response
+
+                # No commands found — check if we should auto-retry once
+                completion_phrases = ["complete summary", "work summary", "complete implementation status", "final report", "implementation complete", "summary"]
+                is_finishing_summary = any(phrase in response_text.lower() for phrase in completion_phrases)
+                is_exempt_agent = model in ["architect", "reviewer"]
+
+                last_msg_to_agent = history[-2] if len(history) >= 2 else {}
+                already_retried = last_msg_to_agent.get("_retried")
+
+                if not is_finishing_summary and not already_retried and not is_exempt_agent:
+                    print_colored("\nAgent gave advice instead of executing. Retrying...", COLORS['WARNING'])
+                    history.append({
+                        "role": "user",
+                        "content": "You did not execute any commands. Do not explain — act. Use <<<REMOTE_EXEC>>> blocks to perform the task now. If you are finished, provide a 'complete summary' or 'work summary'.",
+                        "_retried": True,
+                    })
+                    save_chat_history(history, model)
+                    continue  # one more round-trip
+
+                # Agent is done with this task (summary or exempt agent)
+                break
+
+            if task_aborted:
+                remaining_tasks = tasks[task_idx+1:]
+                if remaining_tasks:
+                    PENDING_TASKS.extend(remaining_tasks)
+                    print_colored(f"\n⚠️  Task aborted. Saved {len(remaining_tasks)} pending tasks.", COLORS['WARNING'])
+                    print_colored("   Type '/resume' to retry/continue.", COLORS['BLUE'])
+                break  # stop processing remaining tasks
+                
+    except KeyboardInterrupt:
+        print_colored("\nInterrupt received.", COLORS['WARNING'])
+        remaining_tasks = tasks[task_idx+1:]
+        if remaining_tasks:
+            PENDING_TASKS.extend(remaining_tasks)
+            remaining_agents = [t[0] for t in remaining_tasks]
+            print_colored(f"⚠️  Skipped remaining tasks for: {', '.join(remaining_agents)}", COLORS['WARNING'])
+            print_colored("   Type '/resume' to continue later.", COLORS['BLUE'])
+    except Exception as e:
+        print_colored(f"\nMain Loop Error: {e}", COLORS['FAIL'])
+    
+    return model
+
 def chat(model="implementer"):
-    global PENDING_TASKS
+    """Main interactive chat loop"""
     # Initialize readline for command history and editing
     setup_readline()
     
@@ -1378,7 +1653,7 @@ def chat(model="implementer"):
     else:
         print_colored("  Command approval: Manual (will prompt for each command)", COLORS['GREEN'])
 
-    print_colored("\nCommands: /help, /exit, /model <name>, /history, /cupertino <query>, /apple <tool> <args>, /ingest <path>", COLORS['BLUE'])
+    print_colored("\nCommands: /help, /exit, /model <name>, /history, /cupertino <query>, /apple <tool> <args>, /ingest <path>, /scrape", COLORS['BLUE'])
     if READLINE_AVAILABLE:
         print_colored("Use ↑/↓ arrows to navigate history. History saved to ~/.qwen_client_history\n", COLORS['BLUE'])
     else:
@@ -1426,140 +1701,18 @@ def chat(model="implementer"):
             if not user_input.strip():
                 continue
             
-            # Help Command
-            if user_input.lower() == '/help':
-                print_colored("\n--- Qwen Remote CLI Help ---", COLORS['HEADER'])
-                print_colored(f"{COLORS['BOLD']}GENERAL COMMANDS:{COLORS['ENDC']}", COLORS['BLUE'])
-                print(f"  /help                - Show this help menu")
-                print(f"  /exit, /quit         - Exit the CLI and cleanup resources")
-                print(f"  /model <name>        - Switch the active agent (e.g. /model architect)")
-                print(f"  /history             - Show recent command history")
-                print(f"  /history clear       - Clear command history")
-                
-                print_colored(f"\n{COLORS['BOLD']}DOCUMENTATION TOOLS:{COLORS['ENDC']}", COLORS['BLUE'])
-                print(f"  /cupertino <query>   - Search local Apple documentation on macOS")
-                print(f"                         Example: /cupertino MTLMeshRenderPipelineDescriptor")
-                print(f"  /apple <tool> <args> - Search Apple Deep Docs on the Linux server")
-                print(f"                         Example: /apple search_swift_evolution {{\"feature\": \"actors\"}}")
-                print(f"  /ingest <path>       - Ingest a local PDF on the Linux server into memory")
-                print(f"                         Example: /ingest /home/user/Metal4_Specs.pdf")
-                
-                print_colored(f"\n{COLORS['BOLD']}AGENT SHORTCUTS:{COLORS['ENDC']}", COLORS['BLUE'])
-                print(f"  @<agent_name> [msg]  - Switch agent and optionally send message in one go")
-                print(f"                         Example: @architect Design a Metal 4 renderer")
-                print(f"                         Example: @debugger Why is this kernel crashing?")
-                print(f"  MULTI-AGENT:         - You can use multiple @ mentions in one prompt!")
-                print(f"                         Example: @architect Design X then @implementer build it.")
-                
-                print_colored(f"\n{COLORS['BOLD']}AVAILABLE AGENTS:{COLORS['ENDC']}", COLORS['BLUE'])
-                for name, theme in AGENT_THEMES.items():
-                    print(f"  {name.ljust(18)} - {theme['desc']}")
-                print_colored("----------------------------\n", COLORS['HEADER'])
-                continue
-
             if user_input.lower() in ['/exit', '/quit']:
                 break
 
-            # Ingest PDF Command
-            if user_input.lower().startswith('/ingest '):
-                parts = user_input.split(' ', 1)
-                if len(parts) < 2 or not parts[1].strip():
-                    print_colored("Usage: /ingest <path_on_server>", COLORS['FAIL'])
-                    continue
-                path = parts[1].strip()
-                result = ingest_pdf(path)
-                print_colored(f"\n{result}\n", COLORS['GREEN'])
-                continue
-
-            # Quick Agent Switch (e.g. @architect or @architect Please design...)
-            if user_input.startswith('@'):
-                parts = user_input.split(' ', 1)
-                potential_agent = parts[0][1:].lower() # remove @
-                
-                # Handle fuzzy matching or aliases if we wanted, but strict for now
-                if potential_agent in AGENT_THEMES:
-                    model = potential_agent
-                    agent_theme = AGENT_THEMES[model]
-                    print_colored(f"\nSwitched to agent: {model} {agent_theme['icon']}", COLORS['WARNING'])
-                    print_colored(f"Description: {agent_theme['desc']}", COLORS['BLUE'])
-
-                    # If there's content after the mention, update user_input to be that content
-                    # effectively switching AND sending in one go.
-                    if len(parts) > 1:
-                        user_input = parts[1].strip()
-                        if not user_input:
-                            continue
-                    else:
-                        # Just a switch, don't send anything
-                        continue
-                else:
-                    # If it looks like a mention but isn't a valid agent, warn but don't crash
-                    # Alternatively, we could just treat it as text. Let's warn.
-                    print_colored(f"Unknown agent '{potential_agent}'. Available: {', '.join(AGENT_THEMES.keys())}", COLORS['FAIL'])
-                    print_colored("Treating as normal text...", COLORS['BLUE'])
-
-            # Apple Documentation Search (Cupertino MCP)
-            if user_input.lower().startswith('/cupertino '):
-                parts = user_input.split(' ', 1)
-                if len(parts) < 2 or not parts[1].strip():
-                    print_colored("Usage: /cupertino <query>", COLORS['FAIL'])
-                    continue
-                query = parts[1].strip()
-                result = handle_cupertino_search(query)
-                print_colored(f"\n{result}\n", COLORS['GREEN'])
-                continue
-
-            # Apple Deep Docs Search (Server-side MCP)
-            if user_input.lower().startswith('/apple '):
-                parts = user_input.split(' ', 2)
-                if len(parts) < 2:
-                    print_colored("Usage: /apple <tool_name> [args_json]", COLORS['FAIL'])
-                    print_colored("Example: /apple search_swift_evolution {\"feature\": \"actors\"}", COLORS['BLUE'])
-                    continue
-                
-                tool = parts[1]
-                args_str = parts[2].strip() if len(parts) > 2 else "{}"
-                if not args_str: args_str = "{}"
-                
-                try:
-                    args = json.loads(args_str)
-                    if not isinstance(args, dict):
-                        print_colored("Error: Arguments must be a JSON object (dictionary).", COLORS['FAIL'])
-                        print_colored("Example: /apple tool {\"key\": \"value\"}", COLORS['BLUE'])
-                        continue
-                        
-                    result = apple_deep_docs_search(tool, args)
-                    print_colored(f"\n{result}\n", COLORS['GREEN'])
-                except json.JSONDecodeError as e:
-                    print_colored(f"Error: Invalid JSON arguments: {e}", COLORS['FAIL'])
-                    print_colored("Hint: Ensure keys and values are in double quotes.", COLORS['BLUE'])
-                    print_colored("Example: /apple tool {\"query\": \"something\"}", COLORS['CYAN'])
-                continue
-
-            # History management commands
-            if user_input.lower() == '/history':
-                if READLINE_AVAILABLE:
-                    history_len = readline.get_current_history_length()
-                    print_colored(f"\nCommand History ({history_len} entries):", COLORS['HEADER'])
-                    for i in range(1, min(history_len + 1, 21)):  # Show last 20
-                        idx = max(1, history_len - 20 + i)
-                        if idx <= history_len:
-                            item = readline.get_history_item(idx)
-                            print_colored(f"  {idx}: {item}", COLORS['CYAN'])
-                    if history_len > 20:
-                        print_colored(f"  ... ({history_len - 20} older entries)", COLORS['BLUE'])
-                else:
-                    print_colored("Readline not available - no history support", COLORS['WARNING'])
-                continue
-
-            if user_input.lower() == '/history clear':
-                if READLINE_AVAILABLE:
-                    readline.clear_history()
-                    print_colored("Command history cleared.", COLORS['GREEN'])
-                else:
-                    print_colored("Readline not available - no history support", COLORS['WARNING'])
-                continue
+            # Handle commands
+            should_continue, new_model = handle_user_command(user_input, history, model, agent_theme)
+            if new_model != model:
+                model = new_model
+                agent_theme = AGENT_THEMES[model]
             
+            if should_continue:
+                continue
+
             # Resume Interrupted Chain
             if user_input.lower() == '/resume':
                 if not PENDING_TASKS:
@@ -1603,117 +1756,12 @@ def chat(model="implementer"):
                     print_colored(f"Error parsing tasks: {e}", COLORS['FAIL'])
                     tasks = []
 
-            # Execute Tasks Loop (shared by both normal input and /resume)
-            try:
-                for task_idx, (task_agent, task_content) in enumerate(tasks):
-                    if not task_content.strip(): continue
-                    
-                    # Switch active context for this specific task
-                    task_theme = AGENT_THEMES[task_agent]
-                    print_colored(f"\n>>> Executing task with @{task_agent} {task_theme['icon']}", COLORS['BLUE'])
+            # Process Tasks
+            model = process_agent_tasks(tasks, history, model, agent_theme)
+            # Update theme if model changed during tasks
+            if model in AGENT_THEMES:
+                agent_theme = AGENT_THEMES[model]
 
-                    # Permanently update the active agent if it was explicitly mentioned
-                    if task_agent != model:
-                        model = task_agent; agent_theme = AGENT_THEMES[model]
-
-                    # Append user prompt to history
-                    history.append({"role": "user", "content": task_content})
-                    save_chat_history(history, model)
-
-                    # Inner loop: keep sending tool output back until the agent
-                    # produces a response with no actionable commands.
-                    force_reload_override = True  # first call for this task uses force reload
-                    task_aborted = False
-                    while True:
-                        headers = {"X-Qwen-Force-Reload": "true" if force_reload_override else "false"}
-
-                        response_text = get_completion(history, model, agent_theme, headers)
-                        if not response_text:
-                            task_aborted = True
-                            break
-
-                        # Append assistant response to history
-                        history.append({"role": "assistant", "content": response_text})
-                        save_chat_history(history, model)
-
-                        # After the first round-trip, reuse the loaded model
-                        force_reload_override = False
-
-                        # ── Execute commands found in the response ──
-                        tool_output = process_remote_commands(response_text)
-
-                        if not tool_output:
-                            # Fallback: model wrote commands in code blocks instead of markers
-                            fallback_cmds = extract_fallback_commands(response_text)
-                            if fallback_cmds:
-                                print_colored("\nAgent used code blocks instead of markers. Extracting commands...", COLORS['WARNING'])
-                                results = []
-                                total_len = 0
-                                GLOBAL_MAX_LEN = 40000
-
-                                for i, cmd in enumerate(fallback_cmds):
-                                    if total_len > GLOBAL_MAX_LEN:
-                                        results.append(f"\n... [OMITTED {len(fallback_cmds) - i} FALLBACK COMMANDS TO PREVENT CONTEXT OVERFLOW] ...")
-                                        break
-
-                                    result = execute_remote_command(cmd.strip())
-                                    if result:
-                                        res_str = f"[Command {i+1}] {result}"
-                                        results.append(res_str)
-                                        total_len += len(res_str)
-
-                                if results:
-                                    tool_output = "\n\n".join(results)
-
-                        if tool_output:
-                            cmd_count = tool_output.count("[Command ")
-                            label = f"{cmd_count} command(s) executed" if cmd_count > 1 else "Tool result"
-                            print_colored(f"\n{label}. Sending output back to agent...", COLORS['CYAN'])
-                            history.append({"role": "user", "content": f"Tool output:\n{tool_output}"})
-                            save_chat_history(history, model)
-                            continue  # loop back to get the agent's next response
-
-                        # No commands found — check if we should auto-retry once
-                        completion_phrases = ["complete summary", "work summary", "complete implementation status", "final report", "implementation complete", "summary"]
-                        is_finishing_summary = any(phrase in response_text.lower() for phrase in completion_phrases)
-                        is_exempt_agent = model in ["architect", "reviewer"]
-
-                        last_msg_to_agent = history[-2] if len(history) >= 2 else {}
-                        already_retried = last_msg_to_agent.get("_retried")
-
-                        if not is_finishing_summary and not already_retried and not is_exempt_agent:
-                            print_colored("\nAgent gave advice instead of executing. Retrying...", COLORS['WARNING'])
-                            history.append({
-                                "role": "user",
-                                "content": "You did not execute any commands. Do not explain — act. Use <<<REMOTE_EXEC>>> blocks to perform the task now. If you are finished, provide a 'complete summary' or 'work summary'.",
-                                "_retried": True,
-                            })
-                            save_chat_history(history, model)
-                            continue  # one more round-trip
-
-                        # Agent is done with this task (summary or exempt agent)
-                        break
-
-                    if task_aborted:
-                        remaining_tasks = tasks[task_idx+1:]
-                        if remaining_tasks:
-                            PENDING_TASKS.extend(remaining_tasks)
-                            print_colored(f"\n⚠️  Task aborted. Saved {len(remaining_tasks)} pending tasks.", COLORS['WARNING'])
-                            print_colored("   Type '/resume' to retry/continue.", COLORS['BLUE'])
-                        break  # stop processing remaining tasks
-                        
-            except KeyboardInterrupt:
-                print_colored("\nInterrupt received.", COLORS['WARNING'])
-                remaining_tasks = tasks[task_idx+1:]
-                if remaining_tasks:
-                    PENDING_TASKS.extend(remaining_tasks)
-                    remaining_agents = [t[0] for t in remaining_tasks]
-                    print_colored(f"⚠️  Skipped remaining tasks for: {', '.join(remaining_agents)}", COLORS['WARNING'])
-                    print_colored("   Type '/resume' to continue later.", COLORS['BLUE'])
-                continue
-            except Exception as e:
-                print_colored(f"\nMain Loop Error: {e}", COLORS['FAIL'])
-                continue
         except KeyboardInterrupt:
             break
 
