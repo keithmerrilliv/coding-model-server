@@ -7,7 +7,12 @@ This script retrieves WWDC videos, related frameworks and additional resources.
 
 import os
 import json
+import subprocess
 import time
+
+# Load environment variables
+from dotenv import load_dotenv
+load_dotenv()
 
 class MetalResourcesScraper:
     def __init__(self):
@@ -17,49 +22,30 @@ class MetalResourcesScraper:
     def scrape_wwdc_videos(self):
         """Use Web Search to find WWDC videos about Metal"""
         print("Searching for WWDC Videos on Metal...")
-        
+
         search_queries = [
             "WWDC Metal tutorial",
-            "Apple developer Metal performance"  
+            "Apple developer Metal performance"
         ]
-        
+
         results = {}
         for query in search_queries:
             try:
                 print(f"  Searching WWDC content for '{query}'...")
-                
-                result_file = f"{self.output_dir}/wwdc_{query.replace(' ', '_')}.json"
-                
-                # In real implementation:
-                # result = subprocess.run(['search_apple_online', '--query', query], capture_output=True, text=True)
-                # if result.returncode == 0:
-                #     mock_result = {
-                #         'query': query,
-                #         'videos_found': 2,
-                #         'video_sessions': [
-                #             {'year': 2021, 'title': 'Optimizing Metal Performance', 'duration': '45min'},
-                #             {'year': 2020, 'title': 'Advanced Metal Rendering', 'duration': '38min'}
-                #         ],
-                #         'data': result.stdout,
-                #         'timestamp': time.time()
-                #     }
-                # else:
-                #     mock_result = {
-                #         'query': query,
-                #         'videos_found': 0,
-                #         'video_sessions': [],
-                #         'error': result.stderr,
-                #         'timestamp': time.time()
-                #     }
 
-                # Try to use apple-deep-docs if available, otherwise fall back to cupertino
-                try:
-                    result = subprocess.run(['apple-deep-docs', '--query', query], capture_output=True, text=True, timeout=30)
-                    tool_used = 'apple-deep-docs'
-                except FileNotFoundError:
-                    # apple-deep-docs not available, fall back to cupertino
-                    result = subprocess.run(['cupertino', 'search', query], capture_output=True, text=True)
-                    tool_used = 'cupertino'
+                result_file = f"{self.output_dir}/wwdc_{query.replace(' ', '_')}.json"
+
+                # apple-deep-docs is an MCP server that doesn't work with command-line args
+                # Fall back to cupertino which is known to work
+                apple_deep_docs_path = os.getenv('APPLE_DEEP_DOCS_PATH', '/default/path/not/set')
+                if os.path.exists(apple_deep_docs_path):
+                    # If we wanted to use apple-deep-docs, we would call it like this:
+                    # result = subprocess.run([apple_deep_docs_path, '--query', query], capture_output=True, text=True, timeout=30)
+                    # But since it's an MCP server, we'll stick with cupertino
+                    pass
+
+                result = subprocess.run(['cupertino', 'search', query], capture_output=True, text=True, timeout=30)
+                tool_used = 'cupertino'
 
                 if result.returncode == 0:
                     # Parse the results to extract video information
@@ -78,19 +64,16 @@ class MetalResourcesScraper:
                             'duration': '45min'  # Default duration
                         })
 
-                    mock_result = {
+                    actual_result = {
                         'query': query,
                         'videos_found': len(video_sessions),
-                        'video_sessions': video_sessions if video_sessions else [
-                            {'year': 2021, 'title': 'Optimizing Metal Performance', 'duration': '45min'},
-                            {'year': 2020, 'title': 'Advanced Metal Rendering', 'duration': '38min'}
-                        ],
+                        'video_sessions': video_sessions,
                         'data': data,
                         'tool_used': tool_used,
                         'timestamp': time.time()
                     }
                 else:
-                    mock_result = {
+                    actual_result = {
                         'query': query,
                         'videos_found': 0,
                         'video_sessions': [],
@@ -98,45 +81,51 @@ class MetalResourcesScraper:
                         'tool_used': tool_used,
                         'timestamp': time.time()
                     }
-                
+
                 with open(result_file, 'w') as f:
-                    json.dump(mock_result, f, indent=2)
-                    
-                results[query] = "success"
+                    json.dump(actual_result, f, indent=2)
+
+                results[query] = "success" if result.returncode == 0 else "failed"
+            except subprocess.TimeoutExpired:
+                print(f"    Timeout searching WWDC '{query}'")
+                results[query] = "timeout"
             except Exception as e:
                 print(f"    Error searching WWDC '{query}': {e}")
                 results[query] = "failed"
-                
+
         return results
     
     def find_related_frameworks(self):
         """Use Cupertino to identify related frameworks"""
         print("Identifying Related Frameworks...")
-        
+
         framework_queries = [
             "CoreGraphics Metal integration",
-            "SpriteKit Metal support", 
-            "SceneKit Metal rendering"  
+            "SpriteKit Metal support",
+            "SceneKit Metal rendering"
         ]
-        
+
         results = {}
         for query in framework_queries:
             try:
                 print(f"  Checking '{query}'...")
-                
+
                 result_file = f"{self.output_dir}/framework_{query.replace(' ', '_')}.json"
-                
-                # Try to use apple-deep-docs if available, otherwise use cupertino
-                try:
-                    result = subprocess.run(['apple-deep-docs', '--query', query], capture_output=True, text=True, timeout=30)
-                    tool_used = 'apple-deep-docs'
-                except FileNotFoundError:
-                    # apple-deep-docs not available, fall back to cupertino
-                    result = subprocess.run(['cupertino', 'search', query], capture_output=True, text=True)
-                    tool_used = 'cupertino'
+
+                # apple-deep-docs is an MCP server that doesn't work with command-line args
+                # Fall back to cupertino which is known to work
+                apple_deep_docs_path = os.getenv('APPLE_DEEP_DOCS_PATH', '/default/path/not/set')
+                if os.path.exists(apple_deep_docs_path):
+                    # If we wanted to use apple-deep-docs, we would call it like this:
+                    # result = subprocess.run([apple_deep_docs_path, '--query', query], capture_output=True, text=True, timeout=30)
+                    # But since it's an MCP server, we'll stick with cupertino
+                    pass
+
+                result = subprocess.run(['cupertino', 'search', query], capture_output=True, text=True, timeout=30)
+                tool_used = 'cupertino'
 
                 if result.returncode == 0:
-                    mock_result = {
+                    actual_result = {
                         'framework_query': query,
                         'related_frameworks_found': True,
                         'integration_details': "Available",
@@ -145,7 +134,7 @@ class MetalResourcesScraper:
                         'timestamp': time.time()
                     }
                 else:
-                    mock_result = {
+                    actual_result = {
                         'framework_query': query,
                         'related_frameworks_found': False,
                         'integration_details': "Not found",
@@ -153,41 +142,47 @@ class MetalResourcesScraper:
                         'tool_used': tool_used,
                         'timestamp': time.time()
                     }
-                
+
                 with open(result_file, 'w') as f:
-                    json.dump(mock_result, f, indent=2)
-                    
-                results[query] = "success"
+                    json.dump(actual_result, f, indent=2)
+
+                results[query] = "success" if result.returncode == 0 else "failed"
+            except subprocess.TimeoutExpired:
+                print(f"    Timeout checking framework '{query}'")
+                results[query] = "timeout"
             except Exception as e:
                 print(f"    Error checking framework '{query}': {e}")
                 results[query] = "failed"
-        
+
         return results
     
     def get_tools_documentation(self):
         """Use Apple Deep Docs for tools documentation"""
         print("Retrieving Tools Documentation...")
-        
+
         tool_queries = [
-            {"tool": "search_apple_online", "arguments": {"query": "Metal Shader Debugger"}},
-            {"tool": "search_apple_online", "arguments": {"query": "Xcode Metal profiling"}} 
+            "Metal Shader Debugger",
+            "Xcode Metal profiling"
         ]
-        
+
         results = {}
         for query in tool_queries:
             try:
-                print(f"  Retrieving tools docs for '{query['arguments']['query']}'...")
-                
-                result_file = f"{self.output_dir}/tools_{query['arguments']['query'].replace(' ', '_')}.json"
-                
-                # Try to use apple-deep-docs if available, otherwise use cupertino
-                try:
-                    result = subprocess.run(['apple-deep-docs', '--query', json.dumps(query)], capture_output=True, text=True, timeout=30)
-                    tool_used = 'apple-deep-docs'
-                except FileNotFoundError:
-                    # apple-deep-docs not available, fall back to cupertino
-                    result = subprocess.run(['cupertino', 'search', json.dumps(query)], capture_output=True, text=True)
-                    tool_used = 'cupertino'
+                print(f"  Retrieving tools docs for '{query}'...")
+
+                result_file = f"{self.output_dir}/tools_{query.replace(' ', '_')}.json"
+
+                # apple-deep-docs is an MCP server that doesn't work with command-line args
+                # Fall back to cupertino which is known to work
+                apple_deep_docs_path = os.getenv('APPLE_DEEP_DOCS_PATH', '/default/path/not/set')
+                if os.path.exists(apple_deep_docs_path):
+                    # If we wanted to use apple-deep-docs, we would call it like this:
+                    # result = subprocess.run([apple_deep_docs_path, '--query', query], capture_output=True, text=True, timeout=30)
+                    # But since it's an MCP server, we'll stick with cupertino
+                    pass
+
+                result = subprocess.run(['cupertino', 'search', query], capture_output=True, text=True, timeout=30)
+                tool_used = 'cupertino'
 
                 if result.returncode == 0:
                     # Parse the results to extract sections
@@ -197,16 +192,16 @@ class MetalResourcesScraper:
                         if any(header in line.lower() for header in ['overview', 'usage', 'best practices', 'installation', 'configuration']):
                             sections.append(line.strip())
 
-                    mock_result = {
+                    actual_result = {
                         'tool_query': query,
                         'documentation_found': True,
-                        'sections_available': sections if sections else ['Overview', 'Usage', 'Best Practices'],
+                        'sections_available': sections,
                         'data': data,
                         'tool_used': tool_used,
                         'timestamp': time.time()
                     }
                 else:
-                    mock_result = {
+                    actual_result = {
                         'tool_query': query,
                         'documentation_found': False,
                         'sections_available': [],
@@ -214,15 +209,18 @@ class MetalResourcesScraper:
                         'tool_used': tool_used,
                         'timestamp': time.time()
                     }
-                
+
                 with open(result_file, 'w') as f:
-                    json.dump(mock_result, f, indent=2)
-                    
-                results[query['arguments']['query']] = "success"
+                    json.dump(actual_result, f, indent=2)
+
+                results[query] = "success" if result.returncode == 0 else "failed"
+            except subprocess.TimeoutExpired:
+                print(f"    Timeout retrieving tools docs for '{query}'")
+                results[query] = "timeout"
             except Exception as e:
                 print(f"    Error retrieving tool docs: {e}")
-                results[query['arguments']['query']] = "failed"
-        
+                results[query] = "failed"
+
         return results
     
     def run(self):

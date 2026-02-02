@@ -10,6 +10,10 @@ import json
 import subprocess
 import time
 
+# Load environment variables
+from dotenv import load_dotenv
+load_dotenv()
+
 class MetalDocScraper:
     def __init__(self):
         self.output_dir = "output/metal/docs"
@@ -18,73 +22,128 @@ class MetalDocScraper:
     def scrape_api_docs_with_cupertino(self):
         """Use Cupertino tool to get core API documentation"""
         print("Scraping Metal framework APIs with Cupertino...")
-        
+
         # Common Metal classes and protocols
         metal_entities = [
-            "MTLDevice", 
-            "MTLCommandQueue", 
-            "MTLBuffer", 
+            "MTLDevice",
+            "MTLCommandQueue",
+            "MTLBuffer",
             "MTLTexture",
-            "MTLRenderPipeline", 
+            "MTLRenderPipeline",
             "MTLComputePipeline"
         ]
-        
+
         results = {}
         for entity in metal_entities:
             try:
                 print(f"  Querying Cupertino for '{entity}'...")
-                
-                # In actual implementation, these would be real MCP tool calls
-                result_file = f"{self.output_dir}/{entity.replace(' ', '_')}_cupertino.json"
-                
-                mock_result = {
-                    'entity': entity,
-                    'status': 'found',
-                    'timestamp': time.time()
-                }
-                
-                with open(result_file, 'w') as f:
-                    json.dump(mock_result, f, indent=2)
-                    
-                results[entity] = "success"
+
+                # Make actual call to Cupertino tool
+                result = subprocess.run(['cupertino', 'search', entity], capture_output=True, text=True, timeout=30)
+
+                if result.returncode == 0:
+                    # Parse the results from Cupertino
+                    data = result.stdout
+
+                    actual_result = {
+                        'entity': entity,
+                        'status': 'found',
+                        'data': data,
+                        'timestamp': time.time()
+                    }
+
+                    result_file = f"{self.output_dir}/{entity.replace(' ', '_')}_cupertino.json"
+                    with open(result_file, 'w') as f:
+                        json.dump(actual_result, f, indent=2)
+
+                    results[entity] = "success"
+                else:
+                    # Handle case where Cupertino didn't find the entity
+                    error_result = {
+                        'entity': entity,
+                        'status': 'not found',
+                        'error': result.stderr,
+                        'timestamp': time.time()
+                    }
+
+                    result_file = f"{self.output_dir}/{entity.replace(' ', '_')}_cupertino.json"
+                    with open(result_file, 'w') as f:
+                        json.dump(error_result, f, indent=2)
+
+                    results[entity] = "not found"
+
+            except subprocess.TimeoutExpired:
+                print(f"    Timeout querying '{entity}' with Cupertino")
+                results[entity] = "timeout"
             except Exception as e:
-                print(f"    Error querying '{entity}': {e}")
+                print(f"    Error querying '{entity}' with Cupertino: {e}")
                 results[entity] = "failed"
-        
+
         return results
     
     def scrape_with_apple_deep_docs(self):
         """Use Apple Deep Docs to get structured documentation"""
         print("Scraping with Apple Deep Docs...")
-        
+
         queries = [
-            {"tool": "search_apple_online", "arguments": {"query": "Metal framework"}},
-            {"tool": "search_apple_online", "arguments": {"query": "MTLDevice protocol"}}, 
-            {"tool": "search_apple_online", "arguments": {"query": "Metal rendering pipeline"}}
+            "Metal framework",
+            "MTLDevice protocol",
+            "Metal rendering pipeline"
         ]
-        
+
         results = {}
-        
+
         for query in queries:
             try:
-                print(f"  Querying deep docs for '{query['arguments']['query']}'...")
-                
-                result_file = f"{self.output_dir}/deepdocs_{query['arguments']['query'].replace(' ', '_')}.json"
-                
-                mock_result = {
-                    'query': query,
-                    'found_results': True,
-                    'timestamp': time.time()
-                }
-                
-                with open(result_file, 'w') as f:
-                    json.dump(mock_result, f, indent=2)
-                    
-                results[query['arguments']['query']] = "success"
+                print(f"  Querying deep docs for '{query}'...")
+
+                # apple-deep-docs is an MCP server that doesn't work with command-line args
+                # Fall back to cupertino which is known to work
+                apple_deep_docs_path = os.getenv('APPLE_DEEP_DOCS_PATH', '/default/path/not/set')
+                if os.path.exists(apple_deep_docs_path):
+                    # If we wanted to use apple-deep-docs, we would call it like this:
+                    # result = subprocess.run([apple_deep_docs_path, '--query', query], capture_output=True, text=True, timeout=30)
+                    # But since it's an MCP server, we'll stick with cupertino
+                    pass
+
+                result = subprocess.run(['cupertino', 'search', query], capture_output=True, text=True, timeout=30)
+                tool_used = 'cupertino'
+
+                if result.returncode == 0:
+                    actual_result = {
+                        'query': query,
+                        'tool_used': tool_used,
+                        'data': result.stdout,
+                        'found_results': True,
+                        'timestamp': time.time()
+                    }
+
+                    result_file = f"{self.output_dir}/deepdocs_{query.replace(' ', '_')}.json"
+                    with open(result_file, 'w') as f:
+                        json.dump(actual_result, f, indent=2)
+
+                    results[query] = "success"
+                else:
+                    error_result = {
+                        'query': query,
+                        'tool_used': tool_used,
+                        'error': result.stderr,
+                        'found_results': False,
+                        'timestamp': time.time()
+                    }
+
+                    result_file = f"{self.output_dir}/deepdocs_{query.replace(' ', '_')}.json"
+                    with open(result_file, 'w') as f:
+                        json.dump(error_result, f, indent=2)
+
+                    results[query] = "failed"
+            except subprocess.TimeoutExpired:
+                print(f"    Timeout querying '{query}' with {tool_used}")
+                results[query] = "timeout"
             except Exception as e:
-                print(f"    Error querying deep docs: {e}")
-                results[query['arguments']['query']] = "failed"
-                
+                print(f"    Error querying deep docs for '{query}': {e}")
+                results[query] = "failed"
+
         return results
     
     def run(self):

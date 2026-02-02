@@ -7,7 +7,12 @@ This script focuses on Metal guides, tutorials and specification documents.
 
 import os
 import json
+import subprocess
 import time
+
+# Load environment variables
+from dotenv import load_dotenv
+load_dotenv()
 
 class MetalGuidesScraper:
     def __init__(self):
@@ -17,29 +22,32 @@ class MetalGuidesScraper:
     def scrape_programming_guides(self):
         """Use Apple Deep Docs to get programming guides"""
         print("Scraping Metal Programming Guides...")
-        
+
         guide_topics = [
             "Metal Programming Guide",
-            "Metal Performance Shaders", 
+            "Metal Performance Shaders",
             "Metal Shader Debugging",
             "Working with Metal Devices"
         ]
-        
+
         results = {}
         for topic in guide_topics:
             try:
                 print(f"  Querying guides for '{topic}'...")
-                
+
                 result_file = f"{self.output_dir}/{topic.replace(' ', '_')}_guide.json"
-                
-                # Try to use apple-deep-docs if available, otherwise fall back to cupertino
-                try:
-                    result = subprocess.run(['apple-deep-docs', '--query', f'Metal {topic}'], capture_output=True, text=True, timeout=30)
-                    tool_used = 'apple-deep-docs'
-                except FileNotFoundError:
-                    # apple-deep-docs not available, fall back to cupertino
-                    result = subprocess.run(['cupertino', 'search', f'Metal {topic}'], capture_output=True, text=True)
-                    tool_used = 'cupertino'
+
+                # apple-deep-docs is an MCP server that doesn't work with command-line args
+                # Fall back to cupertino which is known to work
+                apple_deep_docs_path = os.getenv('APPLE_DEEP_DOCS_PATH', '/default/path/not/set')
+                if os.path.exists(apple_deep_docs_path):
+                    # If we wanted to use apple-deep-docs, we would call it like this:
+                    # result = subprocess.run([apple_deep_docs_path, '--query', f'Metal {topic}'], capture_output=True, text=True, timeout=30)
+                    # But since it's an MCP server, we'll stick with cupertino
+                    pass
+
+                result = subprocess.run(['cupertino', 'search', f'Metal {topic}'], capture_output=True, text=True, timeout=30)
+                tool_used = 'cupertino'
 
                 if result.returncode == 0:
                     # Parse the results to extract sections
@@ -50,7 +58,7 @@ class MetalGuidesScraper:
                         if any(header in line.lower() for header in ['introduction', 'setup', 'implementation', 'overview', 'usage', 'best practices']):
                             sections.append(line.strip())
 
-                    mock_result = {
+                    actual_result = {
                         'topic': topic,
                         'content_available': True,
                         'sections_found': sections if sections else ['Introduction', 'Setup', 'Implementation'],
@@ -59,7 +67,7 @@ class MetalGuidesScraper:
                         'timestamp': time.time()
                     }
                 else:
-                    mock_result = {
+                    actual_result = {
                         'topic': topic,
                         'content_available': False,
                         'sections_found': [],
@@ -67,67 +75,73 @@ class MetalGuidesScraper:
                         'tool_used': tool_used,
                         'timestamp': time.time()
                     }
-                
+
                 with open(result_file, 'w') as f:
-                    json.dump(mock_result, f, indent=2)
-                    
-                results[topic] = "success"
+                    json.dump(actual_result, f, indent=2)
+
+                results[topic] = "success" if result.returncode == 0 else "failed"
+            except subprocess.TimeoutExpired:
+                print(f"    Timeout retrieving guide '{topic}'")
+                results[topic] = "timeout"
             except Exception as e:
                 print(f"    Error retrieving guide '{topic}': {e}")
                 results[topic] = "failed"
-                
+
         return results
     
     def scrape_specifications(self):
         """Get Metal specification documents"""
         print("Retrieving Metal Specification Documents...")
-        
+
         spec_docs = [
             "Metal Shading Language Specification",
-            "Metal Framework Reference"  
+            "Metal Framework Reference"
         ]
-        
+
         results = {}
         for doc in spec_docs:
             try:
                 print(f"  Retrieving '{doc}'...")
-                
+
                 result_file = f"{self.output_dir}/{doc.replace(' ', '_')}_spec.json"
-                
+
                 # Try to use apple-deep-docs if available, otherwise fall back to cupertino
                 try:
                     result = subprocess.run(['apple-deep-docs', '--query', doc], capture_output=True, text=True, timeout=30)
                     tool_used = 'apple-deep-docs'
                 except FileNotFoundError:
                     # apple-deep-docs not available, fall back to cupertino
-                    result = subprocess.run(['cupertino', 'search', doc], capture_output=True, text=True)
+                    result = subprocess.run(['cupertino', 'search', doc], capture_output=True, text=True, timeout=30)
                     tool_used = 'cupertino'
 
                 if result.returncode == 0:
-                    mock_result = {
+                    actual_result = {
                         'document': doc,
-                        'format': 'PDF',
+                        'format': 'text',
                         'accessible_via_tool': tool_used,
                         'data': result.stdout,
                         'timestamp': time.time()
                     }
                 else:
-                    mock_result = {
+                    actual_result = {
                         'document': doc,
-                        'format': 'PDF',
+                        'format': 'text',
                         'accessible_via_tool': tool_used,
                         'error': result.stderr,
                         'timestamp': time.time()
                     }
-                
+
                 with open(result_file, 'w') as f:
-                    json.dump(mock_result, f, indent=2)
-                    
-                results[doc] = "success"
+                    json.dump(actual_result, f, indent=2)
+
+                results[doc] = "success" if result.returncode == 0 else "failed"
+            except subprocess.TimeoutExpired:
+                print(f"    Timeout retrieving '{doc}'")
+                results[doc] = "timeout"
             except Exception as e:
                 print(f"    Error retrieving '{doc}': {e}")
                 results[doc] = "failed"
-        
+
         return results
     
     def run(self):

@@ -7,7 +7,12 @@ This script focuses on retrieving Metal sample code and examples.
 
 import os
 import json
+import subprocess
 import time
+
+# Load environment variables
+from dotenv import load_dotenv
+load_dotenv()
 
 class MetalSampleScraper:
     def __init__(self):
@@ -17,28 +22,31 @@ class MetalSampleScraper:
     def find_sample_projects(self):
         """Use Web Search to locate sample projects"""
         print("Searching for Metal Sample Projects...")
-        
+
         search_queries = [
             "Metal sample code GitHub apple",
-            "Apple developer Metal examples", 
+            "Apple developer Metal examples",
             "Metal tutorial sample projects"
         ]
-        
+
         results = {}
         for query in search_queries:
             try:
                 print(f"  Searching for '{query}'...")
-                
+
                 result_file = f"{self.output_dir}/search_{query.replace(' ', '_')}.json"
-                
-                # Try to use apple-deep-docs if available, otherwise fall back to cupertino
-                try:
-                    result = subprocess.run(['apple-deep-docs', '--query', query], capture_output=True, text=True, timeout=30)
-                    tool_used = 'apple-deep-docs'
-                except FileNotFoundError:
-                    # apple-deep-docs not available, fall back to cupertino
-                    result = subprocess.run(['cupertino', 'search', query], capture_output=True, text=True)
-                    tool_used = 'cupertino'
+
+                # apple-deep-docs is an MCP server that doesn't work with command-line args
+                # Fall back to cupertino which is known to work
+                apple_deep_docs_path = os.getenv('APPLE_DEEP_DOCS_PATH', '/default/path/not/set')
+                if os.path.exists(apple_deep_docs_path):
+                    # If we wanted to use apple-deep-docs, we would call it like this:
+                    # result = subprocess.run([apple_deep_docs_path, '--query', query], capture_output=True, text=True, timeout=30)
+                    # But since it's an MCP server, we'll stick with cupertino
+                    pass
+
+                result = subprocess.run(['cupertino', 'search', query], capture_output=True, text=True, timeout=30)
+                tool_used = 'cupertino'
 
                 if result.returncode == 0:
                     # Parse the results to extract potential sample names
@@ -54,20 +62,16 @@ class MetalSampleScraper:
                                 if len(match) > 3 and not any(word in match.lower() for word in ['the', 'and', 'for', 'with', 'metal']):
                                     potential_samples.append(match.strip())
 
-                    mock_result = {
+                    actual_result = {
                         'query': query,
                         'sample_links_found': len(potential_samples),
-                        'potential_samples': potential_samples[:3] if potential_samples else [
-                            'Basic Metal Rendering',
-                            'Compute Shaders Example',
-                            'Advanced Textures Sample'
-                        ],
+                        'potential_samples': potential_samples[:3] if potential_samples else [],
                         'data': data,
                         'tool_used': tool_used,
                         'timestamp': time.time()
                     }
                 else:
-                    mock_result = {
+                    actual_result = {
                         'query': query,
                         'sample_links_found': 0,
                         'potential_samples': [],
@@ -75,41 +79,44 @@ class MetalSampleScraper:
                         'tool_used': tool_used,
                         'timestamp': time.time()
                     }
-                
+
                 with open(result_file, 'w') as f:
-                    json.dump(mock_result, f, indent=2)
-                    
-                results[query] = "success"
+                    json.dump(actual_result, f, indent=2)
+
+                results[query] = "success" if result.returncode == 0 else "failed"
+            except subprocess.TimeoutExpired:
+                print(f"    Timeout searching '{query}'")
+                results[query] = "timeout"
             except Exception as e:
                 print(f"    Error searching '{query}': {e}")
                 results[query] = "failed"
-                
+
         return results
     
     def retrieve_sample_content(self):
         """Use Cupertino and Deep Docs to get sample content"""
         print("Retrieving Sample Code Content...")
-        
+
         sample_types = [
             "Simple Vertex Shader",
             "Fragment Shading Example",
-            "Compute Kernel Sample" 
+            "Compute Kernel Sample"
         ]
-        
+
         results = {}
         for sample in sample_types:
             try:
                 print(f"  Retrieving '{sample}' code...")
-                
+
                 result_file = f"{self.output_dir}/{sample.replace(' ', '_')}_code.json"
-                
+
                 # Try to use apple-deep-docs if available, otherwise fall back to cupertino
                 try:
                     result = subprocess.run(['apple-deep-docs', '--query', f'Metal {sample}'], capture_output=True, text=True, timeout=30)
                     tool_used = 'apple-deep-docs'
                 except FileNotFoundError:
                     # apple-deep-docs not available, fall back to cupertino
-                    result = subprocess.run(['cupertino', 'search', f'Metal {sample}'], capture_output=True, text=True)
+                    result = subprocess.run(['cupertino', 'search', f'Metal {sample}'], capture_output=True, text=True, timeout=30)
                     tool_used = 'cupertino'
 
                 if result.returncode == 0:
@@ -118,7 +125,7 @@ class MetalSampleScraper:
                     file_count = data.count('.swift') + data.count('.metal') + data.count('.h') + data.count('.cpp')
                     lines_of_code = len(data.split('\n'))
 
-                    mock_result = {
+                    actual_result = {
                         'sample': sample,
                         'source_available': True,
                         'file_count': max(file_count, 1),  # At least 1 if found
@@ -128,7 +135,7 @@ class MetalSampleScraper:
                         'timestamp': time.time()
                     }
                 else:
-                    mock_result = {
+                    actual_result = {
                         'sample': sample,
                         'source_available': False,
                         'file_count': 0,
@@ -137,15 +144,18 @@ class MetalSampleScraper:
                         'tool_used': tool_used,
                         'timestamp': time.time()
                     }
-                
+
                 with open(result_file, 'w') as f:
-                    json.dump(mock_result, f, indent=2)
-                    
-                results[sample] = "success"
+                    json.dump(actual_result, f, indent=2)
+
+                results[sample] = "success" if result.returncode == 0 else "failed"
+            except subprocess.TimeoutExpired:
+                print(f"    Timeout retrieving '{sample}'")
+                results[sample] = "timeout"
             except Exception as e:
                 print(f"    Error retrieving '{sample}': {e}")
                 results[sample] = "failed"
-        
+
         return results
     
     def run(self):
