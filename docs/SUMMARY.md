@@ -52,5 +52,17 @@ This project establishes a robust, local LLM infrastructure using the Qwen model
     *   Fixed event loop blocking in MCP tools (`apple_deep_docs`) by making endpoints synchronous.
     *   Optimized `qwen_remote.py` prompt colors and interruption handling.
 
+### Phase 4: Metal 4 Integration & 5080 Optimization (Jan 30 - Feb 1)
+*   **Hardware Optimization (RTX 5080):**
+    *   Standardized **Implementer/Debugger** on `Qwen3-Coder-30B-A3B` with **80k context** (81,920 tokens) and **32 GPU layers**. This specific configuration achieves ~94% VRAM utilization for maximum speed while maintaining stability.
+    *   Optimized **Architect** (480B) with 4 GPU layers and **Reviewer** (14B) with full GPU offload.
+*   **Metal 4 RAG & Agent:**
+    *   Ingested **871 chunks** of Metal 4 documentation (Feature Sets, Shading Language Spec) into the memory service.
+    *   Deployed specialized `metal_implementer` agent for graphics programming tasks.
+*   **Client Resilience:**
+    *   Upgraded `qwen_remote.py` to support **sequential tool calls**, allowing agents to perform multiple actions (e.g., search -> read -> plan) in a single turn.
+    *   Enhanced error handling for batch commands to prevent entire queues from failing due to single command errors.
+    *   Simplified protocol to raw `<<<REMOTE_EXEC>>>` tags for better reliability.
+
 ## 5. Current Status
-The project is functional and stable. The server safely manages resource-intensive models (including a 480B parameter model), and the client provides a smooth developer experience with features like history navigation, quick agent switching, safe remote execution, and robust multi-agent orchestration.
+As of Feb 1, 2026, the project has reached a mature "v2.0" state. The multi-agent system efficiently utilizes the RTX 5080's 16GB VRAM to run a hybrid of massive (480B) and fast (30B) models. The addition of the `metal_implementer` and comprehensive documentation ingestion has transformed it into a capable graphics engineering assistant. The system is stable, self-correcting, and capable of complex, multi-step autonomous workflows.
