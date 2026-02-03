@@ -464,9 +464,9 @@ Rules:
     # ── Shared model configs ──
     _CODER_30B = {
         'path': os.getenv('MODEL_PATH_CODER_30B', '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf'),
-        'n_gpu_layers': 32, # Dialed back for slightly more headroom
-        'n_ctx': 81920, # 80k Context
-        'n_batch': 1024,
+        'n_gpu_layers': 36,  # Slight increase from 32 - reduced context frees some VRAM
+        'n_ctx': 32768,      # Match yarn_orig_ctx - no YaRN extrapolation
+        'n_batch': 2048,     # Doubled for better throughput
         'rope_scaling_type': 2,
         'rope_freq_scale': 1.0,
         'yarn_ext_factor': -1.0,
