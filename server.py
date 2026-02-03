@@ -342,27 +342,6 @@ def _create_model_config(path_env, path_default, n_gpu_layers, n_ctx=32768, n_ba
     }
 
 
-# ============================================================================
-# Helper Functions
-# ============================================================================
-
-def _create_model_config(path_env, path_default, n_gpu_layers, n_ctx=32768, n_batch=2048):
-    """Helper function to create standardized model configurations"""
-    return {
-        'path': os.getenv(path_env, path_default),
-        'n_gpu_layers': n_gpu_layers,
-        'n_ctx': n_ctx,
-        'n_batch': n_batch,
-        'rope_scaling_type': 2,
-        'rope_freq_scale': 1.0,
-        'yarn_ext_factor': -1.0,
-        'yarn_attn_factor': 1.0,
-        'yarn_beta_fast': 32.0,
-        'yarn_beta_slow': 1.0,
-        'yarn_orig_ctx': 32768,
-        'type_k': 8, 'type_v': 8, 'offload_kqv': True,
-    }
-
 
 def _create_agent_config(description, system_prompt, model_config, executor=False):
     """Helper function to create standardized agent configurations"""

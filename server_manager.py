@@ -14,8 +14,14 @@ from threading import Thread
 import json
 
 class AppleDeepDocsServer:
-    def __init__(self, server_dir="/Users/km4/Dev/Qwen/appledeepdoc-mcp"):
-        self.server_dir = server_dir
+    def __init__(self, server_dir=None):
+        if server_dir is None:
+            # Default to tools/appledeepdoc-mcp relative to this script
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            self.server_dir = os.path.join(base_dir, "tools", "appledeepdoc-mcp")
+        else:
+            self.server_dir = server_dir
+        
         self.process = None
         self.is_running = False
         
