@@ -535,41 +535,101 @@ def run_command_async(job_id, command):
     try:
         job_tracker.update_job(job_id, status="running")
 
-        if ALLOW_SHELL_MODE:
-            process = subprocess.Popen(
-                command,
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
+        # Handle && separated commands unless there's a pipe dependency
+        if '&&' in command and not has_pipe_dependency(command):
+            commands = [cmd.strip() for cmd in command.split('&&')]
+
+            # Execute each command sequentially in the same process
+            for cmd in commands:
+                if not cmd:  # Skip empty commands
+                    continue
+
+                job_tracker.add_output(job_id, f"Executing: {cmd}")
+
+                if ALLOW_SHELL_MODE:
+                    process = subprocess.Popen(
+                        cmd,
+                        shell=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        bufsize=1,
+                    )
+                else:
+                    command_args = parse_command_safely(cmd)
+                    command_args = expand_paths_in_args(command_args)
+                    process = subprocess.Popen(
+                        command_args,
+                        shell=False,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        bufsize=1,
+                    )
+
+                job_tracker.update_job(job_id, process=process)
+
+                for line in iter(process.stdout.readline, ''):
+                    if line:
+                        job_tracker.add_output(job_id, line.rstrip())
+
+                process.wait()
+
+                # Check if this command failed and decide whether to continue
+                if process.returncode != 0:
+                    job_tracker.add_output(job_id, f"Command failed with exit code {process.returncode}, stopping execution")
+                    job_tracker.update_job(
+                        job_id,
+                        status="failed",
+                        exit_code=process.returncode,
+                        completed_at=datetime.now().isoformat()
+                    )
+                    return
+
+            # All commands succeeded
+            job_tracker.update_job(
+                job_id,
+                status="completed",
+                exit_code=0,
+                completed_at=datetime.now().isoformat()
             )
         else:
-            command_args = parse_command_safely(command)
-            command_args = expand_paths_in_args(command_args)
-            process = subprocess.Popen(
-                command_args,
-                shell=False,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
+            # Execute as a single command (preserves pipes and complex shell constructs)
+            if ALLOW_SHELL_MODE:
+                process = subprocess.Popen(
+                    command,
+                    shell=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                )
+            else:
+                command_args = parse_command_safely(command)
+                command_args = expand_paths_in_args(command_args)
+                process = subprocess.Popen(
+                    command_args,
+                    shell=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                )
+
+            job_tracker.update_job(job_id, process=process)
+
+            for line in iter(process.stdout.readline, ''):
+                if line:
+                    job_tracker.add_output(job_id, line.rstrip())
+
+            process.wait()
+
+            job_tracker.update_job(
+                job_id,
+                status="completed" if process.returncode == 0 else "failed",
+                exit_code=process.returncode,
+                completed_at=datetime.now().isoformat()
             )
-
-        job_tracker.update_job(job_id, process=process)
-
-        for line in iter(process.stdout.readline, ''):
-            if line:
-                job_tracker.add_output(job_id, line.rstrip())
-
-        process.wait()
-
-        job_tracker.update_job(
-            job_id,
-            status="completed" if process.returncode == 0 else "failed",
-            exit_code=process.returncode,
-            completed_at=datetime.now().isoformat()
-        )
 
     except Exception as e:
         job_tracker.add_output(job_id, f"ERROR: {str(e)}")
@@ -723,6 +783,56 @@ def execute_remote_command_chunked(command, async_mode=False, chunk_output=True)
         str: Result of command execution
     """
     """Execute command synchronously or asynchronously with security checks"""
+
+    # Split && separated commands unless there's a pipe dependency
+    # More sophisticated detection of pipe dependencies
+    if '&&' in command and not has_pipe_dependency(command):
+        commands = [cmd.strip() for cmd in command.split('&&')]
+        results = []
+        for cmd in commands:
+            if cmd:  # Skip empty commands
+                result = execute_single_command(cmd, async_mode, chunk_output)
+                results.append(result)
+                # If any command fails in a sequence, we might want to stop
+                # For now, we'll continue executing all commands
+        return "\n\n".join(results)
+    else:
+        # Execute as a single command (preserves pipes and complex shell constructs)
+        return execute_single_command(command, async_mode, chunk_output)
+
+
+def has_pipe_dependency(command):
+    """
+    Check if a command has pipe dependencies that require it to run as a single unit.
+    Pipes connect the output of one command to the input of another, and redirections
+    connect commands to files, so they must run together rather than being split by && separators.
+    """
+    # Check for pipes, output redirections (>), and input redirections (<) outside of quotes
+    in_single_quotes = False
+    in_double_quotes = False
+    escaped = False
+
+    for i, char in enumerate(command):
+        if escaped:
+            escaped = False
+            continue
+
+        if char == '\\':
+            escaped = True
+            continue
+
+        if char == "'" and not in_double_quotes:
+            in_single_quotes = not in_single_quotes
+        elif char == '"' and not in_single_quotes:
+            in_double_quotes = not in_double_quotes
+        elif char in ('|', '>', '<') and not in_single_quotes and not in_double_quotes:
+            return True
+
+    return False
+
+
+def execute_single_command(command, async_mode=False, chunk_output=True):
+    """Execute a single command with security checks"""
     print_colored(f"\nAgent wants to run command: {command}", COLORS['WARNING'])
     if async_mode:
         print_colored(f"   (async mode - will run in background)", COLORS['BLUE'])
@@ -1080,6 +1190,36 @@ def apple_deep_docs_search(tool, args):
 # Global queue for interrupted multi-agent chains
 PENDING_TASKS = []
 
+def install_tool_with_homebrew(tool_name):
+    """Install a tool using Homebrew"""
+    print_colored(f"\nAgent wants to install tool: {tool_name} with Homebrew", COLORS['WARNING'])
+
+    try:
+        # Check if Homebrew is installed
+        result = subprocess.run(['which', 'brew'], capture_output=True, text=True)
+        if result.returncode != 0:
+            return "Error: Homebrew is not installed. Please install Homebrew first."
+
+        # Construct the installation command
+        install_cmd = f"brew install {tool_name}"
+        print_colored(f"Installing {tool_name} with Homebrew...", COLORS['CYAN'])
+
+        # Execute the installation command
+        result = subprocess.run(install_cmd, shell=True, capture_output=True, text=True)
+
+        if result.returncode == 0:
+            print_colored(f"Successfully installed {tool_name} with Homebrew", COLORS['GREEN'])
+            return f"Successfully installed {tool_name} with Homebrew.\nOutput:\n{result.stdout}"
+        else:
+            error_msg = f"Failed to install {tool_name} with Homebrew.\nError:\n{result.stderr}"
+            print_colored(error_msg, COLORS['FAIL'])
+            return error_msg
+
+    except Exception as e:
+        error_msg = f"Error installing {tool_name} with Homebrew: {str(e)}"
+        print_colored(error_msg, COLORS['FAIL'])
+        return error_msg
+
 def read_file_content(path):
     """Read content of a local file safely"""
     try:
@@ -1136,6 +1276,9 @@ def process_remote_commands(response_text: str) -> Optional[str]:
          True),
         (r'<<<APPLE_DEEP_DOCS>>>\s*(.*?)\s*<<<APPLE_DEEP_DOCS>>>',
          lambda payload_str: (lambda p: apple_deep_docs_search(p.get("tool"), p.get("arguments", {})))(json.loads(payload_str)),
+         True),
+        (r'<<<INSTALL_TOOL_HOMEBREW>>>\s*(.*?)\s*<<<INSTALL_TOOL_HOMEBREW>>>',
+         lambda tool_name: install_tool_with_homebrew(tool_name.strip()),
          True),
         (r'<<<REMOTE_LIST_JOBS>>>',
          lambda _: list_all_jobs(),

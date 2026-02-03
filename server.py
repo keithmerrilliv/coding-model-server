@@ -349,6 +349,7 @@ class Config:
 <<<WEB_SEARCH>>>query<<<WEB_SEARCH>>>                             — web search
 <<<CUPERTINO>>>query<<<CUPERTINO>>>                               — Apple docs (local MCP)
 <<<APPLE_DEEP_DOCS>>>{"tool":"NAME","arguments":{}}<<<APPLE_DEEP_DOCS>>> — Apple docs (server MCP)
+<<<INSTALL_TOOL_HOMEBREW>>>tool_name<<<INSTALL_TOOL_HOMEBREW>>>   — install a tool using Homebrew
 """
 
     # ── Git-enhanced tool reference for reviewer ──
@@ -363,6 +364,7 @@ class Config:
 <<<WEB_SEARCH>>>query<<<WEB_SEARCH>>>                             — web search
 <<<CUPERTINO>>>query<<<CUPERTINO>>>                               — Apple docs (local MCP)
 <<<APPLE_DEEP_DOCS>>>{"tool":"NAME","arguments":{}}<<<APPLE_DEEP_DOCS>>> — Apple docs (server MCP)
+<<<INSTALL_TOOL_HOMEBREW>>>tool_name<<<INSTALL_TOOL_HOMEBREW>>>   — install a tool using Homebrew
 
 # ESSENTIAL TOOLS FOR CODE REVIEW — Comprehensive toolkit for thorough code analysis:
 # Git commands for understanding code changes and history:
@@ -407,6 +409,7 @@ class Config:
 <<<WEB_SEARCH>>>query<<<WEB_SEARCH>>>                             — web search
 <<<CUPERTINO>>>query<<<CUPERTINO>>>                               — Apple docs (local MCP)
 <<<APPLE_DEEP_DOCS>>>{"tool":"NAME","arguments":{}}<<<APPLE_DEEP_DOCS>>> — Apple docs (server MCP)
+<<<INSTALL_TOOL_HOMEBREW>>>tool_name<<<INSTALL_TOOL_HOMEBREW>>>   — install a tool using Homebrew
 """
 
     # ── Token budget guidance (injected dynamically) ──
