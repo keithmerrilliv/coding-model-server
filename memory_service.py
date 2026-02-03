@@ -54,10 +54,10 @@ class MemoryService:
             raise RuntimeError("Embedding model not initialized")
         return self._embedding_model.encode(text).tolist()
 
-    def add_memory(self, text: str, metadata: Optional[Dict[str, Any]] = None) -> str:
-        """Add a new memory string to the database"""
+    def add_memory(self, text: str, metadata: Optional[Dict[str, Any]] = None) -> Optional[str]:
+        """Add a new memory string to the database. Returns mem_id on success, None on failure."""
         if not text or not text.strip():
-            return "Empty text ignored"
+            return None
             
         try:
             timestamp = time.time()

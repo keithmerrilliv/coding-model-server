@@ -28,33 +28,31 @@ class AppleDeepDocsServer:
     def start_server(self):
         """Start the appledeepdoc-mcp server"""
         print("Starting Apple Deep Docs MCP server...")
-        
-        # Change to the server directory
-        original_dir = os.getcwd()
-        os.chdir(self.server_dir)
-        
+
         try:
-            # Start the server using the run.sh script
+            # Start the server using the run.sh script with cwd instead of os.chdir
+            run_sh = os.path.join(self.server_dir, 'run.sh')
             self.process = subprocess.Popen(
-                ['./run.sh'],
+                [run_sh],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                stdin=subprocess.PIPE
+                stdin=subprocess.PIPE,
+                cwd=self.server_dir
             )
-            
+
             # Give the server a moment to initialize
             time.sleep(2)
-            
+
             # Check if the process is still running
             if self.process.poll() is None:
                 self.is_running = True
                 print("Apple Deep Docs MCP server started successfully")
                 print(f"PID: {self.process.pid}")
-                
+
                 # Start monitoring thread
                 monitor_thread = Thread(target=self._monitor_process, daemon=True)
                 monitor_thread.start()
-                
+
                 return True
             else:
                 print("Failed to start server - process exited early")
@@ -62,12 +60,10 @@ class AppleDeepDocsServer:
                 print(f"STDOUT: {stdout.decode()}")
                 print(f"STDERR: {stderr.decode()}")
                 return False
-                
+
         except Exception as e:
             print(f"Error starting server: {e}")
             return False
-        finally:
-            os.chdir(original_dir)
     
     def _monitor_process(self):
         """Monitor the server process"""

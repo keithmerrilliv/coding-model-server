@@ -194,7 +194,7 @@ class AppleDeepDocsService:
                 [self.venv_python, main_py],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
                 text=True,
                 bufsize=1,
                 cwd=self.mcp_path
@@ -279,21 +279,22 @@ class AppleDeepDocsService:
                 logger.info(f"Sending MCP Request: {payload[:200]}...")
                 self.process.stdin.write(payload + "\n")
                 self.process.stdin.flush()
-                
-                # Read response (blocking until line or process exit)
+
+                # Read response with timeout to avoid blocking forever
                 # We loop to skip non-JSON lines (like logs or banners)
-                while True:
-                    line = self.process.stdout.readline()
+                max_attempts = 50  # safety cap to prevent infinite loop
+                for _ in range(max_attempts):
+                    line = self._readline_with_timeout(timeout=60)
                     if not line:
-                        err = self.process.stderr.read() if self.process.poll() is not None else "No output"
-                        logger.error(f"MCP Read Error: {err}")
-                        return f"Error: No response from MCP server. {err[:200]}"
-                    
+                        if self.process.poll() is not None:
+                            return "Error: MCP server process exited unexpectedly."
+                        return "Error: No response from MCP server (timed out)."
+
                     line = line.strip()
                     logger.info(f"Received from MCP: {line[:500]}")
                     if not line:
                         continue
-                        
+
                     try:
                         response = json.loads(line)
                         if response.get("id") == req_id:
@@ -304,18 +305,20 @@ class AppleDeepDocsService:
                             for item in content:
                                 if item.get("type") == "text":
                                     text_parts.append(item.get("text", ""))
-                            
+
                             if text_parts:
                                 return "\n\n".join(text_parts)
-                            
+
                             # If no text parts, return the whole result as string
                             return json.dumps(result, indent=2)
-                        
+
                         logger.debug(f"Skipping MCP response with mismatching ID: {response.get('id')}")
                     except json.JSONDecodeError:
                         logger.debug(f"Skipping non-JSON MCP output: {line[:100]}...")
                         continue
-                
+
+                return "Error: MCP server sent too many non-matching responses."
+
             except Exception as e:
                 logger.error(f"Communication error with Deep Docs MCP: {e}")
                 return f"Error: Documentation fetch failed: {str(e)}"
@@ -633,10 +636,11 @@ class ModelManager:
         # If force_reload is False, we try to reuse the existing model to speed up
         # agent loops (e.g. tool use).
         # If force_reload is True (default), we aggressively unload/reload to clear VRAM.
-        
-        if not force_reload and self.current_model_path == model_path and model_path in self.models:
-            logger.info(f"Reusing loaded model for {agent_name} (Fast Path)")
-            return self.models[model_path]
+
+        with self.lock:
+            if not force_reload and self.current_model_path == model_path and model_path in self.models:
+                logger.info(f"Reusing loaded model for {agent_name} (Fast Path)")
+                return self.models[model_path]
 
         # Otherwise, perform full unload/reload cycle
         self.unload_model()
@@ -847,10 +851,11 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+_cors_origins = os.getenv("CORS_ORIGINS", "*").split(",")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.getenv("CORS_ORIGINS", "*").split(","),
-    allow_credentials=True,
+    allow_origins=_cors_origins,
+    allow_credentials="*" not in _cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -1052,8 +1057,8 @@ def chat_completions(request: ChatCompletionRequest, raw_request: Request):
 def sync_completion(messages: List[ChatMessage], system_prompt: str, model_path: str,
                     model_id: str, max_tokens: int, temperature: float, force_reload: bool) -> Dict[str, Any]:
     """Generate synchronous completion with token budget awareness"""
-    try:
-        with model_manager.inference_lock:
+    with model_manager.inference_lock:
+        try:
             model = model_manager.get_model(model_id, force_reload=force_reload)
             n_ctx = model.n_ctx()
 
@@ -1100,18 +1105,18 @@ def sync_completion(messages: List[ChatMessage], system_prompt: str, model_path:
             params = get_model_params(clamped_max, temperature, stream=False)
             response = model(prompt, **params)
 
-        text = response['choices'][0]['text'].strip()
+            text = response['choices'][0]['text'].strip()
 
-        # Extract real finish_reason from llama-cpp response
-        finish_reason = response['choices'][0].get('finish_reason', 'stop')
-        if not finish_reason:
-            finish_reason = 'stop'
+            # Extract real finish_reason from llama-cpp response
+            finish_reason = response['choices'][0].get('finish_reason', 'stop')
+            if not finish_reason:
+                finish_reason = 'stop'
 
-        return build_completion_response(model_id, text, response['usage'],
-                                         finish_reason=finish_reason)
-    finally:
-        if force_reload:
-            model_manager.unload_model()
+            return build_completion_response(model_id, text, response['usage'],
+                                             finish_reason=finish_reason)
+        finally:
+            if force_reload:
+                model_manager.unload_model()
 
 def stream_completion(messages: List[ChatMessage], system_prompt: str, model_path: str,
                       model_id: str, max_tokens: int, temperature: float, force_reload: bool) -> Iterator[str]:
@@ -1121,84 +1126,88 @@ def stream_completion(messages: List[ChatMessage], system_prompt: str, model_pat
     llama-cpp-python is not thread-safe, so concurrent inference on the same
     model instance would cause undefined behavior or crashes.
     """
+    completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+    finish_reason = "stop"
+
     try:
-        completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
-        finish_reason = "stop"
-
         with model_manager.inference_lock:
-            model = model_manager.get_model(model_id, force_reload=force_reload)
-            n_ctx = model.n_ctx()
+            try:
+                model = model_manager.get_model(model_id, force_reload=force_reload)
+                n_ctx = model.n_ctx()
 
-            # First pass: build prompt without budget to estimate token count
-            preliminary_prompt = build_model_prompt(messages, system_prompt, model_path)
-            preliminary_tokens = model.tokenize(preliminary_prompt.encode("utf-8"))
-            n_preliminary = len(preliminary_tokens)
+                # First pass: build prompt without budget to estimate token count
+                preliminary_prompt = build_model_prompt(messages, system_prompt, model_path)
+                preliminary_tokens = model.tokenize(preliminary_prompt.encode("utf-8"))
+                n_preliminary = len(preliminary_tokens)
 
-            # Calculate available tokens (reserve ~150 tokens for budget guidance overhead)
-            budget_overhead = 150
-            available = n_ctx - n_preliminary - budget_overhead
-            if available < 1:
-                error_chunk = {
-                    "error": {
-                        "message": f"Prompt ({n_preliminary} tokens) fills the entire context window "
-                                   f"({n_ctx}). Reduce conversation history and retry.",
-                        "type": "context_length_exceeded"
+                # Calculate available tokens (reserve ~150 tokens for budget guidance overhead)
+                budget_overhead = 150
+                available = n_ctx - n_preliminary - budget_overhead
+                if available < 1:
+                    error_chunk = {
+                        "error": {
+                            "message": f"Prompt ({n_preliminary} tokens) fills the entire context window "
+                                       f"({n_ctx}). Reduce conversation history and retry.",
+                            "type": "context_length_exceeded"
+                        }
                     }
-                }
-                yield f"data: {json.dumps(error_chunk)}\n\n"
-                return
+                    yield f"data: {json.dumps(error_chunk)}\n\n"
+                    return
 
-            # Clamp to requested max_tokens
-            clamped_max = min(max_tokens, available)
+                # Clamp to requested max_tokens
+                clamped_max = min(max_tokens, available)
 
-            # Second pass: inject token budget guidance and rebuild prompt
-            budget_guidance = Config.TOKEN_BUDGET_GUIDANCE.format(available_tokens=clamped_max)
-            augmented_system_prompt = f"{system_prompt}\n{budget_guidance}"
-            prompt = build_model_prompt(messages, augmented_system_prompt, model_path)
+                # Second pass: inject token budget guidance and rebuild prompt
+                budget_guidance = Config.TOKEN_BUDGET_GUIDANCE.format(available_tokens=clamped_max)
+                augmented_system_prompt = f"{system_prompt}\n{budget_guidance}"
+                prompt = build_model_prompt(messages, augmented_system_prompt, model_path)
 
-            # Final token count for logging
-            final_tokens = model.tokenize(prompt.encode("utf-8"))
-            n_prompt = len(final_tokens)
-            final_available = n_ctx - n_prompt
-            clamped_max = min(max_tokens, final_available)
+                # Final token count for logging
+                final_tokens = model.tokenize(prompt.encode("utf-8"))
+                n_prompt = len(final_tokens)
+                final_available = n_ctx - n_prompt
+                clamped_max = min(max_tokens, final_available)
 
-            if clamped_max < max_tokens:
+                if clamped_max < max_tokens:
+                    logger.info(
+                        "Clamped max_tokens %d -> %d for %s (prompt=%d, n_ctx=%d)",
+                        max_tokens, clamped_max, model_id, n_prompt, n_ctx
+                    )
+
                 logger.info(
-                    "Clamped max_tokens %d -> %d for %s (prompt=%d, n_ctx=%d)",
-                    max_tokens, clamped_max, model_id, n_prompt, n_ctx
+                    "Token budget injected for %s: budget=%d tokens communicated to model",
+                    model_id, clamped_max
                 )
 
-            logger.info(
-                "Token budget injected for %s: budget=%d tokens communicated to model",
-                model_id, clamped_max
-            )
+                params = get_model_params(clamped_max, temperature, stream=True)
+                token_count = 0
 
-            params = get_model_params(clamped_max, temperature, stream=True)
-            token_count = 0
+                for output in model(prompt, **params):
+                    if 'choices' in output and len(output['choices']) > 0:
+                        choice = output['choices'][0]
+                        token = choice.get('text', '')
+                        if token:
+                            token_count += 1
+                            chunk = build_stream_chunk(completion_id, model_id, content=token)
+                            yield f"data: {json.dumps(chunk)}\n\n"
+                        # Capture finish_reason from the last chunk llama-cpp emits
+                        if choice.get('finish_reason'):
+                            finish_reason = choice['finish_reason']
 
-            for output in model(prompt, **params):
-                if 'choices' in output and len(output['choices']) > 0:
-                    choice = output['choices'][0]
-                    token = choice.get('text', '')
-                    if token:
-                        token_count += 1
-                        chunk = build_stream_chunk(completion_id, model_id, content=token)
-                        yield f"data: {json.dumps(chunk)}\n\n"
-                    # Capture finish_reason from the last chunk llama-cpp emits
-                    if choice.get('finish_reason'):
-                        finish_reason = choice['finish_reason']
+                # If llama-cpp didn't set a finish_reason but we hit the token limit,
+                # infer "length" so the client knows the response was truncated
+                if finish_reason == "stop" and token_count >= clamped_max:
+                    finish_reason = "length"
 
-            # If llama-cpp didn't set a finish_reason but we hit the token limit,
-            # infer "length" so the client knows the response was truncated
-            if finish_reason == "stop" and token_count >= clamped_max:
-                finish_reason = "length"
-
-            # Always log completion stats for debugging truncation issues
-            logger.info(
-                "Completion stats for %s: prompt=%d, available=%d, clamped_max=%d, "
-                "generated=%d, finish_reason=%s",
-                model_id, n_prompt, final_available, clamped_max, token_count, finish_reason
-            )
+                # Always log completion stats for debugging truncation issues
+                logger.info(
+                    "Completion stats for %s: prompt=%d, available=%d, clamped_max=%d, "
+                    "generated=%d, finish_reason=%s",
+                    model_id, n_prompt, final_available, clamped_max, token_count, finish_reason
+                )
+            finally:
+                if force_reload:
+                    model_manager.unload_model()
 
         final_chunk = build_stream_chunk(completion_id, model_id, finish=True,
                                          finish_reason=finish_reason)
@@ -1209,9 +1218,6 @@ def stream_completion(messages: List[ChatMessage], system_prompt: str, model_pat
         logger.error("Error in stream_completion: %s", e, exc_info=True)
         error_chunk = {"error": {"message": str(e), "type": "server_error"}}
         yield f"data: {json.dumps(error_chunk)}\n\n"
-    finally:
-        if force_reload:
-            model_manager.unload_model()
 
 
 if __name__ == "__main__":

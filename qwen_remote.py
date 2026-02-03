@@ -782,7 +782,6 @@ def execute_remote_command_chunked(command, async_mode=False, chunk_output=True)
     Returns:
         str: Result of command execution
     """
-    """Execute command synchronously or asynchronously with security checks"""
 
     # Split && separated commands unless there's a pipe dependency
     # More sophisticated detection of pipe dependencies
@@ -949,6 +948,7 @@ def _execute_command_internal(command, async_mode=False, chunk_output=True):
                     # If small enough, clean up the temp file to reduce clutter
                     try:
                         os.remove(tmp_path)
+                        _temp_files.discard(tmp_path)
                     except Exception:
                         pass
 
@@ -1057,7 +1057,7 @@ class CupertinoMCPClient:
                 [cupertino_path, "serve"],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
                 text=True,
                 bufsize=1
             )
@@ -1098,16 +1098,28 @@ class CupertinoMCPClient:
             try:
                 self.process.stdin.write(json.dumps(request) + "\n")
                 self.process.stdin.flush()
-                
-                # Wait for response line
-                line = self.process.stdout.readline()
-                if not line:
-                    return {"error": "No response from Cupertino MCP"}
-                    
-                response = json.loads(line)
-                if response.get("id") == req_id:
-                    return response.get("result", {})
-                return {"error": "Response ID mismatch"}
+
+                # Read lines until we get the matching response ID,
+                # skipping notifications and non-matching messages
+                for _ in range(50):  # safety cap
+                    line = self.process.stdout.readline()
+                    if not line:
+                        return {"error": "No response from Cupertino MCP"}
+
+                    line = line.strip()
+                    if not line:
+                        continue
+
+                    try:
+                        response = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+
+                    if response.get("id") == req_id:
+                        return response.get("result", {})
+                    # else: skip notifications / mismatched IDs
+
+                return {"error": "Cupertino MCP sent too many non-matching responses"}
             except Exception as e:
                 return {"error": f"Communication error: {e}"}
 
@@ -1196,8 +1208,23 @@ def apple_deep_docs_search(tool, args):
 PENDING_TASKS = []
 
 def install_tool_with_homebrew(tool_name):
-    """Install a tool using Homebrew"""
+    """Install a tool using Homebrew with user approval and input sanitization"""
+    # Sanitize: only allow alphanumeric, hyphens, underscores, slashes (for taps), and @
+    tool_name = tool_name.strip()
+    if not re.match(r'^[a-zA-Z0-9@_/.-]+$', tool_name):
+        return f"Error: Invalid tool name '{tool_name}'. Only alphanumeric characters, hyphens, underscores, slashes, and @ are allowed."
+
     print_colored(f"\nAgent wants to install tool: {tool_name} with Homebrew", COLORS['WARNING'])
+
+    if ALLOW_ALL:
+        print_colored(f"   Auto-approved (ALLOW_ALL mode enabled)", COLORS['GREEN'])
+    else:
+        try:
+            choice = input(f"{COLORS['BOLD']}Allow brew install {tool_name}? [y/N] > {COLORS['ENDC']}")
+        except (EOFError, KeyboardInterrupt):
+            return "User cancelled Homebrew installation."
+        if choice.lower() != 'y':
+            return "User denied Homebrew installation."
 
     try:
         # Check if Homebrew is installed
@@ -1205,12 +1232,9 @@ def install_tool_with_homebrew(tool_name):
         if result.returncode != 0:
             return "Error: Homebrew is not installed. Please install Homebrew first."
 
-        # Construct the installation command
-        install_cmd = f"brew install {tool_name}"
+        # Execute with shell=False to prevent injection
         print_colored(f"Installing {tool_name} with Homebrew...", COLORS['CYAN'])
-
-        # Execute the installation command
-        result = subprocess.run(install_cmd, shell=True, capture_output=True, text=True)
+        result = subprocess.run(['brew', 'install', tool_name], capture_output=True, text=True)
 
         if result.returncode == 0:
             print_colored(f"Successfully installed {tool_name} with Homebrew", COLORS['GREEN'])
@@ -1760,6 +1784,8 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
 
                 # ── Handle truncated responses (finish_reason == "length") ──
                 # Automatically request continuation so the agent can finish.
+                # We track partial segments so we can append them to history
+                # without duplicating content in the final merged response.
                 continuation_count = 0
                 while finish_reason == "length" and continuation_count < max_continuations:
                     continuation_count += 1
@@ -1768,7 +1794,7 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                         "Response was truncated. Requesting continuation...",
                         COLORS['WARNING']
                     )
-                    # Append the partial response and ask the agent to continue
+                    # Append the latest segment and ask the agent to continue
                     history.append({"role": "assistant", "content": response_text})
                     history.append({
                         "role": "user",
@@ -1784,8 +1810,9 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                     if cont_text is None:
                         task_aborted = True
                         break
-                    # Merge the continuation into the logical response
-                    response_text += cont_text
+                    # The continuation becomes the new response_text for the
+                    # next iteration (the partial is already in history above).
+                    response_text = cont_text
 
                 if task_aborted:
                     break
