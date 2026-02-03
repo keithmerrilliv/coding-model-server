@@ -9,3 +9,4 @@ tools/
 .DS_Store
 appledeepdoc-mcp/
 scraping/output
+server_stats.csv

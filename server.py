@@ -409,6 +409,40 @@ class Config:
 <<<APPLE_DEEP_DOCS>>>{"tool":"NAME","arguments":{}}<<<APPLE_DEEP_DOCS>>> — Apple docs (server MCP)
 """
 
+    # ── Token budget guidance (injected dynamically) ──
+    TOKEN_BUDGET_GUIDANCE = """
+# OUTPUT BUDGET: ~{available_tokens} tokens available for your response.
+
+CRITICAL: Plan your response to fit within this budget. If the task requires more output:
+
+1. PARTITION LARGE TASKS: Break into logical, self-contained sections
+   - Each section should be complete and usable on its own
+   - For code: complete one file or one function fully before moving on
+   - For explanations: complete one topic fully before the next
+
+2. PRIORITIZE: Do the most important/requested work FIRST
+   - Core functionality before edge cases
+   - Critical files before auxiliary ones
+   - Working code before optimizations
+
+3. SIGNAL CONTINUATION: If you cannot finish everything, end with:
+   <<<CONTINUE>>>
+   REMAINING: [brief list of what still needs to be done]
+
+   The client will automatically request continuation.
+
+4. NEVER leave code incomplete mid-function or mid-file
+   - If you can't fit a complete file, don't start it
+   - Better to deliver 3 complete files than 5 partial ones
+
+BUDGET GUIDELINES:
+- ~100 tokens ≈ 75 words or ~4-5 lines of code
+- A typical function: 50-200 tokens
+- A typical file: 200-1000 tokens
+- If budget < 1000: Keep response very concise
+- If budget < 500: Single focused answer only
+"""
+
     # ── Behavioral instruction for action-oriented agents ──
     EXECUTOR_PROMPT = """You execute tasks by running shell commands. Never give advice, suggestions, or recommendations.
 
@@ -454,7 +488,7 @@ Rules:
 
     _QWEN_480B = {
         'path': os.getenv('MODEL_PATH_QWEN_480B', '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/Qwen3-Coder-480B-A35B-Instruct-UD-IQ1_M.gguf'),
-        'n_gpu_layers': 4, 'n_ctx': 49152, 'n_batch': 512,
+        'n_gpu_layers': 4, 'n_ctx': 32768, 'n_batch': 1024,
         'rope_scaling_type': 2, 'rope_freq_scale': 1.0,
         'yarn_ext_factor': -1.0, 'yarn_attn_factor': 1.0,
         'yarn_beta_fast': 32.0, 'yarn_beta_slow': 1.0, 'yarn_orig_ctx': 32768,
@@ -687,7 +721,7 @@ def get_model_params(max_tokens: int, temperature: float, stream: bool = False) 
     return {
         "max_tokens": max_tokens,
         "temperature": temperature,
-        "stop": [CHATML_END, CHATML_START, "<|EOT|>", "### Response:", "### Instruction:", "###"],
+        "stop": [CHATML_END, CHATML_START, "<|EOT|>", "<|endoftext|>"],
         "stream": stream,
         "repeat_penalty": 1.15,
         "echo": False
@@ -971,7 +1005,7 @@ def chat_completions(request: ChatCompletionRequest, raw_request: Request):
         if memory_service and request.messages:
             # Find the last user message to use as query
             last_user_msg = next((m.content for m in reversed(request.messages) if m.role == 'user'), None)
-            
+
             if last_user_msg:
                 try:
                     context = memory_service.get_context_string(last_user_msg)
@@ -982,15 +1016,18 @@ def chat_completions(request: ChatCompletionRequest, raw_request: Request):
                 except Exception as e:
                     logger.error(f"Memory retrieval failed: {e}")
 
-        prompt = build_model_prompt(request.messages, system_prompt, agent_config['model_config']['path'])
+        # Pass components to completion functions - they will inject token budget
+        model_path = agent_config['model_config']['path']
 
         if request.stream:
             return StreamingResponse(
-                stream_completion(prompt, request.model, request.max_tokens, request.temperature, force_reload),
+                stream_completion(request.messages, system_prompt, model_path, request.model,
+                                  request.max_tokens, request.temperature, force_reload),
                 media_type="text/event-stream"
             )
         else:
-            return sync_completion(prompt, request.model, request.max_tokens, request.temperature, force_reload)
+            return sync_completion(request.messages, system_prompt, model_path, request.model,
+                                   request.max_tokens, request.temperature, force_reload)
 
     except HTTPException:
         raise
@@ -1002,29 +1039,53 @@ def chat_completions(request: ChatCompletionRequest, raw_request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def sync_completion(prompt: str, model_id: str, max_tokens: int, temperature: float, force_reload: bool) -> Dict[str, Any]:
-    """Generate synchronous completion"""
+def sync_completion(messages: List[ChatMessage], system_prompt: str, model_path: str,
+                    model_id: str, max_tokens: int, temperature: float, force_reload: bool) -> Dict[str, Any]:
+    """Generate synchronous completion with token budget awareness"""
     try:
         with model_manager.inference_lock:
             model = model_manager.get_model(model_id, force_reload=force_reload)
-
-            # Tokenize prompt to get actual token count, then clamp max_tokens
-            prompt_tokens = model.tokenize(prompt.encode("utf-8"))
-            n_prompt = len(prompt_tokens)
             n_ctx = model.n_ctx()
-            available = n_ctx - n_prompt
+
+            # First pass: build prompt without budget to estimate token count
+            preliminary_prompt = build_model_prompt(messages, system_prompt, model_path)
+            preliminary_tokens = model.tokenize(preliminary_prompt.encode("utf-8"))
+            n_preliminary = len(preliminary_tokens)
+
+            # Calculate available tokens (reserve ~150 tokens for budget guidance overhead)
+            budget_overhead = 150
+            available = n_ctx - n_preliminary - budget_overhead
             if available < 1:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Prompt ({n_prompt} tokens) fills the entire context window ({n_ctx}). "
+                    detail=f"Prompt ({n_preliminary} tokens) fills the entire context window ({n_ctx}). "
                            "Reduce conversation history and retry."
                 )
+
+            # Clamp to requested max_tokens
             clamped_max = min(max_tokens, available)
+
+            # Second pass: inject token budget guidance and rebuild prompt
+            budget_guidance = Config.TOKEN_BUDGET_GUIDANCE.format(available_tokens=clamped_max)
+            augmented_system_prompt = f"{system_prompt}\n{budget_guidance}"
+            prompt = build_model_prompt(messages, augmented_system_prompt, model_path)
+
+            # Final token count for logging
+            final_tokens = model.tokenize(prompt.encode("utf-8"))
+            n_prompt = len(final_tokens)
+            final_available = n_ctx - n_prompt
+            clamped_max = min(max_tokens, final_available)
+
             if clamped_max < max_tokens:
                 logger.info(
                     "Clamped max_tokens %d -> %d for %s (prompt=%d, n_ctx=%d)",
                     max_tokens, clamped_max, model_id, n_prompt, n_ctx
                 )
+
+            logger.info(
+                "Token budget injected for %s: budget=%d tokens communicated to model",
+                model_id, clamped_max
+            )
 
             params = get_model_params(clamped_max, temperature, stream=False)
             response = model(prompt, **params)
@@ -1042,8 +1103,9 @@ def sync_completion(prompt: str, model_id: str, max_tokens: int, temperature: fl
         if force_reload:
             model_manager.unload_model()
 
-def stream_completion(prompt: str, model_id: str, max_tokens: int, temperature: float, force_reload: bool) -> Iterator[str]:
-    """Generate streaming completion.
+def stream_completion(messages: List[ChatMessage], system_prompt: str, model_path: str,
+                      model_id: str, max_tokens: int, temperature: float, force_reload: bool) -> Iterator[str]:
+    """Generate streaming completion with token budget awareness.
 
     The inference_lock is held for the full duration of streaming intentionally.
     llama-cpp-python is not thread-safe, so concurrent inference on the same
@@ -1055,28 +1117,51 @@ def stream_completion(prompt: str, model_id: str, max_tokens: int, temperature: 
 
         with model_manager.inference_lock:
             model = model_manager.get_model(model_id, force_reload=force_reload)
-
-            # Tokenize prompt to get actual token count, then clamp max_tokens
-            prompt_tokens = model.tokenize(prompt.encode("utf-8"))
-            n_prompt = len(prompt_tokens)
             n_ctx = model.n_ctx()
-            available = n_ctx - n_prompt
+
+            # First pass: build prompt without budget to estimate token count
+            preliminary_prompt = build_model_prompt(messages, system_prompt, model_path)
+            preliminary_tokens = model.tokenize(preliminary_prompt.encode("utf-8"))
+            n_preliminary = len(preliminary_tokens)
+
+            # Calculate available tokens (reserve ~150 tokens for budget guidance overhead)
+            budget_overhead = 150
+            available = n_ctx - n_preliminary - budget_overhead
             if available < 1:
                 error_chunk = {
                     "error": {
-                        "message": f"Prompt ({n_prompt} tokens) fills the entire context window "
+                        "message": f"Prompt ({n_preliminary} tokens) fills the entire context window "
                                    f"({n_ctx}). Reduce conversation history and retry.",
                         "type": "context_length_exceeded"
                     }
                 }
                 yield f"data: {json.dumps(error_chunk)}\n\n"
                 return
+
+            # Clamp to requested max_tokens
             clamped_max = min(max_tokens, available)
+
+            # Second pass: inject token budget guidance and rebuild prompt
+            budget_guidance = Config.TOKEN_BUDGET_GUIDANCE.format(available_tokens=clamped_max)
+            augmented_system_prompt = f"{system_prompt}\n{budget_guidance}"
+            prompt = build_model_prompt(messages, augmented_system_prompt, model_path)
+
+            # Final token count for logging
+            final_tokens = model.tokenize(prompt.encode("utf-8"))
+            n_prompt = len(final_tokens)
+            final_available = n_ctx - n_prompt
+            clamped_max = min(max_tokens, final_available)
+
             if clamped_max < max_tokens:
                 logger.info(
                     "Clamped max_tokens %d -> %d for %s (prompt=%d, n_ctx=%d)",
                     max_tokens, clamped_max, model_id, n_prompt, n_ctx
                 )
+
+            logger.info(
+                "Token budget injected for %s: budget=%d tokens communicated to model",
+                model_id, clamped_max
+            )
 
             params = get_model_params(clamped_max, temperature, stream=True)
             token_count = 0
@@ -1097,6 +1182,13 @@ def stream_completion(prompt: str, model_id: str, max_tokens: int, temperature: 
             # infer "length" so the client knows the response was truncated
             if finish_reason == "stop" and token_count >= clamped_max:
                 finish_reason = "length"
+
+            # Always log completion stats for debugging truncation issues
+            logger.info(
+                "Completion stats for %s: prompt=%d, available=%d, clamped_max=%d, "
+                "generated=%d, finish_reason=%s",
+                model_id, n_prompt, final_available, clamped_max, token_count, finish_reason
+            )
 
         final_chunk = build_stream_chunk(completion_id, model_id, finish=True,
                                          finish_reason=finish_reason)
