@@ -1263,7 +1263,7 @@ def get_completion(history, model, agent_theme, headers):
             if response.status_code != 200:
                 stop_progress.set()
                 error_text = response.text
-                if "exceed context window" in error_text or "context_length_exceeded" in error_text:
+                if "exceed context window" in error_text or "context_length_exceeded" in error_text or "fills the entire context window" in error_text:
                     if context_retries < MAX_CONTEXT_RETRIES:
                         print_colored(f"\n[Client] Context limit reached. Trimming history and retrying ({context_retries+1}/{MAX_CONTEXT_RETRIES})...", COLORS['WARNING'])
                         if len(history) > 2:
@@ -1316,7 +1316,7 @@ def get_completion(history, model, agent_theme, headers):
                             elif "error" in data:
                                 stop_progress.set()
                                 error_msg = data['error'].get('message', 'Unknown error')
-                                if "exceed context window" in error_msg or "context_length_exceeded" in error_msg:
+                                if "exceed context window" in error_msg or "context_length_exceeded" in error_msg or "fills the entire context window" in error_msg:
                                     if context_retries < MAX_CONTEXT_RETRIES:
                                         print_colored(f"\n[Client] Context limit reached (during generation). Trimming and retrying...", COLORS['WARNING'])
                                         if len(history) > 2:
