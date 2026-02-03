@@ -831,8 +831,8 @@ def has_pipe_dependency(command):
     return False
 
 
-def execute_single_command(command, async_mode=False, chunk_output=True):
-    """Execute a single command with security checks"""
+def _execute_command_internal(command, async_mode=False, chunk_output=True):
+    """Internal function to execute a command with security checks"""
     print_colored(f"\nAgent wants to run command: {command}", COLORS['WARNING'])
     if async_mode:
         print_colored(f"   (async mode - will run in background)", COLORS['BLUE'])
@@ -959,6 +959,11 @@ def execute_single_command(command, async_mode=False, chunk_output=True):
             return "Command timed out (240s limit for sync commands). Consider using async mode for long-running commands."
         except Exception as e:
             return f"Error executing command: {str(e)}"
+
+
+def execute_single_command(command, async_mode=False, chunk_output=True):
+    """Execute a single command with security checks"""
+    return _execute_command_internal(command, async_mode, chunk_output)
 
 
 def check_job_status(job_id):

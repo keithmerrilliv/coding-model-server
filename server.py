@@ -320,9 +320,65 @@ class AppleDeepDocsService:
                 logger.error(f"Communication error with Deep Docs MCP: {e}")
                 return f"Error: Documentation fetch failed: {str(e)}"
 
-# ============================================================================ 
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+def _create_model_config(path_env, path_default, n_gpu_layers, n_ctx=32768, n_batch=2048):
+    """Helper function to create standardized model configurations"""
+    return {
+        'path': os.getenv(path_env, path_default),
+        'n_gpu_layers': n_gpu_layers,
+        'n_ctx': n_ctx,
+        'n_batch': n_batch,
+        'rope_scaling_type': 2,
+        'rope_freq_scale': 1.0,
+        'yarn_ext_factor': -1.0,
+        'yarn_attn_factor': 1.0,
+        'yarn_beta_fast': 32.0,
+        'yarn_beta_slow': 1.0,
+        'yarn_orig_ctx': 32768,
+        'type_k': 8, 'type_v': 8, 'offload_kqv': True,
+    }
+
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+def _create_model_config(path_env, path_default, n_gpu_layers, n_ctx=32768, n_batch=2048):
+    """Helper function to create standardized model configurations"""
+    return {
+        'path': os.getenv(path_env, path_default),
+        'n_gpu_layers': n_gpu_layers,
+        'n_ctx': n_ctx,
+        'n_batch': n_batch,
+        'rope_scaling_type': 2,
+        'rope_freq_scale': 1.0,
+        'yarn_ext_factor': -1.0,
+        'yarn_attn_factor': 1.0,
+        'yarn_beta_fast': 32.0,
+        'yarn_beta_slow': 1.0,
+        'yarn_orig_ctx': 32768,
+        'type_k': 8, 'type_v': 8, 'offload_kqv': True,
+    }
+
+
+def _create_agent_config(description, system_prompt, model_config, executor=False):
+    """Helper function to create standardized agent configurations"""
+    config = {
+        'description': description,
+        'system_prompt': system_prompt,
+        'model_config': model_config,
+    }
+    if executor:
+        config['executor'] = True
+    return config
+
+
+# ============================================================================
 # Configuration
-# ============================================================================ 
+# ============================================================================
 
 class Config:
     PORT = int(os.getenv('PORT', 5000))
@@ -337,84 +393,73 @@ class Config:
     DEFAULT_N_THREADS = int(os.getenv('MODEL_N_THREADS', 24))
     DEFAULT_N_BATCH = int(os.getenv('MODEL_N_BATCH', 2048))  # Increased to 2048 for better CPU saturation
     
-    # ── Tool syntax reference (appended to all agents) ──
-    TOOL_REFERENCE = r"""
-# TOOLS — emit these markers inline and the client runs them automatically.
-<<<REMOTE_EXEC>>>command<<<REMOTE_EXEC>>>                         — run a shell command (sync, <30s)
-<<<REMOTE_EXEC_ASYNC>>>command<<<REMOTE_EXEC_ASYNC>>>             — run in background (builds, long tasks)
-<<<REMOTE_CHECK_STATUS>>>JOB_ID<<<REMOTE_CHECK_STATUS>>>          — poll async job
-<<<REMOTE_GET_OUTPUT>>>JOB_ID<<<REMOTE_GET_OUTPUT>>>              — get finished job output
-<<<READ_FILE>>>path<<<READ_FILE>>>                                — read file content (safe, fast)
-<<<SAVE_MEMORY>>>fact<<<SAVE_MEMORY>>>                            — persist a fact
-<<<WEB_SEARCH>>>query<<<WEB_SEARCH>>>                             — web search
-<<<CUPERTINO>>>query<<<CUPERTINO>>>                               — Apple docs (local MCP)
-<<<APPLE_DEEP_DOCS>>>{"tool":"NAME","arguments":{}}<<<APPLE_DEEP_DOCS>>> — Apple docs (server MCP)
-<<<INSTALL_TOOL_HOMEBREW>>>tool_name<<<INSTALL_TOOL_HOMEBREW>>>   — install a tool using Homebrew
-"""
+    # ── Base tool reference (used by all agents) ──
+    BASE_TOOLS = [
+        "<<<REMOTE_EXEC>>>command<<<REMOTE_EXEC>>>                         — run a shell command (sync, <30s)",
+        "<<<REMOTE_EXEC_ASYNC>>>command<<<REMOTE_EXEC_ASYNC>>>             — run in background (builds, long tasks)",
+        "<<<REMOTE_CHECK_STATUS>>>JOB_ID<<<REMOTE_CHECK_STATUS>>>          — poll async job",
+        "<<<REMOTE_GET_OUTPUT>>>JOB_ID<<<REMOTE_GET_OUTPUT>>>              — get finished job output",
+        "<<<READ_FILE>>>path<<<READ_FILE>>>                                — read file content (safe, fast)",
+        "<<<SAVE_MEMORY>>>fact<<<SAVE_MEMORY>>>                            — persist a fact",
+        "<<<WEB_SEARCH>>>query<<<WEB_SEARCH>>>                             — web search",
+        "<<<CUPERTINO>>>query<<<CUPERTINO>>>                               — Apple docs (local MCP)",
+        '<<<APPLE_DEEP_DOCS>>>{"tool":"NAME","arguments":{}}<<<APPLE_DEEP_DOCS>>> — Apple docs (server MCP)',
+        "<<<INSTALL_TOOL_HOMEBREW>>>tool_name<<<INSTALL_TOOL_HOMEBREW>>>   — install a tool using Homebrew"
+    ]
+
+    TOOL_REFERENCE = "# TOOLS — emit these markers inline and the client runs them automatically.\n" + "\n".join(BASE_TOOLS)
 
     # ── Git-enhanced tool reference for reviewer ──
-    GIT_TOOL_REFERENCE = r"""
-# TOOLS — emit these markers inline and the client runs them automatically.
-<<<REMOTE_EXEC>>>command<<<REMOTE_EXEC>>>                         — run a shell command (sync, <30s)
-<<<REMOTE_EXEC_ASYNC>>>command<<<REMOTE_EXEC_ASYNC>>>             — run in background (builds, long tasks)
-<<<REMOTE_CHECK_STATUS>>>JOB_ID<<<REMOTE_CHECK_STATUS>>>          — poll async job
-<<<REMOTE_GET_OUTPUT>>>JOB_ID<<<REMOTE_GET_OUTPUT>>>              — get finished job output
-<<<READ_FILE>>>path<<<READ_FILE>>>                                — read file content (safe, fast)
-<<<SAVE_MEMORY>>>fact<<<SAVE_MEMORY>>>                            — persist a fact
-<<<WEB_SEARCH>>>query<<<WEB_SEARCH>>>                             — web search
-<<<CUPERTINO>>>query<<<CUPERTINO>>>                               — Apple docs (local MCP)
-<<<APPLE_DEEP_DOCS>>>{"tool":"NAME","arguments":{}}<<<APPLE_DEEP_DOCS>>> — Apple docs (server MCP)
-<<<INSTALL_TOOL_HOMEBREW>>>tool_name<<<INSTALL_TOOL_HOMEBREW>>>   — install a tool using Homebrew
-
-# ESSENTIAL TOOLS FOR CODE REVIEW — Comprehensive toolkit for thorough code analysis:
-# Git commands for understanding code changes and history:
-<<<REMOTE_EXEC>>>git status<<<REMOTE_EXEC>>>                      — check current repository state
-<<<REMOTE_EXEC>>>git log --oneline -10<<<REMOTE_EXEC>>>           — view recent commit history
-<<<REMOTE_EXEC>>>git diff<<<REMOTE_EXEC>>>                        — see current uncommitted changes
-<<<REMOTE_EXEC>>>git diff --cached<<<REMOTE_EXEC>>>               — see staged changes
-<<<REMOTE_EXEC>>>git diff HEAD~1<<<REMOTE_EXEC>>>                 — compare working directory to last commit
-<<<REMOTE_EXEC>>>git show HEAD<<<REMOTE_EXEC>>>                   — show details of last commit
-<<<REMOTE_EXEC>>>git blame filename<<<REMOTE_EXEC>>>              — see who made changes to each line
-<<<REMOTE_EXEC>>>git log -p --follow filepath<<<REMOTE_EXEC>>>    — see history of changes to a specific file
-<<<REMOTE_EXEC>>>git diff HEAD~3 HEAD<<<REMOTE_EXEC>>>            — compare changes between commits
-<<<REMOTE_EXEC>>>git log --author="Author Name" --since="2 weeks ago"<<<REMOTE_EXEC>>> — find commits by author/time
-
-# File system navigation and search:
-<<<REMOTE_EXEC>>>find . -name "*.py" -type f<<<REMOTE_EXEC>>>     — find all Python files
-<<<REMOTE_EXEC>>>find . -name "*.js" -o -name "*.ts"<<<REMOTE_EXEC>>> — find JavaScript/TypeScript files
-<<<REMOTE_EXEC>>>find . -name "*.java" -o -name "*.cpp" -o -name "*.h"<<<REMOTE_EXEC>>> — find source files
-<<<REMOTE_EXEC>>>find . -name "*test*" -o -name "*spec*"<<<REMOTE_EXEC>>> — find test files
-<<<REMOTE_EXEC>>>find . -name "*.md" -o -name "*.txt"<<<REMOTE_EXEC>>> — find documentation files
-<<<REMOTE_EXEC>>>find . -size +1M -name "*.log"<<<REMOTE_EXEC>>> — find large log files
-<<<REMOTE_EXEC>>>grep -r "TODO|FIXME|HACK" .<<<REMOTE_EXEC>>>   — find code comments indicating work to do
-<<<REMOTE_EXEC>>>grep -rn "error" .<<<REMOTE_EXEC>>>              — find error mentions in code
-<<<REMOTE_EXEC>>>grep -rn "DEBUG|debug|console.log" .<<<REMOTE_EXEC>>> — find debug statements
-
-# Code analysis and comparison:
-<<<REMOTE_EXEC>>>diff file1 file2<<<REMOTE_EXEC>>>                — compare two files
-<<<REMOTE_EXEC>>>diff -u old_file new_file<<<REMOTE_EXEC>>>       — unified diff format
-<<<REMOTE_EXEC>>>wc -l filename<<<REMOTE_EXEC>>>                  — count lines in file
-<<<REMOTE_EXEC>>>head -20 filename<<<REMOTE_EXEC>>>               — show first 20 lines
-<<<REMOTE_EXEC>>>tail -20 filename<<<REMOTE_EXEC>>>               — show last 20 lines
-<<<REMOTE_EXEC>>>sort filename<<<REMOTE_EXEC>>>                   — sort file contents
-<<<REMOTE_EXEC>>>uniq -c filename<<<REMOTE_EXEC>>>                — count unique lines
-<<<REMOTE_EXEC>>>stat filename<<<REMOTE_EXEC>>>                   — detailed file information
-"""
+    GIT_TOOL_REFERENCE = (
+        "# TOOLS — emit these markers inline and the client runs them automatically.\n" +
+        "\n".join(BASE_TOOLS) +
+        "\n\n# ESSENTIAL TOOLS FOR CODE REVIEW — Comprehensive toolkit for thorough code analysis:"
+        "\n# Git commands for understanding code changes and history:" +
+        "\n<<<REMOTE_EXEC>>>git status<<<REMOTE_EXEC>>>                      — check current repository state" +
+        "\n<<<REMOTE_EXEC>>>git log --oneline -10<<<REMOTE_EXEC>>>           — view recent commit history" +
+        "\n<<<REMOTE_EXEC>>>git diff<<<REMOTE_EXEC>>>                        — see current uncommitted changes" +
+        "\n<<<REMOTE_EXEC>>>git diff --cached<<<REMOTE_EXEC>>>               — see staged changes" +
+        "\n<<<REMOTE_EXEC>>>git diff HEAD~1<<<REMOTE_EXEC>>>                 — compare working directory to last commit" +
+        "\n<<<REMOTE_EXEC>>>git show HEAD<<<REMOTE_EXEC>>>                   — show details of last commit" +
+        "\n<<<REMOTE_EXEC>>>git blame filename<<<REMOTE_EXEC>>>              — see who made changes to each line" +
+        "\n<<<REMOTE_EXEC>>>git log -p --follow filepath<<<REMOTE_EXEC>>>    — see history of changes to a specific file" +
+        "\n<<<REMOTE_EXEC>>>git diff HEAD~3 HEAD<<<REMOTE_EXEC>>>            — compare changes between commits" +
+        "\n<<<REMOTE_EXEC>>>git log --author=\"Author Name\" --since=\"2 weeks ago\"<<<REMOTE_EXEC>>> — find commits by author/time" +
+        "\n\n# File system navigation and search:" +
+        "\n<<<REMOTE_EXEC>>>find . -name \"*.py\" -type f<<<REMOTE_EXEC>>>     — find all Python files" +
+        "\n<<<REMOTE_EXEC>>>find . -name \"*.js\" -o -name \"*.ts\"<<<REMOTE_EXEC>>> — find JavaScript/TypeScript files" +
+        "\n<<<REMOTE_EXEC>>>find . -name \"*.java\" -o -name \"*.cpp\" -o -name \"*.h\"<<<REMOTE_EXEC>>> — find source files" +
+        "\n<<<REMOTE_EXEC>>>find . -name \"*test*\" -o -name \"*spec*\"<<<REMOTE_EXEC>>> — find test files" +
+        "\n<<<REMOTE_EXEC>>>find . -name \"*.md\" -o -name \"*.txt\"<<<REMOTE_EXEC>>> — find documentation files" +
+        "\n<<<REMOTE_EXEC>>>find . -size +1M -name \"*.log\"<<<REMOTE_EXEC>>> — find large log files" +
+        "\n<<<REMOTE_EXEC>>>grep -r \"TODO|FIXME|HACK\" .<<<REMOTE_EXEC>>>   — find code comments indicating work to do" +
+        "\n<<<REMOTE_EXEC>>>grep -rn \"error\" .<<<REMOTE_EXEC>>>              — find error mentions in code" +
+        "\n<<<REMOTE_EXEC>>>grep -rn \"DEBUG|debug|console.log\" .<<<REMOTE_EXEC>>> — find debug statements" +
+        "\n\n# Code analysis and comparison:" +
+        "\n<<<REMOTE_EXEC>>>diff file1 file2<<<REMOTE_EXEC>>>                — compare two files" +
+        "\n<<<REMOTE_EXEC>>>diff -u old_file new_file<<<REMOTE_EXEC>>>       — unified diff format" +
+        "\n<<<REMOTE_EXEC>>>wc -l filename<<<REMOTE_EXEC>>>                  — count lines in file" +
+        "\n<<<REMOTE_EXEC>>>head -20 filename<<<REMOTE_EXEC>>>               — show first 20 lines" +
+        "\n<<<REMOTE_EXEC>>>tail -20 filename<<<REMOTE_EXEC>>>               — show last 20 lines" +
+        "\n<<<REMOTE_EXEC>>>sort filename<<<REMOTE_EXEC>>>                   — sort file contents" +
+        "\n<<<REMOTE_EXEC>>>uniq -c filename<<<REMOTE_EXEC>>>                — count unique lines" +
+        "\n<<<REMOTE_EXEC>>>stat filename<<<REMOTE_EXEC>>>                   — detailed file information"
+    )
 
     # ── Restricted tools for Architect (No shell execution) ──
-    ARCHITECT_TOOL_REFERENCE = r"""
-# TOOLS — emit these markers inline and the client runs them automatically.
-<<<READ_FILE>>>path<<<READ_FILE>>>                                — read file content (safe, fast)
-<<<SAVE_MEMORY>>>fact<<<SAVE_MEMORY>>>                            — persist a fact
-<<<WEB_SEARCH>>>query<<<WEB_SEARCH>>>                             — web search
-<<<CUPERTINO>>>query<<<CUPERTINO>>>                               — Apple docs (local MCP)
-<<<APPLE_DEEP_DOCS>>>{"tool":"NAME","arguments":{}}<<<APPLE_DEEP_DOCS>>> — Apple docs (server MCP)
-<<<INSTALL_TOOL_HOMEBREW>>>tool_name<<<INSTALL_TOOL_HOMEBREW>>>   — install a tool using Homebrew
-"""
+    ARCHITECT_BASE_TOOLS = [
+        "<<<READ_FILE>>>path<<<READ_FILE>>>                                — read file content (safe, fast)",
+        "<<<SAVE_MEMORY>>>fact<<<SAVE_MEMORY>>>                            — persist a fact",
+        "<<<WEB_SEARCH>>>query<<<WEB_SEARCH>>>                             — web search",
+        "<<<CUPERTINO>>>query<<<CUPERTINO>>>                               — Apple docs (local MCP)",
+        '<<<APPLE_DEEP_DOCS>>>{"tool":"NAME","arguments":{}}<<<APPLE_DEEP_DOCS>>> — Apple docs (server MCP)',
+        "<<<INSTALL_TOOL_HOMEBREW>>>tool_name<<<INSTALL_TOOL_HOMEBREW>>>   — install a tool using Homebrew"
+    ]
+
+    ARCHITECT_TOOL_REFERENCE = "# TOOLS — emit these markers inline and the client runs them automatically.\n" + "\n".join(ARCHITECT_BASE_TOOLS)
 
     # ── Token budget guidance (injected dynamically) ──
-    TOKEN_BUDGET_GUIDANCE = """
-# OUTPUT BUDGET: ~{available_tokens} tokens available for your response.
+    TOKEN_BUDGET_GUIDANCE = """# OUTPUT BUDGET: ~{available_tokens} tokens available for your response.
 
 CRITICAL: Plan your response to fit within this budget. If the task requires more output:
 
@@ -443,8 +488,7 @@ BUDGET GUIDELINES:
 - A typical function: 50-200 tokens
 - A typical file: 200-1000 tokens
 - If budget < 1000: Keep response very concise
-- If budget < 500: Single focused answer only
-"""
+- If budget < 500: Single focused answer only"""
 
     # ── Behavioral instruction for action-oriented agents ──
     EXECUTOR_PROMPT = """You execute tasks by running shell commands. Never give advice, suggestions, or recommendations.
@@ -465,47 +509,31 @@ Rules:
 """
 
     # ── Shared model configs ──
-    _CODER_30B = {
-        'path': os.getenv('MODEL_PATH_CODER_30B', '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf'),
-        'n_gpu_layers': 36,  # Slight increase from 32 - reduced context frees some VRAM
-        'n_ctx': 32768,      # Match yarn_orig_ctx - no YaRN extrapolation
-        'n_batch': 2048,     # Doubled for better throughput
-        'rope_scaling_type': 2,
-        'rope_freq_scale': 1.0,
-        'yarn_ext_factor': -1.0,
-        'yarn_attn_factor': 1.0,
-        'yarn_beta_fast': 32.0,
-        'yarn_beta_slow': 1.0,
-        'yarn_orig_ctx': 32768,
-        'type_k': 8, 'type_v': 8, 'offload_kqv': True,
-    }
+    _CODER_30B = _create_model_config(
+        'MODEL_PATH_CODER_30B',
+        '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
+        36,  # Slight increase from 32 - reduced context frees some VRAM
+        32768,  # Match yarn_orig_ctx - no YaRN extrapolation
+        2048    # Doubled for better throughput
+    )
 
-    _QWEN_32B = {
-        'path': os.getenv('MODEL_PATH_QWEN_32B', '/home/keith-merrill/.lmstudio/models/Qwen/Qwen3-32B-GGUF/Qwen3-32B-Q4_K_M.gguf'),
-        'n_gpu_layers': 35, 'n_ctx': 43008, 'n_batch': 2048,
-        'rope_scaling_type': 2, 'rope_freq_scale': 1.0,
-        'yarn_ext_factor': -1.0, 'yarn_attn_factor': 1.0,
-        'yarn_beta_fast': 32.0, 'yarn_beta_slow': 1.0, 'yarn_orig_ctx': 32768,
-        'type_k': 8, 'type_v': 8, 'offload_kqv': True,
-    }
+    _QWEN_32B = _create_model_config(
+        'MODEL_PATH_QWEN_32B',
+        '/home/keith-merrill/.lmstudio/models/Qwen/Qwen3-32B-GGUF/Qwen3-32B-Q4_K_M.gguf',
+        35, 43008, 2048
+    )
 
-    _QWEN_480B = {
-        'path': os.getenv('MODEL_PATH_QWEN_480B', '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/Qwen3-Coder-480B-A35B-Instruct-UD-IQ1_M.gguf'),
-        'n_gpu_layers': 4, 'n_ctx': 32768, 'n_batch': 1024,
-        'rope_scaling_type': 2, 'rope_freq_scale': 1.0,
-        'yarn_ext_factor': -1.0, 'yarn_attn_factor': 1.0,
-        'yarn_beta_fast': 32.0, 'yarn_beta_slow': 1.0, 'yarn_orig_ctx': 32768,
-        'type_k': 8, 'type_v': 8, 'offload_kqv': True,
-    }
+    _QWEN_480B = _create_model_config(
+        'MODEL_PATH_QWEN_480B',
+        '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/Qwen3-Coder-480B-A35B-Instruct-UD-IQ1_M.gguf',
+        4, 32768, 1024
+    )
 
-    _QWEN_14B = {
-        'path': os.getenv('MODEL_PATH_QWEN_14B', '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-14B-GGUF/Qwen3-14B-Q6_K.gguf'),
-        'n_gpu_layers': 99, 'n_ctx': 32768, 'n_batch': 2048,
-        'rope_scaling_type': 2, 'rope_freq_scale': 1.0,
-        'yarn_ext_factor': -1.0, 'yarn_attn_factor': 1.0,
-        'yarn_beta_fast': 32.0, 'yarn_beta_slow': 1.0, 'yarn_orig_ctx': 32768,
-        'type_k': 8, 'type_v': 8, 'offload_kqv': True,
-    }
+    _QWEN_14B = _create_model_config(
+        'MODEL_PATH_QWEN_14B',
+        '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-14B-GGUF/Qwen3-14B-Q6_K.gguf',
+        99, 32768, 2048
+    )
 
     # ── Few-shot example injected for executor agents ──
     # The model sees this as a real prior exchange, so it copies the format.
@@ -517,34 +545,34 @@ Rules:
     # ── Agent definitions ──
     # 'executor': True means few-shot + fallback extraction are enabled.
     AGENTS = {
-        'implementer': {
-            'description': 'Qwen3-Coder-30B-A3B (Smart - 80k Context)',
-            'system_prompt': f'You are an implementer. {EXECUTOR_PROMPT}\n\nCOMPREHENSIVE IMPLEMENTATION: When implementing tasks, leverage multiple tools to understand the codebase thoroughly:\n\nXCODE DEVELOPMENT: Use Xcode command line tools for iOS/macOS development:\n- Use `xcodebuild` to build, test, and archive Xcode projects\n- Use `xcrun` to run various Xcode developer tools\n- Use Metal compiler (`metal`, `metallib`) for Metal shader compilation\n- Use `xcodegen` to generate Xcode projects from YAML descriptions\n- Use `simctl` to manage iOS simulators\n\nGIT AWARENESS: Use Git to understand code changes, history, and context:\n- Use `git log` to understand recent changes and history\n- Use `git diff` to see specific code differences\n- Use `git blame` to identify who made changes and why\n- Use `git show` to examine specific commits\n- Use `git status` to see current state of the repository\n\nFILE SYSTEM NAVIGATION: Use find/grep to locate and analyze relevant files:\n- Use `find` to locate specific file types or patterns\n- Use `grep` to search for specific terms, TODOs, FIXMEs, or error patterns\n- Use `grep -r` for recursive searches across the codebase\n\nCODE COMPARISON: Use diff and other tools to analyze code changes:\n- Use `diff` to compare files and see changes\n- Use `wc`, `head`, `tail` to analyze file contents\n\nAlways use these tools to gather comprehensive context before implementing. This helps you understand the evolution of code, locate related files, and provide more accurate implementations.\n{GIT_TOOL_REFERENCE}',
-            'model_config': _CODER_30B,
-            'executor': True,
-        },
-        'architect': {
-            'description': 'System architecture agent',
-            'system_prompt': f'You are a system architect. Design scalable, maintainable solutions. You are encouraged to provide detailed advice, feedback, and suggestions. Note that you are not intended to implement the architectures you create; implementation is handled by the implementer agents.\n{ARCHITECT_TOOL_REFERENCE}',
-            'model_config': _QWEN_480B,
-        },
-        'reviewer': {
-            'description': 'Code review agent',
-            'system_prompt': f'You are a code reviewer. Identify issues and suggest improvements. You are encouraged to provide detailed advice and recommendations.\n\nCOMPREHENSIVE ANALYSIS: When performing code reviews, leverage multiple tools to understand the codebase thoroughly:\n\nGIT AWARENESS: Use Git to understand code changes, history, and context:\n- Use `git log` to understand recent changes and history\n- Use `git diff` to see specific code differences\n- Use `git blame` to identify who made changes and why\n- Use `git show` to examine specific commits\n- Use `git status` to see current state of the repository\n\nFILE SYSTEM NAVIGATION: Use find/grep to locate and analyze relevant files:\n- Use `find` to locate specific file types or patterns\n- Use `grep` to search for specific terms, TODOs, FIXMEs, or error patterns\n- Use `grep -r` for recursive searches across the codebase\n\nCODE COMPARISON: Use diff and other tools to analyze code changes:\n- Use `diff` to compare files and see changes\n- Use `wc`, `head`, `tail` to analyze file contents\n\nAlways use these tools to gather comprehensive context before providing your review. This helps you understand the evolution of code, locate related files, and provide more accurate feedback.\n{GIT_TOOL_REFERENCE}',
-            'model_config': _CODER_30B,
-        },
-        'debugger': {
-            'description': 'Qwen3-Coder-30B-A3B (Smart - 80k Context)',
-            'system_prompt': f'You are a debugger. {EXECUTOR_PROMPT}\n{TOOL_REFERENCE}',
-            'model_config': _CODER_30B,
-            'executor': True,
-        },
-        'metal_implementer': {
-            'description': 'Qwen3-Coder-30B-A3B (Smart - 80k Context)',
-            'system_prompt': f'You are a Metal 4 graphics engineer (compute kernels, mesh shaders, ray tracing, argument buffers). {EXECUTOR_PROMPT}\n{TOOL_REFERENCE}',
-            'model_config': _CODER_30B,
-            'executor': True,
-        },
+        'implementer': _create_agent_config(
+            'Qwen3-Coder-30B-A3B (Smart - 80k Context)',
+            f'You are an implementer. {EXECUTOR_PROMPT}\n\nCOMPREHENSIVE IMPLEMENTATION: When implementing tasks, leverage multiple tools to understand the codebase thoroughly:\n\nXCODE DEVELOPMENT: Use Xcode command line tools for iOS/macOS development:\n- Use `xcodebuild` to build, test, and archive Xcode projects\n- Use `xcrun` to run various Xcode developer tools\n- Use Metal compiler (`metal`, `metallib`) for Metal shader compilation\n- Use `xcodegen` to generate Xcode projects from YAML descriptions\n- Use `simctl` to manage iOS simulators\n\nGIT AWARENESS: Use Git to understand code changes, history, and context:\n- Use `git log` to understand recent changes and history\n- Use `git diff` to see specific code differences\n- Use `git blame` to identify who made changes and why\n- Use `git show` to examine specific commits\n- Use `git status` to see current state of the repository\n\nFILE SYSTEM NAVIGATION: Use find/grep to locate and analyze relevant files:\n- Use `find` to locate specific file types or patterns\n- Use `grep` to search for specific terms, TODOs, FIXMEs, or error patterns\n- Use `grep -r` for recursive searches across the codebase\n\nCODE COMPARISON: Use diff and other tools to analyze code changes:\n- Use `diff` to compare files and see changes\n- Use `wc`, `head`, `tail` to analyze file contents\n\nAlways use these tools to gather comprehensive context before implementing. This helps you understand the evolution of code, locate related files, and provide more accurate implementations.\n{GIT_TOOL_REFERENCE}',
+            _CODER_30B,
+            executor=True
+        ),
+        'architect': _create_agent_config(
+            'System architecture agent',
+            f'You are a system architect. Design scalable, maintainable solutions. You are encouraged to provide detailed advice, feedback, and suggestions. Note that you are not intended to implement the architectures you create; implementation is handled by the implementer agents.\n{ARCHITECT_TOOL_REFERENCE}',
+            _QWEN_480B
+        ),
+        'reviewer': _create_agent_config(
+            'Code review agent',
+            f'You are a code reviewer. Identify issues and suggest improvements. You are encouraged to provide detailed advice and recommendations.\n\nCOMPREHENSIVE ANALYSIS: When performing code reviews, leverage multiple tools to understand the codebase thoroughly:\n\nGIT AWARENESS: Use Git to understand code changes, history, and context:\n- Use `git log` to understand recent changes and history\n- Use `git diff` to see specific code differences\n- Use `git blame` to identify who made changes and why\n- Use `git show` to examine specific commits\n- Use `git status` to see current state of the repository\n\nFILE SYSTEM NAVIGATION: Use find/grep to locate and analyze relevant files:\n- Use `find` to locate specific file types or patterns\n- Use `grep` to search for specific terms, TODOs, FIXMEs, or error patterns\n- Use `grep -r` for recursive searches across the codebase\n\nCODE COMPARISON: Use diff and other tools to analyze code changes:\n- Use `diff` to compare files and see changes\n- Use `wc`, `head`, `tail` to analyze file contents\n\nAlways use these tools to gather comprehensive context before providing your review. This helps you understand the evolution of code, locate related files, and provide more accurate feedback.\n{GIT_TOOL_REFERENCE}',
+            _CODER_30B
+        ),
+        'debugger': _create_agent_config(
+            'Qwen3-Coder-30B-A3B (Smart - 80k Context)',
+            f'You are a debugger. {EXECUTOR_PROMPT}\n{TOOL_REFERENCE}',
+            _CODER_30B,
+            executor=True
+        ),
+        'metal_implementer': _create_agent_config(
+            'Qwen3-Coder-30B-A3B (Smart - 80k Context)',
+            f'You are a Metal 4 graphics engineer (compute kernels, mesh shaders, ray tracing, argument buffers). {EXECUTOR_PROMPT}\n{TOOL_REFERENCE}',
+            _CODER_30B,
+            executor=True
+        ),
     }
 
     @classmethod
