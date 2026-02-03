@@ -1197,8 +1197,13 @@ def extract_fallback_commands(response_text: str) -> List[str]:
 
 
 def get_completion(history, model, agent_theme, headers):
-    """Internal helper to get a completion from the server with full error handling and streaming"""
+    """Internal helper to get a completion from the server with full error handling and streaming.
+
+    Returns (response_text, finish_reason) on success, or (None, None) on failure.
+    finish_reason is "stop" for normal completion, "length" for truncation.
+    """
     full_response = ""
+    finish_reason = "stop"
     server_error_occurred = False
     
     # Sanitize history to remove internal flags like 'auto_send'
@@ -1262,7 +1267,7 @@ def get_completion(history, model, agent_theme, headers):
                             stop_progress = threading.Event(); progress_thread = threading.Thread(target=show_progress, daemon=True); progress_thread.start()
                             continue
                 print_colored(f"\nError: {error_text}", COLORS['FAIL'])
-                return None
+                return None, None
 
             for line in response.iter_lines():
                 if line:
@@ -1273,7 +1278,8 @@ def get_completion(history, model, agent_theme, headers):
                         try:
                             data = json.loads(data_str)
                             if "choices" in data and len(data["choices"]) > 0:
-                                delta = data["choices"][0].get("delta", {})
+                                choice = data["choices"][0]
+                                delta = choice.get("delta", {})
                                 content = delta.get("content", "")
                                 if content:
                                     if not first_token_time:
@@ -1282,6 +1288,9 @@ def get_completion(history, model, agent_theme, headers):
                                     print(content, end="", flush=True)
                                     full_response += content
                                     chunk_count += 1
+                                # Capture finish_reason from the final chunk
+                                if choice.get("finish_reason"):
+                                    finish_reason = choice["finish_reason"]
                             elif "error" in data:
                                 stop_progress.set()
                                 error_msg = data['error'].get('message', 'Unknown error')
@@ -1315,10 +1324,24 @@ def get_completion(history, model, agent_theme, headers):
             if wait_for_server():
                 start_time = time.time(); stop_progress = threading.Event(); progress_thread = threading.Thread(target=show_progress, daemon=True); progress_thread.start()
                 continue
-            return None
+            return None, None
+        except (requests.exceptions.ChunkedEncodingError, requests.exceptions.ProtocolError) as e:
+            stop_progress.set()
+            print_colored(f"\n[Client] Connection interrupted: {e}. Retrying...", COLORS['WARNING'])
+            if chunk_count > 0: 
+                # If we already got some data, we can't easily resume seamlessly without server support for offsets
+                # For now, we return what we have or treat it as a failure depending on needs.
+                # Let's try to just return None to trigger a full retry if possible, or break if that's risky.
+                # Given the user wants recovery, a full retry of the generation is usually safest.
+                full_response = ""; chunk_count = 0
+                start_time = time.time(); stop_progress = threading.Event(); progress_thread = threading.Thread(target=show_progress, daemon=True); progress_thread.start()
+                continue
+            # If no data yet, definitely retry
+            start_time = time.time(); stop_progress = threading.Event(); progress_thread = threading.Thread(target=show_progress, daemon=True); progress_thread.start()
+            continue
         except Exception as e:
             stop_progress.set(); print_colored(f"\nUnexpected error: {e}", COLORS['FAIL'])
-            return None
+            return None, None
 
     stop_progress.set()
     print()
@@ -1327,8 +1350,11 @@ def get_completion(history, model, agent_theme, headers):
         ttft = first_token_time - start_time; gen_duration = end_time - first_token_time
         cps = chunk_count / gen_duration if gen_duration > 0 else 0
         print_colored(f"[Stats] {model}: TTFT: {ttft:.2f}s | Total: {total_duration:.2f}s | {chunk_count} chunks | {cps:.2f} chunks/s", COLORS['CYAN'])
-    
-    return full_response
+
+    if finish_reason == "length":
+        print_colored("[Truncated] Response hit token limit — continuation needed.", COLORS['WARNING'])
+
+    return full_response, finish_reason
 
 
 def handle_user_command(user_input, history, model, agent_theme):
@@ -1524,15 +1550,48 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
             # produces a response with no actionable commands.
             force_reload_override = True  # first call for this task uses force reload
             task_aborted = False
+            max_continuations = 5  # safety cap for truncation retries
             while True:
                 headers = {"X-Qwen-Force-Reload": "true" if force_reload_override else "false"}
 
-                response_text = get_completion(history, model, agent_theme, headers)
-                if not response_text:
+                response_text, finish_reason = get_completion(history, model, agent_theme, headers)
+                if response_text is None:
                     task_aborted = True
                     break
 
-                # Append assistant response to history
+                # ── Handle truncated responses (finish_reason == "length") ──
+                # Automatically request continuation so the agent can finish.
+                continuation_count = 0
+                while finish_reason == "length" and continuation_count < max_continuations:
+                    continuation_count += 1
+                    print_colored(
+                        f"\n[Continuation {continuation_count}/{max_continuations}] "
+                        "Response was truncated. Requesting continuation...",
+                        COLORS['WARNING']
+                    )
+                    # Append the partial response and ask the agent to continue
+                    history.append({"role": "assistant", "content": response_text})
+                    history.append({
+                        "role": "user",
+                        "content": "Your previous response was cut off. Continue exactly where you left off.",
+                        "auto_send": True,
+                    })
+                    save_chat_history(history, model)
+
+                    cont_text, finish_reason = get_completion(
+                        history, model, agent_theme,
+                        {"X-Qwen-Force-Reload": "false"}
+                    )
+                    if cont_text is None:
+                        task_aborted = True
+                        break
+                    # Merge the continuation into the logical response
+                    response_text += cont_text
+
+                if task_aborted:
+                    break
+
+                # Append the (possibly merged) assistant response to history
                 history.append({"role": "assistant", "content": response_text})
                 save_chat_history(history, model)
 
@@ -1549,10 +1608,10 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                         print_colored("\nAgent used code blocks instead of markers. Extracting commands...", COLORS['WARNING'])
                         results = []
                         total_len = 0
-                        GLOBAL_MAX_LEN = 40000
+                        global_max_len = 40000
 
                         for i, cmd in enumerate(fallback_cmds):
-                            if total_len > GLOBAL_MAX_LEN:
+                            if total_len > global_max_len:
                                 results.append(f"\n... [OMITTED {len(fallback_cmds) - i} FALLBACK COMMANDS TO PREVENT CONTEXT OVERFLOW] ...")
                                 break
 

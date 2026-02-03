@@ -698,7 +698,8 @@ def get_model_params(max_tokens: int, temperature: float, stream: bool = False) 
 # Response Builders
 # ============================================================================ 
 
-def build_completion_response(model_id: str, text: str, usage: Dict[str, int]) -> Dict[str, Any]:
+def build_completion_response(model_id: str, text: str, usage: Dict[str, int],
+                              finish_reason: str = "stop") -> Dict[str, Any]:
     """Build OpenAI-compatible completion response"""
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
@@ -711,7 +712,7 @@ def build_completion_response(model_id: str, text: str, usage: Dict[str, int]) -
                 "role": "assistant",
                 "content": text
             },
-            "finish_reason": "stop"
+            "finish_reason": finish_reason
         }],
         "usage": {
             "prompt_tokens": usage['prompt_tokens'],
@@ -721,8 +722,11 @@ def build_completion_response(model_id: str, text: str, usage: Dict[str, int]) -
     }
 
 
-def build_stream_chunk(completion_id: str, model_id: str, content: Optional[str] = None, finish: bool = False) -> Dict[str, Any]:
+def build_stream_chunk(completion_id: str, model_id: str, content: Optional[str] = None,
+                       finish: bool = False, finish_reason: Optional[str] = None) -> Dict[str, Any]:
     """Build OpenAI-compatible streaming chunk"""
+    if finish and not finish_reason:
+        finish_reason = "stop"
     return {
         "id": completion_id,
         "object": "chat.completion.chunk",
@@ -731,7 +735,7 @@ def build_stream_chunk(completion_id: str, model_id: str, content: Optional[str]
         "choices": [{
             "index": 0,
             "delta": {"content": content} if content else {},
-            "finish_reason": "stop" if finish else None
+            "finish_reason": finish_reason if finish else None
         }]
     }
 
@@ -1000,15 +1004,40 @@ def chat_completions(request: ChatCompletionRequest, raw_request: Request):
 
 def sync_completion(prompt: str, model_id: str, max_tokens: int, temperature: float, force_reload: bool) -> Dict[str, Any]:
     """Generate synchronous completion"""
-    params = get_model_params(max_tokens, temperature, stream=False)
-
     try:
         with model_manager.inference_lock:
             model = model_manager.get_model(model_id, force_reload=force_reload)
+
+            # Tokenize prompt to get actual token count, then clamp max_tokens
+            prompt_tokens = model.tokenize(prompt.encode("utf-8"))
+            n_prompt = len(prompt_tokens)
+            n_ctx = model.n_ctx()
+            available = n_ctx - n_prompt
+            if available < 1:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Prompt ({n_prompt} tokens) fills the entire context window ({n_ctx}). "
+                           "Reduce conversation history and retry."
+                )
+            clamped_max = min(max_tokens, available)
+            if clamped_max < max_tokens:
+                logger.info(
+                    "Clamped max_tokens %d -> %d for %s (prompt=%d, n_ctx=%d)",
+                    max_tokens, clamped_max, model_id, n_prompt, n_ctx
+                )
+
+            params = get_model_params(clamped_max, temperature, stream=False)
             response = model(prompt, **params)
-        
+
         text = response['choices'][0]['text'].strip()
-        return build_completion_response(model_id, text, response['usage'])
+
+        # Extract real finish_reason from llama-cpp response
+        finish_reason = response['choices'][0].get('finish_reason', 'stop')
+        if not finish_reason:
+            finish_reason = 'stop'
+
+        return build_completion_response(model_id, text, response['usage'],
+                                         finish_reason=finish_reason)
     finally:
         if force_reload:
             model_manager.unload_model()
@@ -1022,19 +1051,55 @@ def stream_completion(prompt: str, model_id: str, max_tokens: int, temperature: 
     """
     try:
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
-        
+        finish_reason = "stop"
+
         with model_manager.inference_lock:
             model = model_manager.get_model(model_id, force_reload=force_reload)
-            params = get_model_params(max_tokens, temperature, stream=True)
+
+            # Tokenize prompt to get actual token count, then clamp max_tokens
+            prompt_tokens = model.tokenize(prompt.encode("utf-8"))
+            n_prompt = len(prompt_tokens)
+            n_ctx = model.n_ctx()
+            available = n_ctx - n_prompt
+            if available < 1:
+                error_chunk = {
+                    "error": {
+                        "message": f"Prompt ({n_prompt} tokens) fills the entire context window "
+                                   f"({n_ctx}). Reduce conversation history and retry.",
+                        "type": "context_length_exceeded"
+                    }
+                }
+                yield f"data: {json.dumps(error_chunk)}\n\n"
+                return
+            clamped_max = min(max_tokens, available)
+            if clamped_max < max_tokens:
+                logger.info(
+                    "Clamped max_tokens %d -> %d for %s (prompt=%d, n_ctx=%d)",
+                    max_tokens, clamped_max, model_id, n_prompt, n_ctx
+                )
+
+            params = get_model_params(clamped_max, temperature, stream=True)
+            token_count = 0
 
             for output in model(prompt, **params):
                 if 'choices' in output and len(output['choices']) > 0:
-                    token = output['choices'][0].get('text', '')
+                    choice = output['choices'][0]
+                    token = choice.get('text', '')
                     if token:
+                        token_count += 1
                         chunk = build_stream_chunk(completion_id, model_id, content=token)
                         yield f"data: {json.dumps(chunk)}\n\n"
+                    # Capture finish_reason from the last chunk llama-cpp emits
+                    if choice.get('finish_reason'):
+                        finish_reason = choice['finish_reason']
 
-        final_chunk = build_stream_chunk(completion_id, model_id, finish=True)
+            # If llama-cpp didn't set a finish_reason but we hit the token limit,
+            # infer "length" so the client knows the response was truncated
+            if finish_reason == "stop" and token_count >= clamped_max:
+                finish_reason = "length"
+
+        final_chunk = build_stream_chunk(completion_id, model_id, finish=True,
+                                         finish_reason=finish_reason)
         yield f"data: {json.dumps(final_chunk)}\n\n"
         yield "data: [DONE]\n\n"
 
