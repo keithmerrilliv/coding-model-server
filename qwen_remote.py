@@ -1207,10 +1207,21 @@ def get_completion(history, model, agent_theme, headers):
     server_error_occurred = False
     
     # Sanitize history to remove internal flags like 'auto_send'
-    sanitized_history = [
-        {"role": msg["role"], "content": msg["content"]} 
-        for msg in history
-    ]
+    # AND filter out invalid messages that cause 422 errors on server
+    sanitized_history = []
+    valid_roles = {"system", "user", "assistant"}
+    
+    for msg in history:
+        content = msg.get("content", "").strip()
+        role = msg.get("role", "")
+        
+        # skip empty content or invalid roles
+        if content and role in valid_roles:
+            sanitized_history.append({"role": role, "content": content})
+            
+    # If history is empty after sanitization (e.g. only had empty messages), add a fallback prompt
+    if not sanitized_history:
+        sanitized_history.append({"role": "user", "content": "Hello"})
     
     payload = {
         "model": model, 
@@ -1262,7 +1273,18 @@ def get_completion(history, model, agent_theme, headers):
                                 trim_index += 1
                             trimmed_past = history[trim_index:-1]
                             history[:] = trimmed_past + [history[-1]]
-                            payload["messages"] = [{"role": m["role"], "content": m["content"]} for m in history]
+                            
+                            # Re-sanitize history for the retry payload
+                            sanitized_retry = []
+                            for m in history:
+                                content = m.get("content", "").strip()
+                                role = m.get("role", "")
+                                if content and role in valid_roles:
+                                    sanitized_retry.append({"role": role, "content": content})
+                            if not sanitized_retry:
+                                sanitized_retry.append({"role": "user", "content": "Hello"})
+
+                            payload["messages"] = sanitized_retry
                             context_retries += 1
                             stop_progress = threading.Event(); progress_thread = threading.Thread(target=show_progress, daemon=True); progress_thread.start()
                             continue
@@ -1304,7 +1326,18 @@ def get_completion(history, model, agent_theme, headers):
                                                 trim_index += 1
                                             trimmed_past = history[trim_index:-1]
                                             history[:] = trimmed_past + [history[-1]]
-                                            payload["messages"] = [{"role": m["role"], "content": m["content"]} for m in history]
+                                            
+                                            # Re-sanitize history for the retry payload
+                                            sanitized_retry = []
+                                            for m in history:
+                                                content = m.get("content", "").strip()
+                                                role = m.get("role", "")
+                                                if content and role in valid_roles:
+                                                    sanitized_retry.append({"role": role, "content": content})
+                                            if not sanitized_retry:
+                                                sanitized_retry.append({"role": "user", "content": "Hello"})
+
+                                            payload["messages"] = sanitized_retry
                                             context_retries += 1
                                             server_error_occurred = True
                                             break
