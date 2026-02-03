@@ -338,7 +338,7 @@ class Config:
     DEFAULT_N_BATCH = int(os.getenv('MODEL_N_BATCH', 2048))  # Increased to 2048 for better CPU saturation
     
     # ── Tool syntax reference (appended to all agents) ──
-    TOOL_REFERENCE = """
+    TOOL_REFERENCE = r"""
 # TOOLS — emit these markers inline and the client runs them automatically.
 <<<REMOTE_EXEC>>>command<<<REMOTE_EXEC>>>                         — run a shell command (sync, <30s)
 <<<REMOTE_EXEC_ASYNC>>>command<<<REMOTE_EXEC_ASYNC>>>             — run in background (builds, long tasks)
@@ -352,7 +352,7 @@ class Config:
 """
 
     # ── Git-enhanced tool reference for reviewer ──
-    GIT_TOOL_REFERENCE = """
+    GIT_TOOL_REFERENCE = r"""
 # TOOLS — emit these markers inline and the client runs them automatically.
 <<<REMOTE_EXEC>>>command<<<REMOTE_EXEC>>>                         — run a shell command (sync, <30s)
 <<<REMOTE_EXEC_ASYNC>>>command<<<REMOTE_EXEC_ASYNC>>>             — run in background (builds, long tasks)
@@ -384,9 +384,9 @@ class Config:
 <<<REMOTE_EXEC>>>find . -name "*test*" -o -name "*spec*"<<<REMOTE_EXEC>>> — find test files
 <<<REMOTE_EXEC>>>find . -name "*.md" -o -name "*.txt"<<<REMOTE_EXEC>>> — find documentation files
 <<<REMOTE_EXEC>>>find . -size +1M -name "*.log"<<<REMOTE_EXEC>>> — find large log files
-<<<REMOTE_EXEC>>>grep -r "TODO\|FIXME\|HACK" .<<<REMOTE_EXEC>>>   — find code comments indicating work to do
+<<<REMOTE_EXEC>>>grep -r "TODO|FIXME|HACK" .<<<REMOTE_EXEC>>>   — find code comments indicating work to do
 <<<REMOTE_EXEC>>>grep -rn "error" .<<<REMOTE_EXEC>>>              — find error mentions in code
-<<<REMOTE_EXEC>>>grep -rn "DEBUG\|debug\|console.log" .<<<REMOTE_EXEC>>> — find debug statements
+<<<REMOTE_EXEC>>>grep -rn "DEBUG|debug|console.log" .<<<REMOTE_EXEC>>> — find debug statements
 
 # Code analysis and comparison:
 <<<REMOTE_EXEC>>>diff file1 file2<<<REMOTE_EXEC>>>                — compare two files
@@ -400,7 +400,7 @@ class Config:
 """
 
     # ── Restricted tools for Architect (No shell execution) ──
-    ARCHITECT_TOOL_REFERENCE = """
+    ARCHITECT_TOOL_REFERENCE = r"""
 # TOOLS — emit these markers inline and the client runs them automatically.
 <<<READ_FILE>>>path<<<READ_FILE>>>                                — read file content (safe, fast)
 <<<SAVE_MEMORY>>>fact<<<SAVE_MEMORY>>>                            — persist a fact
@@ -516,7 +516,7 @@ Rules:
     AGENTS = {
         'implementer': {
             'description': 'Qwen3-Coder-30B-A3B (Smart - 80k Context)',
-            'system_prompt': f'{EXECUTOR_PROMPT}\n{TOOL_REFERENCE}',
+            'system_prompt': f'You are an implementer. {EXECUTOR_PROMPT}\n\nCOMPREHENSIVE IMPLEMENTATION: When implementing tasks, leverage multiple tools to understand the codebase thoroughly:\n\nXCODE DEVELOPMENT: Use Xcode command line tools for iOS/macOS development:\n- Use `xcodebuild` to build, test, and archive Xcode projects\n- Use `xcrun` to run various Xcode developer tools\n- Use Metal compiler (`metal`, `metallib`) for Metal shader compilation\n- Use `xcodegen` to generate Xcode projects from YAML descriptions\n- Use `simctl` to manage iOS simulators\n\nGIT AWARENESS: Use Git to understand code changes, history, and context:\n- Use `git log` to understand recent changes and history\n- Use `git diff` to see specific code differences\n- Use `git blame` to identify who made changes and why\n- Use `git show` to examine specific commits\n- Use `git status` to see current state of the repository\n\nFILE SYSTEM NAVIGATION: Use find/grep to locate and analyze relevant files:\n- Use `find` to locate specific file types or patterns\n- Use `grep` to search for specific terms, TODOs, FIXMEs, or error patterns\n- Use `grep -r` for recursive searches across the codebase\n\nCODE COMPARISON: Use diff and other tools to analyze code changes:\n- Use `diff` to compare files and see changes\n- Use `wc`, `head`, `tail` to analyze file contents\n\nAlways use these tools to gather comprehensive context before implementing. This helps you understand the evolution of code, locate related files, and provide more accurate implementations.\n{GIT_TOOL_REFERENCE}',
             'model_config': _CODER_30B,
             'executor': True,
         },
