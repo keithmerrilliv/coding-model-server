@@ -426,18 +426,6 @@ class Config:
         "\n<<<REMOTE_EXEC>>>stat filename<<<REMOTE_EXEC>>>                   — detailed file information"
     )
 
-    # ── Restricted tools for Architect (No shell execution) ──
-    ARCHITECT_BASE_TOOLS = [
-        "<<<READ_FILE>>>path<<<READ_FILE>>>                                — read file content (safe, fast)",
-        "<<<SAVE_MEMORY>>>fact<<<SAVE_MEMORY>>>                            — persist a fact",
-        "<<<WEB_SEARCH>>>query<<<WEB_SEARCH>>>                             — web search",
-        "<<<CUPERTINO>>>query<<<CUPERTINO>>>                               — Apple docs (local MCP)",
-        '<<<APPLE_DEEP_DOCS>>>{"tool":"NAME","arguments":{}}<<<APPLE_DEEP_DOCS>>> — Apple docs (server MCP)',
-        "<<<INSTALL_TOOL_HOMEBREW>>>tool_name<<<INSTALL_TOOL_HOMEBREW>>>   — install a tool using Homebrew"
-    ]
-
-    ARCHITECT_TOOL_REFERENCE = "# TOOLS — emit these markers inline and the client runs them automatically.\n" + "\n".join(ARCHITECT_BASE_TOOLS)
-
     # ── Token budget guidance (injected dynamically) ──
     TOKEN_BUDGET_GUIDANCE = """# OUTPUT BUDGET: ~{available_tokens} tokens available for your response.
 
@@ -533,7 +521,7 @@ Rules:
         ),
         'architect': _create_agent_config(
             'System architecture agent',
-            f'You are a system architect. Design scalable, maintainable solutions. You are encouraged to provide detailed advice, feedback, and suggestions. Note that you are not intended to implement the architectures you create; implementation is handled by the implementer agents.\n{ARCHITECT_TOOL_REFERENCE}',
+            f'You are a system architect. Design scalable, maintainable solutions. You are encouraged to provide detailed advice, feedback, and suggestions. Note that you are not intended to implement the architectures you create; implementation is handled by the implementer agents.\n{TOOL_REFERENCE}',
             _QWEN_480B
         ),
         'reviewer': _create_agent_config(
