@@ -877,6 +877,10 @@ def _execute_command_internal(command, async_mode=False, chunk_output=True):
         print_colored(f"   This command involves Apple development files and should likely run on macOS CLIENT", COLORS['WARNING'])
         print_colored(f"   Consider using `<<<CLIENT_EXEC>>>` instead of `<<<REMOTE_EXEC>>>`", COLORS['WARNING'])
 
+        # For high-confidence Apple development scenarios, return a strong recommendation
+        if any(indicator in command for indicator in ['.xcodeproj', '.xcworkspace', 'Podfile', 'Cartfile']):
+            return f"RECOMMENDATION: Command '{command}' involves Apple development project files.\nUse `<<<CLIENT_EXEC>>>` instead of `<<<REMOTE_EXEC>>>` for Apple development tasks."
+
     try:
         if not ALLOW_SHELL_MODE:
             command_args = parse_command_safely(command)
