@@ -1124,6 +1124,34 @@ def sync_completion(messages: List[ChatMessage], system_prompt: str, model_path:
             if not finish_reason:
                 finish_reason = 'stop'
 
+            # Check if the response contains Apple development commands that should run on client
+            # If so, inject a strong reminder to use client commands
+            if model_id in ['implementer', 'metal_implementer']:
+                apple_dev_indicators = [
+                    'xcodegen', 'xcodebuild', 'xcrun', 'simctl', 'xcode-select',
+                    'ios-deploy', 'swift', 'swiftc', 'objc', 'Objective-C',
+                    'UIKit', 'SwiftUI', 'Metal', 'ARKit', 'SceneKit', 'RealityKit',
+                    'CoreImage', 'AVFoundation', 'Vision', 'CoreML', 'XCTest',
+                    'XCUIApplication', 'tvOS', 'watchOS', 'macOS', 'iOS development',
+                    'iPhone', 'iPad', 'Apple Silicon', 'CocoaPods', 'Carthage',
+                    'Swift Package Manager', 'xcarchive', 'ipa', 'bundle identifier',
+                    'plist', 'Info.plist', 'entitlements', 'provisioning profile',
+                    'App Store Connect', 'TestFlight', 'iTunes Connect'
+                ]
+
+                # Check if any Apple dev indicators are in the response
+                text_lower = text.lower()
+                has_apple_dev_content = any(indicator.lower() in text_lower for indicator in apple_dev_indicators)
+
+                # If the response contains Apple dev content but no client commands, add a warning
+                if has_apple_dev_content and 'CLIENT_EXEC' not in text and 'CLIENT_INSTALL_XCODE_TOOLS' not in text and 'CLIENT_LIST_XCODE_TOOLS' not in text and 'CLIENT_GENERATE_XCODE_PROJECT' not in text:
+                    # Add a strong warning to the response
+                    warning = ("\n\n⚠️ CRITICAL WARNING: You are attempting Apple development tasks on the server. "
+                              "Apple development tools (xcodebuild, xcodegen, etc.) must run on macOS client. "
+                              "Use `<<<CLIENT_EXEC>>>` instead of `<<<REMOTE_EXEC>>>` for Apple development commands. "
+                              "Use `<<<CLIENT_GENERATE_XCODE_PROJECT>>>` for xcodegen operations.")
+                    text += warning
+
             return build_completion_response(model_id, text, response['usage'],
                                              finish_reason=finish_reason)
         finally:
