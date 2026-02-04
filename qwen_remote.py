@@ -1249,6 +1249,161 @@ def install_tool_with_homebrew(tool_name):
         print_colored(error_msg, COLORS['FAIL'])
         return error_msg
 
+
+def execute_client_command(command):
+    """Execute a command on the client machine"""
+    print_colored(f"\nAgent wants to execute client command: {command}", COLORS['WARNING'])
+
+    try:
+        # This is a direct client-side command execution
+        # Apply the same security checks as remote commands
+        if not ALLOW_SHELL_MODE:
+            command_args = parse_command_safely(command)
+            allowed, msg = is_command_allowed(command_args)
+            if not allowed:
+                print_colored(f"   {msg}", COLORS['FAIL'])
+                return f"Command rejected: {msg}"
+            print_colored(f"   {msg}", COLORS['GREEN'])
+        else:
+            print_colored(f"   Shell mode enabled (less safe)", COLORS['WARNING'])
+
+        if ALLOW_ALL:
+            print_colored(f"   Auto-approved (ALLOW_ALL mode enabled)", COLORS['GREEN'])
+            choice = 'y'
+        else:
+            try:
+                choice = input(f"{COLORS['BOLD']}Allow? [y/N] > {COLORS['ENDC']}")
+            except (EOFError, KeyboardInterrupt):
+                return "User cancelled command execution."
+
+            if choice.lower() != 'y':
+                return "User denied command execution."
+
+        # Execute the command
+        result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=240)
+
+        print_colored(f"Client command executed with exit code {result.returncode}", COLORS['CYAN'])
+        output = result.stdout
+        if result.stderr:
+            output += f"\nSTDERR:\n{result.stderr}"
+
+        return f"Client command executed successfully.\nExit Code: {result.returncode}\nOutput:\n{output}"
+
+    except subprocess.TimeoutExpired:
+        return "Client command timed out (240s limit)."
+    except Exception as e:
+        return f"Error executing client command: {str(e)}"
+
+
+def install_xcode_tools(tool_name=""):
+    """Install Xcode command line tools"""
+    print_colored(f"\nAgent wants to install Xcode command line tools", COLORS['WARNING'])
+
+    try:
+        # Check if on macOS
+        import platform
+        if platform.system() != "Darwin":
+            return "Error: Xcode command line tools are only available on macOS."
+
+        # Check if Xcode tools are already installed
+        result = subprocess.run(['xcode-select', '-p'], capture_output=True, text=True)
+        if result.returncode == 0:
+            return f"Xcode command line tools are already installed at: {result.stdout.strip()}"
+
+        print_colored("Installing Xcode command line tools (this may take a few minutes)...", COLORS['CYAN'])
+        print_colored("Note: This will open a GUI dialog to install the tools.", COLORS['BLUE'])
+
+        # Install Xcode command line tools
+        result = subprocess.run(['xcode-select', '--install'], capture_output=True, text=True)
+
+        if result.returncode == 0:
+            print_colored("Xcode command line tools installation initiated", COLORS['GREEN'])
+            return "Xcode command line tools installation initiated. Follow the GUI prompts to complete installation."
+        else:
+            error_msg = f"Failed to initiate Xcode command line tools installation.\nError:\n{result.stderr}"
+            print_colored(error_msg, COLORS['FAIL'])
+            return error_msg
+
+    except Exception as e:
+        error_msg = f"Error installing Xcode command line tools: {str(e)}"
+        print_colored(error_msg, COLORS['FAIL'])
+        return error_msg
+
+
+def list_xcode_tools(list_cmd=""):
+    """List available Xcode command line tools"""
+    print_colored(f"\nAgent wants to list Xcode command line tools", COLORS['WARNING'])
+
+    try:
+        import platform
+        if platform.system() != "Darwin":
+            return "Error: Xcode command line tools are only available on macOS."
+
+        # List available tools
+        result = subprocess.run(['xcode-select', '-p'], capture_output=True, text=True)
+        if result.returncode != 0:
+            return "Xcode command line tools are not installed."
+
+        tools_path = result.stdout.strip()
+        print_colored(f"Xcode tools path: {tools_path}", COLORS['CYAN'])
+
+        # List some common tools
+        common_tools = ['xcodebuild', 'xcrun', 'xcode-select', 'simctl', 'codesign', 'security']
+        available_tools = []
+        for tool in common_tools:
+            tool_result = subprocess.run(['which', tool], capture_output=True, text=True)
+            if tool_result.returncode == 0:
+                available_tools.append(f"{tool}: {tool_result.stdout.strip()}")
+
+        if available_tools:
+            return f"Available Xcode tools:\n" + "\n".join(available_tools)
+        else:
+            return "No common Xcode tools found in PATH."
+
+    except Exception as e:
+        error_msg = f"Error listing Xcode command line tools: {str(e)}"
+        print_colored(error_msg, COLORS['FAIL'])
+        return error_msg
+
+
+def generate_xcode_project(config):
+    """Generate an Xcode project using xcodegen"""
+    print_colored(f"\nAgent wants to generate Xcode project", COLORS['WARNING'])
+
+    try:
+        import platform
+        if platform.system() != "Darwin":
+            return "Error: Xcode and xcodegen are only available on macOS."
+
+        # Check if xcodegen is installed
+        result = subprocess.run(['which', 'xcodegen'], capture_output=True, text=True)
+        if result.returncode != 0:
+            install_msg = install_xcode_tools()  # Attempt to install Xcode tools
+            return f"xcodegen not found. {install_msg}\n\nYou may need to install xcodegen separately using Homebrew: `brew install xcodegen`"
+
+        # Generate project based on configuration
+        # If config looks like a path, use it as the project spec file
+        if config and ('/' in config or config.endswith('.yml') or config.endswith('.yaml')):
+            # Assume it's a path to a project spec file
+            project_spec = config
+            result = subprocess.run(['xcodegen', 'generate', '--spec', project_spec], capture_output=True, text=True)
+        else:
+            # If no config provided or it's not a path, just run xcodegen in current directory
+            result = subprocess.run(['xcodegen', 'generate'], capture_output=True, text=True)
+
+        if result.returncode == 0:
+            print_colored("Xcode project generated successfully", COLORS['GREEN'])
+            return f"Xcode project generated successfully.\nOutput:\n{result.stdout}"
+        else:
+            error_msg = f"Failed to generate Xcode project.\nError:\n{result.stderr}"
+            print_colored(error_msg, COLORS['FAIL'])
+            return error_msg
+
+    except Exception as e:
+        error_msg = f"Error generating Xcode project: {str(e)}"
+        print_colored(error_msg, COLORS['FAIL'])
+        return error_msg
+
 def read_file_content(path):
     """Read content of a local file safely"""
     try:
@@ -1308,6 +1463,18 @@ def process_remote_commands(response_text: str) -> Optional[str]:
          True),
         (r'<<<INSTALL_TOOL_HOMEBREW>>>\s*(.*?)\s*<<<INSTALL_TOOL_HOMEBREW>>>',
          lambda tool_name: install_tool_with_homebrew(tool_name.strip()),
+         True),
+        (r'<<<CLIENT_EXEC>>>\s*(.*?)\s*<<<CLIENT_EXEC>>>',
+         lambda cmd: execute_client_command(cmd.strip()),
+         True),
+        (r'<<<CLIENT_INSTALL_XCODE_TOOLS>>>\s*(.*?)\s*<<<CLIENT_INSTALL_XCODE_TOOLS>>>',
+         lambda name: install_xcode_tools(name.strip()),
+         True),
+        (r'<<<CLIENT_LIST_XCODE_TOOLS>>>\s*(.*?)\s*<<<CLIENT_LIST_XCODE_TOOLS>>>',
+         lambda list_cmd: list_xcode_tools(list_cmd.strip()),
+         True),
+        (r'<<<CLIENT_GENERATE_XCODE_PROJECT>>>\s*(.*?)\s*<<<CLIENT_GENERATE_XCODE_PROJECT>>>',
+         lambda config: generate_xcode_project(config.strip()),
          True),
         (r'<<<REMOTE_LIST_JOBS>>>',
          lambda _: list_all_jobs(),

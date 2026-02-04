@@ -389,12 +389,23 @@ class Config:
         "<<<INSTALL_TOOL_HOMEBREW>>>tool_name<<<INSTALL_TOOL_HOMEBREW>>>   — install a tool using Homebrew"
     ]
 
-    TOOL_REFERENCE = "# TOOLS — emit these markers inline and the client runs them automatically.\n" + "\n".join(BASE_TOOLS)
+    # ── Client-specific tools (commands that run on the client machine) ──
+    CLIENT_TOOLS = [
+        "<<<CLIENT_EXEC>>>command<<<CLIENT_EXEC>>>                         — run a command on the client machine",
+        "<<<CLIENT_INSTALL_XCODE_TOOLS>>>name<<<CLIENT_INSTALL_XCODE_TOOLS>>> — install Xcode command line tools (xcode-select --install)",
+        "<<<CLIENT_LIST_XCODE_TOOLS>>>list<<<CLIENT_LIST_XCODE_TOOLS>>>   — list available Xcode command line tools",
+        "<<<CLIENT_GENERATE_XCODE_PROJECT>>>config<<<CLIENT_GENERATE_XCODE_PROJECT>>> — generate Xcode project from configuration (uses xcodegen)"
+    ]
+
+    # ── Combined tools for agents that can use both ──
+    ALL_TOOLS = BASE_TOOLS + CLIENT_TOOLS
+
+    TOOL_REFERENCE = "# TOOLS — emit these markers inline and the client runs them automatically.\n" + "\n".join(ALL_TOOLS)
 
     # ── Git-enhanced tool reference for reviewer ──
     GIT_TOOL_REFERENCE = (
         "# TOOLS — emit these markers inline and the client runs them automatically.\n" +
-        "\n".join(BASE_TOOLS) +
+        "\n".join(ALL_TOOLS) +
         "\n\n# ESSENTIAL TOOLS FOR CODE REVIEW — Comprehensive toolkit for thorough code analysis:"
         "\n# Git commands for understanding code changes and history:" +
         "\n<<<REMOTE_EXEC>>>git status<<<REMOTE_EXEC>>>                      — check current repository state" +
@@ -435,7 +446,8 @@ class Config:
         "<<<WEB_SEARCH>>>query<<<WEB_SEARCH>>>                             — web search",
         "<<<CUPERTINO>>>query<<<CUPERTINO>>>                               — Apple docs (local MCP)",
         '<<<APPLE_DEEP_DOCS>>>{"tool":"NAME","arguments":{}}<<<APPLE_DEEP_DOCS>>> — Apple docs (server MCP)',
-        "<<<INSTALL_TOOL_HOMEBREW>>>tool_name<<<INSTALL_TOOL_HOMEBREW>>>   — install a tool using Homebrew"
+        "<<<INSTALL_TOOL_HOMEBREW>>>tool_name<<<INSTALL_TOOL_HOMEBREW>>>   — install a tool using Homebrew",
+        "<<<CLIENT_EXEC>>>command<<<CLIENT_EXEC>>>                         — run a command on the client machine"
     ]
 
     ARCHITECT_TOOL_REFERENCE = "# TOOLS — emit these markers inline and the client runs them automatically.\n" + "\n".join(ARCHITECT_BASE_TOOLS)
@@ -529,7 +541,7 @@ Rules:
     AGENTS = {
         'implementer': _create_agent_config(
             'Qwen3-Coder-30B-A3B (Smart - 80k Context)',
-            f'You are an implementer. {EXECUTOR_PROMPT}\n\nCOMPREHENSIVE IMPLEMENTATION: When implementing tasks, leverage multiple tools to understand the codebase thoroughly:\n\nXCODE DEVELOPMENT: Use Xcode command line tools for iOS/macOS development:\n- Use `xcodebuild` to build, test, and archive Xcode projects\n- Use `xcrun` to run various Xcode developer tools\n- Use Metal compiler (`metal`, `metallib`) for Metal shader compilation\n- Use `xcodegen` to generate Xcode projects from YAML descriptions\n- Use `simctl` to manage iOS simulators\n\nGIT AWARENESS: Use Git to understand code changes, history, and context:\n- Use `git log` to understand recent changes and history\n- Use `git diff` to see specific code differences\n- Use `git blame` to identify who made changes and why\n- Use `git show` to examine specific commits\n- Use `git status` to see current state of the repository\n\nFILE SYSTEM NAVIGATION: Use find/grep to locate and analyze relevant files:\n- Use `find` to locate specific file types or patterns\n- Use `grep` to search for specific terms, TODOs, FIXMEs, or error patterns\n- Use `grep -r` for recursive searches across the codebase\n\nCODE COMPARISON: Use diff and other tools to analyze code changes:\n- Use `diff` to compare files and see changes\n- Use `wc`, `head`, `tail` to analyze file contents\n\nAlways use these tools to gather comprehensive context before implementing. This helps you understand the evolution of code, locate related files, and provide more accurate implementations.\n{GIT_TOOL_REFERENCE}',
+            f'You are an implementer. {EXECUTOR_PROMPT}\n\nCOMPREHENSIVE IMPLEMENTATION: When implementing tasks, leverage multiple tools to understand the codebase thoroughly:\n\nSERVER-SIDE COMMANDS: Use standard Unix/Linux commands available on the server:\n- Use `find`, `grep`, `diff`, `git`, etc. via `<<<REMOTE_EXEC>>>` markers\n- Use standard system utilities for file manipulation and analysis\n\nCLIENT-SIDE COMMANDS: Use client-specific tools available on the client machine:\n- Use `xcodebuild`, `xcrun`, `xcodegen`, `simctl`, etc. via `<<<CLIENT_EXEC>>>` markers\n- Use `<<<CLIENT_INSTALL_XCODE_TOOLS>>>` to install Xcode command line tools if needed\n- Use `<<<CLIENT_GENERATE_XCODE_PROJECT>>>` to generate Xcode projects\n\nGIT AWARENESS: Use Git to understand code changes, history, and context:\n- Use `git log` to understand recent changes and history\n- Use `git diff` to see specific code differences\n- Use `git blame` to identify who made changes and why\n- Use `git show` to examine specific commits\n- Use `git status` to see current state of the repository\n\nFILE SYSTEM NAVIGATION: Use find/grep to locate and analyze relevant files:\n- Use `find` to locate specific file types or patterns\n- Use `grep` to search for specific terms, TODOs, FIXMEs, or error patterns\n- Use `grep -r` for recursive searches across the codebase\n\nCODE COMPARISON: Use diff and other tools to analyze code changes:\n- Use `diff` to compare files and see changes\n- Use `wc`, `head`, `tail` to analyze file contents\n\nCRITICAL: Choose the appropriate execution environment for each command:\n- Use `<<<REMOTE_EXEC>>>` for server-side commands\n- Use `<<<CLIENT_EXEC>>>` for client-side commands (Xcode tools, etc.)\n\nAlways use these tools to gather comprehensive context before implementing. This helps you understand the evolution of code, locate related files, and provide more accurate implementations.\n{GIT_TOOL_REFERENCE}',
             _CODER_30B,
             executor=True
         ),
