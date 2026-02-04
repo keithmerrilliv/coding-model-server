@@ -375,10 +375,10 @@ class Config:
     DEFAULT_N_THREADS = int(os.getenv('MODEL_N_THREADS', 24))
     DEFAULT_N_BATCH = int(os.getenv('MODEL_N_BATCH', 2048))  # Increased to 2048 for better CPU saturation
     
-    # ── Base tool reference (used by all agents) ──
+    # ── Unified tool reference ──
     BASE_TOOLS = [
-        "<<<REMOTE_EXEC>>>command<<<REMOTE_EXEC>>>                         — run a shell command ON SERVER (Linux) - NOT FOR XCODE PROJECTS",
-        "<<<REMOTE_EXEC_ASYNC>>>command<<<REMOTE_EXEC_ASYNC>>>             — run in background ON SERVER (Linux)",
+        "<<<REMOTE_EXEC>>>command<<<REMOTE_EXEC>>>                         — run a shell command (Linux/macOS compatible)",
+        "<<<REMOTE_EXEC_ASYNC>>>command<<<REMOTE_EXEC_ASYNC>>>             — run in background",
         "<<<REMOTE_CHECK_STATUS>>>JOB_ID<<<REMOTE_CHECK_STATUS>>>          — poll async job",
         "<<<REMOTE_GET_OUTPUT>>>JOB_ID<<<REMOTE_GET_OUTPUT>>>              — get finished job output",
         "<<<READ_FILE>>>path<<<READ_FILE>>>                                — read file content (safe, fast)",
@@ -389,18 +389,13 @@ class Config:
         "<<<INSTALL_TOOL_HOMEBREW>>>tool_name<<<INSTALL_TOOL_HOMEBREW>>>   — install a tool using Homebrew"
     ]
 
-    # ── Client-specific tools (commands that run on the client machine) ──
-    CLIENT_TOOLS = [
-        "<<<CLIENT_EXEC>>>command<<<CLIENT_EXEC>>>                         — run a command on the CLIENT MAC (macOS) - USE FOR XCODE PROJECTS!",
-        "<<<CLIENT_INSTALL_XCODE_TOOLS>>>name<<<CLIENT_INSTALL_XCODE_TOOLS>>> — install Xcode command line tools (xcode-select --install)",
-        "<<<CLIENT_LIST_XCODE_TOOLS>>>list<<<CLIENT_LIST_XCODE_TOOLS>>>   — list available Xcode command line tools",
-        "<<<CLIENT_GENERATE_XCODE_PROJECT>>>config<<<CLIENT_GENERATE_XCODE_PROJECT>>> — generate Xcode project from configuration (uses xcodegen) - RUNS ON CLIENT!"
-    ]
+    # (Legacy client tools mapped to REMOTE_EXEC behavior via instructions)
+    CLIENT_TOOLS = [] 
 
-    # ── Combined tools for agents that can use both ──
-    ALL_TOOLS = BASE_TOOLS + CLIENT_TOOLS
+    # ── Combined tools ──
+    ALL_TOOLS = BASE_TOOLS
 
-    TOOL_REFERENCE = "# TOOLS — emit these markers inline and the client runs them automatically.\n" + "\n".join(ALL_TOOLS)
+    TOOL_REFERENCE = "# TOOLS — emit these markers inline to execute commands.\n" + "\n".join(ALL_TOOLS)
 
     # ── Git-enhanced tool reference for reviewer ──
     GIT_TOOL_REFERENCE = (
@@ -446,8 +441,7 @@ class Config:
         "<<<WEB_SEARCH>>>query<<<WEB_SEARCH>>>                             — web search",
         "<<<CUPERTINO>>>query<<<CUPERTINO>>>                               — Apple docs (local MCP)",
         '<<<APPLE_DEEP_DOCS>>>{"tool":"NAME","arguments":{}}<<<APPLE_DEEP_DOCS>>> — Apple docs (server MCP)',
-        "<<<INSTALL_TOOL_HOMEBREW>>>tool_name<<<INSTALL_TOOL_HOMEBREW>>>   — install a tool using Homebrew",
-        "<<<CLIENT_EXEC>>>command<<<CLIENT_EXEC>>>                         — run a command on the client machine"
+        "<<<INSTALL_TOOL_HOMEBREW>>>tool_name<<<INSTALL_TOOL_HOMEBREW>>>   — install a tool using Homebrew"
     ]
 
     ARCHITECT_TOOL_REFERENCE = "# TOOLS — emit these markers inline and the client runs them automatically.\n" + "\n".join(ARCHITECT_BASE_TOOLS)
@@ -541,7 +535,7 @@ Rules:
     AGENTS = {
         'implementer': _create_agent_config(
             'Qwen3-Coder-30B-A3B (Smart - 80k Context)',
-            f'You are an implementer. {EXECUTOR_PROMPT}\n\nCOMPREHENSIVE IMPLEMENTATION: When implementing tasks, leverage multiple tools to understand the codebase thoroughly:\n\nSERVER-SIDE COMMANDS: Use standard Unix/Linux commands available on the server:\n- Use `find`, `grep`, `diff`, `git`, etc. via `<<<REMOTE_EXEC>>>` markers\n- Use standard system utilities for file manipulation and analysis\n\nCLIENT-SIDE COMMANDS: Use client-specific tools available on the client machine (macOS):\n- Use `xcodebuild`, `xcrun`, `xcodegen`, `simctl`, etc. via `<<<CLIENT_EXEC>>>` markers\n- Use `<<<CLIENT_INSTALL_XCODE_TOOLS>>>` to install Xcode command line tools if needed\n- Use `<<<CLIENT_GENERATE_XCODE_PROJECT>>>` to generate Xcode projects\n\nGIT AWARENESS: Use Git to understand code changes, history, and context:\n- Use `git log` to understand recent changes and history\n- Use `git diff` to see specific code differences\n- Use `git blame` to identify who made changes and why\n- Use `git show` to examine specific commits\n- Use `git status` to see current state of the repository\n\nFILE SYSTEM NAVIGATION: Use find/grep to locate and analyze relevant files:\n- Use `find` to locate specific file types or patterns\n- Use `grep` to search for specific terms, TODOs, FIXMEs, or error patterns\n- Use `grep -r` for recursive searches across the codebase\n\nCRITICAL: Choose the appropriate execution environment for each command:\n- Use `<<<REMOTE_EXEC>>>` for server-side commands (Linux)\n- Use `<<<CLIENT_EXEC>>>` for client-side commands (macOS) - ESPECIALLY for Xcode-related tools like xcodegen, xcodebuild, etc.\n\nIMPORTANT: For Xcode project manipulation, ALWAYS use client-side commands. The macOS client machine is where Xcode projects are located and where Xcode command-line tools are installed.\n\nHARD RULES FOR APPLE DEVELOPMENT:\n- Xcode projects, iOS/macOS/watchOS/tvOS development → ALWAYS use `<<<CLIENT_EXEC>>>`\n- Swift/Objective-C code compilation → ALWAYS use `<<<CLIENT_EXEC>>>`\n- Xcode command-line tools (xcodebuild, xcrun, xcode-select, simctl) → ALWAYS use `<<<CLIENT_EXEC>>>`\n- Apple frameworks (UIKit, SwiftUI, Metal, ARKit, etc.) → ALWAYS use `<<<CLIENT_EXEC>>>`\n- Simulator management → ALWAYS use `<<<CLIENT_EXEC>>>`\n- iOS device management → ALWAYS use `<<<CLIENT_EXEC>>>`\n- For all other general development tasks → use `<<<REMOTE_EXEC>>>`\n\nAlways use these tools to gather comprehensive context before implementing. This helps you understand the evolution of code, locate related files, and provide more accurate implementations.\n{GIT_TOOL_REFERENCE}',
+            f'You are an implementer. {EXECUTOR_PROMPT}\n\nCOMPREHENSIVE IMPLEMENTATION: When implementing tasks, leverage multiple tools to understand the codebase thoroughly:\n\nEXECUTION ENVIRONMENT: You are running on a macOS environment with full access to development tools.\n- Use `<<<REMOTE_EXEC>>>` for ALL shell commands (including Xcode tools, Git, file operations).\n- Do NOT distinguish between "server" and "client". Everything runs locally.\n\nGIT AWARENESS: Use Git to understand code changes, history, and context:\n- Use `git log` to understand recent changes and history\n- Use `git diff` to see specific code differences\n- Use `git blame` to identify who made changes and why\n- Use `git show` to examine specific commits\n- Use `git status` to see current state of the repository\n\nFILE SYSTEM NAVIGATION: Use find/grep to locate and analyze relevant files:\n- Use `find` to locate specific file types or patterns\n- Use `grep` to search for specific terms, TODOs, FIXMEs, or error patterns\n- Use `grep -r` for recursive searches across the codebase\n\nAPPLE DEVELOPMENT:\n- For Xcode projects, use `xcodebuild`, `xcrun`, `xcodegen` directly via `<<<REMOTE_EXEC>>>`.\n- No special markers needed for client-side tools.\n\n{TOOL_REFERENCE}',
             _CODER_30B,
             executor=True
         ),
@@ -563,7 +557,7 @@ Rules:
         ),
         'metal_implementer': _create_agent_config(
             'Qwen3-Coder-30B-A3B (Smart - 80k Context)',
-            f'You are a Metal 4 graphics engineer (compute kernels, mesh shaders, ray tracing, argument buffers). {EXECUTOR_PROMPT}\n\nCRITICAL: As a Metal developer, ALL your work happens on the macOS client:\n- Metal shader compilation and validation → use `<<<CLIENT_EXEC>>>`\n- Metal framework integration → use `<<<CLIENT_EXEC>>>`\n- Metal performance profiling → use `<<<CLIENT_EXEC>>>`\n- Metal debugging with Xcode Instruments → use `<<<CLIENT_EXEC>>>`\n- Metal sample code compilation → use `<<<CLIENT_EXEC>>>`\n- Simulator testing for Metal features → use `<<<CLIENT_EXEC>>>`\n\nFor Metal development, ALWAYS use client-side commands. The macOS client machine is where Metal frameworks are available and where Metal development tools run.\n\n{TOOL_REFERENCE}',
+            f'You are a Metal 4 graphics engineer (compute kernels, mesh shaders, ray tracing, argument buffers). {EXECUTOR_PROMPT}\n\nEXECUTION ENVIRONMENT: You are running on a macOS environment with full access to Metal tools.\n- Use `<<<REMOTE_EXEC>>>` for ALL shell commands.\n- Do NOT distinguish between "server" and "client". Everything runs locally.\n\nMETAL DEVELOPMENT:\n- Metal shader compilation and validation → use `<<<REMOTE_EXEC>>>`\n- Metal framework integration → use `<<<REMOTE_EXEC>>>`\n- Metal performance profiling → use `<<<REMOTE_EXEC>>>`\n\n{TOOL_REFERENCE}',
             _CODER_30B,
             executor=True
         ),

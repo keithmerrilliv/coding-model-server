@@ -549,20 +549,10 @@ def run_command_async(job_id, command):
     """Run command in background thread and capture output in real-time"""
 
     # Check if this is an Apple development command that should run on client
+    # (Restriction removed: This CLI runs on the client, so REMOTE_EXEC runs locally too)
     import re
     is_apple_dev_command = any(re.search(r'\b' + re.escape(cmd) + r'\b', command) for cmd in APPLE_DEV_COMMANDS)
 
-    if is_apple_dev_command:
-        job_tracker.add_output(job_id, f"🚨 APPLE DEVELOPMENT COMMAND DETECTED: {command}")
-        job_tracker.add_output(job_id, "   This command should run on macOS CLIENT, not Linux SERVER")
-        job_tracker.add_output(job_id, "   Use `<<<CLIENT_EXEC>>>` instead of `<<<REMOTE_EXEC>>>`")
-        job_tracker.update_job(
-            job_id,
-            status="failed",
-            exit_code=-1,
-            completed_at=datetime.now().isoformat()
-        )
-        return
 
     # Additional check: if command contains paths typical of iOS/macOS development, warn about server execution
     apple_dev_indicators = [
@@ -574,118 +564,57 @@ def run_command_async(job_id, command):
     command_lower = command.lower()
     has_apple_dev_path = any(indicator.lower() in command_lower for indicator in apple_dev_indicators)
 
-    if has_apple_dev_path:
-        job_tracker.add_output(job_id, f"⚠️  APPLE DEVELOPMENT PATH DETECTED: {command}")
-        job_tracker.add_output(job_id, "   This command involves Apple development files and should likely run on macOS CLIENT")
-        job_tracker.add_output(job_id, "   Consider using `<<<CLIENT_EXEC>>>` instead of `<<<REMOTE_EXEC>>>`")
-
     try:
         job_tracker.update_job(job_id, status="running")
 
-        # Handle && separated commands unless there's a pipe dependency
-        if '&&' in command and not has_pipe_dependency(command):
-            commands = [cmd.strip() for cmd in command.split('&&')]
+        # Execute as a single command (preserves pipes, &&, and complex shell constructs)
+        if ALLOW_SHELL_MODE:
+            process = subprocess.Popen(
+                command,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+        else:
+            # Note: chaining commands with && doesn't work well with shell=False unless passed as a single shell string
+            # But if ALLOW_SHELL_MODE is False, we shouldn't be doing complex shell things anyway.
+            # We'll try to parse it safely.
+            command_args = parse_command_safely(command)
+            command_args = expand_paths_in_args(command_args)
+            process = subprocess.Popen(
+                command_args,
+                shell=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
 
-            # Execute each command sequentially in the same process
-            for cmd in commands:
-                if not cmd:  # Skip empty commands
-                    continue
+        job_tracker.update_job(job_id, process=process)
 
-                job_tracker.add_output(job_id, f"Executing: {cmd}")
+        for line in iter(process.stdout.readline, ''):
+            if line:
+                job_tracker.add_output(job_id, line.rstrip())
 
-                if ALLOW_SHELL_MODE:
-                    process = subprocess.Popen(
-                        cmd,
-                        shell=True,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT,
-                        text=True,
-                        bufsize=1,
-                    )
-                else:
-                    command_args = parse_command_safely(cmd)
-                    command_args = expand_paths_in_args(command_args)
-                    process = subprocess.Popen(
-                        command_args,
-                        shell=False,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT,
-                        text=True,
-                        bufsize=1,
-                    )
+        process.wait()
 
-                job_tracker.update_job(job_id, process=process)
-
-                for line in iter(process.stdout.readline, ''):
-                    if line:
-                        job_tracker.add_output(job_id, line.rstrip())
-
-                process.wait()
-
-                # Check if this command failed and decide whether to continue
-                if process.returncode != 0:
-                    job_tracker.add_output(job_id, f"ERROR: Command failed with exit code {process.returncode}, stopping execution")
-                    job_tracker.update_job(
-                        job_id,
-                        status="failed",
-                        exit_code=process.returncode,
-                        completed_at=datetime.now().isoformat()
-                    )
-                    return
-
-            # All commands succeeded
+        if process.returncode == 0:
             job_tracker.update_job(
                 job_id,
                 status="completed",
-                exit_code=0,
+                exit_code=process.returncode,
                 completed_at=datetime.now().isoformat()
             )
         else:
-            # Execute as a single command (preserves pipes and complex shell constructs)
-            if ALLOW_SHELL_MODE:
-                process = subprocess.Popen(
-                    command,
-                    shell=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1,
-                )
-            else:
-                command_args = parse_command_safely(command)
-                command_args = expand_paths_in_args(command_args)
-                process = subprocess.Popen(
-                    command_args,
-                    shell=False,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1,
-                )
-
-            job_tracker.update_job(job_id, process=process)
-
-            for line in iter(process.stdout.readline, ''):
-                if line:
-                    job_tracker.add_output(job_id, line.rstrip())
-
-            process.wait()
-
-            if process.returncode == 0:
-                job_tracker.update_job(
-                    job_id,
-                    status="completed",
-                    exit_code=process.returncode,
-                    completed_at=datetime.now().isoformat()
-                )
-            else:
-                job_tracker.add_output(job_id, f"ERROR: Command failed with exit code {process.returncode}")
-                job_tracker.update_job(
-                    job_id,
-                    status="failed",
-                    exit_code=process.returncode,
-                    completed_at=datetime.now().isoformat()
-                )
+            job_tracker.add_output(job_id, f"ERROR: Command failed with exit code {process.returncode}")
+            job_tracker.update_job(
+                job_id,
+                status="failed",
+                exit_code=process.returncode,
+                completed_at=datetime.now().isoformat()
+            )
 
     except Exception as e:
         job_tracker.add_output(job_id, f"ERROR: {str(e)}")
@@ -839,21 +768,9 @@ def execute_remote_command_chunked(command, async_mode=False, chunk_output=True)
         str: Result of command execution
     """
 
-    # Split && separated commands unless there's a pipe dependency
-    # More sophisticated detection of pipe dependencies
-    if '&&' in command and not has_pipe_dependency(command):
-        commands = [cmd.strip() for cmd in command.split('&&')]
-        results = []
-        for cmd in commands:
-            if cmd:  # Skip empty commands
-                result = execute_single_command(cmd, async_mode, chunk_output)
-                results.append(result)
-                # If any command fails in a sequence, we might want to stop
-                # For now, we'll continue executing all commands
-        return "\n\n".join(results)
-    else:
-        # Execute as a single command (preserves pipes and complex shell constructs)
-        return execute_single_command(command, async_mode, chunk_output)
+    # Execute as a single command (preserves pipes and complex shell constructs)
+    # We rely on the shell (ALLOW_SHELL_MODE=True) to handle && chaining correctly for state persistence (like cd)
+    return execute_single_command(command, async_mode, chunk_output)
 
 
 def has_pipe_dependency(command):
@@ -890,15 +807,10 @@ def _execute_command_internal(command, async_mode=False, chunk_output=True):
     """Internal function to execute a command with security checks"""
 
     # Check if this is an Apple development command that should run on client
+    # (Restriction removed: This CLI runs on the client, so REMOTE_EXEC runs locally too)
     # Use word boundary matching to avoid substring matches (e.g., 'pod' shouldn't match 'podman')
     import re
     is_apple_dev_command = any(re.search(r'\b' + re.escape(cmd) + r'\b', command) for cmd in APPLE_DEV_COMMANDS)
-
-    if is_apple_dev_command:
-        print_colored(f"\n🚨 APPLE DEVELOPMENT COMMAND DETECTED: {command}", COLORS['FAIL'])
-        print_colored(f"   This command should run on macOS CLIENT, not Linux SERVER", COLORS['FAIL'])
-        print_colored(f"   Use `<<<CLIENT_EXEC>>>` instead of `<<<REMOTE_EXEC>>>`", COLORS['FAIL'])
-        return f"ERROR: Apple development command '{command}' should run on macOS client, not Linux server.\nUse `<<<CLIENT_EXEC>>>` instead of `<<<REMOTE_EXEC>>>` for Apple development tools."
 
     print_colored(f"\nAgent wants to run command: {command}", COLORS['WARNING'])
     if async_mode:
@@ -918,19 +830,6 @@ def _execute_command_internal(command, async_mode=False, chunk_output=True):
 
     command_lower = command.lower()
     has_apple_dev_path = any(indicator.lower() in command_lower for indicator in apple_dev_indicators)
-
-    if has_apple_dev_path and not is_apple_dev_command:
-        print_colored(f"\n⚠️  APPLE DEVELOPMENT PATH DETECTED: {command}", COLORS['WARNING'])
-        print_colored(f"   This command involves Apple development files and should likely run on macOS CLIENT", COLORS['WARNING'])
-        print_colored(f"   Consider using `<<<CLIENT_EXEC>>>` instead of `<<<REMOTE_EXEC>>>`", COLORS['WARNING'])
-
-        # For high-confidence Apple development scenarios, return a strong recommendation
-        # Only trigger for commands that are likely to modify or build Apple projects, not read operations
-        build_or_modify_commands = ['xcodebuild', 'xcodegen', 'pod', 'carthage', 'swift', 'swiftc', 'xcrun']
-        has_build_command = any(cmd in command for cmd in build_or_modify_commands)
-
-        if has_build_command and any(indicator in command for indicator in ['.xcodeproj', '.xcworkspace', 'Podfile', 'Cartfile']):
-            return f"RECOMMENDATION: Command '{command}' involves Apple development project files.\nUse `<<<CLIENT_EXEC>>>` instead of `<<<REMOTE_EXEC>>>` for Apple development tasks."
 
     try:
         if not ALLOW_SHELL_MODE:
@@ -1603,11 +1502,12 @@ def process_remote_commands(response_text: str) -> Optional[str]:
     Returns aggregated output from all commands, or None if no markers found.
     """
     # Define all command patterns with their handlers
+    # Update regex to handle malformed closing tags (e.g. <<<<<<<)
     command_defs = [
-        (r'<<<REMOTE_EXEC_ASYNC>>>\s*(.*?)\s*<<<REMOTE_EXEC_ASYNC>>>',
+        (r'<<<REMOTE_EXEC_ASYNC>>>\s*(.*?)\s*(?:<<<REMOTE_EXEC_ASYNC>>>|<<<<<<<)',
          lambda cmd: execute_remote_command(cmd.strip(), async_mode=True),
          True),
-        (r'<<<REMOTE_EXEC>>>\s*(.*?)\s*<<<REMOTE_EXEC>>>',
+        (r'<<<REMOTE_EXEC>>>\s*(.*?)\s*(?:<<<REMOTE_EXEC>>>|<<<<<<<)',
          lambda cmd: execute_remote_command(cmd.strip(), async_mode=False),
          True),
         (r'<<<REMOTE_CHECK_STATUS>>>\s*(.*?)\s*<<<REMOTE_CHECK_STATUS>>>',
@@ -1697,7 +1597,7 @@ def extract_fallback_commands(response_text: str) -> List[str]:
     commands = []
 
     # Match fenced code blocks: ```bash ... ```, ```shell ... ```, ```sh ... ```, or plain ``` ... ```
-    for m in re.finditer(r'```(?:bash|shell|sh|zsh)?\s*\n(.+?)```', response_text, re.DOTALL):
+    for m in re.finditer(r'```(?:bash|shell|sh|zsh)?\s*(.+?)```', response_text, re.DOTALL):
         block = m.group(1).strip()
         if block:
             commands.append(block)
