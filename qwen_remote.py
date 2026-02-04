@@ -577,7 +577,7 @@ def run_command_async(job_id, command):
 
                 # Check if this command failed and decide whether to continue
                 if process.returncode != 0:
-                    job_tracker.add_output(job_id, f"Command failed with exit code {process.returncode}, stopping execution")
+                    job_tracker.add_output(job_id, f"ERROR: Command failed with exit code {process.returncode}, stopping execution")
                     job_tracker.update_job(
                         job_id,
                         status="failed",
@@ -624,12 +624,21 @@ def run_command_async(job_id, command):
 
             process.wait()
 
-            job_tracker.update_job(
-                job_id,
-                status="completed" if process.returncode == 0 else "failed",
-                exit_code=process.returncode,
-                completed_at=datetime.now().isoformat()
-            )
+            if process.returncode == 0:
+                job_tracker.update_job(
+                    job_id,
+                    status="completed",
+                    exit_code=process.returncode,
+                    completed_at=datetime.now().isoformat()
+                )
+            else:
+                job_tracker.add_output(job_id, f"ERROR: Command failed with exit code {process.returncode}")
+                job_tracker.update_job(
+                    job_id,
+                    status="failed",
+                    exit_code=process.returncode,
+                    completed_at=datetime.now().isoformat()
+                )
 
     except Exception as e:
         job_tracker.add_output(job_id, f"ERROR: {str(e)}")
@@ -965,12 +974,17 @@ def _execute_command_internal(command, async_mode=False, chunk_output=True):
                         pass
 
             print_colored(f"Output:\n{final_output}", COLORS['CYAN'])
-            return f"Command executed successfully.\nExit Code: {result.returncode}\nOutput:\n{final_output}"
+
+            # Return different messages based on exit code
+            if result.returncode == 0:
+                return f"Command executed successfully.\nExit Code: {result.returncode}\nOutput:\n{final_output}"
+            else:
+                return f"ERROR: Command failed with exit code {result.returncode}.\nCommand: {command}\nOutput:\n{final_output}"
 
         except subprocess.TimeoutExpired:
-            return "Command timed out (240s limit for sync commands). Consider using async mode for long-running commands."
+            return f"ERROR: Command timed out (240s limit for sync commands). Command: {command}\nConsider using async mode for long-running commands."
         except Exception as e:
-            return f"Error executing command: {str(e)}"
+            return f"ERROR: Failed to execute command: {str(e)}\nCommand: {command}"
 
 
 def execute_single_command(command, async_mode=False, chunk_output=True):
