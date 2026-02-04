@@ -1152,6 +1152,13 @@ def sync_completion(messages: List[ChatMessage], system_prompt: str, model_path:
                               "Use `<<<CLIENT_GENERATE_XCODE_PROJECT>>>` for xcodegen operations.")
                     text += warning
 
+                    # Additionally, if the response contains REMOTE_EXEC markers for Apple development commands,
+                    # add a note at the end to guide the agent for future attempts
+                    if '<<<REMOTE_EXEC>>>' in text:
+                        guidance = ("\n\n💡 FOR NEXT TIME: When you need to run Apple development tools like xcodegen, "
+                                   "use `<<<CLIENT_EXEC>>>` markers instead of `<<<REMOTE_EXEC>>>` markers.")
+                        text += guidance
+
             return build_completion_response(model_id, text, response['usage'],
                                              finish_reason=finish_reason)
         finally:
