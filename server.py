@@ -389,9 +389,6 @@ class Config:
         "<<<INSTALL_TOOL_HOMEBREW>>>tool_name<<<INSTALL_TOOL_HOMEBREW>>>   — install a tool using Homebrew"
     ]
 
-    # (Legacy client tools mapped to REMOTE_EXEC behavior via instructions)
-    CLIENT_TOOLS = [] 
-
     # ── Combined tools ──
     ALL_TOOLS = BASE_TOOLS
 
@@ -1117,29 +1114,6 @@ def sync_completion(messages: List[ChatMessage], system_prompt: str, model_path:
             finish_reason = response['choices'][0].get('finish_reason', 'stop')
             if not finish_reason:
                 finish_reason = 'stop'
-
-            # Check if the response contains Apple development commands that should run on client
-            # If so, inject a strong reminder to use client commands
-            if model_id in ['implementer', 'metal_implementer']:
-                apple_dev_indicators = [
-                    'xcodegen', 'xcodebuild', 'xcrun', 'simctl', 'xcode-select',
-                    'ios-deploy', 'swiftc',  # Compilers and build tools
-                    'UIKit', 'SwiftUI', 'Metal', 'ARKit', 'SceneKit', 'RealityKit',  # Frameworks
-                    'CoreImage', 'AVFoundation', 'Vision', 'CoreML',  # Frameworks
-                    'xcarchive', 'ipa', 'plist', 'Info.plist',  # File types
-                    'Podfile', 'Cartfile',  # Dependency managers
-                    '.xcodeproj', '.xcworkspace'  # Project files
-                ]
-
-                # Check if any Apple dev indicators are in the response
-                text_lower = text.lower()
-                has_apple_dev_content = any(indicator.lower() in text_lower for indicator in apple_dev_indicators)
-
-                # If the response contains Apple dev content but no client commands, log for debugging
-                if has_apple_dev_content and 'CLIENT_EXEC' not in text and 'CLIENT_INSTALL_XCODE_TOOLS' not in text and 'CLIENT_LIST_XCODE_TOOLS' not in text and 'CLIENT_GENERATE_XCODE_PROJECT' not in text:
-                    # Log this for debugging purposes but don't modify the response text
-                    # to avoid polluting conversation history
-                    logger.warning("Agent attempted Apple development without client commands: %s", text[:200])
 
             return build_completion_response(model_id, text, response['usage'],
                                              finish_reason=finish_reason)

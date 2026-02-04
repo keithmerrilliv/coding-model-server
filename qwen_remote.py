@@ -20,21 +20,6 @@ from collections import deque
 from typing import Optional, List
 import requests
 
-# Apple development command and file indicators
-APPLE_DEV_COMMANDS = [
-    'xcodegen', 'xcodebuild', 'xcrun', 'simctl', 'xcode-select',
-    'swift', 'swiftc', 'ios-deploy', 'xcpretty', 'fastlane',
-    'carthage', 'pod', 'xctest', 'otool', 'nm', 'codesign',
-    'security', 'agvtool', 'plutil', 'ibtool', 'actool'
-]
-
-APPLE_DEV_FILE_INDICATORS = [
-    '.xcodeproj', '.xcworkspace', '.plist', 'Info.plist', '.xcassets',
-    'AppDelegate', 'ViewController', 'SceneDelegate', 'Assets.xcassets',
-    'Base.lproj', 'LaunchScreen', 'Main.storyboard', 'Podfile', 'Cartfile',
-    '.entitlements', '.mobileprovision', '.xcarchive', '.ipa', '.app'
-]
-
 # Readline for command history and CLI editing
 try:
     import readline
@@ -548,22 +533,6 @@ def is_command_allowed(command_args: List[str]) -> tuple:
 def run_command_async(job_id, command):
     """Run command in background thread and capture output in real-time"""
 
-    # Check if this is an Apple development command that should run on client
-    # (Restriction removed: This CLI runs on the client, so REMOTE_EXEC runs locally too)
-    import re
-    is_apple_dev_command = any(re.search(r'\b' + re.escape(cmd) + r'\b', command) for cmd in APPLE_DEV_COMMANDS)
-
-
-    # Additional check: if command contains paths typical of iOS/macOS development, warn about server execution
-    apple_dev_indicators = [
-        '.xcodeproj', '.xcworkspace', '.plist', 'Info.plist', '.xcassets',
-        'AppDelegate', 'ViewController', 'SceneDelegate', 'Assets.xcassets',
-        'Base.lproj', 'LaunchScreen', 'Main.storyboard', 'Podfile', 'Cartfile'
-    ]
-
-    command_lower = command.lower()
-    has_apple_dev_path = any(indicator.lower() in command_lower for indicator in apple_dev_indicators)
-
     try:
         job_tracker.update_job(job_id, status="running")
 
@@ -806,12 +775,6 @@ def has_pipe_dependency(command):
 def _execute_command_internal(command, async_mode=False, chunk_output=True):
     """Internal function to execute a command with security checks"""
 
-    # Check if this is an Apple development command that should run on client
-    # (Restriction removed: This CLI runs on the client, so REMOTE_EXEC runs locally too)
-    # Use word boundary matching to avoid substring matches (e.g., 'pod' shouldn't match 'podman')
-    import re
-    is_apple_dev_command = any(re.search(r'\b' + re.escape(cmd) + r'\b', command) for cmd in APPLE_DEV_COMMANDS)
-
     print_colored(f"\nAgent wants to run command: {command}", COLORS['WARNING'])
     if async_mode:
         print_colored(f"   (async mode - will run in background)", COLORS['BLUE'])
@@ -820,16 +783,6 @@ def _execute_command_internal(command, async_mode=False, chunk_output=True):
         print_colored(f"   Shell mode enabled (less safe)", COLORS['WARNING'])
     else:
         print_colored(f"   Safe mode (shell=False)", COLORS['GREEN'])
-
-    # Additional check: if command contains paths typical of iOS/macOS development, warn about server execution
-    apple_dev_indicators = [
-        '.xcodeproj', '.xcworkspace', '.plist', 'Info.plist', '.xcassets',
-        'AppDelegate', 'ViewController', 'SceneDelegate', 'Assets.xcassets',
-        'Base.lproj', 'LaunchScreen', 'Main.storyboard', 'Podfile', 'Cartfile'
-    ]
-
-    command_lower = command.lower()
-    has_apple_dev_path = any(indicator.lower() in command_lower for indicator in apple_dev_indicators)
 
     try:
         if not ALLOW_SHELL_MODE:
@@ -2010,6 +1963,7 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
             # produces a response with no actionable commands.
             force_reload_override = True  # first call for this task uses force reload
             task_aborted = False
+            task_commands_executed = False # Track if any commands were run for this task
             max_continuations = 5  # safety cap for truncation retries
             while True:
                 headers = {"X-Qwen-Force-Reload": "true" if force_reload_override else "false"}
@@ -2088,6 +2042,7 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                             tool_output = "\n\n".join(results)
 
                 if tool_output:
+                    task_commands_executed = True
                     cmd_count = tool_output.count("[Command ")
                     label = f"{cmd_count} command(s) executed" if cmd_count > 1 else "Tool result"
                     print_colored(f"\n{label}. Sending output back to agent...", COLORS['CYAN'])
@@ -2103,7 +2058,20 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                 last_msg_to_agent = history[-2] if len(history) >= 2 else {}
                 already_retried = last_msg_to_agent.get("_retried")
 
-                if not is_finishing_summary and not already_retried and not is_exempt_agent:
+                # Retry if:
+                # 1. It's an executor agent (not exempt) AND no commands have been executed yet (REGARDLESS of summary)
+                # 2. OR it's any agent that didn't provide a summary AND hasn't been retried yet
+                should_retry = False
+                
+                if not already_retried:
+                    if not is_exempt_agent and not task_commands_executed:
+                        # Force executor agents to work at least once
+                        should_retry = True
+                    elif not is_finishing_summary:
+                        # Standard retry for non-summary responses
+                        should_retry = True
+
+                if should_retry:
                     print_colored("\nAgent gave advice instead of executing. Retrying...", COLORS['WARNING'])
                     history.append({
                         "role": "user",
