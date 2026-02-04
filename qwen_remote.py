@@ -1296,8 +1296,8 @@ def execute_client_command(command):
 
 
 def install_xcode_tools(tool_name=""):
-    """Install Xcode command line tools"""
-    print_colored(f"\nAgent wants to install Xcode command line tools", COLORS['WARNING'])
+    """Install Xcode command line tools - runs on client (macOS)"""
+    print_colored(f"\n[XCODE TOOLS] Agent wants to install Xcode command line tools on CLIENT (macOS)", COLORS['GREEN'])
 
     try:
         # Check if on macOS
@@ -1310,29 +1310,29 @@ def install_xcode_tools(tool_name=""):
         if result.returncode == 0:
             return f"Xcode command line tools are already installed at: {result.stdout.strip()}"
 
-        print_colored("Installing Xcode command line tools (this may take a few minutes)...", COLORS['CYAN'])
-        print_colored("Note: This will open a GUI dialog to install the tools.", COLORS['BLUE'])
+        print_colored("Installing Xcode command line tools (this may take a few minutes)...", COLORS['GREEN'])
+        print_colored("Note: This will open a GUI dialog to install the tools.", COLORS['GREEN'])
 
         # Install Xcode command line tools
         result = subprocess.run(['xcode-select', '--install'], capture_output=True, text=True)
 
         if result.returncode == 0:
-            print_colored("Xcode command line tools installation initiated", COLORS['GREEN'])
-            return "Xcode command line tools installation initiated. Follow the GUI prompts to complete installation."
+            print_colored("Xcode command line tools installation initiated on CLIENT (macOS)", COLORS['GREEN'])
+            return "Xcode command line tools installation initiated on CLIENT (macOS). Follow the GUI prompts to complete installation."
         else:
-            error_msg = f"Failed to initiate Xcode command line tools installation.\nError:\n{result.stderr}"
+            error_msg = f"Failed to initiate Xcode command line tools installation on CLIENT (macOS).\nError:\n{result.stderr}"
             print_colored(error_msg, COLORS['FAIL'])
             return error_msg
 
     except Exception as e:
-        error_msg = f"Error installing Xcode command line tools: {str(e)}"
+        error_msg = f"Error installing Xcode command line tools on CLIENT (macOS): {str(e)}"
         print_colored(error_msg, COLORS['FAIL'])
         return error_msg
 
 
 def list_xcode_tools(list_cmd=""):
-    """List available Xcode command line tools"""
-    print_colored(f"\nAgent wants to list Xcode command line tools", COLORS['WARNING'])
+    """List available Xcode command line tools - runs on client (macOS)"""
+    print_colored(f"\n[XCODE TOOLS] Agent wants to list Xcode command line tools on CLIENT (macOS)", COLORS['GREEN'])
 
     try:
         import platform
@@ -1345,7 +1345,7 @@ def list_xcode_tools(list_cmd=""):
             return "Xcode command line tools are not installed."
 
         tools_path = result.stdout.strip()
-        print_colored(f"Xcode tools path: {tools_path}", COLORS['CYAN'])
+        print_colored(f"Xcode tools path: {tools_path}", COLORS['GREEN'])
 
         # List some common tools
         common_tools = ['xcodebuild', 'xcrun', 'xcode-select', 'simctl', 'codesign', 'security']
@@ -1356,12 +1356,12 @@ def list_xcode_tools(list_cmd=""):
                 available_tools.append(f"{tool}: {tool_result.stdout.strip()}")
 
         if available_tools:
-            return f"Available Xcode tools:\n" + "\n".join(available_tools)
+            return f"Available Xcode tools on CLIENT (macOS):\n" + "\n".join(available_tools)
         else:
-            return "No common Xcode tools found in PATH."
+            return "No common Xcode tools found in PATH on CLIENT (macOS)."
 
     except Exception as e:
-        error_msg = f"Error listing Xcode command line tools: {str(e)}"
+        error_msg = f"Error listing Xcode command line tools on CLIENT (macOS): {str(e)}"
         print_colored(error_msg, COLORS['FAIL'])
         return error_msg
 
