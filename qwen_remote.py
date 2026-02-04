@@ -832,6 +832,18 @@ def has_pipe_dependency(command):
 
 def _execute_command_internal(command, async_mode=False, chunk_output=True):
     """Internal function to execute a command with security checks"""
+
+    # Check if this is an Apple development command that should run on client
+    apple_dev_commands = ['xcodegen', 'xcodebuild', 'xcrun', 'simctl', 'xcode-select',
+                          'swift', 'swiftc', 'ios-deploy']
+    is_apple_dev_command = any(cmd in command for cmd in apple_dev_commands)
+
+    if is_apple_dev_command:
+        print_colored(f"\n🚨 APPLE DEVELOPMENT COMMAND DETECTED: {command}", COLORS['FAIL'])
+        print_colored(f"   This command should run on macOS CLIENT, not Linux SERVER", COLORS['FAIL'])
+        print_colored(f"   Use `<<<CLIENT_EXEC>>>` instead of `<<<REMOTE_EXEC>>>`", COLORS['FAIL'])
+        return f"ERROR: Apple development command '{command}' should run on macOS client, not Linux server.\nUse `<<<CLIENT_EXEC>>>` instead of `<<<REMOTE_EXEC>>>` for Apple development tools."
+
     print_colored(f"\nAgent wants to run command: {command}", COLORS['WARNING'])
     if async_mode:
         print_colored(f"   (async mode - will run in background)", COLORS['BLUE'])
