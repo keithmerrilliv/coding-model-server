@@ -10,6 +10,7 @@ import time
 import uuid
 import subprocess
 import logging
+import select
 from datetime import datetime
 from typing import Dict, List, Optional, Any, Literal, Iterator
 from threading import Lock, Thread
@@ -158,26 +159,20 @@ class AppleDeepDocsService:
         self.venv_python = os.path.join(mcp_path, "venv/bin/python")
 
     def _readline_with_timeout(self, timeout: float = 30) -> Optional[str]:
-        """Read a line from the MCP subprocess stdout with a timeout.
-
-        Uses a background thread so a hung subprocess doesn't block forever.
+        """Read a line from the MCP subprocess stdout with a timeout using select.
+        
         Returns the line string, or None on timeout / EOF.
         """
-        result = [None]
-
-        def _read():
-            try:
-                result[0] = self.process.stdout.readline()
-            except Exception:
-                result[0] = None
-
-        reader = Thread(target=_read, daemon=True)
-        reader.start()
-        reader.join(timeout)
-        if reader.is_alive():
-            logger.error("MCP readline timed out after %.1f seconds", timeout)
+        if not self.process or not self.process.stdout:
             return None
-        return result[0]
+
+        # Poll stdout for data
+        ready, _, _ = select.select([self.process.stdout], [], [], timeout)
+        if ready:
+            return self.process.stdout.readline()
+        
+        logger.error("MCP readline timed out after %.1f seconds", timeout)
+        return None
 
     def start(self):
         """Start the MCP server process and perform handshake if not already running"""
@@ -605,12 +600,7 @@ class ModelManager:
             if self.models:
                 logger.info("Unloading models (Cleaning VRAM)...")
                 try:
-                    # Clear internal references and explicitly delete models
-                    for model_path, model in self.models.items():
-                        logger.info(f"Unloading model: {model_path}")
-                        del model
-
-                    # Clear the ordered dict
+                    # Clear internal references
                     self.models.clear()
 
                     # Force garbage collection
@@ -650,15 +640,12 @@ class ModelManager:
                 logger.info(f"Reusing cached model for {agent_name}")
                 return model
 
-        # If not cached and force_reload is True, we may need to evict oldest models
-        if force_reload:
-            with self.lock:
-                # If we've reached the cache limit, remove the oldest model
-                while len(self.models) >= self.max_cached_models:
-                    oldest_path, oldest_model = self.models.popitem(last=False)
-                    logger.info(f"Evicting oldest model from cache: {oldest_path}")
-                    # Explicitly delete the model to free memory
-                    del oldest_model
+            # Evict oldest if cache is full (unconditionally)
+            while len(self.models) >= self.max_cached_models:
+                oldest_path, oldest_model = self.models.popitem(last=False)
+                logger.info(f"Evicting oldest model from cache: {oldest_path}")
+                # Explicitly delete the model object to help GC
+                del oldest_model
 
         # Load the model
         with self.lock:
@@ -699,20 +686,6 @@ class ModelManager:
             except Exception as e:
                 logger.error("Failed to load model %s: %s", model_path, e)
                 raise
-
-    def is_model_cached(self, model_path: str) -> bool:
-        """Check if a model is currently cached"""
-        with self.lock:
-            return model_path in self.models
-
-    def get_cached_model_stats(self) -> Dict[str, Any]:
-        """Get statistics about cached models"""
-        with self.lock:
-            return {
-                "cached_count": len(self.models),
-                "max_cache_size": self.max_cached_models,
-                "cached_models": list(self.models.keys()),
-            }
 
     def is_loaded(self) -> bool:
         """Check if any model is loaded"""
@@ -1149,10 +1122,8 @@ def sync_completion(messages: List[ChatMessage], system_prompt: str, model_path:
             return build_completion_response(model_id, text, response['usage'],
                                              finish_reason=finish_reason)
         finally:
-            # Only unload if force_reload is True and we want to clear all models
-            # Otherwise, keep the model cached for future use
-            if force_reload:
-                model_manager.unload_model()
+            # Keep the model cached for future use
+            pass
 
 def stream_completion(messages: List[ChatMessage], system_prompt: str, model_path: str,
                       model_id: str, max_tokens: int, temperature: float, force_reload: bool) -> Iterator[str]:
@@ -1245,10 +1216,8 @@ def stream_completion(messages: List[ChatMessage], system_prompt: str, model_pat
                     model_id, n_prompt, final_available, clamped_max, token_count, finish_reason
                 )
             finally:
-                # Only unload if force_reload is True and we want to clear all models
-                # Otherwise, keep the model cached for future use
-                if force_reload:
-                    model_manager.unload_model()
+                # Keep the model cached for future use
+                pass
 
         final_chunk = build_stream_chunk(completion_id, model_id, finish=True,
                                          finish_reason=finish_reason)

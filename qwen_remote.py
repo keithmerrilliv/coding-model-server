@@ -648,12 +648,6 @@ def run_command_async(job_id, command):
         )
 
 
-def execute_remote_command(command, async_mode=False):
-    """Execute command synchronously or asynchronously with security checks"""
-    # Use the chunked version by default for better handling of large outputs
-    return execute_remote_command_chunked(command, async_mode, chunk_output=True)
-
-
 def chunk_large_output(content, chunk_size=6000, overlap=500):
     """
     Split large output into chunks with overlap to preserve context.
@@ -777,55 +771,7 @@ def get_chunk_for_display(content, chunk_idx=None, chunk_size=6000, overlap=500,
         )
 
 
-def execute_remote_command_chunked(command, async_mode=False, chunk_output=True):
-    """
-    Execute command with optional chunked output handling for large outputs.
-
-    Args:
-        command (str): Command to execute
-        async_mode (bool): Whether to run in async mode
-        chunk_output (bool): Whether to use chunked output handling
-
-    Returns:
-        str: Result of command execution
-    """
-
-    # Execute as a single command (preserves pipes and complex shell constructs)
-    # We rely on the shell (ALLOW_SHELL_MODE=True) to handle && chaining correctly for state persistence (like cd)
-    return execute_single_command(command, async_mode, chunk_output)
-
-
-def has_pipe_dependency(command):
-    """
-    Check if a command has pipe dependencies that require it to run as a single unit.
-    Pipes connect the output of one command to the input of another, and redirections
-    connect commands to files, so they must run together rather than being split by && separators.
-    """
-    # Check for pipes, output redirections (>), and input redirections (<) outside of quotes
-    in_single_quotes = False
-    in_double_quotes = False
-    escaped = False
-
-    for i, char in enumerate(command):
-        if escaped:
-            escaped = False
-            continue
-
-        if char == '\\':
-            escaped = True
-            continue
-
-        if char == "'" and not in_double_quotes:
-            in_single_quotes = not in_single_quotes
-        elif char == '"' and not in_single_quotes:
-            in_double_quotes = not in_double_quotes
-        elif char in ('|', '>', '<') and not in_single_quotes and not in_double_quotes:
-            return True
-
-    return False
-
-
-def _execute_command_internal(command, async_mode=False, chunk_output=True):
+def execute_remote_command(command, async_mode=False, chunk_output=True):
     """Internal function to execute a command with security checks"""
 
     print_colored(f"\nAgent wants to run command: {command}", COLORS['WARNING'])
@@ -960,11 +906,6 @@ def _execute_command_internal(command, async_mode=False, chunk_output=True):
             return f"ERROR: Command timed out (240s limit for sync commands). Command: {command}\nConsider using async mode for long-running commands."
         except Exception as e:
             return f"ERROR: Failed to execute command: {str(e)}\nCommand: {command}"
-
-
-def execute_single_command(command, async_mode=False, chunk_output=True):
-    """Execute a single command with security checks"""
-    return _execute_command_internal(command, async_mode, chunk_output)
 
 
 def check_job_status(job_id):
@@ -1275,234 +1216,6 @@ def install_tool_with_homebrew(tool_name):
         return error_msg
 
 
-def execute_client_command(command):
-    """Execute a command on the client machine (macOS where Xcode projects are located)"""
-    print_colored(f"\n[CLIENT EXEC] Agent wants to execute command on CLIENT (macOS): {command}", COLORS['GREEN'])
-
-    try:
-        # This is a direct client-side command execution
-        # Apply the same security checks as remote commands
-        if not ALLOW_SHELL_MODE:
-            command_args = parse_command_safely(command)
-            allowed, msg = is_command_allowed(command_args)
-            if not allowed:
-                print_colored(f"   {msg}", COLORS['FAIL'])
-                return f"Command rejected: {msg}"
-            print_colored(f"   {msg}", COLORS['GREEN'])
-        else:
-            print_colored(f"   Shell mode enabled (less safe)", COLORS['WARNING'])
-
-        if ALLOW_ALL:
-            print_colored(f"   Auto-approved (ALLOW_ALL mode enabled)", COLORS['GREEN'])
-            choice = 'y'
-        else:
-            try:
-                choice = input(f"{COLORS['BOLD']}Allow? [y/N] > {COLORS['ENDC']}")
-            except (EOFError, KeyboardInterrupt):
-                return "User cancelled command execution."
-
-            if choice.lower() != 'y':
-                return "User denied command execution."
-
-        # Execute the command respecting the same security settings as remote commands
-        # Create a temp file to capture output for consistent handling with chunking
-        with tempfile.NamedTemporaryFile(mode='w+', delete=False, prefix='qwen_client_cmd_', suffix='.log') as tmp:
-            tmp_path = tmp.name
-        _add_temp_file(tmp_path)
-
-        # Run process redirecting stdout/stderr to the temp file
-        if ALLOW_SHELL_MODE:
-            with open(tmp_path, 'w') as f:
-                result = subprocess.run(command, shell=True, stdout=f, stderr=subprocess.STDOUT, text=True, errors='replace', timeout=240)
-        else:
-            command_args = parse_command_safely(command)
-            command_args = expand_paths_in_args(command_args)
-            with open(tmp_path, 'w') as f:
-                result = subprocess.run(command_args, shell=False, stdout=f, stderr=subprocess.STDOUT, text=True, errors='replace', timeout=240)
-
-        # Analyze output file
-        with open(tmp_path, 'r', errors='replace') as f:
-            content = f.read()
-
-        output_len = len(content)
-
-        # Use chunked processing if output is large
-        if output_len > 8000:  # Same threshold as remote commands
-            final_output = get_chunk_for_display(content, chunk_size=6000, overlap=500, log_path=tmp_path)
-
-            # Store chunk info for potential later retrieval
-            chunk_info_path = tmp_path + '.chunks'
-            _add_temp_file(chunk_info_path)
-            chunk_result = chunk_large_output(content, chunk_size=6000, overlap=500)
-
-            # Save chunk metadata
-            with open(chunk_info_path, 'w') as f:
-                json.dump({
-                    'total_chunks': chunk_result['total_chunks'],
-                    'original_length': chunk_result['original_length'],
-                    'chunk_size': chunk_result['chunk_size'],
-                    'file_path': tmp_path
-                }, f)
-        else:
-            # Use original logic for smaller outputs
-            MAX_DISPLAY_CHARS = 8000 # ~2k tokens safe limit
-
-            if output_len > MAX_DISPLAY_CHARS:
-                head = content[:2500]
-                tail = content[-2500:]
-
-                # Simple grep for errors/warnings in the truncated middle
-                middle = content[2500:-2500]
-                error_lines = []
-                for line in middle.splitlines():
-                    if 'error' in line.lower() or 'fail' in line.lower() or 'warning' in line.lower():
-                        error_lines.append(line.strip())
-
-                summary = "\n".join(error_lines[:15]) # Limit summary size
-                if len(error_lines) > 15:
-                    summary += f"\n... ({len(error_lines) - 15} more error lines omitted) ..."
-
-                final_output = (
-                    f"{head}\n"
-                    f"\n... [TRUNCATED: {output_len} chars] ...\n"
-                    f"... [Log: {tmp_path}] ...\n"
-                    f"... [Error Summary]:\n{summary}\n"
-                    f"\n... [TAIL] ...\n"
-                    f"{tail}"
-                )
-            else:
-                final_output = content
-                # If small enough, clean up the temp file to reduce clutter
-                try:
-                    os.remove(tmp_path)
-                    _remove_temp_file(tmp_path)
-                except Exception:
-                    pass
-
-        print_colored(f"Client command executed with exit code {result.returncode}", COLORS['GREEN'] if result.returncode == 0 else COLORS['FAIL'])
-
-        if result.returncode == 0:
-            return f"Command executed successfully on CLIENT (macOS).\nExit Code: {result.returncode}\nOutput:\n{final_output}"
-        else:
-            return f"ERROR: Command failed on CLIENT (macOS).\nExit Code: {result.returncode}\nCommand: {command}\nOutput:\n{final_output}"
-
-    except subprocess.TimeoutExpired:
-        return "Client command timed out (240s limit)."
-    except Exception as e:
-        return f"Error executing client command: {str(e)}"
-
-
-def install_xcode_tools(tool_name=""):
-    """Install Xcode command line tools - runs on client (macOS)"""
-    print_colored(f"\n[XCODE TOOLS] Agent wants to install Xcode command line tools on CLIENT (macOS)", COLORS['GREEN'])
-
-    try:
-        # Check if on macOS
-        import platform
-        if platform.system() != "Darwin":
-            return "Error: Xcode command line tools are only available on macOS."
-
-        # Check if Xcode tools are already installed
-        result = subprocess.run(['xcode-select', '-p'], capture_output=True, text=True)
-        if result.returncode == 0:
-            return f"Xcode command line tools are already installed at: {result.stdout.strip()}"
-
-        print_colored("Installing Xcode command line tools (this may take a few minutes)...", COLORS['GREEN'])
-        print_colored("Note: This will open a GUI dialog to install the tools.", COLORS['GREEN'])
-
-        # Install Xcode command line tools
-        result = subprocess.run(['xcode-select', '--install'], capture_output=True, text=True)
-
-        if result.returncode == 0:
-            print_colored("Xcode command line tools installation initiated on CLIENT (macOS)", COLORS['GREEN'])
-            return "Xcode command line tools installation initiated on CLIENT (macOS). Follow the GUI prompts to complete installation."
-        else:
-            error_msg = f"Failed to initiate Xcode command line tools installation on CLIENT (macOS).\nError:\n{result.stderr}"
-            print_colored(error_msg, COLORS['FAIL'])
-            return error_msg
-
-    except Exception as e:
-        error_msg = f"Error installing Xcode command line tools on CLIENT (macOS): {str(e)}"
-        print_colored(error_msg, COLORS['FAIL'])
-        return error_msg
-
-
-def list_xcode_tools(list_cmd=""):
-    """List available Xcode command line tools - runs on client (macOS)"""
-    print_colored(f"\n[XCODE TOOLS] Agent wants to list Xcode command line tools on CLIENT (macOS)", COLORS['GREEN'])
-
-    try:
-        import platform
-        if platform.system() != "Darwin":
-            return "Error: Xcode command line tools are only available on macOS."
-
-        # List available tools
-        result = subprocess.run(['xcode-select', '-p'], capture_output=True, text=True)
-        if result.returncode != 0:
-            return "Xcode command line tools are not installed."
-
-        tools_path = result.stdout.strip()
-        print_colored(f"Xcode tools path: {tools_path}", COLORS['GREEN'])
-
-        # List some common tools
-        common_tools = ['xcodebuild', 'xcrun', 'xcode-select', 'simctl', 'codesign', 'security']
-        available_tools = []
-        for tool in common_tools:
-            tool_result = subprocess.run(['which', tool], capture_output=True, text=True)
-            if tool_result.returncode == 0:
-                available_tools.append(f"{tool}: {tool_result.stdout.strip()}")
-
-        if available_tools:
-            return f"Available Xcode tools on CLIENT (macOS):\n" + "\n".join(available_tools)
-        else:
-            return "No common Xcode tools found in PATH on CLIENT (macOS)."
-
-    except Exception as e:
-        error_msg = f"Error listing Xcode command line tools on CLIENT (macOS): {str(e)}"
-        print_colored(error_msg, COLORS['FAIL'])
-        return error_msg
-
-
-def generate_xcode_project(config):
-    """Generate an Xcode project using xcodegen - runs on client (macOS)"""
-    print_colored(f"\n[XCODEGEN] Agent wants to generate Xcode project on CLIENT (macOS)", COLORS['GREEN'])
-
-    try:
-        import platform
-        if platform.system() != "Darwin":
-            return "Error: Xcode and xcodegen are only available on macOS."
-
-        # Check if xcodegen is installed
-        result = subprocess.run(['which', 'xcodegen'], capture_output=True, text=True)
-        if result.returncode != 0:
-            install_msg = install_xcode_tools()  # Attempt to install Xcode tools
-            return f"xcodegen not found. {install_msg}\n\nYou may need to install xcodegen separately using Homebrew: `brew install xcodegen`"
-
-        # Generate project based on configuration
-        # If config looks like a path, use it as the project spec file
-        if config and ('/' in config or config.endswith('.yml') or config.endswith('.yaml')):
-            # Assume it's a path to a project spec file
-            project_spec = config
-            print_colored(f"Generating Xcode project from spec: {project_spec}", COLORS['GREEN'])
-            result = subprocess.run(['xcodegen', 'generate', '--spec', project_spec], capture_output=True, text=True)
-        else:
-            print_colored("Generating Xcode project from current directory spec", COLORS['GREEN'])
-            # If no config provided or it's not a path, just run xcodegen in current directory
-            result = subprocess.run(['xcodegen', 'generate'], capture_output=True, text=True)
-
-        if result.returncode == 0:
-            print_colored("Xcode project generated successfully on CLIENT (macOS)", COLORS['GREEN'])
-            return f"Xcode project generated successfully on CLIENT (macOS).\nOutput:\n{result.stdout}"
-        else:
-            error_msg = f"Failed to generate Xcode project on CLIENT (macOS).\nError:\n{result.stderr}"
-            print_colored(error_msg, COLORS['FAIL'])
-            return error_msg
-
-    except Exception as e:
-        error_msg = f"Error generating Xcode project on CLIENT (macOS): {str(e)}"
-        print_colored(error_msg, COLORS['FAIL'])
-        return error_msg
-
 def read_file_content(path):
     """Read content of a local file safely"""
     try:
@@ -1564,18 +1277,6 @@ def process_remote_commands(response_text: str) -> Optional[str]:
         (r'<<<INSTALL_TOOL_HOMEBREW>>>\s*(.*?)\s*<<<INSTALL_TOOL_HOMEBREW>>>',
          lambda tool_name: install_tool_with_homebrew(tool_name.strip()),
          True),
-        (r'<<<CLIENT_EXEC>>>\s*(.*?)\s*<<<CLIENT_EXEC>>>',
-         lambda cmd: execute_client_command(cmd.strip()),
-         True),
-        (r'<<<CLIENT_INSTALL_XCODE_TOOLS>>>\s*(.*?)\s*<<<CLIENT_INSTALL_XCODE_TOOLS>>>',
-         lambda name: install_xcode_tools(name.strip()),
-         True),
-        (r'<<<CLIENT_LIST_XCODE_TOOLS>>>\s*(.*?)\s*<<<CLIENT_LIST_XCODE_TOOLS>>>',
-         lambda list_cmd: list_xcode_tools(list_cmd.strip()),
-         True),
-        (r'<<<CLIENT_GENERATE_XCODE_PROJECT>>>\s*(.*?)\s*<<<CLIENT_GENERATE_XCODE_PROJECT>>>',
-         lambda config: generate_xcode_project(config.strip()),
-         True),
         (r'<<<REMOTE_LIST_JOBS>>>',
          lambda _: list_all_jobs(),
          False),
@@ -1633,6 +1334,30 @@ def extract_fallback_commands(response_text: str) -> List[str]:
             commands.append(block)
 
     return commands
+
+
+def _trim_history_for_context(history):
+    """Trim history when context limit is reached"""
+    if len(history) > 2:
+        trim_index = max(1, int(len(history) * 0.25))
+        # Walk forward until we land on a "user" message to keep valid conversation structure
+        while trim_index < len(history) - 1 and history[trim_index]["role"] != "user":
+            trim_index += 1
+        trimmed_past = history[trim_index:-1]
+        history[:] = trimmed_past + [history[-1]]
+        
+        # Re-sanitize history for the retry payload
+        sanitized_retry = []
+        valid_roles = {"system", "user", "assistant"}
+        for m in history:
+            content = m.get("content", "").strip()
+            role = m.get("role", "")
+            if content and role in valid_roles:
+                sanitized_retry.append({"role": role, "content": content})
+        if not sanitized_retry:
+            sanitized_retry.append({"role": "user", "content": "Hello"})
+        return sanitized_retry
+    return None
 
 
 def get_completion(history, model, agent_theme, headers):
@@ -1705,24 +1430,8 @@ def get_completion(history, model, agent_theme, headers):
                 if "exceed context window" in error_text or "context_length_exceeded" in error_text or "fills the entire context window" in error_text:
                     if context_retries < MAX_CONTEXT_RETRIES:
                         print_colored(f"\n[Client] Context limit reached. Trimming history and retrying ({context_retries+1}/{MAX_CONTEXT_RETRIES})...", COLORS['WARNING'])
-                        if len(history) > 2:
-                            trim_index = max(1, int(len(history) * 0.25))
-                            # Walk forward until we land on a "user" message to keep valid conversation structure
-                            while trim_index < len(history) - 1 and history[trim_index]["role"] != "user":
-                                trim_index += 1
-                            trimmed_past = history[trim_index:-1]
-                            history[:] = trimmed_past + [history[-1]]
-                            
-                            # Re-sanitize history for the retry payload
-                            sanitized_retry = []
-                            for m in history:
-                                content = m.get("content", "").strip()
-                                role = m.get("role", "")
-                                if content and role in valid_roles:
-                                    sanitized_retry.append({"role": role, "content": content})
-                            if not sanitized_retry:
-                                sanitized_retry.append({"role": "user", "content": "Hello"})
-
+                        sanitized_retry = _trim_history_for_context(history)
+                        if sanitized_retry:
                             payload["messages"] = sanitized_retry
                             context_retries += 1
                             stop_progress = threading.Event(); progress_thread = threading.Thread(target=show_progress, daemon=True); progress_thread.start()
@@ -1758,24 +1467,8 @@ def get_completion(history, model, agent_theme, headers):
                                 if "exceed context window" in error_msg or "context_length_exceeded" in error_msg or "fills the entire context window" in error_msg:
                                     if context_retries < MAX_CONTEXT_RETRIES:
                                         print_colored(f"\n[Client] Context limit reached (during generation). Trimming and retrying...", COLORS['WARNING'])
-                                        if len(history) > 2:
-                                            trim_index = max(1, int(len(history) * 0.25))
-                                            # Walk forward until we land on a "user" message to keep valid conversation structure
-                                            while trim_index < len(history) - 1 and history[trim_index]["role"] != "user":
-                                                trim_index += 1
-                                            trimmed_past = history[trim_index:-1]
-                                            history[:] = trimmed_past + [history[-1]]
-                                            
-                                            # Re-sanitize history for the retry payload
-                                            sanitized_retry = []
-                                            for m in history:
-                                                content = m.get("content", "").strip()
-                                                role = m.get("role", "")
-                                                if content and role in valid_roles:
-                                                    sanitized_retry.append({"role": role, "content": content})
-                                            if not sanitized_retry:
-                                                sanitized_retry.append({"role": "user", "content": "Hello"})
-
+                                        sanitized_retry = _trim_history_for_context(history)
+                                        if sanitized_retry:
                                             payload["messages"] = sanitized_retry
                                             context_retries += 1
                                             server_error_occurred = True
