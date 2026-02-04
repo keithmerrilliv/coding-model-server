@@ -1129,35 +1129,23 @@ def sync_completion(messages: List[ChatMessage], system_prompt: str, model_path:
             if model_id in ['implementer', 'metal_implementer']:
                 apple_dev_indicators = [
                     'xcodegen', 'xcodebuild', 'xcrun', 'simctl', 'xcode-select',
-                    'ios-deploy', 'swift', 'swiftc', 'objc', 'Objective-C',
-                    'UIKit', 'SwiftUI', 'Metal', 'ARKit', 'SceneKit', 'RealityKit',
-                    'CoreImage', 'AVFoundation', 'Vision', 'CoreML', 'XCTest',
-                    'XCUIApplication', 'tvOS', 'watchOS', 'macOS', 'iOS development',
-                    'iPhone', 'iPad', 'Apple Silicon', 'CocoaPods', 'Carthage',
-                    'Swift Package Manager', 'xcarchive', 'ipa', 'bundle identifier',
-                    'plist', 'Info.plist', 'entitlements', 'provisioning profile',
-                    'App Store Connect', 'TestFlight', 'iTunes Connect'
+                    'ios-deploy', 'swiftc',  # Compilers and build tools
+                    'UIKit', 'SwiftUI', 'Metal', 'ARKit', 'SceneKit', 'RealityKit',  # Frameworks
+                    'CoreImage', 'AVFoundation', 'Vision', 'CoreML',  # Frameworks
+                    'xcarchive', 'ipa', 'plist', 'Info.plist',  # File types
+                    'Podfile', 'Cartfile',  # Dependency managers
+                    '.xcodeproj', '.xcworkspace'  # Project files
                 ]
 
                 # Check if any Apple dev indicators are in the response
                 text_lower = text.lower()
                 has_apple_dev_content = any(indicator.lower() in text_lower for indicator in apple_dev_indicators)
 
-                # If the response contains Apple dev content but no client commands, add a warning
+                # If the response contains Apple dev content but no client commands, log for debugging
                 if has_apple_dev_content and 'CLIENT_EXEC' not in text and 'CLIENT_INSTALL_XCODE_TOOLS' not in text and 'CLIENT_LIST_XCODE_TOOLS' not in text and 'CLIENT_GENERATE_XCODE_PROJECT' not in text:
-                    # Add a strong warning to the response
-                    warning = ("\n\n⚠️ CRITICAL WARNING: You are attempting Apple development tasks on the server. "
-                              "Apple development tools (xcodebuild, xcodegen, etc.) must run on macOS client. "
-                              "Use `<<<CLIENT_EXEC>>>` instead of `<<<REMOTE_EXEC>>>` for Apple development commands. "
-                              "Use `<<<CLIENT_GENERATE_XCODE_PROJECT>>>` for xcodegen operations.")
-                    text += warning
-
-                    # Additionally, if the response contains REMOTE_EXEC markers for Apple development commands,
-                    # add a note at the end to guide the agent for future attempts
-                    if '<<<REMOTE_EXEC>>>' in text:
-                        guidance = ("\n\n💡 FOR NEXT TIME: When you need to run Apple development tools like xcodegen, "
-                                   "use `<<<CLIENT_EXEC>>>` markers instead of `<<<REMOTE_EXEC>>>` markers.")
-                        text += guidance
+                    # Log this for debugging purposes but don't modify the response text
+                    # to avoid polluting conversation history
+                    logger.warning("Agent attempted Apple development without client commands: %s", text[:200])
 
             return build_completion_response(model_id, text, response['usage'],
                                              finish_reason=finish_reason)

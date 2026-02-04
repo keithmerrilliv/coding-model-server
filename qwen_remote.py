@@ -20,6 +20,21 @@ from collections import deque
 from typing import Optional, List
 import requests
 
+# Apple development command and file indicators
+APPLE_DEV_COMMANDS = [
+    'xcodegen', 'xcodebuild', 'xcrun', 'simctl', 'xcode-select',
+    'swift', 'swiftc', 'ios-deploy', 'xcpretty', 'fastlane',
+    'carthage', 'pod', 'xctest', 'otool', 'nm', 'codesign',
+    'security', 'agvtool', 'plutil', 'ibtool', 'actool'
+]
+
+APPLE_DEV_FILE_INDICATORS = [
+    '.xcodeproj', '.xcworkspace', '.plist', 'Info.plist', '.xcassets',
+    'AppDelegate', 'ViewController', 'SceneDelegate', 'Assets.xcassets',
+    'Base.lproj', 'LaunchScreen', 'Main.storyboard', 'Podfile', 'Cartfile',
+    '.entitlements', '.mobileprovision', '.xcarchive', '.ipa', '.app'
+]
+
 # Readline for command history and CLI editing
 try:
     import readline
@@ -532,6 +547,38 @@ def is_command_allowed(command_args: List[str]) -> tuple:
 
 def run_command_async(job_id, command):
     """Run command in background thread and capture output in real-time"""
+
+    # Check if this is an Apple development command that should run on client
+    import re
+    is_apple_dev_command = any(re.search(r'\b' + re.escape(cmd) + r'\b', command) for cmd in APPLE_DEV_COMMANDS)
+
+    if is_apple_dev_command:
+        job_tracker.add_output(job_id, f"🚨 APPLE DEVELOPMENT COMMAND DETECTED: {command}")
+        job_tracker.add_output(job_id, "   This command should run on macOS CLIENT, not Linux SERVER")
+        job_tracker.add_output(job_id, "   Use `<<<CLIENT_EXEC>>>` instead of `<<<REMOTE_EXEC>>>`")
+        job_tracker.update_job(
+            job_id,
+            status="failed",
+            exit_code=-1,
+            completed_at=datetime.now().isoformat()
+        )
+        return
+
+    # Additional check: if command contains paths typical of iOS/macOS development, warn about server execution
+    apple_dev_indicators = [
+        '.xcodeproj', '.xcworkspace', '.plist', 'Info.plist', '.xcassets',
+        'AppDelegate', 'ViewController', 'SceneDelegate', 'Assets.xcassets',
+        'Base.lproj', 'LaunchScreen', 'Main.storyboard', 'Podfile', 'Cartfile'
+    ]
+
+    command_lower = command.lower()
+    has_apple_dev_path = any(indicator.lower() in command_lower for indicator in apple_dev_indicators)
+
+    if has_apple_dev_path:
+        job_tracker.add_output(job_id, f"⚠️  APPLE DEVELOPMENT PATH DETECTED: {command}")
+        job_tracker.add_output(job_id, "   This command involves Apple development files and should likely run on macOS CLIENT")
+        job_tracker.add_output(job_id, "   Consider using `<<<CLIENT_EXEC>>>` instead of `<<<REMOTE_EXEC>>>`")
+
     try:
         job_tracker.update_job(job_id, status="running")
 
@@ -843,9 +890,9 @@ def _execute_command_internal(command, async_mode=False, chunk_output=True):
     """Internal function to execute a command with security checks"""
 
     # Check if this is an Apple development command that should run on client
-    apple_dev_commands = ['xcodegen', 'xcodebuild', 'xcrun', 'simctl', 'xcode-select',
-                          'swift', 'swiftc', 'ios-deploy', 'xcpretty', 'fastlane', 'carthage', 'pod', 'xctest']
-    is_apple_dev_command = any(cmd in command for cmd in apple_dev_commands)
+    # Use word boundary matching to avoid substring matches (e.g., 'pod' shouldn't match 'podman')
+    import re
+    is_apple_dev_command = any(re.search(r'\b' + re.escape(cmd) + r'\b', command) for cmd in APPLE_DEV_COMMANDS)
 
     if is_apple_dev_command:
         print_colored(f"\n🚨 APPLE DEVELOPMENT COMMAND DETECTED: {command}", COLORS['FAIL'])
@@ -878,7 +925,11 @@ def _execute_command_internal(command, async_mode=False, chunk_output=True):
         print_colored(f"   Consider using `<<<CLIENT_EXEC>>>` instead of `<<<REMOTE_EXEC>>>`", COLORS['WARNING'])
 
         # For high-confidence Apple development scenarios, return a strong recommendation
-        if any(indicator in command for indicator in ['.xcodeproj', '.xcworkspace', 'Podfile', 'Cartfile']):
+        # Only trigger for commands that are likely to modify or build Apple projects, not read operations
+        build_or_modify_commands = ['xcodebuild', 'xcodegen', 'pod', 'carthage', 'swift', 'swiftc', 'xcrun']
+        has_build_command = any(cmd in command for cmd in build_or_modify_commands)
+
+        if has_build_command and any(indicator in command for indicator in ['.xcodeproj', '.xcworkspace', 'Podfile', 'Cartfile']):
             return f"RECOMMENDATION: Command '{command}' involves Apple development project files.\nUse `<<<CLIENT_EXEC>>>` instead of `<<<REMOTE_EXEC>>>` for Apple development tasks."
 
     try:
@@ -1324,15 +1375,87 @@ def execute_client_command(command):
             if choice.lower() != 'y':
                 return "User denied command execution."
 
-        # Execute the command
-        result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=240)
+        # Execute the command respecting the same security settings as remote commands
+        # Create a temp file to capture output for consistent handling with chunking
+        with tempfile.NamedTemporaryFile(mode='w+', delete=False, prefix='qwen_client_cmd_', suffix='.log') as tmp:
+            tmp_path = tmp.name
+        _temp_files.add(tmp_path)
 
-        print_colored(f"Client command executed with exit code {result.returncode}", COLORS['GREEN'])
-        output = result.stdout
-        if result.stderr:
-            output += f"\nSTDERR:\n{result.stderr}"
+        # Run process redirecting stdout/stderr to the temp file
+        if ALLOW_SHELL_MODE:
+            with open(tmp_path, 'w') as f:
+                result = subprocess.run(command, shell=True, stdout=f, stderr=subprocess.STDOUT, text=True, errors='replace', timeout=240)
+        else:
+            command_args = parse_command_safely(command)
+            command_args = expand_paths_in_args(command_args)
+            with open(tmp_path, 'w') as f:
+                result = subprocess.run(command_args, shell=False, stdout=f, stderr=subprocess.STDOUT, text=True, errors='replace', timeout=240)
 
-        return f"Command executed successfully on CLIENT (macOS).\nExit Code: {result.returncode}\nOutput:\n{output}"
+        # Analyze output file
+        with open(tmp_path, 'r', errors='replace') as f:
+            content = f.read()
+
+        output_len = len(content)
+
+        # Use chunked processing if output is large
+        if output_len > 8000:  # Same threshold as remote commands
+            final_output = get_chunk_for_display(content, chunk_size=6000, overlap=500, log_path=tmp_path)
+
+            # Store chunk info for potential later retrieval
+            chunk_info_path = tmp_path + '.chunks'
+            _temp_files.add(chunk_info_path)
+            chunk_result = chunk_large_output(content, chunk_size=6000, overlap=500)
+
+            # Save chunk metadata
+            with open(chunk_info_path, 'w') as f:
+                json.dump({
+                    'total_chunks': chunk_result['total_chunks'],
+                    'original_length': chunk_result['original_length'],
+                    'chunk_size': chunk_result['chunk_size'],
+                    'file_path': tmp_path
+                }, f)
+        else:
+            # Use original logic for smaller outputs
+            MAX_DISPLAY_CHARS = 8000 # ~2k tokens safe limit
+
+            if output_len > MAX_DISPLAY_CHARS:
+                head = content[:2500]
+                tail = content[-2500:]
+
+                # Simple grep for errors/warnings in the truncated middle
+                middle = content[2500:-2500]
+                error_lines = []
+                for line in middle.splitlines():
+                    if 'error' in line.lower() or 'fail' in line.lower() or 'warning' in line.lower():
+                        error_lines.append(line.strip())
+
+                summary = "\n".join(error_lines[:15]) # Limit summary size
+                if len(error_lines) > 15:
+                    summary += f"\n... ({len(error_lines) - 15} more error lines omitted) ..."
+
+                final_output = (
+                    f"{head}\n"
+                    f"\n... [TRUNCATED: {output_len} chars] ...\n"
+                    f"... [Log: {tmp_path}] ...\n"
+                    f"... [Error Summary]:\n{summary}\n"
+                    f"\n... [TAIL] ...\n"
+                    f"{tail}"
+                )
+            else:
+                final_output = content
+                # If small enough, clean up the temp file to reduce clutter
+                try:
+                    os.remove(tmp_path)
+                    _temp_files.discard(tmp_path)
+                except Exception:
+                    pass
+
+        print_colored(f"Client command executed with exit code {result.returncode}", COLORS['GREEN'] if result.returncode == 0 else COLORS['FAIL'])
+
+        if result.returncode == 0:
+            return f"Command executed successfully on CLIENT (macOS).\nExit Code: {result.returncode}\nOutput:\n{final_output}"
+        else:
+            return f"ERROR: Command failed on CLIENT (macOS).\nExit Code: {result.returncode}\nCommand: {command}\nOutput:\n{final_output}"
 
     except subprocess.TimeoutExpired:
         return "Client command timed out (240s limit)."
