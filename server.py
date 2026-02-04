@@ -377,8 +377,8 @@ class Config:
     
     # ── Base tool reference (used by all agents) ──
     BASE_TOOLS = [
-        "<<<REMOTE_EXEC>>>command<<<REMOTE_EXEC>>>                         — run a shell command (sync, <30s)",
-        "<<<REMOTE_EXEC_ASYNC>>>command<<<REMOTE_EXEC_ASYNC>>>             — run in background (builds, long tasks)",
+        "<<<REMOTE_EXEC>>>command<<<REMOTE_EXEC>>>                         — run a shell command ON SERVER (Linux) - NOT FOR XCODE PROJECTS",
+        "<<<REMOTE_EXEC_ASYNC>>>command<<<REMOTE_EXEC_ASYNC>>>             — run in background ON SERVER (Linux)",
         "<<<REMOTE_CHECK_STATUS>>>JOB_ID<<<REMOTE_CHECK_STATUS>>>          — poll async job",
         "<<<REMOTE_GET_OUTPUT>>>JOB_ID<<<REMOTE_GET_OUTPUT>>>              — get finished job output",
         "<<<READ_FILE>>>path<<<READ_FILE>>>                                — read file content (safe, fast)",
@@ -391,10 +391,10 @@ class Config:
 
     # ── Client-specific tools (commands that run on the client machine) ──
     CLIENT_TOOLS = [
-        "<<<CLIENT_EXEC>>>command<<<CLIENT_EXEC>>>                         — run a command on the client machine",
+        "<<<CLIENT_EXEC>>>command<<<CLIENT_EXEC>>>                         — run a command on the CLIENT MAC (macOS) - USE FOR XCODE PROJECTS!",
         "<<<CLIENT_INSTALL_XCODE_TOOLS>>>name<<<CLIENT_INSTALL_XCODE_TOOLS>>> — install Xcode command line tools (xcode-select --install)",
         "<<<CLIENT_LIST_XCODE_TOOLS>>>list<<<CLIENT_LIST_XCODE_TOOLS>>>   — list available Xcode command line tools",
-        "<<<CLIENT_GENERATE_XCODE_PROJECT>>>config<<<CLIENT_GENERATE_XCODE_PROJECT>>> — generate Xcode project from configuration (uses xcodegen)"
+        "<<<CLIENT_GENERATE_XCODE_PROJECT>>>config<<<CLIENT_GENERATE_XCODE_PROJECT>>> — generate Xcode project from configuration (uses xcodegen) - RUNS ON CLIENT!"
     ]
 
     # ── Combined tools for agents that can use both ──
@@ -541,7 +541,7 @@ Rules:
     AGENTS = {
         'implementer': _create_agent_config(
             'Qwen3-Coder-30B-A3B (Smart - 80k Context)',
-            f'You are an implementer. {EXECUTOR_PROMPT}\n\nCOMPREHENSIVE IMPLEMENTATION: When implementing tasks, leverage multiple tools to understand the codebase thoroughly:\n\nSERVER-SIDE COMMANDS: Use standard Unix/Linux commands available on the server:\n- Use `find`, `grep`, `diff`, `git`, etc. via `<<<REMOTE_EXEC>>>` markers\n- Use standard system utilities for file manipulation and analysis\n\nCLIENT-SIDE COMMANDS: Use client-specific tools available on the client machine:\n- Use `xcodebuild`, `xcrun`, `xcodegen`, `simctl`, etc. via `<<<CLIENT_EXEC>>>` markers\n- Use `<<<CLIENT_INSTALL_XCODE_TOOLS>>>` to install Xcode command line tools if needed\n- Use `<<<CLIENT_GENERATE_XCODE_PROJECT>>>` to generate Xcode projects\n\nGIT AWARENESS: Use Git to understand code changes, history, and context:\n- Use `git log` to understand recent changes and history\n- Use `git diff` to see specific code differences\n- Use `git blame` to identify who made changes and why\n- Use `git show` to examine specific commits\n- Use `git status` to see current state of the repository\n\nFILE SYSTEM NAVIGATION: Use find/grep to locate and analyze relevant files:\n- Use `find` to locate specific file types or patterns\n- Use `grep` to search for specific terms, TODOs, FIXMEs, or error patterns\n- Use `grep -r` for recursive searches across the codebase\n\nCODE COMPARISON: Use diff and other tools to analyze code changes:\n- Use `diff` to compare files and see changes\n- Use `wc`, `head`, `tail` to analyze file contents\n\nCRITICAL: Choose the appropriate execution environment for each command:\n- Use `<<<REMOTE_EXEC>>>` for server-side commands\n- Use `<<<CLIENT_EXEC>>>` for client-side commands (Xcode tools, etc.)\n\nAlways use these tools to gather comprehensive context before implementing. This helps you understand the evolution of code, locate related files, and provide more accurate implementations.\n{GIT_TOOL_REFERENCE}',
+            f'You are an implementer. {EXECUTOR_PROMPT}\n\nCOMPREHENSIVE IMPLEMENTATION: When implementing tasks, leverage multiple tools to understand the codebase thoroughly:\n\nSERVER-SIDE COMMANDS: Use standard Unix/Linux commands available on the server:\n- Use `find`, `grep`, `diff`, `git`, etc. via `<<<REMOTE_EXEC>>>` markers\n- Use standard system utilities for file manipulation and analysis\n\nCLIENT-SIDE COMMANDS: Use client-specific tools available on the client machine (macOS):\n- Use `xcodebuild`, `xcrun`, `xcodegen`, `simctl`, etc. via `<<<CLIENT_EXEC>>>` markers\n- Use `<<<CLIENT_INSTALL_XCODE_TOOLS>>>` to install Xcode command line tools if needed\n- Use `<<<CLIENT_GENERATE_XCODE_PROJECT>>>` to generate Xcode projects\n\nGIT AWARENESS: Use Git to understand code changes, history, and context:\n- Use `git log` to understand recent changes and history\n- Use `git diff` to see specific code differences\n- Use `git blame` to identify who made changes and why\n- Use `git show` to examine specific commits\n- Use `git status` to see current state of the repository\n\nFILE SYSTEM NAVIGATION: Use find/grep to locate and analyze relevant files:\n- Use `find` to locate specific file types or patterns\n- Use `grep` to search for specific terms, TODOs, FIXMEs, or error patterns\n- Use `grep -r` for recursive searches across the codebase\n\nCRITICAL: Choose the appropriate execution environment for each command:\n- Use `<<<REMOTE_EXEC>>>` for server-side commands (Linux)\n- Use `<<<CLIENT_EXEC>>>` for client-side commands (macOS) - ESPECIALLY for Xcode-related tools like xcodegen, xcodebuild, etc.\n\nIMPORTANT: For Xcode project manipulation, ALWAYS use client-side commands. The macOS client machine is where Xcode projects are located and where Xcode command-line tools are installed.\n\nAlways use these tools to gather comprehensive context before implementing. This helps you understand the evolution of code, locate related files, and provide more accurate implementations.\n{GIT_TOOL_REFERENCE}',
             _CODER_30B,
             executor=True
         ),

@@ -1251,8 +1251,8 @@ def install_tool_with_homebrew(tool_name):
 
 
 def execute_client_command(command):
-    """Execute a command on the client machine"""
-    print_colored(f"\nAgent wants to execute client command: {command}", COLORS['WARNING'])
+    """Execute a command on the client machine (macOS where Xcode projects are located)"""
+    print_colored(f"\n[CLIENT EXEC] Agent wants to execute command on CLIENT (macOS): {command}", COLORS['GREEN'])
 
     try:
         # This is a direct client-side command execution
@@ -1282,12 +1282,12 @@ def execute_client_command(command):
         # Execute the command
         result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=240)
 
-        print_colored(f"Client command executed with exit code {result.returncode}", COLORS['CYAN'])
+        print_colored(f"Client command executed with exit code {result.returncode}", COLORS['GREEN'])
         output = result.stdout
         if result.stderr:
             output += f"\nSTDERR:\n{result.stderr}"
 
-        return f"Client command executed successfully.\nExit Code: {result.returncode}\nOutput:\n{output}"
+        return f"Command executed successfully on CLIENT (macOS).\nExit Code: {result.returncode}\nOutput:\n{output}"
 
     except subprocess.TimeoutExpired:
         return "Client command timed out (240s limit)."
@@ -1367,8 +1367,8 @@ def list_xcode_tools(list_cmd=""):
 
 
 def generate_xcode_project(config):
-    """Generate an Xcode project using xcodegen"""
-    print_colored(f"\nAgent wants to generate Xcode project", COLORS['WARNING'])
+    """Generate an Xcode project using xcodegen - runs on client (macOS)"""
+    print_colored(f"\n[XCODEGEN] Agent wants to generate Xcode project on CLIENT (macOS)", COLORS['GREEN'])
 
     try:
         import platform
@@ -1386,21 +1386,23 @@ def generate_xcode_project(config):
         if config and ('/' in config or config.endswith('.yml') or config.endswith('.yaml')):
             # Assume it's a path to a project spec file
             project_spec = config
+            print_colored(f"Generating Xcode project from spec: {project_spec}", COLORS['GREEN'])
             result = subprocess.run(['xcodegen', 'generate', '--spec', project_spec], capture_output=True, text=True)
         else:
+            print_colored("Generating Xcode project from current directory spec", COLORS['GREEN'])
             # If no config provided or it's not a path, just run xcodegen in current directory
             result = subprocess.run(['xcodegen', 'generate'], capture_output=True, text=True)
 
         if result.returncode == 0:
-            print_colored("Xcode project generated successfully", COLORS['GREEN'])
-            return f"Xcode project generated successfully.\nOutput:\n{result.stdout}"
+            print_colored("Xcode project generated successfully on CLIENT (macOS)", COLORS['GREEN'])
+            return f"Xcode project generated successfully on CLIENT (macOS).\nOutput:\n{result.stdout}"
         else:
-            error_msg = f"Failed to generate Xcode project.\nError:\n{result.stderr}"
+            error_msg = f"Failed to generate Xcode project on CLIENT (macOS).\nError:\n{result.stderr}"
             print_colored(error_msg, COLORS['FAIL'])
             return error_msg
 
     except Exception as e:
-        error_msg = f"Error generating Xcode project: {str(e)}"
+        error_msg = f"Error generating Xcode project on CLIENT (macOS): {str(e)}"
         print_colored(error_msg, COLORS['FAIL'])
         return error_msg
 
