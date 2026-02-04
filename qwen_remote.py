@@ -844,7 +844,7 @@ def _execute_command_internal(command, async_mode=False, chunk_output=True):
 
     # Check if this is an Apple development command that should run on client
     apple_dev_commands = ['xcodegen', 'xcodebuild', 'xcrun', 'simctl', 'xcode-select',
-                          'swift', 'swiftc', 'ios-deploy']
+                          'swift', 'swiftc', 'ios-deploy', 'xcpretty', 'fastlane', 'carthage', 'pod', 'xctest']
     is_apple_dev_command = any(cmd in command for cmd in apple_dev_commands)
 
     if is_apple_dev_command:
@@ -861,6 +861,21 @@ def _execute_command_internal(command, async_mode=False, chunk_output=True):
         print_colored(f"   Shell mode enabled (less safe)", COLORS['WARNING'])
     else:
         print_colored(f"   Safe mode (shell=False)", COLORS['GREEN'])
+
+    # Additional check: if command contains paths typical of iOS/macOS development, warn about server execution
+    apple_dev_indicators = [
+        '.xcodeproj', '.xcworkspace', '.plist', 'Info.plist', '.xcassets',
+        'AppDelegate', 'ViewController', 'SceneDelegate', 'Assets.xcassets',
+        'Base.lproj', 'LaunchScreen', 'Main.storyboard', 'Podfile', 'Cartfile'
+    ]
+
+    command_lower = command.lower()
+    has_apple_dev_path = any(indicator.lower() in command_lower for indicator in apple_dev_indicators)
+
+    if has_apple_dev_path and not is_apple_dev_command:
+        print_colored(f"\n⚠️  APPLE DEVELOPMENT PATH DETECTED: {command}", COLORS['WARNING'])
+        print_colored(f"   This command involves Apple development files and should likely run on macOS CLIENT", COLORS['WARNING'])
+        print_colored(f"   Consider using `<<<CLIENT_EXEC>>>` instead of `<<<REMOTE_EXEC>>>`", COLORS['WARNING'])
 
     try:
         if not ALLOW_SHELL_MODE:
