@@ -136,8 +136,11 @@ _INTERNAL_KEYS = {"auto_send", "_retried", "_retried_prompt"}
 def save_chat_history(history, current_agent="implementer"):
     """Save full chat history and metadata to file, stripping internal keys"""
     try:
+        # Proactively prune history to prevent excessive growth
+        pruned_history = _prune_history(history)
+
         cleaned = []
-        for msg in history:
+        for msg in pruned_history:
             clean_msg = {k: v for k, v in msg.items() if k not in _INTERNAL_KEYS}
             cleaned.append(clean_msg)
         data = {
@@ -149,6 +152,21 @@ def save_chat_history(history, current_agent="implementer"):
             json.dump(data, f, indent=2)
     except Exception as e:
         print_colored(f"Warning: Failed to save chat history: {e}", COLORS['WARNING'])
+
+
+def _prune_history(history, max_messages=100):
+    """Prune history to prevent excessive growth, keeping important context"""
+    if len(history) <= max_messages:
+        return history
+
+    # Keep the first few messages (initial context) and the last max_messages-n messages
+    n_keep_start = 10  # Keep first 10 messages
+    n_keep_end = max_messages - n_keep_start  # Keep last n messages
+
+    pruned = history[:n_keep_start] + history[-n_keep_end:]
+
+    print_colored(f"Pruned chat history from {len(history)} to {len(pruned)} messages", COLORS['WARNING'])
+    return pruned
 
 def load_chat_history():
     """Load chat history from file if it exists. Returns (history, last_agent)"""
@@ -418,18 +436,53 @@ job_tracker = JobTracker(
 # Register cleanup on exit
 atexit.register(job_tracker.terminate_all)
 
-# Track temporary files for cleanup on exit
-_temp_files = set()
+# Track temporary files with creation time for cleanup
+_temp_files = {}  # Maps path -> creation_time
 
 def _cleanup_temp_files():
     """Remove all tracked temporary files on exit"""
-    for path in list(_temp_files):
+    for path in list(_temp_files.keys()):
         try:
             if os.path.exists(path):
                 os.remove(path)
         except Exception:
             pass
     _temp_files.clear()
+
+
+def _cleanup_old_temp_files(max_age_minutes=60):
+    """Remove temporary files older than max_age_minutes"""
+    current_time = time.time()
+    expired_files = []
+
+    for path, creation_time in _temp_files.items():
+        if current_time - creation_time > max_age_minutes * 60:
+            expired_files.append(path)
+
+    for path in expired_files:
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+                print_colored(f"Cleaned up old temp file: {path}", COLORS['WARNING'])
+        except Exception as e:
+            print_colored(f"Failed to clean up temp file {path}: {e}", COLORS['FAIL'])
+        finally:
+            _temp_files.pop(path, None)
+
+
+def _add_temp_file(path):
+    """Add a temporary file to tracking with timestamp"""
+    _temp_files[path] = time.time()
+
+    # Clean up old files periodically
+    if len(_temp_files) % 10 == 0:  # Every 10 new files
+        _cleanup_old_temp_files()
+
+
+def _remove_temp_file(path):
+    """Remove a temporary file from tracking"""
+    _temp_files.pop(path, None)
+
 
 atexit.register(_cleanup_temp_files)
 
@@ -824,7 +877,7 @@ def _execute_command_internal(command, async_mode=False, chunk_output=True):
             # We keep it if output is large so the agent can inspect it later
             with tempfile.NamedTemporaryFile(mode='w+', delete=False, prefix='qwen_cmd_', suffix='.log') as tmp:
                 tmp_path = tmp.name
-            _temp_files.add(tmp_path)
+            _add_temp_file(tmp_path)
 
             # Run process redirecting stdout/stderr to the temp file
             if ALLOW_SHELL_MODE:
@@ -848,7 +901,7 @@ def _execute_command_internal(command, async_mode=False, chunk_output=True):
 
                 # Store chunk info in a way that can be accessed later if needed
                 chunk_info_path = tmp_path + '.chunks'
-                _temp_files.add(chunk_info_path)
+                _add_temp_file(chunk_info_path)
                 chunk_result = chunk_large_output(content, chunk_size=6000, overlap=500)
 
                 # Save chunk metadata for potential later retrieval
@@ -891,7 +944,7 @@ def _execute_command_internal(command, async_mode=False, chunk_output=True):
                     # If small enough, clean up the temp file to reduce clutter
                     try:
                         os.remove(tmp_path)
-                        _temp_files.discard(tmp_path)
+                        _remove_temp_file(tmp_path)
                     except Exception:
                         pass
 
@@ -1027,22 +1080,44 @@ class CupertinoMCPClient:
                     pass
             self.process = None
 
+    def _readline_with_timeout(self, timeout: float = 30) -> Optional[str]:
+        """Read a line from the subprocess stdout with a timeout.
+
+        Uses a background thread so a hung subprocess doesn't block forever.
+        Returns the line string, or None on timeout / EOF.
+        """
+        result = [None]
+
+        def _read():
+            try:
+                result[0] = self.process.stdout.readline()
+            except Exception:
+                result[0] = None
+
+        reader = threading.Thread(target=_read, daemon=True)
+        reader.start()
+        reader.join(timeout)
+        if reader.is_alive():
+            print_colored(f"Cupertino MCP readline timed out after {timeout:.1f} seconds", COLORS['WARNING'])
+            return None
+        return result[0]
+
     def _send_request(self, method, params):
         """Send a JSON-RPC request to the MCP server and wait for response"""
         if not self.start():
             return {"error": "Cupertino MCP not found or failed to start"}
-            
+
         with self.lock:
             req_id = self.msg_id
             self.msg_id += 1
-            
+
             request = {
                 "jsonrpc": "2.0",
                 "id": req_id,
                 "method": method,
                 "params": params
             }
-            
+
             try:
                 self.process.stdin.write(json.dumps(request) + "\n")
                 self.process.stdin.flush()
@@ -1050,9 +1125,11 @@ class CupertinoMCPClient:
                 # Read lines until we get the matching response ID,
                 # skipping notifications and non-matching messages
                 for _ in range(50):  # safety cap
-                    line = self.process.stdout.readline()
+                    line = self._readline_with_timeout(timeout=30)
                     if not line:
-                        return {"error": "No response from Cupertino MCP"}
+                        if self.process.poll() is not None:
+                            return {"error": "Cupertino MCP server process exited unexpectedly."}
+                        return {"error": "No response from Cupertino MCP (timed out)."}
 
                     line = line.strip()
                     if not line:
@@ -1231,7 +1308,7 @@ def execute_client_command(command):
         # Create a temp file to capture output for consistent handling with chunking
         with tempfile.NamedTemporaryFile(mode='w+', delete=False, prefix='qwen_client_cmd_', suffix='.log') as tmp:
             tmp_path = tmp.name
-        _temp_files.add(tmp_path)
+        _add_temp_file(tmp_path)
 
         # Run process redirecting stdout/stderr to the temp file
         if ALLOW_SHELL_MODE:
@@ -1255,7 +1332,7 @@ def execute_client_command(command):
 
             # Store chunk info for potential later retrieval
             chunk_info_path = tmp_path + '.chunks'
-            _temp_files.add(chunk_info_path)
+            _add_temp_file(chunk_info_path)
             chunk_result = chunk_large_output(content, chunk_size=6000, overlap=500)
 
             # Save chunk metadata
@@ -1298,7 +1375,7 @@ def execute_client_command(command):
                 # If small enough, clean up the temp file to reduce clutter
                 try:
                     os.remove(tmp_path)
-                    _temp_files.discard(tmp_path)
+                    _remove_temp_file(tmp_path)
                 except Exception:
                     pass
 

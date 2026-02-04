@@ -590,12 +590,14 @@ async def verify_admin_key(x_admin_key: Optional[str] = Header(None)):
 # Model Manager
 # ============================================================================
 
+from collections import OrderedDict
+
 class ModelManager:
-    def __init__(self):
-        self.models: Dict[str, Any] = {}
+    def __init__(self, max_cached_models=3):
+        self.models: OrderedDict[str, Any] = OrderedDict()  # Use OrderedDict for LRU behavior
         self.lock = Lock()
         self.inference_lock = Lock()
-        self.current_model_path = None
+        self.max_cached_models = max_cached_models  # Maximum number of models to keep cached
 
     def unload_model(self):
         """Unload all models and free VRAM"""
@@ -603,16 +605,20 @@ class ModelManager:
             if self.models:
                 logger.info("Unloading models (Cleaning VRAM)...")
                 try:
-                    # Clear internal references
+                    # Clear internal references and explicitly delete models
+                    for model_path, model in self.models.items():
+                        logger.info(f"Unloading model: {model_path}")
+                        del model
+
+                    # Clear the ordered dict
                     self.models.clear()
-                    self.current_model_path = None
-                    
+
                     # Force garbage collection
                     import gc
                     import time
                     gc.collect()
-                    gc.collect() 
-                    
+                    gc.collect()
+
                     # Clear CUDA cache if PyTorch is available (often used by other libs)
                     try:
                         import torch
@@ -621,39 +627,46 @@ class ModelManager:
                             torch.cuda.ipc_collect()
                     except ImportError:
                         pass
-                    
+
                     time.sleep(2) # Allow async cleanup
                     logger.info("Models unloaded, memory freed")
                 except Exception as e:
                     logger.error(f"Error during model unload: {e}")
 
     def get_model(self, agent_name: str, force_reload: bool = True):
-        """Get or load the model for the specific agent, unloading others if needed"""
+        """Get or load the model for the specific agent, using caching to minimize load/unload cycles"""
         if agent_name not in Config.AGENTS:
             raise ValueError(f"Unknown agent: {agent_name}")
 
         model_config = Config.AGENTS[agent_name]['model_config']
         model_path = model_config['path']
 
-        # Conditional Reload Policy:
-        # If force_reload is False, we try to reuse the existing model to speed up
-        # agent loops (e.g. tool use).
-        # If force_reload is True (default), we aggressively unload/reload to clear VRAM.
-
         with self.lock:
-            if not force_reload and self.current_model_path == model_path and model_path in self.models:
-                logger.info(f"Reusing loaded model for {agent_name} (Fast Path)")
-                return self.models[model_path]
+            # Check if model is already cached
+            if model_path in self.models:
+                # Move to end to mark as most recently used
+                model = self.models.pop(model_path)
+                self.models[model_path] = model
+                logger.info(f"Reusing cached model for {agent_name}")
+                return model
 
-        # Otherwise, perform full unload/reload cycle
-        self.unload_model()
+        # If not cached and force_reload is True, we may need to evict oldest models
+        if force_reload:
+            with self.lock:
+                # If we've reached the cache limit, remove the oldest model
+                while len(self.models) >= self.max_cached_models:
+                    oldest_path, oldest_model = self.models.popitem(last=False)
+                    logger.info(f"Evicting oldest model from cache: {oldest_path}")
+                    # Explicitly delete the model to free memory
+                    del oldest_model
 
+        # Load the model
         with self.lock:
             logger.info("Loading model for %s: %s", agent_name, model_path)
             try:
                 import llama_cpp
                 from llama_cpp import Llama
-                
+
                 model = Llama(
                     model_path=model_path,
                     n_ctx=model_config.get('n_ctx', Config.DEFAULT_CONTEXT_SIZE),
@@ -678,13 +691,28 @@ class ModelManager:
                     yarn_orig_ctx=model_config.get('yarn_orig_ctx', 0),          # 0 = Model default
                     verbose=True
                 )
+
+                # Add to cache
                 self.models[model_path] = model
-                self.current_model_path = model_path
                 logger.info("Model loaded successfully: %s", model_path)
                 return model
             except Exception as e:
                 logger.error("Failed to load model %s: %s", model_path, e)
                 raise
+
+    def is_model_cached(self, model_path: str) -> bool:
+        """Check if a model is currently cached"""
+        with self.lock:
+            return model_path in self.models
+
+    def get_cached_model_stats(self) -> Dict[str, Any]:
+        """Get statistics about cached models"""
+        with self.lock:
+            return {
+                "cached_count": len(self.models),
+                "max_cache_size": self.max_cached_models,
+                "cached_models": list(self.models.keys()),
+            }
 
     def is_loaded(self) -> bool:
         """Check if any model is loaded"""
@@ -795,7 +823,7 @@ def build_stream_chunk(completion_id: str, model_id: str, content: Optional[str]
 # FastAPI Application
 # ============================================================================ 
 
-model_manager = ModelManager()
+model_manager = ModelManager(max_cached_models=3)
 memory_service = None
 web_search_service = None
 apple_deep_docs_service = None
@@ -1065,14 +1093,17 @@ def sync_completion(messages: List[ChatMessage], system_prompt: str, model_path:
             model = model_manager.get_model(model_id, force_reload=force_reload)
             n_ctx = model.n_ctx()
 
-            # First pass: build prompt without budget to estimate token count
+            # Estimate the token count for the budget guidance string itself
+            budget_guidance_template = Config.TOKEN_BUDGET_GUIDANCE.format(available_tokens=1000)  # Placeholder value
+            budget_guidance_tokens = len(model.tokenize(budget_guidance_template.encode("utf-8")))
+
+            # Build prompt without budget guidance to get the base token count
             preliminary_prompt = build_model_prompt(messages, system_prompt, model_path)
             preliminary_tokens = model.tokenize(preliminary_prompt.encode("utf-8"))
             n_preliminary = len(preliminary_tokens)
 
-            # Calculate available tokens (reserve ~150 tokens for budget guidance overhead)
-            budget_overhead = 150
-            available = n_ctx - n_preliminary - budget_overhead
+            # Calculate available tokens accounting for budget guidance overhead
+            available = n_ctx - n_preliminary - budget_guidance_tokens
             if available < 1:
                 raise HTTPException(
                     status_code=400,
@@ -1083,7 +1114,7 @@ def sync_completion(messages: List[ChatMessage], system_prompt: str, model_path:
             # Clamp to requested max_tokens
             clamped_max = min(max_tokens, available)
 
-            # Second pass: inject token budget guidance and rebuild prompt
+            # Now build the final prompt with actual budget guidance
             budget_guidance = Config.TOKEN_BUDGET_GUIDANCE.format(available_tokens=clamped_max)
             augmented_system_prompt = f"{system_prompt}\n{budget_guidance}"
             prompt = build_model_prompt(messages, augmented_system_prompt, model_path)
@@ -1118,6 +1149,8 @@ def sync_completion(messages: List[ChatMessage], system_prompt: str, model_path:
             return build_completion_response(model_id, text, response['usage'],
                                              finish_reason=finish_reason)
         finally:
+            # Only unload if force_reload is True and we want to clear all models
+            # Otherwise, keep the model cached for future use
             if force_reload:
                 model_manager.unload_model()
 
@@ -1138,14 +1171,17 @@ def stream_completion(messages: List[ChatMessage], system_prompt: str, model_pat
                 model = model_manager.get_model(model_id, force_reload=force_reload)
                 n_ctx = model.n_ctx()
 
-                # First pass: build prompt without budget to estimate token count
+                # Estimate the token count for the budget guidance string itself
+                budget_guidance_template = Config.TOKEN_BUDGET_GUIDANCE.format(available_tokens=1000)  # Placeholder value
+                budget_guidance_tokens = len(model.tokenize(budget_guidance_template.encode("utf-8")))
+
+                # Build prompt without budget guidance to get the base token count
                 preliminary_prompt = build_model_prompt(messages, system_prompt, model_path)
                 preliminary_tokens = model.tokenize(preliminary_prompt.encode("utf-8"))
                 n_preliminary = len(preliminary_tokens)
 
-                # Calculate available tokens (reserve ~150 tokens for budget guidance overhead)
-                budget_overhead = 150
-                available = n_ctx - n_preliminary - budget_overhead
+                # Calculate available tokens accounting for budget guidance overhead
+                available = n_ctx - n_preliminary - budget_guidance_tokens
                 if available < 1:
                     error_chunk = {
                         "error": {
@@ -1160,7 +1196,7 @@ def stream_completion(messages: List[ChatMessage], system_prompt: str, model_pat
                 # Clamp to requested max_tokens
                 clamped_max = min(max_tokens, available)
 
-                # Second pass: inject token budget guidance and rebuild prompt
+                # Now build the final prompt with actual budget guidance
                 budget_guidance = Config.TOKEN_BUDGET_GUIDANCE.format(available_tokens=clamped_max)
                 augmented_system_prompt = f"{system_prompt}\n{budget_guidance}"
                 prompt = build_model_prompt(messages, augmented_system_prompt, model_path)
@@ -1209,6 +1245,8 @@ def stream_completion(messages: List[ChatMessage], system_prompt: str, model_pat
                     model_id, n_prompt, final_available, clamped_max, token_count, finish_reason
                 )
             finally:
+                # Only unload if force_reload is True and we want to clear all models
+                # Otherwise, keep the model cached for future use
                 if force_reload:
                     model_manager.unload_model()
 
