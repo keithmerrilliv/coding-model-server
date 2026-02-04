@@ -73,6 +73,24 @@ THEME_STYLES = {
 # This will be populated from the server
 AGENT_THEMES = {}
 
+def set_terminal_title(title):
+    """Set the terminal window title using ANSI escape codes"""
+    sys.stdout.write(f"\033]0;{title}\007")
+    sys.stdout.flush()
+
+def send_macos_notification(text, title="Qwen Client"):
+    """Send a native macOS notification via osascript"""
+    if sys.platform != 'darwin':
+        return
+    try:
+        # Escape quotes for AppleScript
+        safe_text = text.replace('"', '\\"')
+        safe_title = title.replace('"', '\\"')
+        cmd = f'display notification "{safe_text}" with title "{safe_title}"'
+        subprocess.run(['osascript', '-e', cmd], check=False, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass # Fail silently
+
 def fetch_available_models():
     """Fetch available models from the server and populate AGENT_THEMES"""
     global AGENT_THEMES
@@ -629,6 +647,7 @@ def run_command_async(job_id, command):
                 exit_code=process.returncode,
                 completed_at=datetime.now().isoformat()
             )
+            send_macos_notification(f"Background command finished (Job {job_id})", title="Job Complete")
         else:
             job_tracker.add_output(job_id, f"ERROR: Command failed with exit code {process.returncode}")
             job_tracker.update_job(
@@ -637,6 +656,7 @@ def run_command_async(job_id, command):
                 exit_code=process.returncode,
                 completed_at=datetime.now().isoformat()
             )
+            send_macos_notification(f"Background command failed (Job {job_id})", title="Job Failed")
 
     except Exception as e:
         job_tracker.add_output(job_id, f"ERROR: {str(e)}")
@@ -1719,6 +1739,9 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
             # Switch active context for this specific task
             task_theme = AGENT_THEMES[task_agent]
             print_colored(f"\n>>> Executing task with @{task_agent} {task_theme['icon']}", COLORS['BLUE'])
+            
+            # Update terminal title
+            set_terminal_title(f"Qwen - @{task_agent} Working...")
 
             # Permanently update the active agent if it was explicitly mentioned
             if task_agent != model:
@@ -1873,6 +1896,10 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
     except Exception as e:
         print_colored(f"\nMain Loop Error: {e}", COLORS['FAIL'])
     
+    set_terminal_title("Qwen - Idle")
+    if not PENDING_TASKS:
+        send_macos_notification("All tasks completed.", title="Qwen Client")
+        
     return model
 
 def chat(model="implementer"):
@@ -1884,6 +1911,7 @@ def chat(model="implementer"):
     fetch_available_models()
 
     print_colored(f"\nQwen Remote CLI (Connected to {LINUX_SERVER_IP})", COLORS['HEADER'])
+    set_terminal_title("Qwen - Idle")
     
     # Get initial theme
     if model not in AGENT_THEMES:
