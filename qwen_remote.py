@@ -16,6 +16,7 @@ import atexit
 import time
 import tempfile
 import select
+import logging
 from datetime import datetime
 from collections import deque
 from typing import Optional, List
@@ -33,17 +34,53 @@ HISTORY_FILE = os.path.expanduser("~/.qwen_client_history")
 CHAT_HISTORY_FILE = os.path.expanduser("~/.qwen_chat_history.json")
 HISTORY_MAX_LENGTH = 1000
 
-# Configuration
-LINUX_SERVER_IP = os.getenv("QWEN_SERVER_IP", "192.168.50.101")
-API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/chat/completions"
-MEMORY_API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/memory"
-INGEST_API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/memory/ingest"
-SEARCH_API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/tools/search"
-DEEP_DOCS_API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/tools/apple_deep_docs"
-UNLOAD_API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/admin/unload"
-HEALTH_URL = f"http://{LINUX_SERVER_IP}:5000/health"
-MODELS_URL = f"http://{LINUX_SERVER_IP}:5000/v1/models"
-ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
+# Configuration class
+class Config:
+    LINUX_SERVER_IP = os.getenv("QWEN_SERVER_IP", "192.168.50.101")
+    API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/chat/completions"
+    MEMORY_API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/memory"
+    INGEST_API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/memory/ingest"
+    SEARCH_API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/tools/search"
+    DEEP_DOCS_API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/tools/apple_deep_docs"
+    UNLOAD_API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/admin/unload"
+    HEALTH_URL = f"http://{LINUX_SERVER_IP}:5000/health"
+    MODELS_URL = f"http://{LINUX_SERVER_IP}:5000/v1/models"
+    ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
+
+    # Command execution security settings
+    ALLOW_SHELL_MODE = os.getenv('ALLOW_SHELL_MODE', 'true').lower() == 'true'
+    ALLOW_ALL = os.getenv('ALLOW_ALL', 'false').lower() == 'true'
+    COMMAND_WHITELIST = os.getenv('COMMAND_WHITELIST', '').split(',') if os.getenv('COMMAND_WHITELIST') else None
+
+    # Temporary file settings
+    HISTORY_FILE = os.path.expanduser("~/.qwen_client_history")
+    CHAT_HISTORY_FILE = os.path.expanduser("~/.qwen_chat_history.json")
+    HISTORY_MAX_LENGTH = 1000
+
+    # Chunking settings
+    CHUNK_SIZE = 6000
+    CHUNK_OVERLAP = 500
+    CHUNK_THRESHOLD = 8000
+    MAX_DISPLAY_CHARS = 8000
+
+    # Timeout settings
+    COMMAND_TIMEOUT = 240  # seconds
+    REQUEST_TIMEOUT = 30   # seconds for API requests
+    LONG_REQUEST_TIMEOUT = 60  # seconds for longer operations like PDF ingestion
+
+# Initialize configuration
+config = Config()
+
+# Setup structured logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(os.path.expanduser("~/.qwen_client.log")),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger(__name__)
 
 COLORS = {
     "HEADER": "\033[95m",
@@ -96,7 +133,7 @@ def fetch_available_models():
     """Fetch available models from the server and populate AGENT_THEMES"""
     global AGENT_THEMES
     try:
-        response = requests.get(MODELS_URL, timeout=5)
+        response = requests.get(config.MODELS_URL, timeout=config.REQUEST_TIMEOUT)
         if response.status_code == 200:
             data = response.json().get("data", [])
             AGENT_THEMES.clear()
@@ -104,7 +141,7 @@ def fetch_available_models():
                 mid = model["id"]
                 # Get style or fallback to default
                 style = THEME_STYLES.get(mid, THEME_STYLES["default"])
-                
+
                 AGENT_THEMES[mid] = {
                     "color": style["color"],
                     "icon": style["icon"],
@@ -142,8 +179,8 @@ def _load_fallback_themes():
 def cleanup_server_resources():
     """Tell the server to unload models and free VRAM"""
     try:
-        headers = {"X-Admin-Key": ADMIN_API_KEY} if ADMIN_API_KEY else {}
-        requests.post(UNLOAD_API_URL, headers=headers, timeout=5)
+        headers = {"X-Admin-Key": config.ADMIN_API_KEY} if config.ADMIN_API_KEY else {}
+        requests.post(config.UNLOAD_API_URL, headers=headers, timeout=config.REQUEST_TIMEOUT)
     except Exception:
         pass
 
@@ -167,7 +204,7 @@ def save_chat_history(history, current_agent="implementer"):
             "last_agent": current_agent,
             "timestamp": datetime.now().isoformat()
         }
-        with open(CHAT_HISTORY_FILE, 'w') as f:
+        with open(config.CHAT_HISTORY_FILE, 'w') as f:
             json.dump(data, f, indent=2)
     except Exception as e:
         print_colored(f"Warning: Failed to save chat history: {e}", COLORS['WARNING'])
@@ -189,11 +226,11 @@ def _prune_history(history, max_messages=100):
 
 def load_chat_history():
     """Load chat history from file if it exists. Returns (history, last_agent)"""
-    if os.path.exists(CHAT_HISTORY_FILE):
+    if os.path.exists(config.CHAT_HISTORY_FILE):
         try:
-            with open(CHAT_HISTORY_FILE, 'r') as f:
+            with open(config.CHAT_HISTORY_FILE, 'r') as f:
                 data = json.load(f)
-            
+
             # Handle both old format (list) and new format (dict)
             if isinstance(data, list):
                 history = data
@@ -201,7 +238,7 @@ def load_chat_history():
             else:
                 history = data.get("messages", [])
                 last_agent = data.get("last_agent", "implementer")
-                
+
             print_colored(f"Found saved session with {len(history)} messages.", COLORS['CYAN'])
             if last_agent != "implementer":
                 print_colored(f"Last used agent: {last_agent}", COLORS['CYAN'])
@@ -215,16 +252,16 @@ def load_chat_history():
 
 def wait_for_server():
     """Poll server health endpoint until it comes back online"""
-    print_colored(f"\nConnection lost. Waiting for server at {LINUX_SERVER_IP}...", COLORS['WARNING'])
+    print_colored(f"\nConnection lost. Waiting for server at {config.LINUX_SERVER_IP}...", COLORS['WARNING'])
     while True:
         try:
-            response = requests.get(HEALTH_URL, timeout=2)
+            response = requests.get(config.HEALTH_URL, timeout=config.REQUEST_TIMEOUT)
             if response.status_code == 200:
                 print_colored("\nServer is back online! Resuming...", COLORS['GREEN'])
                 return True
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
             pass
-        
+
         try:
             time.sleep(5)
             print(".", end="", flush=True)
@@ -240,13 +277,13 @@ def setup_readline():
 
     # Load history from file
     try:
-        if os.path.exists(HISTORY_FILE):
-            readline.read_history_file(HISTORY_FILE)
+        if os.path.exists(config.HISTORY_FILE):
+            readline.read_history_file(config.HISTORY_FILE)
     except (IOError, OSError):
         pass  # History file doesn't exist or isn't readable
 
     # Set history length
-    readline.set_history_length(HISTORY_MAX_LENGTH)
+    readline.set_history_length(config.HISTORY_MAX_LENGTH)
 
     # Register save on exit
     atexit.register(save_readline_history)
@@ -289,10 +326,6 @@ def add_to_history(line):
     readline.add_history(line)
 
 
-# Command execution security settings
-ALLOW_SHELL_MODE = os.getenv('ALLOW_SHELL_MODE', 'true').lower() == 'true'
-ALLOW_ALL = os.getenv('ALLOW_ALL', 'false').lower() == 'true'
-COMMAND_WHITELIST = os.getenv('COMMAND_WHITELIST', '').split(',') if os.getenv('COMMAND_WHITELIST') else None
 
 
 # Register cleanup on exit
@@ -356,7 +389,7 @@ def print_colored(text, color):
 def save_memory(text):
     """Send a memory/fact to the server to be saved"""
     try:
-        response = requests.post(MEMORY_API_URL, json={"text": text}, timeout=10)
+        response = requests.post(config.MEMORY_API_URL, json={"text": text}, timeout=config.REQUEST_TIMEOUT)
         if response.status_code == 200:
             print_colored(f"Memory Saved: {text[:60]}...", COLORS['GREEN'])
             return f"Memory saved successfully."
@@ -370,7 +403,7 @@ def ingest_pdf(path):
     """Tell the server to ingest a local PDF file"""
     try:
         print_colored(f"Requesting server to ingest PDF: {path}", COLORS['CYAN'])
-        response = requests.post(INGEST_API_URL, json={"path": path}, timeout=60)
+        response = requests.post(config.INGEST_API_URL, json={"path": path}, timeout=config.LONG_REQUEST_TIMEOUT)
         if response.status_code == 200:
             result = response.json()
             msg = f"Successfully ingested {result['filename']}: {result['chunks']} chunks from {result['pages']} pages."
@@ -386,8 +419,16 @@ def ingest_pdf(path):
 
 def parse_command_safely(command: str) -> List[str]:
     """Parse command string into argument list safely"""
-    if not ALLOW_SHELL_MODE:
-        dangerous_chars = ['|', '&', ';', '$', '`', '\n', '>', '<', '(', ')']
+    if not command or not isinstance(command, str):
+        raise ValueError("Command must be a non-empty string")
+
+    # Sanitize command string
+    command = command.strip()
+    if not command:
+        raise ValueError("Command cannot be empty after trimming")
+
+    if not config.ALLOW_SHELL_MODE:
+        dangerous_chars = ['|', '&', ';', '$', '`', '\n', '>', '<', '(', ')', '*', '?', '[', ']']
         if any(char in command for char in dangerous_chars):
             raise ValueError(
                 f"Command contains shell metacharacters. "
@@ -396,9 +437,15 @@ def parse_command_safely(command: str) -> List[str]:
             )
 
     try:
-        return shlex.split(command)
+        parsed = shlex.split(command)
+        # Additional validation: ensure no empty arguments that could cause issues
+        if any(arg == '' for arg in parsed):
+            raise ValueError("Command contains empty arguments after parsing")
+        return parsed
     except ValueError as e:
         raise ValueError(f"Failed to parse command: {e}")
+    except Exception as e:
+        raise ValueError(f"Unexpected error parsing command: {e}")
 
 
 def expand_paths_in_args(command_args: List[str]) -> List[str]:
@@ -426,7 +473,7 @@ def expand_paths_in_args(command_args: List[str]) -> List[str]:
 
 def is_command_allowed(command_args: List[str]) -> tuple:
     """Check if command is allowed based on whitelist"""
-    if not COMMAND_WHITELIST:
+    if not config.COMMAND_WHITELIST:
         return True, "No whitelist configured (all commands allowed)"
 
     if not command_args:
@@ -434,29 +481,39 @@ def is_command_allowed(command_args: List[str]) -> tuple:
 
     base_command = command_args[0]
 
-    if base_command in COMMAND_WHITELIST:
+    # Additional security check: prevent path traversal attempts
+    if '..' in base_command:
+        return False, f"Command '{base_command}' contains path traversal ('..') which is not allowed"
+
+    if base_command in config.COMMAND_WHITELIST:
         return True, f"Command '{base_command}' is whitelisted"
 
     if '/' in base_command:
         base_name = os.path.basename(base_command)
-        if base_name in COMMAND_WHITELIST:
+        if base_name in config.COMMAND_WHITELIST:
             return True, f"Command '{base_name}' is whitelisted"
 
-    return False, f"Command '{base_command}' not in whitelist: {', '.join(COMMAND_WHITELIST)}"
+    return False, f"Command '{base_command}' not in whitelist: {', '.join(config.COMMAND_WHITELIST)}"
 
 
-def chunk_large_output(content, chunk_size=6000, overlap=500):
+def chunk_large_output(content, chunk_size=None, overlap=None):
     """
     Split large output into chunks with overlap to preserve context.
 
     Args:
         content (str): The large output content to chunk
-        chunk_size (int): Maximum size of each chunk in characters
-        overlap (int): Number of overlapping characters between chunks
+        chunk_size (int): Maximum size of each chunk in characters (uses config if None)
+        overlap (int): Number of overlapping characters between chunks (uses config if None)
 
     Returns:
         dict: Contains 'chunks' list, 'total_chunks', 'chunk_size', and 'original_length'
     """
+    # Use config values if not provided
+    if chunk_size is None:
+        chunk_size = config.CHUNK_SIZE
+    if overlap is None:
+        overlap = config.CHUNK_OVERLAP
+
     if len(content) <= chunk_size:
         return {
             'chunks': [content],
@@ -470,6 +527,34 @@ def chunk_large_output(content, chunk_size=6000, overlap=500):
     start = 0
     content_len = len(content)
 
+    # Pre-calculate line breaks for faster processing
+    line_breaks = []
+    pos = 0
+    while pos < content_len:
+        pos = content.find('\n', pos)
+        if pos == -1:
+            break
+        line_breaks.append(pos)
+        pos += 1
+
+    # Binary search helper to find nearest line break
+    def find_nearest_line_break(start_pos, max_pos):
+        # Find the closest line break before max_pos
+        low, high = 0, len(line_breaks) - 1
+        best_break = -1
+
+        while low <= high:
+            mid = (low + high) // 2
+            if line_breaks[mid] <= max_pos and line_breaks[mid] >= start_pos:
+                best_break = line_breaks[mid]
+                low = mid + 1  # Look for a later line break
+            elif line_breaks[mid] < start_pos:
+                low = mid + 1
+            else:
+                high = mid - 1
+
+        return best_break
+
     while start < content_len:
         end = start + chunk_size
 
@@ -478,13 +563,12 @@ def chunk_large_output(content, chunk_size=6000, overlap=500):
             chunk = content[start:]
         else:
             # Find a good breaking point (try to break at line boundaries)
-            actual_end = end
-            while actual_end < content_len and content[actual_end] != '\n' and actual_end < end + 200:
-                actual_end += 1
+            line_break = find_nearest_line_break(start, end)
 
-            if actual_end < end + 200:  # Found a newline within reasonable distance
-                chunk = content[start:actual_end + 1]
-            else:  # No newline found, just take the chunk
+            if line_break != -1 and line_break > start:  # Found a newline within range
+                chunk = content[start:line_break + 1]
+            else:
+                # No suitable line break found, just take the chunk
                 chunk = content[start:end]
 
         chunks.append(chunk)
@@ -510,20 +594,26 @@ def chunk_large_output(content, chunk_size=6000, overlap=500):
     }
 
 
-def get_chunk_for_display(content, chunk_idx=None, chunk_size=6000, overlap=500, log_path=None):
+def get_chunk_for_display(content, chunk_idx=None, chunk_size=None, overlap=None, log_path=None):
     """
     Get a specific chunk or a summary of chunks for display in the context window.
 
     Args:
         content (str): The full content to chunk
         chunk_idx (int, optional): Specific chunk index to return (-1 for all chunks)
-        chunk_size (int): Size of each chunk
-        overlap (int): Overlap between chunks
+        chunk_size (int): Size of each chunk (uses config if None)
+        overlap (int): Overlap between chunks (uses config if None)
         log_path (str, optional): Path to the log file for reference
 
     Returns:
         str: Formatted output for display
     """
+    # Use config values if not provided
+    if chunk_size is None:
+        chunk_size = config.CHUNK_SIZE
+    if overlap is None:
+        overlap = config.CHUNK_OVERLAP
+
     chunk_result = chunk_large_output(content, chunk_size, overlap)
 
     if not chunk_result['needs_chunking']:
@@ -571,35 +661,50 @@ def get_chunk_for_display(content, chunk_idx=None, chunk_size=6000, overlap=500,
 def execute_remote_command(command, chunk_output=True):
     """Internal function to execute a command with security checks"""
 
+    # Validate input
+    if not command or not isinstance(command, str):
+        logger.warning("Invalid command received: %s", command)
+        return "Error: Invalid command - command must be a non-empty string"
+
+    logger.info("Executing command: %s", command)
     print_colored(f"\nAgent wants to run command: {command}", COLORS['WARNING'])
 
-    if ALLOW_SHELL_MODE:
+    if config.ALLOW_SHELL_MODE:
         print_colored(f"   Shell mode enabled (less safe)", COLORS['WARNING'])
     else:
         print_colored(f"   Safe mode (shell=False)", COLORS['GREEN'])
 
     try:
-        if not ALLOW_SHELL_MODE:
+        if not config.ALLOW_SHELL_MODE:
             command_args = parse_command_safely(command)
             allowed, msg = is_command_allowed(command_args)
             if not allowed:
                 print_colored(f"   {msg}", COLORS['FAIL'])
+                logger.warning("Command rejected: %s - %s", command, msg)
                 return f"Command rejected: {msg}"
             print_colored(f"   {msg}", COLORS['GREEN'])
     except ValueError as e:
         print_colored(f"   {str(e)}", COLORS['FAIL'])
+        logger.error("Command validation failed: %s - %s", command, str(e))
         return f"Command validation failed: {str(e)}"
+    except Exception as e:
+        print_colored(f"   Unexpected error during command validation: {str(e)}", COLORS['FAIL'])
+        logger.error("Unexpected error during command validation: %s - %s", command, str(e), exc_info=True)
+        return f"Command validation failed with unexpected error: {str(e)}"
 
-    if ALLOW_ALL:
+    if config.ALLOW_ALL:
         print_colored(f"   Auto-approved (ALLOW_ALL mode enabled)", COLORS['GREEN'])
+        logger.info("Auto-approving command due to ALLOW_ALL setting: %s", command)
         choice = 'y'
     else:
         try:
             choice = input(f"{COLORS['BOLD']}Allow? [y/N] > {COLORS['ENDC']}")
         except (EOFError, KeyboardInterrupt):
+            logger.info("Command execution cancelled by user: %s", command)
             return "User cancelled command execution."
 
         if choice.lower() != 'y':
+            logger.info("Command denied by user: %s", command)
             return "User denied command execution."
 
     try:
@@ -610,47 +715,69 @@ def execute_remote_command(command, chunk_output=True):
         _add_temp_file(tmp_path)
 
         # Run process redirecting stdout/stderr to the temp file
-        if ALLOW_SHELL_MODE:
-            with open(tmp_path, 'w') as f:
-                result = subprocess.run(command, shell=True, stdout=f, stderr=subprocess.STDOUT, text=True, errors='replace', timeout=240)
-        else:
-            command_args = parse_command_safely(command)
-            command_args = expand_paths_in_args(command_args)
-            with open(tmp_path, 'w') as f:
-                result = subprocess.run(command_args, shell=False, stdout=f, stderr=subprocess.STDOUT, text=True, errors='replace', timeout=240)
+        try:
+            if config.ALLOW_SHELL_MODE:
+                logger.debug("Running command in shell mode: %s", command)
+                with open(tmp_path, 'w') as f:
+                    result = subprocess.run(command, shell=True, stdout=f, stderr=subprocess.STDOUT, text=True, errors='replace', timeout=config.COMMAND_TIMEOUT)
+            else:
+                command_args = parse_command_safely(command)
+                command_args = expand_paths_in_args(command_args)
+                logger.debug("Running command in safe mode: %s", command_args)
+                with open(tmp_path, 'w') as f:
+                    result = subprocess.run(command_args, shell=False, stdout=f, stderr=subprocess.STDOUT, text=True, errors='replace', timeout=config.COMMAND_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            logger.error("Command timed out: %s", command[:100])
+            return f"Error: Command timed out after {config.COMMAND_TIMEOUT} seconds. Command: {command[:100]}..."
+        except Exception as e:
+            logger.error("Error running command subprocess: %s - %s", command[:100], str(e))
+            return f"Error running command subprocess: {str(e)}. Command: {command[:100]}..."
 
         # Analyze output file
-        with open(tmp_path, 'r', errors='replace') as f:
-            content = f.read()
+        try:
+            with open(tmp_path, 'r', errors='replace') as f:
+                content = f.read()
+        except IOError as e:
+            logger.error("Error reading command output: %s", str(e))
+            return f"Error reading command output: {str(e)}"
 
         output_len = len(content)
+        logger.info("Command executed successfully, output length: %d", output_len)
 
         # Use chunked processing if output is large and chunking is enabled
-        if chunk_output and output_len > 8000:  # Same threshold as original
-            final_output = get_chunk_for_display(content, chunk_size=6000, overlap=500, log_path=tmp_path)
+        if chunk_output and output_len > config.CHUNK_THRESHOLD:  # Same threshold as original
+            logger.debug("Using chunked output for command with %d characters", output_len)
+            final_output = get_chunk_for_display(content, chunk_size=config.CHUNK_SIZE, overlap=config.CHUNK_OVERLAP, log_path=tmp_path)
 
             # Store chunk info in a way that can be accessed later if needed
             chunk_info_path = tmp_path + '.chunks'
             _add_temp_file(chunk_info_path)
-            chunk_result = chunk_large_output(content, chunk_size=6000, overlap=500)
+            chunk_result = chunk_large_output(content, chunk_size=config.CHUNK_SIZE, overlap=config.CHUNK_OVERLAP)
 
             # Save chunk metadata for potential later retrieval
-            with open(chunk_info_path, 'w') as f:
-                json.dump({
-                    'total_chunks': chunk_result['total_chunks'],
-                    'original_length': chunk_result['original_length'],
-                    'chunk_size': chunk_result['chunk_size'],
-                    'file_path': tmp_path
-                }, f)
+            try:
+                with open(chunk_info_path, 'w') as f:
+                    json.dump({
+                        'total_chunks': chunk_result['total_chunks'],
+                        'original_length': chunk_result['original_length'],
+                        'chunk_size': chunk_result['chunk_size'],
+                        'file_path': tmp_path
+                    }, f)
+            except IOError as e:
+                print_colored(f"Warning: Could not save chunk metadata: {str(e)}", COLORS['WARNING'])
+                logger.warning("Could not save chunk metadata: %s", str(e))
 
             return final_output
 
         # If it fits in one go, just return it
+        logger.debug("Returning command output directly, length: %d", len(content) if content else 0)
         return content if content else "(empty output)"
 
     except subprocess.TimeoutExpired:
-        return "Error: Command timed out after 240 seconds."
+        logger.error("Command timed out after %d seconds", config.COMMAND_TIMEOUT)
+        return f"Error: Command timed out after {config.COMMAND_TIMEOUT} seconds."
     except Exception as e:
+        logger.error("Error executing command: %s", str(e), exc_info=True)
         return f"Error executing command: {str(e)}"
 
 
@@ -660,7 +787,7 @@ def web_search(query):
     """Send a search query to the server"""
     try:
         print_colored(f"Searching web for: {query}", COLORS['CYAN'])
-        response = requests.post(SEARCH_API_URL, json={"query": query}, timeout=30)
+        response = requests.post(config.SEARCH_API_URL, json={"query": query}, timeout=config.REQUEST_TIMEOUT)
         if response.status_code == 200:
             result = response.json().get("result", "No results")
             print_colored(f"\n{result}\n", COLORS['GREEN']) # Print results to console
@@ -829,13 +956,13 @@ def apple_deep_docs_search(tool, args):
     """Send a deep doc search query to the server"""
     try:
         print_colored(f"Calling Apple Deep Docs ({tool}): {args}", COLORS['CYAN'])
-        
+
         payload = {"tool": tool, "arguments": args}
-        response = requests.post(DEEP_DOCS_API_URL, json=payload, timeout=60)
-        
+        response = requests.post(config.DEEP_DOCS_API_URL, json=payload, timeout=config.LONG_REQUEST_TIMEOUT)
+
         if response.status_code == 200:
             result = response.json().get("result", "No results")
-            
+
             # Format result for display and memory
             formatted_result = ""
             if isinstance(result, (dict, list)):
@@ -849,7 +976,7 @@ def apple_deep_docs_search(tool, args):
                     formatted_result = result
             else:
                 formatted_result = str(result)
-            
+
             # Save to memory for grounding (limit size)
             save_memory(f"Apple Deep Doc ({tool}): {str(args)}\n{formatted_result[:10000]}")
             return f"Apple Deep Docs Result ({tool}):\n{formatted_result}"
