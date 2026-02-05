@@ -11,14 +11,12 @@ import re
 import subprocess
 import shlex
 import threading
-import uuid
 import atexit
 import time
 import tempfile
 import select
 import logging
 from datetime import datetime
-from collections import deque
 from typing import Optional, List
 import requests
 
