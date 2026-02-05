@@ -34,17 +34,19 @@ sudo systemctl stop qwen-server || true
 echo -e "${GREEN}✓ Stopped${NC}"
 echo ""
 
-echo -e "${YELLOW}Step 2/6: Activating venv...${NC}"
+echo -e "${YELLOW}Step 2/6: Activating venv and upgrading core tools...${NC}"
 source venv/bin/activate
-echo -e "${GREEN}✓ Activated${NC}"
+pip install --upgrade pip setuptools wheel
+pip install -r requirements.txt
+echo -e "${GREEN}✓ Environment updated${NC}"
 echo ""
 
-echo -e "${YELLOW}Step 3/6: Uninstalling current version...${NC}"
+echo -e "${YELLOW}Step 3/6: Uninstalling current llama-cpp-python...${NC}"
 pip uninstall -y llama-cpp-python
 echo -e "${GREEN}✓ Uninstalled${NC}"
 echo ""
 
-echo -e "${YELLOW}Step 4/6: Rebuilding with RTX 5080 architecture support (sm_120)...${NC}"
+echo -e "${YELLOW}Step 4/6: Rebuilding llama-cpp-python with RTX 5080 support (sm_120)...${NC}"
 echo "This will compile for sm_120 (Blackwell architecture)"
 echo "Compilation takes 3-5 minutes..."
 echo ""
@@ -54,7 +56,7 @@ echo ""
 export CMAKE_ARGS="-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=120"
 export FORCE_CMAKE=1
 
-pip install llama-cpp-python==0.3.16 --force-reinstall --no-cache-dir --verbose
+pip install llama-cpp-python>=0.3.16 --force-reinstall --no-cache-dir --verbose
 
 echo ""
 echo -e "${GREEN}✓ Compilation complete${NC}"
