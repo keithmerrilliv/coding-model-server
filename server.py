@@ -308,7 +308,7 @@ Rules:
     _CODER_30B_HD = _create_model_config(
         'MODEL_PATH_30B_HD',
         '/home/keith-merrill/.lmstudio/models/lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q8_0.gguf',
-        24, 32768, 2048
+        20, 32768, 2048
     )
 
     # Lite: Faster reasoning on system RAM
@@ -482,7 +482,7 @@ class ModelManager:
                     type_k=model_config.get('type_k'), # None = Model default (usually F16)
                     type_v=model_config.get('type_v'), # None = Model default (usually F16)
                     use_mmap=True,
-                    use_mlock=True,
+                    use_mlock=False,
                     offload_kqv=model_config.get('offload_kqv', True), # True = Offload to GPU, False = RAM
                     # RoPE / YaRN Scaling for extended context
                     rope_scaling_type=model_config.get('rope_scaling_type', -1), # -1 = Unspecified
