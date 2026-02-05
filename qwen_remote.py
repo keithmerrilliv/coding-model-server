@@ -1187,7 +1187,7 @@ def get_completion(history, model, agent_theme):
             now = time.time()
             elapsed = now - start_time
             if now - last_heartbeat > 30:
-                try: requests.get(HEALTH_URL, timeout=2); last_heartbeat = now
+                try: requests.get(config.HEALTH_URL, timeout=2); last_heartbeat = now
                 except Exception: pass
             sys.stdout.write(f"\r{COLORS['BLUE']}Waiting for {model}... ({elapsed:.1f}s){COLORS['ENDC']}")
             sys.stdout.flush()
@@ -1203,7 +1203,7 @@ def get_completion(history, model, agent_theme):
 
     while True:
         try:
-            response = requests.post(API_URL, json=payload, stream=True, timeout=7200)
+            response = requests.post(config.API_URL, json=payload, stream=True, timeout=7200)
             
             if response.status_code != 200:
                 stop_progress.set()
