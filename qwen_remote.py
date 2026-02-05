@@ -538,6 +538,9 @@ def chunk_large_output(content, chunk_size=None, overlap=None):
     # Binary search helper to find nearest line break
     def find_nearest_line_break(start_pos, max_pos):
         # Find the closest line break before max_pos
+        if not line_breaks:
+            return -1
+
         low, high = 0, len(line_breaks) - 1
         best_break = -1
 
@@ -950,6 +953,26 @@ def handle_cupertino_search(query):
     return f"Retrieved Apple Documentation for '{query}':\n\n{combined_results}"
 
 
+def handle_apple_deep_docs(payload_str):
+    """Handle Apple Deep Docs command with proper error handling"""
+    try:
+        # Parse the payload string as JSON
+        payload = json.loads(payload_str)
+        tool = payload.get("tool")
+        args = payload.get("arguments", {})
+
+        if not tool:
+            return "Error: Missing 'tool' in Apple Deep Docs payload"
+
+        return apple_deep_docs_search(tool, args)
+    except json.JSONDecodeError as e:
+        logger.error("Invalid JSON in Apple Deep Docs payload: %s", payload_str)
+        return f"Error: Invalid JSON in Apple Deep Docs payload: {str(e)}"
+    except Exception as e:
+        logger.error("Error handling Apple Deep Docs: %s", str(e))
+        return f"Error handling Apple Deep Docs: {str(e)}"
+
+
 def apple_deep_docs_search(tool, args):
     """Send a deep doc search query to the server"""
     try:
@@ -1036,7 +1059,7 @@ def process_remote_commands(response_text: str) -> Optional[str]:
          lambda query: handle_cupertino_search(query.strip()),
          True),
         (r'<<<APPLE_DEEP_DOCS>>>\s*(.*?)\s*<<<APPLE_DEEP_DOCS>>>',
-         lambda payload_str: (lambda p: apple_deep_docs_search(p.get("tool"), p.get("arguments", {})))(json.loads(payload_str)),
+         lambda payload_str: handle_apple_deep_docs(payload_str.strip()),
          True),
     ]
 
