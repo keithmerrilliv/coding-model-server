@@ -447,9 +447,7 @@ CRITICAL: Plan your response to fit within this budget. If the task requires mor
 
    The client will automatically request continuation.
 
-4. NEVER leave code incomplete mid-function or mid-file
-   - If you can't fit a complete file, don't start it
-   - Better to deliver 3 complete files than 5 partial ones
+4. MAINTAIN ATOMIC INTEGRITY: When context limits prevent delivering a large file in one turn, DO NOT provide a partial rewrite. Instead, use incremental replace calls for specific blocks or write segments to temporary files and use shell tools (like cat) to assemble the complete final file. Always ensure the worktree remains syntactically valid at the end of each turn.
 
 BUDGET GUIDELINES:
 - ~100 tokens ≈ 75 words or ~4-5 lines of code
