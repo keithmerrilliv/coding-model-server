@@ -1529,6 +1529,7 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                 # We track partial segments so we can append them to history
                 # without duplicating content in the final merged response.
                 continuation_count = 0
+                aggregated_response = response_text
                 while finish_reason == "length" and continuation_count < max_continuations:
                     continuation_count += 1
                     print_colored(
@@ -1554,13 +1555,20 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                     # The continuation becomes the new response_text for the
                     # next iteration (the partial is already in history above).
                     response_text = cont_text
+                    aggregated_response += cont_text
 
                 if task_aborted:
                     break
 
                 # Append the (possibly merged) assistant response to history
-                history.append({"role": "assistant", "content": response_text})
-                save_chat_history(history, model)
+                # If we aggregated, we already put segments in history, 
+                # but the final tool processing should use the full combined text.
+                if continuation_count > 0:
+                    # Update response_text to the full aggregated version for tool parsing
+                    response_text = aggregated_response
+                else:
+                    history.append({"role": "assistant", "content": response_text})
+                    save_chat_history(history, model)
 
                 # ── Execute commands found in the response ──
                 tool_output = process_remote_commands(response_text)

@@ -22,6 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 from memory_service import MemoryService
 from web_search_service import WebSearchService
+from server_manager import AppleDeepDocsService
 
 # Configure logging
 logging.basicConfig(
@@ -143,180 +144,6 @@ class IngestRequest(BaseModel):
     """Request to ingest a local file"""
     path: str
 
-
-# ============================================================================
-# Apple Deep Docs Service (MCP Integration)
-# ============================================================================
-
-class AppleDeepDocsService:
-    """Service for interacting with the Apple Deep Docs MCP server on the Linux server"""
-
-    def __init__(self, mcp_path: str):
-        self.mcp_path = mcp_path
-        self.process = None
-        self.msg_id = 1
-        self.lock = Lock()
-        self.venv_python = os.path.join(mcp_path, "venv/bin/python")
-
-    def _readline_with_timeout(self, timeout: float = 30) -> Optional[str]:
-        """Read a line from the MCP subprocess stdout with a timeout using select.
-        
-        Returns the line string, or None on timeout / EOF.
-        """
-        if not self.process or not self.process.stdout:
-            return None
-
-        # Poll stdout for data
-        ready, _, _ = select.select([self.process.stdout], [], [], timeout)
-        if ready:
-            return self.process.stdout.readline()
-        
-        logger.error("MCP readline timed out after %.1f seconds", timeout)
-        return None
-
-    def start(self):
-        """Start the MCP server process and perform handshake if not already running"""
-        if self.process and self.process.poll() is None:
-            return True
-
-        try:
-            main_py = os.path.join(self.mcp_path, "main.py")
-            if not os.path.exists(self.venv_python):
-                logger.error(f"Apple Deep Docs venv not found at {self.venv_python}")
-                return False
-
-            self.process = subprocess.Popen(
-                [self.venv_python, main_py],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                text=True,
-                bufsize=1,
-                cwd=self.mcp_path
-            )
-
-            # Perform MCP Handshake
-            logger.info("Performing MCP handshake with Apple Deep Docs...")
-
-            # 1. Send initialize
-            init_request = {
-                "jsonrpc": "2.0",
-                "id": 0,
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {},
-                    "clientInfo": {"name": "qwen-server", "version": "2.0"}
-                }
-            }
-            self.process.stdin.write(json.dumps(init_request) + "\n")
-            self.process.stdin.flush()
-
-            # 2. Wait for initialize response (with timeout)
-            while True:
-                line = self._readline_with_timeout(timeout=30)
-                if not line:
-                    logger.error("Failed to receive initialize response from MCP")
-                    return False
-                line = line.strip()
-                if not line: continue
-                try:
-                    resp = json.loads(line)
-                    if resp.get("id") == 0:
-                        logger.info("MCP initialize successful")
-                        break
-                except Exception:
-                    continue
-            
-            # 3. Send initialized notification
-            initialized_notif = {
-                "jsonrpc": "2.0",
-                "method": "notifications/initialized"
-            }
-            self.process.stdin.write(json.dumps(initialized_notif) + "\n")
-            self.process.stdin.flush()
-            
-            logger.info("Apple Deep Docs MCP server ready")
-            return True
-        except Exception as e:
-            logger.error(f"Error starting Apple Deep Docs MCP: {e}")
-            return False
-
-    def stop(self):
-        """Stop the MCP server process"""
-        if self.process:
-            self.process.terminate()
-            self.process = None
-            logger.info("Apple Deep Docs MCP server stopped")
-
-    def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> str:
-        """Call a specific tool on the MCP server and return the result as text"""
-        if not self.start():
-            return "Error: Apple Deep Docs MCP server failed to start."
-            
-        with self.lock:
-            req_id = self.msg_id
-            self.msg_id += 1
-            
-            request = {
-                "jsonrpc": "2.0",
-                "id": req_id,
-                "method": "tools/call",
-                "params": {
-                    "name": tool_name,
-                    "arguments": arguments
-                }
-            }
-            
-            try:
-                # Write request
-                payload = json.dumps(request)
-                logger.info(f"Sending MCP Request: {payload[:200]}...")
-                self.process.stdin.write(payload + "\n")
-                self.process.stdin.flush()
-
-                # Read response with timeout to avoid blocking forever
-                # We loop to skip non-JSON lines (like logs or banners)
-                max_attempts = 50  # safety cap to prevent infinite loop
-                for _ in range(max_attempts):
-                    line = self._readline_with_timeout(timeout=60)
-                    if not line:
-                        if self.process.poll() is not None:
-                            return "Error: MCP server process exited unexpectedly."
-                        return "Error: No response from MCP server (timed out)."
-
-                    line = line.strip()
-                    logger.info(f"Received from MCP: {line[:500]}")
-                    if not line:
-                        continue
-
-                    try:
-                        response = json.loads(line)
-                        if response.get("id") == req_id:
-                            result = response.get("result", {})
-                            # Process content (usually a list of content items)
-                            content = result.get("content", [])
-                            text_parts = []
-                            for item in content:
-                                if item.get("type") == "text":
-                                    text_parts.append(item.get("text", ""))
-
-                            if text_parts:
-                                return "\n\n".join(text_parts)
-
-                            # If no text parts, return the whole result as string
-                            return json.dumps(result, indent=2)
-
-                        logger.debug(f"Skipping MCP response with mismatching ID: {response.get('id')}")
-                    except json.JSONDecodeError:
-                        logger.debug(f"Skipping non-JSON MCP output: {line[:100]}...")
-                        continue
-
-                return "Error: MCP server sent too many non-matching responses."
-
-            except Exception as e:
-                logger.error(f"Communication error with Deep Docs MCP: {e}")
-                return f"Error: Documentation fetch failed: {str(e)}"
 
 # ============================================================================
 # Helper Functions
@@ -481,7 +308,7 @@ Rules:
     _CODER_30B_HD = _create_model_config(
         'MODEL_PATH_30B_HD',
         '/home/keith-merrill/.lmstudio/models/lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q8_0.gguf',
-        36, 32768, 2048
+        24, 32768, 2048
     )
 
     # Lite: Faster reasoning on system RAM
@@ -585,7 +412,7 @@ class ModelManager:
         self.max_cached_models = max_cached_models  # Maximum number of models to keep cached
 
     def unload_model(self):
-        """Unload all models and free VRAM"""
+        """Unload all models and free VRAM with aggressive cleanup"""
         with self.lock:
             if self.models:
                 logger.info("Unloading models (Cleaning VRAM)...")
@@ -593,13 +420,14 @@ class ModelManager:
                     # Clear internal references
                     self.models.clear()
 
-                    # Force garbage collection
+                    # Force garbage collection multiple times to ensure objects are freed
                     import gc
                     import time
                     gc.collect()
                     gc.collect()
+                    gc.collect()
 
-                    # Clear CUDA cache if PyTorch is available (often used by other libs)
+                    # Clear CUDA cache if PyTorch is available
                     try:
                         import torch
                         if torch.cuda.is_available():
@@ -608,7 +436,7 @@ class ModelManager:
                     except ImportError:
                         pass
 
-                    time.sleep(2) # Allow async cleanup
+                    time.sleep(1) # Allow async cleanup
                     logger.info("Models unloaded, memory freed")
                 except Exception as e:
                     logger.error(f"Error during model unload: {e}")
@@ -631,10 +459,11 @@ class ModelManager:
                 return model
 
             # Evict oldest if cache is full
-            while len(self.models) >= self.max_cached_models:
-                oldest_path, oldest_model = self.models.popitem(last=False)
-                logger.info(f"Evicting oldest model from cache: {oldest_path}")
-                del oldest_model
+            if len(self.models) >= self.max_cached_models:
+                logger.info("Cache full, evicting all models for clean VRAM state...")
+                # We unload EVERYTHING to ensure maximum VRAM for the next model
+                # as llama-cpp-python can sometimes fragment VRAM
+                self.unload_model()
 
             # Load the model (still inside the lock to prevent race conditions)
             logger.info("Loading model for %s: %s", agent_name, model_path)
