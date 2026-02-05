@@ -80,7 +80,7 @@ import sys
 
 try:
     test = Llama(
-        model_path="/home/keith-merrill/.lmstudio/models/zhangfeng026/Qwen2.5-Coder-32B-Instruct-Q4_K_M-GGUF/qwen2.5-coder-32b-instruct-q4_k_m.gguf",
+        model_path="/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf",
         n_ctx=512,
         n_gpu_layers=10,  # Test with 10 layers
         verbose=False
