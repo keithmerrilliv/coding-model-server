@@ -327,7 +327,6 @@ def add_to_history(line):
 
 
 # Register cleanup on exit
-atexit.register(_cleanup_temp_files)
 
 # Track temporary files with creation time for cleanup
 _temp_files = {}  # Maps path -> creation_time
@@ -1664,7 +1663,7 @@ def chat(model="implementer"):
     # Load available models from server
     fetch_available_models()
 
-    print_colored(f"\nQwen Remote CLI (Connected to {LINUX_SERVER_IP})", COLORS['HEADER'])
+    print_colored(f"\nQwen Remote CLI (Connected to {config.LINUX_SERVER_IP})", COLORS['HEADER'])
     set_terminal_title("Qwen - Idle")
     
     # Get initial theme
@@ -1688,18 +1687,18 @@ def chat(model="implementer"):
     print_colored(f"({agent_theme['desc']})", COLORS['BLUE'])
 
     print_colored("\nSecurity Settings:", COLORS['HEADER'])
-    if ALLOW_SHELL_MODE:
+    if config.ALLOW_SHELL_MODE:
         print_colored("  Shell mode: ENABLED (allows pipes, redirects, etc.)", COLORS['WARNING'])
     else:
         print_colored("  Shell mode: DISABLED (safer, no shell injection)", COLORS['GREEN'])
 
-    if COMMAND_WHITELIST:
+    if config.COMMAND_WHITELIST:
         print_colored(f"  Whitelist: {len(COMMAND_WHITELIST)} commands allowed", COLORS['GREEN'])
-        print_colored(f"    {', '.join(COMMAND_WHITELIST[:5])}{'...' if len(COMMAND_WHITELIST) > 5 else ''}", COLORS['CYAN'])
+        print_colored(f"    {', '.join(config.COMMAND_WHITELIST[:5])}{'...' if len(config.COMMAND_WHITELIST) > 5 else ''}", COLORS['CYAN'])
     else:
         print_colored("  Whitelist: DISABLED (all commands allowed)", COLORS['WARNING'])
 
-    if ALLOW_ALL:
+    if config.ALLOW_ALL:
         print_colored("  Command approval: AUTO-APPROVE ALL (⚠️  NO PROMPTS - DANGEROUS!)", COLORS['FAIL'])
     else:
         print_colored("  Command approval: Manual (will prompt for each command)", COLORS['GREEN'])
