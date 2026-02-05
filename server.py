@@ -612,8 +612,8 @@ class ModelManager:
                 except Exception as e:
                     logger.error(f"Error during model unload: {e}")
 
-    def get_model(self, agent_name: str, force_reload: bool = True):
-        """Get or load the model for the specific agent, using caching to minimize load/unload cycles"""
+    def get_model(self, agent_name: str):
+        """Get or load the model for the specific agent, using LRU caching"""
         if agent_name not in Config.AGENTS:
             raise ValueError(f"Unknown agent: {agent_name}")
 
@@ -629,15 +629,13 @@ class ModelManager:
                 logger.info(f"Reusing cached model for {agent_name}")
                 return model
 
-            # Evict oldest if cache is full (unconditionally)
+            # Evict oldest if cache is full
             while len(self.models) >= self.max_cached_models:
                 oldest_path, oldest_model = self.models.popitem(last=False)
                 logger.info(f"Evicting oldest model from cache: {oldest_path}")
-                # Explicitly delete the model object to help GC
                 del oldest_model
 
-        # Load the model
-        with self.lock:
+            # Load the model (still inside the lock to prevent race conditions)
             logger.info("Loading model for %s: %s", agent_name, model_path)
             try:
                 import llama_cpp
@@ -998,9 +996,6 @@ def chat_completions(request: ChatCompletionRequest, raw_request: Request):
                 detail=f"Model '{request.model}' not found. Available models: {', '.join(Config.AGENTS.keys())}"
             )
 
-        # Check for reload flag (default to False to reuse loaded model)
-        force_reload = raw_request.headers.get("X-Qwen-Force-Reload", "false").lower() == "true"
-
         agent_config = Config.AGENTS[request.model]
         system_prompt = agent_config['system_prompt']
 
@@ -1030,12 +1025,12 @@ def chat_completions(request: ChatCompletionRequest, raw_request: Request):
         if request.stream:
             return StreamingResponse(
                 stream_completion(request.messages, system_prompt, model_path, request.model,
-                                  request.max_tokens, request.temperature, force_reload),
+                                  request.max_tokens, request.temperature),
                 media_type="text/event-stream"
             )
         else:
             return sync_completion(request.messages, system_prompt, model_path, request.model,
-                                   request.max_tokens, request.temperature, force_reload)
+                                   request.max_tokens, request.temperature)
 
     except HTTPException:
         raise
@@ -1048,11 +1043,11 @@ def chat_completions(request: ChatCompletionRequest, raw_request: Request):
 
 
 def sync_completion(messages: List[ChatMessage], system_prompt: str, model_path: str,
-                    model_id: str, max_tokens: int, temperature: float, force_reload: bool) -> Dict[str, Any]:
+                    model_id: str, max_tokens: int, temperature: float) -> Dict[str, Any]:
     """Generate synchronous completion with token budget awareness"""
     with model_manager.inference_lock:
         try:
-            model = model_manager.get_model(model_id, force_reload=force_reload)
+            model = model_manager.get_model(model_id)
             n_ctx = model.n_ctx()
 
             # Estimate the token count for the budget guidance string itself
@@ -1110,12 +1105,12 @@ def sync_completion(messages: List[ChatMessage], system_prompt: str, model_path:
 
             return build_completion_response(model_id, text, response['usage'],
                                              finish_reason=finish_reason)
-        finally:
-            # Keep the model cached for future use
-            pass
+        except Exception:
+            raise
+
 
 def stream_completion(messages: List[ChatMessage], system_prompt: str, model_path: str,
-                      model_id: str, max_tokens: int, temperature: float, force_reload: bool) -> Iterator[str]:
+                      model_id: str, max_tokens: int, temperature: float) -> Iterator[str]:
     """Generate streaming completion with token budget awareness.
 
     The inference_lock is held for the full duration of streaming intentionally.
@@ -1127,86 +1122,82 @@ def stream_completion(messages: List[ChatMessage], system_prompt: str, model_pat
 
     try:
         with model_manager.inference_lock:
-            try:
-                model = model_manager.get_model(model_id, force_reload=force_reload)
-                n_ctx = model.n_ctx()
+            model = model_manager.get_model(model_id)
+            n_ctx = model.n_ctx()
 
-                # Estimate the token count for the budget guidance string itself
-                budget_guidance_template = Config.TOKEN_BUDGET_GUIDANCE.format(available_tokens=1000)  # Placeholder value
-                budget_guidance_tokens = len(model.tokenize(budget_guidance_template.encode("utf-8")))
+            # Estimate the token count for the budget guidance string itself
+            budget_guidance_template = Config.TOKEN_BUDGET_GUIDANCE.format(available_tokens=1000)  # Placeholder value
+            budget_guidance_tokens = len(model.tokenize(budget_guidance_template.encode("utf-8")))
 
-                # Build prompt without budget guidance to get the base token count
-                preliminary_prompt = build_model_prompt(messages, system_prompt, model_path)
-                preliminary_tokens = model.tokenize(preliminary_prompt.encode("utf-8"))
-                n_preliminary = len(preliminary_tokens)
+            # Build prompt without budget guidance to get the base token count
+            preliminary_prompt = build_model_prompt(messages, system_prompt, model_path)
+            preliminary_tokens = model.tokenize(preliminary_prompt.encode("utf-8"))
+            n_preliminary = len(preliminary_tokens)
 
-                # Calculate available tokens accounting for budget guidance overhead
-                available = n_ctx - n_preliminary - budget_guidance_tokens
-                if available < 1:
-                    error_chunk = {
-                        "error": {
-                            "message": f"Prompt ({n_preliminary} tokens) fills the entire context window "
-                                       f"({n_ctx}). Reduce conversation history and retry.",
-                            "type": "context_length_exceeded"
-                        }
+            # Calculate available tokens accounting for budget guidance overhead
+            available = n_ctx - n_preliminary - budget_guidance_tokens
+            if available < 1:
+                error_chunk = {
+                    "error": {
+                        "message": f"Prompt ({n_preliminary} tokens) fills the entire context window "
+                                   f"({n_ctx}). Reduce conversation history and retry.",
+                        "type": "context_length_exceeded"
                     }
-                    yield f"data: {json.dumps(error_chunk)}\n\n"
-                    return
+                }
+                yield f"data: {json.dumps(error_chunk)}\n\n"
+                return
 
-                # Clamp to requested max_tokens
-                clamped_max = min(max_tokens, available)
+            # Clamp to requested max_tokens
+            clamped_max = min(max_tokens, available)
 
-                # Now build the final prompt with actual budget guidance
-                budget_guidance = Config.TOKEN_BUDGET_GUIDANCE.format(available_tokens=clamped_max)
-                augmented_system_prompt = f"{system_prompt}\n{budget_guidance}"
-                prompt = build_model_prompt(messages, augmented_system_prompt, model_path)
+            # Now build the final prompt with actual budget guidance
+            budget_guidance = Config.TOKEN_BUDGET_GUIDANCE.format(available_tokens=clamped_max)
+            augmented_system_prompt = f"{system_prompt}\n{budget_guidance}"
+            prompt = build_model_prompt(messages, augmented_system_prompt, model_path)
 
-                # Final token count for logging
-                final_tokens = model.tokenize(prompt.encode("utf-8"))
-                n_prompt = len(final_tokens)
-                final_available = n_ctx - n_prompt
-                clamped_max = min(max_tokens, final_available)
+            # Final token count for logging
+            final_tokens = model.tokenize(prompt.encode("utf-8"))
+            n_prompt = len(final_tokens)
+            final_available = n_ctx - n_prompt
+            clamped_max = min(max_tokens, final_available)
 
-                if clamped_max < max_tokens:
-                    logger.info(
-                        "Clamped max_tokens %d -> %d for %s (prompt=%d, n_ctx=%d)",
-                        max_tokens, clamped_max, model_id, n_prompt, n_ctx
-                    )
-
+            if clamped_max < max_tokens:
                 logger.info(
-                    "Token budget injected for %s: budget=%d tokens communicated to model",
-                    model_id, clamped_max
+                    "Clamped max_tokens %d -> %d for %s (prompt=%d, n_ctx=%d)",
+                    max_tokens, clamped_max, model_id, n_prompt, n_ctx
                 )
 
-                params = get_model_params(clamped_max, temperature, stream=True)
-                token_count = 0
+            logger.info(
+                "Token budget injected for %s: budget=%d tokens communicated to model",
+                model_id, clamped_max
+            )
 
-                for output in model(prompt, **params):
-                    if 'choices' in output and len(output['choices']) > 0:
-                        choice = output['choices'][0]
-                        token = choice.get('text', '')
-                        if token:
-                            token_count += 1
-                            chunk = build_stream_chunk(completion_id, model_id, content=token)
-                            yield f"data: {json.dumps(chunk)}\n\n"
-                        # Capture finish_reason from the last chunk llama-cpp emits
-                        if choice.get('finish_reason'):
-                            finish_reason = choice['finish_reason']
+            params = get_model_params(clamped_max, temperature, stream=True)
+            token_count = 0
 
-                # If llama-cpp didn't set a finish_reason but we hit the token limit,
-                # infer "length" so the client knows the response was truncated
-                if finish_reason == "stop" and token_count >= clamped_max:
-                    finish_reason = "length"
+            for output in model(prompt, **params):
+                if 'choices' in output and len(output['choices']) > 0:
+                    choice = output['choices'][0]
+                    token = choice.get('text', '')
+                    if token:
+                        token_count += 1
+                        chunk = build_stream_chunk(completion_id, model_id, content=token)
+                        yield f"data: {json.dumps(chunk)}\n\n"
+                    # Capture finish_reason from the last chunk llama-cpp emits
+                    if choice.get('finish_reason'):
+                        finish_reason = choice['finish_reason']
 
-                # Always log completion stats for debugging truncation issues
-                logger.info(
-                    "Completion stats for %s: prompt=%d, available=%d, clamped_max=%d, "
-                    "generated=%d, finish_reason=%s",
-                    model_id, n_prompt, final_available, clamped_max, token_count, finish_reason
-                )
-            finally:
-                # Keep the model cached for future use
-                pass
+            # If llama-cpp didn't set a finish_reason but we hit the token limit,
+            # infer "length" so the client knows the response was truncated
+            if finish_reason == "stop" and token_count >= clamped_max:
+                finish_reason = "length"
+
+            # Always log completion stats for debugging truncation issues
+            logger.info(
+                "Completion stats for %s: prompt=%d, available=%d, clamped_max=%d, "
+                "generated=%d, finish_reason=%s",
+                model_id, n_prompt, final_available, clamped_max, token_count, finish_reason
+            )
 
         final_chunk = build_stream_chunk(completion_id, model_id, finish=True,
                                          finish_reason=finish_reason)

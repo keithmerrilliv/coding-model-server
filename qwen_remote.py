@@ -15,6 +15,7 @@ import uuid
 import atexit
 import time
 import tempfile
+import select
 from datetime import datetime
 from collections import deque
 from typing import Optional, List
@@ -1042,26 +1043,20 @@ class CupertinoMCPClient:
             self.process = None
 
     def _readline_with_timeout(self, timeout: float = 30) -> Optional[str]:
-        """Read a line from the subprocess stdout with a timeout.
+        """Read a line from the subprocess stdout with a timeout using select.
 
-        Uses a background thread so a hung subprocess doesn't block forever.
         Returns the line string, or None on timeout / EOF.
         """
-        result = [None]
-
-        def _read():
-            try:
-                result[0] = self.process.stdout.readline()
-            except Exception:
-                result[0] = None
-
-        reader = threading.Thread(target=_read, daemon=True)
-        reader.start()
-        reader.join(timeout)
-        if reader.is_alive():
-            print_colored(f"Cupertino MCP readline timed out after {timeout:.1f} seconds", COLORS['WARNING'])
+        if not self.process or not self.process.stdout:
             return None
-        return result[0]
+
+        # Poll stdout for data
+        ready, _, _ = select.select([self.process.stdout], [], [], timeout)
+        if ready:
+            return self.process.stdout.readline()
+
+        print_colored(f"Cupertino MCP readline timed out after {timeout:.1f} seconds", COLORS['WARNING'])
+        return None
 
     def _send_request(self, method, params):
         """Send a JSON-RPC request to the MCP server and wait for response"""
@@ -1380,7 +1375,7 @@ def _trim_history_for_context(history):
     return None
 
 
-def get_completion(history, model, agent_theme, headers):
+def get_completion(history, model, agent_theme):
     """Internal helper to get a completion from the server with full error handling and streaming.
 
     Returns (response_text, finish_reason) on success, or (None, None) on failure.
@@ -1442,7 +1437,7 @@ def get_completion(history, model, agent_theme, headers):
 
     while True:
         try:
-            response = requests.post(API_URL, json=payload, headers=headers, stream=True, timeout=7200)
+            response = requests.post(API_URL, json=payload, stream=True, timeout=7200)
             
             if response.status_code != 200:
                 stop_progress.set()
@@ -1754,14 +1749,11 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
 
             # Inner loop: keep sending tool output back until the agent
             # produces a response with no actionable commands.
-            force_reload_override = True  # first call for this task uses force reload
             task_aborted = False
             task_commands_executed = False # Track if any commands were run for this task
             max_continuations = 5  # safety cap for truncation retries
             while True:
-                headers = {"X-Qwen-Force-Reload": "true" if force_reload_override else "false"}
-
-                response_text, finish_reason = get_completion(history, model, agent_theme, headers)
+                response_text, finish_reason = get_completion(history, model, agent_theme)
                 if response_text is None:
                     task_aborted = True
                     break
@@ -1788,8 +1780,7 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                     save_chat_history(history, model)
 
                     cont_text, finish_reason = get_completion(
-                        history, model, agent_theme,
-                        {"X-Qwen-Force-Reload": "false"}
+                        history, model, agent_theme
                     )
                     if cont_text is None:
                         task_aborted = True
@@ -1804,9 +1795,6 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                 # Append the (possibly merged) assistant response to history
                 history.append({"role": "assistant", "content": response_text})
                 save_chat_history(history, model)
-
-                # After the first round-trip, reuse the loaded model
-                force_reload_override = False
 
                 # ── Execute commands found in the response ──
                 tool_output = process_remote_commands(response_text)
