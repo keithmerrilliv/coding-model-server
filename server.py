@@ -843,7 +843,7 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-_cors_origins = os.getenv("CORS_ORIGINS", "*").split(",")
+_cors_origins = os.getenv("CORS_ORIGINS", "localhost,127.0.0.1").split(",")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
