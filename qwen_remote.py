@@ -295,161 +295,6 @@ ALLOW_ALL = os.getenv('ALLOW_ALL', 'false').lower() == 'true'
 COMMAND_WHITELIST = os.getenv('COMMAND_WHITELIST', '').split(',') if os.getenv('COMMAND_WHITELIST') else None
 
 
-class JobTracker:
-    """Tracks background async command jobs"""
-
-    def __init__(self, max_jobs=100, job_ttl_hours=1):
-        self.jobs = {}
-        self.lock = threading.Lock()
-        self.max_jobs = max_jobs
-        self.job_ttl_seconds = job_ttl_hours * 3600
-
-    def _cleanup_old_jobs(self):
-        """Remove old completed jobs. Must be called with lock held."""
-        now = datetime.now()
-
-        jobs_to_remove = []
-        for job_id, job in self.jobs.items():
-            if job['status'] in ['completed', 'failed'] and job['completed_at']:
-                try:
-                    completed_time = datetime.fromisoformat(job['completed_at'])
-                    age_seconds = (now - completed_time).total_seconds()
-                    if age_seconds > self.job_ttl_seconds:
-                        jobs_to_remove.append(job_id)
-                except (ValueError, TypeError):
-                    jobs_to_remove.append(job_id)
-
-        for job_id in jobs_to_remove:
-            del self.jobs[job_id]
-
-        if len(self.jobs) > self.max_jobs:
-            completed_jobs = [
-                (job_id, job) for job_id, job in self.jobs.items()
-                if job['status'] in ['completed', 'failed']
-            ]
-            completed_jobs.sort(key=lambda x: x[1].get('completed_at', ''))
-            num_to_remove = len(self.jobs) - self.max_jobs
-            for i in range(min(num_to_remove, len(completed_jobs))):
-                job_id = completed_jobs[i][0]
-                del self.jobs[job_id]
-
-    def create_job(self, command):
-        job_id = str(uuid.uuid4())[:8]
-        with self.lock:
-            self._cleanup_old_jobs()
-            self.jobs[job_id] = {
-                "command": command,
-                "status": "pending",
-                "output": deque(maxlen=1000),
-                "exit_code": None,
-                "started_at": datetime.now().isoformat(),
-                "completed_at": None,
-                "process": None
-            }
-        return job_id
-
-    def get_job(self, job_id):
-        with self.lock:
-            job = self.jobs.get(job_id)
-            if job is None:
-                return None
-            # Return a shallow copy with output as a list to avoid exposing live state
-            snapshot = dict(job)
-            snapshot["output"] = list(job["output"])
-            return snapshot
-
-    def update_job(self, job_id, **kwargs):
-        with self.lock:
-            if job_id in self.jobs:
-                self.jobs[job_id].update(kwargs)
-
-    def add_output(self, job_id, line):
-        with self.lock:
-            if job_id in self.jobs:
-                self.jobs[job_id]["output"].append(line)
-
-    def get_status(self, job_id):
-        job = self.get_job(job_id)
-        if not job:
-            return "Job not found"
-
-        output_lines = list(job["output"])
-        recent_output = "\n".join(output_lines[-20:]) if output_lines else "(no output yet)"
-
-        status_msg = f"Job ID: {job_id}\n"
-        status_msg += f"Command: {job['command']}\n"
-        status_msg += f"Status: {job['status']}\n"
-        status_msg += f"Started: {job['started_at']}\n"
-
-        if job['completed_at']:
-            status_msg += f"Completed: {job['completed_at']}\n"
-            status_msg += f"Exit Code: {job['exit_code']}\n"
-
-        status_msg += f"\nRecent Output (last 20 lines):\n{recent_output}\n"
-        status_msg += f"\nTotal Output Lines: {len(output_lines)}"
-
-        return status_msg
-
-    def get_full_output(self, job_id):
-        job = self.get_job(job_id)
-        if not job:
-            return "Job not found"
-
-        output_lines = list(job["output"])
-        return "\n".join(output_lines) if output_lines else "(no output)"
-
-    def cleanup(self):
-        """Manually trigger cleanup of old jobs"""
-        with self.lock:
-            before_count = len(self.jobs)
-            self._cleanup_old_jobs()
-            after_count = len(self.jobs)
-            return before_count - after_count
-
-    def get_stats(self):
-        """Get statistics about job tracker"""
-        with self.lock:
-            total = len(self.jobs)
-            by_status = {'pending': 0, 'running': 0, 'completed': 0, 'failed': 0}
-            for job in self.jobs.values():
-                status = job['status']
-                by_status[status] = by_status.get(status, 0) + 1
-
-            return {
-                'total_jobs': total,
-                'max_jobs': self.max_jobs,
-                'ttl_hours': self.job_ttl_seconds / 3600,
-                'by_status': by_status
-            }
-
-    def terminate_all(self):
-        """Terminate all running background jobs"""
-        with self.lock:
-            count = 0
-            for job_id, job in self.jobs.items():
-                if job['status'] == 'running' and job['process']:
-                    try:
-                        print(f"Terminating background job {job_id}...", end="", flush=True)
-                        job['process'].terminate()
-                        # Give it a moment to die gracefully, else kill
-                        try:
-                            job['process'].wait(timeout=0.5)
-                        except subprocess.TimeoutExpired:
-                            job['process'].kill()
-                        print(" Done.")
-                        job['status'] = 'failed'
-                        job['completed_at'] = datetime.now().isoformat()
-                        count += 1
-                    except Exception as e:
-                        print(f" Error: {e}")
-            if count > 0:
-                print(f"Terminated {count} background jobs.")
-
-
-# Initialize job tracker
-job_tracker = JobTracker(
-    max_jobs=int(os.getenv('JOB_TRACKER_MAX_JOBS', 100)),
-    job_ttl_hours=float(os.getenv('JOB_TRACKER_TTL_HOURS', 1))
 )
 
 # Register cleanup on exit
@@ -602,28 +447,6 @@ def is_command_allowed(command_args: List[str]) -> tuple:
     return False, f"Command '{base_command}' not in whitelist: {', '.join(COMMAND_WHITELIST)}"
 
 
-def run_command_async(job_id, command):
-    """Run command in background thread and capture output in real-time"""
-
-    try:
-        job_tracker.update_job(job_id, status="running")
-
-        # Execute as a single command (preserves pipes, &&, and complex shell constructs)
-        if ALLOW_SHELL_MODE:
-            process = subprocess.Popen(
-                command,
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-            )
-        else:
-            # Note: chaining commands with && doesn't work well with shell=False unless passed as a single shell string
-            # But if ALLOW_SHELL_MODE is False, we shouldn't be doing complex shell things anyway.
-            # We'll try to parse it safely.
-            command_args = parse_command_safely(command)
-            command_args = expand_paths_in_args(command_args)
             process = subprocess.Popen(
                 command_args,
                 shell=False,
@@ -792,12 +615,10 @@ def get_chunk_for_display(content, chunk_idx=None, chunk_size=6000, overlap=500,
         )
 
 
-def execute_remote_command(command, async_mode=False, chunk_output=True):
+def execute_remote_command(command, chunk_output=True):
     """Internal function to execute a command with security checks"""
 
     print_colored(f"\nAgent wants to run command: {command}", COLORS['WARNING'])
-    if async_mode:
-        print_colored(f"   (async mode - will run in background)", COLORS['BLUE'])
 
     if ALLOW_SHELL_MODE:
         print_colored(f"   Shell mode enabled (less safe)", COLORS['WARNING'])
@@ -828,58 +649,56 @@ def execute_remote_command(command, async_mode=False, chunk_output=True):
         if choice.lower() != 'y':
             return "User denied command execution."
 
-    if async_mode:
-        job_id = job_tracker.create_job(command)
-        thread = threading.Thread(target=run_command_async, args=(job_id, command), daemon=True)
-        thread.start()
+    try:
+        # Create a temp file to capture output
+        # We keep it if output is large so the agent can inspect it later
+        with tempfile.NamedTemporaryFile(mode='w+', delete=False, prefix='qwen_cmd_', suffix='.log') as tmp:
+            tmp_path = tmp.name
+        _add_temp_file(tmp_path)
 
-        print_colored(f"Command started in background", COLORS['GREEN'])
-        print_colored(f"Job ID: {job_id}", COLORS['CYAN'])
+        # Run process redirecting stdout/stderr to the temp file
+        if ALLOW_SHELL_MODE:
+            with open(tmp_path, 'w') as f:
+                result = subprocess.run(command, shell=True, stdout=f, stderr=subprocess.STDOUT, text=True, errors='replace', timeout=240)
+        else:
+            command_args = parse_command_safely(command)
+            command_args = expand_paths_in_args(command_args)
+            with open(tmp_path, 'w') as f:
+                result = subprocess.run(command_args, shell=False, stdout=f, stderr=subprocess.STDOUT, text=True, errors='replace', timeout=240)
 
-        return f"Command started in background.\nJob ID: {job_id}\n\nUse <<<REMOTE_CHECK_STATUS>>>{job_id}<<<REMOTE_CHECK_STATUS>>> to check progress.\nUse <<<REMOTE_GET_OUTPUT>>>{job_id}<<<REMOTE_GET_OUTPUT>>> to get full output."
+        # Analyze output file
+        with open(tmp_path, 'r', errors='replace') as f:
+            content = f.read()
 
-    else:
-        try:
-            # Create a temp file to capture output
-            # We keep it if output is large so the agent can inspect it later
-            with tempfile.NamedTemporaryFile(mode='w+', delete=False, prefix='qwen_cmd_', suffix='.log') as tmp:
-                tmp_path = tmp.name
-            _add_temp_file(tmp_path)
+        output_len = len(content)
 
-            # Run process redirecting stdout/stderr to the temp file
-            if ALLOW_SHELL_MODE:
-                with open(tmp_path, 'w') as f:
-                    result = subprocess.run(command, shell=True, stdout=f, stderr=subprocess.STDOUT, text=True, errors='replace', timeout=240)
-            else:
-                command_args = parse_command_safely(command)
-                command_args = expand_paths_in_args(command_args)
-                with open(tmp_path, 'w') as f:
-                    result = subprocess.run(command_args, shell=False, stdout=f, stderr=subprocess.STDOUT, text=True, errors='replace', timeout=240)
+        # Use chunked processing if output is large and chunking is enabled
+        if chunk_output and output_len > 8000:  # Same threshold as original
+            final_output = get_chunk_for_display(content, chunk_size=6000, overlap=500, log_path=tmp_path)
 
-            # Analyze output file
-            with open(tmp_path, 'r', errors='replace') as f:
-                content = f.read()
+            # Store chunk info in a way that can be accessed later if needed
+            chunk_info_path = tmp_path + '.chunks'
+            _add_temp_file(chunk_info_path)
+            chunk_result = chunk_large_output(content, chunk_size=6000, overlap=500)
 
-            output_len = len(content)
+            # Save chunk metadata for potential later retrieval
+            with open(chunk_info_path, 'w') as f:
+                json.dump({
+                    'total_chunks': chunk_result['total_chunks'],
+                    'original_length': chunk_result['original_length'],
+                    'chunk_size': chunk_result['chunk_size'],
+                    'file_path': tmp_path
+                }, f)
 
-            # Use chunked processing if output is large and chunking is enabled
-            if chunk_output and output_len > 8000:  # Same threshold as original
-                final_output = get_chunk_for_display(content, chunk_size=6000, overlap=500, log_path=tmp_path)
+            return final_output
 
-                # Store chunk info in a way that can be accessed later if needed
-                chunk_info_path = tmp_path + '.chunks'
-                _add_temp_file(chunk_info_path)
-                chunk_result = chunk_large_output(content, chunk_size=6000, overlap=500)
+        # If it fits in one go, just return it
+        return content if content else "(empty output)"
 
-                # Save chunk metadata for potential later retrieval
-                with open(chunk_info_path, 'w') as f:
-                    json.dump({
-                        'total_chunks': chunk_result['total_chunks'],
-                        'original_length': chunk_result['original_length'],
-                        'chunk_size': chunk_result['chunk_size'],
-                        'file_path': tmp_path
-                    }, f)
-            else:
+    except subprocess.TimeoutExpired:
+        return "Error: Command timed out after 240 seconds."
+    except Exception as e:
+        return f"Error executing command: {str(e)}"            else:
                 # Use original logic for smaller outputs
                 MAX_DISPLAY_CHARS = 8000 # ~2k tokens safe limit
 
@@ -933,40 +752,6 @@ def check_job_status(job_id):
     """Check status of a background job"""
     return job_tracker.get_status(job_id)
 
-
-def get_job_output(job_id):
-    """Get full output of a background job"""
-    job = job_tracker.get_job(job_id)
-    if not job:
-        return "Job not found"
-
-    output = job_tracker.get_full_output(job_id)
-    status = f"Job ID: {job_id}\n"
-    status += f"Status: {job['status']}\n"
-    status += f"Exit Code: {job.get('exit_code', 'N/A')}\n"
-    status += f"\nFull Output:\n{output}"
-
-    return status
-
-
-def list_all_jobs():
-    """List all jobs with their current status"""
-    stats = job_tracker.get_stats()
-
-    result = "Job Tracker Status:\n" + "=" * 60 + "\n"
-    result += f"Total Jobs: {stats['total_jobs']} / {stats['max_jobs']} (max)\n"
-    result += f"TTL for completed jobs: {stats['ttl_hours']} hours\n"
-    result += f"By Status: "
-    result += f"Pending={stats['by_status']['pending']}, "
-    result += f"Running={stats['by_status']['running']}, "
-    result += f"Completed={stats['by_status']['completed']}, "
-    result += f"Failed={stats['by_status']['failed']}\n"
-    result += "=" * 60 + "\n"
-
-    with job_tracker.lock:
-        if not job_tracker.jobs:
-            result += "\nNo jobs found."
-            return result
 
         result += "\nJobs:\n"
         for job_id, job in job_tracker.jobs.items():
@@ -1192,30 +977,6 @@ def install_tool_with_homebrew(tool_name):
     """Install a tool using Homebrew with user approval and input sanitization"""
     # Sanitize: only allow alphanumeric, hyphens, underscores, slashes (for taps), and @
     tool_name = tool_name.strip()
-    if not re.match(r'^[a-zA-Z0-9@_/.-]+$', tool_name):
-        return f"Error: Invalid tool name '{tool_name}'. Only alphanumeric characters, hyphens, underscores, slashes, and @ are allowed."
-
-    print_colored(f"\nAgent wants to install tool: {tool_name} with Homebrew", COLORS['WARNING'])
-
-    if ALLOW_ALL:
-        print_colored(f"   Auto-approved (ALLOW_ALL mode enabled)", COLORS['GREEN'])
-    else:
-        try:
-            choice = input(f"{COLORS['BOLD']}Allow brew install {tool_name}? [y/N] > {COLORS['ENDC']}")
-        except (EOFError, KeyboardInterrupt):
-            return "User cancelled Homebrew installation."
-        if choice.lower() != 'y':
-            return "User denied Homebrew installation."
-
-    try:
-        # Check if Homebrew is installed
-        result = subprocess.run(['which', 'brew'], capture_output=True, text=True)
-        if result.returncode != 0:
-            return "Error: Homebrew is not installed. Please install Homebrew first."
-
-        # Execute with shell=False to prevent injection
-        print_colored(f"Installing {tool_name} with Homebrew...", COLORS['CYAN'])
-        result = subprocess.run(['brew', 'install', tool_name], capture_output=True, text=True)
 
         if result.returncode == 0:
             print_colored(f"Successfully installed {tool_name} with Homebrew", COLORS['GREEN'])
@@ -1262,17 +1023,8 @@ def process_remote_commands(response_text: str) -> Optional[str]:
     # Define all command patterns with their handlers
     # Update regex to handle malformed closing tags (e.g. <<<<<<<)
     command_defs = [
-        (r'<<<REMOTE_EXEC_ASYNC>>>\s*(.*?)\s*(?:<<<REMOTE_EXEC_ASYNC>>>|<<<<<<<)',
-         lambda cmd: execute_remote_command(cmd.strip(), async_mode=True),
-         True),
         (r'<<<REMOTE_EXEC>>>\s*(.*?)\s*(?:<<<REMOTE_EXEC>>>|<<<<<<<)',
          lambda cmd: execute_remote_command(cmd.strip(), async_mode=False),
-         True),
-        (r'<<<REMOTE_CHECK_STATUS>>>\s*(.*?)\s*<<<REMOTE_CHECK_STATUS>>>',
-         lambda job_id: check_job_status(job_id.strip()),
-         True),
-        (r'<<<REMOTE_GET_OUTPUT>>>\s*(.*?)\s*<<<REMOTE_GET_OUTPUT>>>',
-         lambda job_id: get_job_output(job_id.strip()),
          True),
         (r'<<<READ_FILE>>>\s*(.*?)\s*<<<READ_FILE>>>',
          lambda path: read_file_content(path.strip()),
@@ -1289,12 +1041,6 @@ def process_remote_commands(response_text: str) -> Optional[str]:
         (r'<<<APPLE_DEEP_DOCS>>>\s*(.*?)\s*<<<APPLE_DEEP_DOCS>>>',
          lambda payload_str: (lambda p: apple_deep_docs_search(p.get("tool"), p.get("arguments", {})))(json.loads(payload_str)),
          True),
-        (r'<<<INSTALL_TOOL_HOMEBREW>>>\s*(.*?)\s*<<<INSTALL_TOOL_HOMEBREW>>>',
-         lambda tool_name: install_tool_with_homebrew(tool_name.strip()),
-         True),
-        (r'<<<REMOTE_LIST_JOBS>>>',
-         lambda _: list_all_jobs(),
-         False),
     ]
 
     # Find ALL matches across all command types, sorted by position in the response

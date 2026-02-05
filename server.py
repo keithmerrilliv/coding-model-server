@@ -373,15 +373,11 @@ class Config:
     # ── Unified tool reference ──
     BASE_TOOLS = [
         "<<<REMOTE_EXEC>>>command<<<REMOTE_EXEC>>>                         — run a shell command (Linux/macOS compatible)",
-        "<<<REMOTE_EXEC_ASYNC>>>command<<<REMOTE_EXEC_ASYNC>>>             — run in background",
-        "<<<REMOTE_CHECK_STATUS>>>JOB_ID<<<REMOTE_CHECK_STATUS>>>          — poll async job",
-        "<<<REMOTE_GET_OUTPUT>>>JOB_ID<<<REMOTE_GET_OUTPUT>>>              — get finished job output",
         "<<<READ_FILE>>>path<<<READ_FILE>>>                                — read file content (safe, fast)",
         "<<<SAVE_MEMORY>>>fact<<<SAVE_MEMORY>>>                            — persist a fact",
         "<<<WEB_SEARCH>>>query<<<WEB_SEARCH>>>                             — web search",
         "<<<CUPERTINO>>>query<<<CUPERTINO>>>                               — Apple docs (local MCP)",
-        '<<<APPLE_DEEP_DOCS>>>{"tool":"NAME","arguments":{}}<<<APPLE_DEEP_DOCS>>> — Apple docs (server MCP)',
-        "<<<INSTALL_TOOL_HOMEBREW>>>tool_name<<<INSTALL_TOOL_HOMEBREW>>>   — install a tool using Homebrew"
+        '<<<APPLE_DEEP_DOCS>>>{"tool":"NAME","arguments":{}}<<<APPLE_DEEP_DOCS>>> — Apple docs (server MCP)'
     ]
 
     # ── Combined tools ──
