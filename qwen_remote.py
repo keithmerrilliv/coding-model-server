@@ -11,6 +11,7 @@ import re
 import subprocess
 import shlex
 import threading
+import urllib3
 import atexit
 import time
 import tempfile
@@ -1270,7 +1271,7 @@ def get_completion(history, model, agent_theme):
                 start_time = time.time(); stop_progress = threading.Event(); progress_thread = threading.Thread(target=show_progress, daemon=True); progress_thread.start()
                 continue
             return None, None
-        except (requests.exceptions.ChunkedEncodingError, requests.exceptions.ProtocolError) as e:
+        except (requests.exceptions.ChunkedEncodingError, urllib3.exceptions.ProtocolError) as e:
             stop_progress.set()
             print_colored(f"\n[Client] Connection interrupted: {e}. Retrying...", COLORS['WARNING'])
             if chunk_count > 0: 
