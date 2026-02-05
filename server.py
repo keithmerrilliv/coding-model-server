@@ -474,30 +474,32 @@ Rules:
 """
 
     # ── Shared model configs ──
-    _CODER_30B = _create_model_config(
-        'MODEL_PATH_CODER_30B',
+    # Turbo: Optimized for speed and 80k context on RTX 5080 (Success Formula)
+    _CODER_30B_TURBO = _create_model_config(
+        'MODEL_PATH_30B_TURBO',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
-        36,  # Slight increase from 32 - reduced context frees some VRAM
-        32768,  # Match yarn_orig_ctx - no YaRN extrapolation
-        2048    # Doubled for better throughput
+        32, 81920, 2048
     )
 
-    _QWEN_32B = _create_model_config(
-        'MODEL_PATH_QWEN_32B',
-        '/home/keith-merrill/.lmstudio/models/Qwen/Qwen3-32B-GGUF/Qwen3-32B-Q4_K_M.gguf',
-        35, 43008, 2048
+    # HD: Optimized for high-precision code generation and review
+    _CODER_30B_HD = _create_model_config(
+        'MODEL_PATH_30B_HD',
+        '/home/keith-merrill/.lmstudio/models/lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q8_0.gguf',
+        36, 32768, 2048
     )
 
-    _QWEN_480B = _create_model_config(
-        'MODEL_PATH_QWEN_480B',
+    # Lite: Faster reasoning on system RAM
+    _QWEN_480B_LITE = _create_model_config(
+        'MODEL_PATH_480B_LITE',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/Qwen3-Coder-480B-A35B-Instruct-UD-IQ1_M.gguf',
         4, 32768, 1024
     )
 
-    _QWEN_14B = _create_model_config(
-        'MODEL_PATH_QWEN_14B',
-        '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-14B-GGUF/Qwen3-14B-Q6_K.gguf',
-        99, 32768, 2048
+    # Ultra: Premium reasoning using Q2_K_XL on 192GB RAM
+    _QWEN_480B_ULTRA = _create_model_config(
+        'MODEL_PATH_480B_ULTRA',
+        '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/Qwen3-Coder-480B-A35B-Instruct-UD-Q2_K_XL-00001-of-00004.gguf',
+        4, 49152, 1024
     )
 
     # ── Few-shot example injected for executor agents ──
@@ -511,32 +513,38 @@ Rules:
     # 'executor': True means few-shot + fallback extraction are enabled.
     AGENTS = {
         'implementer': _create_agent_config(
-            'Qwen3-Coder-30B-A3B (Smart - 80k Context)',
+            'Qwen3-Coder-30B-A3B HD',
             f'You are an implementer. {EXECUTOR_PROMPT}\n\nCOMPREHENSIVE IMPLEMENTATION: When implementing tasks, leverage multiple tools to understand the codebase thoroughly:\n\nEXECUTION ENVIRONMENT: You are running on a macOS environment with full access to development tools.\n- Use `<<<REMOTE_EXEC>>>` for ALL shell commands (including Xcode tools, Git, file operations).\n- Do NOT distinguish between "server" and "client". Everything runs locally.\n\nGIT AWARENESS: Use Git to understand code changes, history, and context:\n- Use `git log` to understand recent changes and history\n- Use `git diff` to see specific code differences\n- Use `git blame` to identify who made changes and why\n- Use `git show` to examine specific commits\n- Use `git status` to see current state of the repository\n\nFILE SYSTEM NAVIGATION: Use find/grep to locate and analyze relevant files:\n- Use `find` to locate specific file types or patterns\n- Use `grep` to search for specific terms, TODOs, FIXMEs, or error patterns\n- Use `grep -r` for recursive searches across the codebase\n\nAPPLE DEVELOPMENT:\n- For Xcode projects, use `xcodebuild`, `xcrun`, `xcodegen` directly via `<<<REMOTE_EXEC>>>`.\n- No special markers needed for client-side tools.\n\n{TOOL_REFERENCE}',
-            _CODER_30B,
+            _CODER_30B_HD,
             executor=True
         ),
         'architect': _create_agent_config(
-            'System architecture agent',
+            'System architecture agent (Ultra Reasoning)',
             f'You are a system architect. {EXECUTOR_PROMPT}\n\nDESIGN AND IMPLEMENTATION: You are expected to both design solutions and implement them using the tools available.\n\nEXECUTION ENVIRONMENT: You are running on a macOS environment with full access to development tools.\n- Use `<<<REMOTE_EXEC>>>` for ALL shell commands (including Xcode tools, Git, file operations).\n- Do NOT distinguish between "server" and "client". Everything runs locally.\n\nGIT AWARENESS: Use Git to understand code changes, history, and context:\n- Use `git log` to understand recent changes and history\n- Use `git diff` to see specific code differences\n- Use `git blame` to identify who made changes and why\n- Use `git show` to examine specific commits\n- Use `git status` to see current state of the repository\n\nFILE SYSTEM NAVIGATION: Use find/grep to locate and analyze relevant files:\n- Use `find` to locate specific file types or patterns\n- Use `grep` to search for specific terms, TODOs, FIXMEs, or error patterns\n- Use `grep -r` for recursive searches across the codebase\n\nXCODE DEVELOPMENT:\n- For Xcode projects, use `xcodebuild`, `xcrun`, `xcodegen` directly via `<<<REMOTE_EXEC>>>`.\n- Create and manage Xcode projects, schemes, targets, and build configurations.\n- Use `xcode-select` to manage Xcode installations.\n- Use `simctl` to manage iOS simulators.\n- Use `codesign` and `security` for code signing and certificates.\n\n{TOOL_REFERENCE}',
-            _QWEN_480B,
+            _QWEN_480B_ULTRA,
             executor=True
         ),
         'reviewer': _create_agent_config(
-            'Code review agent',
+            'Code review agent (High Precision)',
             f'You are a code reviewer. Identify issues and suggest improvements. You are encouraged to provide detailed advice and recommendations.\n\nCOMPREHENSIVE ANALYSIS: When performing code reviews, leverage multiple tools to understand the codebase thoroughly:\n\nGIT AWARENESS: Use Git to understand code changes, history, and context:\n- Use `git log` to understand recent changes and history\n- Use `git diff` to see specific code differences\n- Use `git blame` to identify who made changes and why\n- Use `git show` to examine specific commits\n- Use `git status` to see current state of the repository\n\nFILE SYSTEM NAVIGATION: Use find/grep to locate and analyze relevant files:\n- Use `find` to locate specific file types or patterns\n- Use `grep` to search for specific terms, TODOs, FIXMEs, or error patterns\n- Use `grep -r` for recursive searches across the codebase\n\nCODE COMPARISON: Use diff and other tools to analyze code changes:\n- Use `diff` to compare files and see changes\n- Use `wc`, `head`, `tail` to analyze file contents\n\nAlways use these tools to gather comprehensive context before providing your review. This helps you understand the evolution of code, locate related files, and provide more accurate feedback.\n{GIT_TOOL_REFERENCE}',
-            _CODER_30B
+            _CODER_30B_HD
         ),
         'debugger': _create_agent_config(
-            'Qwen3-Coder-30B-A3B (Smart - 80k Context)',
+            'Qwen3-Coder-30B-A3B HD',
             f'You are a debugger. {EXECUTOR_PROMPT}\n{TOOL_REFERENCE}',
-            _CODER_30B,
+            _CODER_30B_HD,
             executor=True
         ),
         'metal_implementer': _create_agent_config(
-            'Qwen3-Coder-30B-A3B (Smart - 80k Context)',
+            'Qwen3-Coder-30B-A3B HD',
             f'You are a Metal 4 graphics engineer (compute kernels, mesh shaders, ray tracing, argument buffers). {EXECUTOR_PROMPT}\n\nEXECUTION ENVIRONMENT: You are running on a macOS environment with full access to Metal tools.\n- Use `<<<REMOTE_EXEC>>>` for ALL shell commands.\n- Do NOT distinguish between "server" and "client". Everything runs locally.\n\nMETAL DEVELOPMENT:\n- Metal shader compilation and validation → use `<<<REMOTE_EXEC>>>`\n- Metal framework integration → use `<<<REMOTE_EXEC>>>`\n- Metal performance profiling → use `<<<REMOTE_EXEC>>>`\n\n{TOOL_REFERENCE}',
-            _CODER_30B,
+            _CODER_30B_HD,
+            executor=True
+        ),
+        'lite_architect': _create_agent_config(
+            'System architecture agent (Lite Reasoning)',
+            f'You are a system architect. {EXECUTOR_PROMPT}\n{TOOL_REFERENCE}',
+            _QWEN_480B_LITE,
             executor=True
         ),
     }
