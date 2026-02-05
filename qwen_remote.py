@@ -295,10 +295,8 @@ ALLOW_ALL = os.getenv('ALLOW_ALL', 'false').lower() == 'true'
 COMMAND_WHITELIST = os.getenv('COMMAND_WHITELIST', '').split(',') if os.getenv('COMMAND_WHITELIST') else None
 
 
-)
-
 # Register cleanup on exit
-atexit.register(job_tracker.terminate_all)
+atexit.register(_cleanup_temp_files)
 
 # Track temporary files with creation time for cleanup
 _temp_files = {}  # Maps path -> creation_time
@@ -445,51 +443,6 @@ def is_command_allowed(command_args: List[str]) -> tuple:
             return True, f"Command '{base_name}' is whitelisted"
 
     return False, f"Command '{base_command}' not in whitelist: {', '.join(COMMAND_WHITELIST)}"
-
-
-            process = subprocess.Popen(
-                command_args,
-                shell=False,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-            )
-
-        job_tracker.update_job(job_id, process=process)
-
-        for line in iter(process.stdout.readline, ''):
-            if line:
-                job_tracker.add_output(job_id, line.rstrip())
-
-        process.wait()
-
-        if process.returncode == 0:
-            job_tracker.update_job(
-                job_id,
-                status="completed",
-                exit_code=process.returncode,
-                completed_at=datetime.now().isoformat()
-            )
-            send_macos_notification(f"Background command finished (Job {job_id})", title="Job Complete")
-        else:
-            job_tracker.add_output(job_id, f"ERROR: Command failed with exit code {process.returncode}")
-            job_tracker.update_job(
-                job_id,
-                status="failed",
-                exit_code=process.returncode,
-                completed_at=datetime.now().isoformat()
-            )
-            send_macos_notification(f"Background command failed (Job {job_id})", title="Job Failed")
-
-    except Exception as e:
-        job_tracker.add_output(job_id, f"ERROR: {str(e)}")
-        job_tracker.update_job(
-            job_id,
-            status="failed",
-            exit_code=-1,
-            completed_at=datetime.now().isoformat()
-        )
 
 
 def chunk_large_output(content, chunk_size=6000, overlap=500):
@@ -698,73 +651,9 @@ def execute_remote_command(command, chunk_output=True):
     except subprocess.TimeoutExpired:
         return "Error: Command timed out after 240 seconds."
     except Exception as e:
-        return f"Error executing command: {str(e)}"            else:
-                # Use original logic for smaller outputs
-                MAX_DISPLAY_CHARS = 8000 # ~2k tokens safe limit
-
-                if output_len > MAX_DISPLAY_CHARS:
-                    head = content[:2500]
-                    tail = content[-2500:]
-
-                    # Simple grep for errors/warnings in the truncated middle
-                    middle = content[2500:-2500]
-                    error_lines = []
-                    for line in middle.splitlines():
-                        if 'error' in line.lower() or 'fail' in line.lower() or 'warning' in line.lower():
-                            error_lines.append(line.strip())
-
-                    summary = "\n".join(error_lines[:15]) # Limit summary size
-                    if len(error_lines) > 15:
-                        summary += f"\n... ({len(error_lines) - 15} more error lines omitted) ..."
-
-                    final_output = (
-                        f"{head}\n"
-                        f"\n... [TRUNCATED: {output_len} chars] ...\n"
-                        f"... [Log: {tmp_path}] ...\n"
-                        f"... [Error Summary]:\n{summary}\n"
-                        f"\n... [TAIL] ...\n"
-                        f"{tail}"
-                    )
-                else:
-                    final_output = content
-                    # If small enough, clean up the temp file to reduce clutter
-                    try:
-                        os.remove(tmp_path)
-                        _remove_temp_file(tmp_path)
-                    except Exception:
-                        pass
-
-            print_colored(f"Output:\n{final_output}", COLORS['CYAN'])
-
-            # Return different messages based on exit code
-            if result.returncode == 0:
-                return f"Command executed successfully.\nExit Code: {result.returncode}\nOutput:\n{final_output}"
-            else:
-                return f"ERROR: Command failed with exit code {result.returncode}.\nCommand: {command}\nOutput:\n{final_output}"
-
-        except subprocess.TimeoutExpired:
-            return f"ERROR: Command timed out (240s limit for sync commands). Command: {command}\nConsider using async mode for long-running commands."
-        except Exception as e:
-            return f"ERROR: Failed to execute command: {str(e)}\nCommand: {command}"
+        return f"Error executing command: {str(e)}"
 
 
-def check_job_status(job_id):
-    """Check status of a background job"""
-    return job_tracker.get_status(job_id)
-
-
-        result += "\nJobs:\n"
-        for job_id, job in job_tracker.jobs.items():
-            result += f"\nJob ID: {job_id}\n"
-            result += f"Command: {job['command'][:60]}{'...' if len(job['command']) > 60 else ''}\n"
-            result += f"Status: {job['status']}\n"
-            result += f"Started: {job['started_at']}\n"
-            if job['completed_at']:
-                result += f"Completed: {job['completed_at']}\n"
-                result += f"Exit Code: {job['exit_code']}\n"
-            result += "-" * 60 + "\n"
-
-        return result
 
 
 def web_search(query):
@@ -973,23 +862,6 @@ def apple_deep_docs_search(tool, args):
 # Global queue for interrupted multi-agent chains
 PENDING_TASKS = []
 
-def install_tool_with_homebrew(tool_name):
-    """Install a tool using Homebrew with user approval and input sanitization"""
-    # Sanitize: only allow alphanumeric, hyphens, underscores, slashes (for taps), and @
-    tool_name = tool_name.strip()
-
-        if result.returncode == 0:
-            print_colored(f"Successfully installed {tool_name} with Homebrew", COLORS['GREEN'])
-            return f"Successfully installed {tool_name} with Homebrew.\nOutput:\n{result.stdout}"
-        else:
-            error_msg = f"Failed to install {tool_name} with Homebrew.\nError:\n{result.stderr}"
-            print_colored(error_msg, COLORS['FAIL'])
-            return error_msg
-
-    except Exception as e:
-        error_msg = f"Error installing {tool_name} with Homebrew: {str(e)}"
-        print_colored(error_msg, COLORS['FAIL'])
-        return error_msg
 
 
 def read_file_content(path):
@@ -1024,7 +896,7 @@ def process_remote_commands(response_text: str) -> Optional[str]:
     # Update regex to handle malformed closing tags (e.g. <<<<<<<)
     command_defs = [
         (r'<<<REMOTE_EXEC>>>\s*(.*?)\s*(?:<<<REMOTE_EXEC>>>|<<<<<<<)',
-         lambda cmd: execute_remote_command(cmd.strip(), async_mode=False),
+         lambda cmd: execute_remote_command(cmd.strip()),
          True),
         (r'<<<READ_FILE>>>\s*(.*?)\s*<<<READ_FILE>>>',
          lambda path: read_file_content(path.strip()),
@@ -1342,7 +1214,7 @@ def handle_user_command(user_input, history, model, agent_theme):
             
         # Run the main.py scraper orchestrator with optional argument
         scrape_cmd = f"cd scraping && python3 main.py{framework_arg}"
-        result = execute_remote_command(scrape_cmd, async_mode=False)
+        result = execute_remote_command(scrape_cmd)
         print_colored(f"\n{result}\n", COLORS['GREEN'])
         return True, model
 
