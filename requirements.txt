@@ -2,6 +2,8 @@
 
 # Model inference
 llama-cpp-python>=0.3.16
+transformers>=5.1.0
+huggingface-hub>=1.4.0
 
 # Web server (FastAPI)
 fastapi>=0.128.1
