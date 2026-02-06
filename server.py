@@ -318,6 +318,13 @@ Rules:
 - After writing/editing files, use <<<REMOTE_EXEC>>> to compile/build and verify changes work
 - Never ask for permission. You have full file access.
 - Never claim you cannot run commands or write files. You can.
+
+CONTEXT MANAGEMENT — your context window is limited. Work efficiently:
+- Work FILE-BY-FILE: read a file, modify it, verify it, then move to the next.
+  Do NOT read all files before starting work.
+- After reading a file, save key findings with <<<SAVE_MEMORY>>> before moving on.
+  This lets you drop the raw content from context while retaining what matters.
+- Prefer <<<GREP>>> over <<<READ_FILE>>> when you only need to find specific content.
 """
 
     # ── Shared model configs ──
@@ -344,18 +351,18 @@ Rules:
         21, 49152, 2048
     )
 
-    # Lite: Faster reasoning on system RAM (49k context via YaRN scaling from 32k training length)
+    # Lite: Faster reasoning on system RAM (64k context via YaRN 2x scaling from 32k training length)
     _QWEN_480B_LITE = _create_model_config(
         'MODEL_PATH_480B_LITE',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/Qwen3-Coder-480B-A35B-Instruct-UD-IQ1_M.gguf',
-        4, 49152, 1024
+        4, 65536, 1024
     )
 
-    # Ultra: Premium reasoning using Q2_K_XL on 192GB RAM
+    # Ultra: Premium reasoning using Q2_K_XL on 192GB RAM (64k context via YaRN 2x scaling)
     _QWEN_480B_ULTRA = _create_model_config(
         'MODEL_PATH_480B_ULTRA',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/Qwen3-Coder-480B-A35B-Instruct-UD-Q2_K_XL-00001-of-00004.gguf',
-        4, 49152, 1024
+        4, 65536, 1024
     )
 
     # ── Few-shot example injected for executor agents ──
@@ -962,6 +969,9 @@ def sync_completion(messages: List[ChatMessage], system_prompt: str, model_path:
             model_manager.unload_model()
 
 
+STREAM_TTFT_TIMEOUT = 300  # seconds — abort if no token generated within 5 minutes
+
+
 def stream_completion(messages: List[ChatMessage], system_prompt: str, model_path: str,
                       model_id: str, max_tokens: int, temperature: float) -> Iterator[str]:
     """Generate streaming completion with token budget awareness.
@@ -972,6 +982,7 @@ def stream_completion(messages: List[ChatMessage], system_prompt: str, model_pat
     """
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
     finish_reason = "stop"
+    start_time = time.time()
 
     try:
         with model_manager.inference_lock:
@@ -981,6 +992,22 @@ def stream_completion(messages: List[ChatMessage], system_prompt: str, model_pat
                 prompt, clamped_max, n_prompt, error_msg = calculate_token_budget(
                     model, messages, system_prompt, model_path, max_tokens, model_id
                 )
+
+                budget_elapsed = time.time() - start_time
+                if budget_elapsed > STREAM_TTFT_TIMEOUT:
+                    logger.error(
+                        "Token budget calculation took %.1fs for %s (prompt=%d tokens) — aborting",
+                        budget_elapsed, model_id, n_prompt
+                    )
+                    error_chunk = {
+                        "error": {
+                            "message": f"Server timeout: prompt tokenization took {budget_elapsed:.0f}s. "
+                                       "Reduce conversation history and retry.",
+                            "type": "context_length_exceeded"
+                        }
+                    }
+                    yield f"data: {json.dumps(error_chunk)}\n\n"
+                    return
 
                 if error_msg:
                     error_chunk = {
@@ -996,6 +1023,22 @@ def stream_completion(messages: List[ChatMessage], system_prompt: str, model_pat
                 token_count = 0
 
                 for output in model(prompt, **params):
+                    # TTFT timeout: abort if stuck in prefill
+                    if token_count == 0 and (time.time() - start_time) > STREAM_TTFT_TIMEOUT:
+                        logger.error(
+                            "TTFT timeout (%.0fs) for %s — prompt=%d tokens, aborting",
+                            time.time() - start_time, model_id, n_prompt
+                        )
+                        error_chunk = {
+                            "error": {
+                                "message": f"Server timeout: no tokens generated within {STREAM_TTFT_TIMEOUT}s. "
+                                           "Reduce conversation history and retry.",
+                                "type": "context_length_exceeded"
+                            }
+                        }
+                        yield f"data: {json.dumps(error_chunk)}\n\n"
+                        return
+
                     if 'choices' in output and len(output['choices']) > 0:
                         choice = output['choices'][0]
                         token = choice.get('text', '')
