@@ -201,17 +201,17 @@ class Config:
     
     # ── Unified tool reference ──
     BASE_TOOLS = [
-        "<<<REMOTE_EXEC>>>command<<<REMOTE_EXEC>>>                         — run a shell command (Linux/macOS compatible)",
-        "<<<READ_FILE>>>path<<<READ_FILE>>>                                — read file content (safe, fast)",
-        "<<<WRITE_FILE>>>path\ncontent<<<WRITE_FILE>>>                     — write content to file (first line = path, rest = content)",
-        "<<<EDIT_FILE>>>path\n<<<OLD>>>\nold text\n<<<NEW>>>\nnew text<<<EDIT_FILE>>> — surgical edit: find and replace text in file",
-        "<<<LIST_DIR>>>path<<<LIST_DIR>>>                                  — list directory contents with sizes and dates",
-        "<<<GLOB>>>pattern<<<GLOB>>>                                       — find files matching pattern (e.g., **/*.swift, src/*.py)",
-        "<<<GREP>>>pattern|path|options<<<GREP>>>                          — search file contents (options: i=ignore case)",
-        "<<<SAVE_MEMORY>>>fact<<<SAVE_MEMORY>>>                            — persist a fact",
-        "<<<WEB_SEARCH>>>query<<<WEB_SEARCH>>>                             — web search",
-        "<<<CUPERTINO>>>query<<<CUPERTINO>>>                               — Apple docs (local MCP)",
-        '<<<APPLE_DEEP_DOCS>>>{"tool":"NAME","arguments":{}}<<<APPLE_DEEP_DOCS>>> — Apple docs (server MCP)'
+        "<<<REMOTE_EXEC>>>command                          — run a shell command (Linux/macOS compatible)",
+        "<<<READ_FILE>>>path                               — read file content (safe, fast)",
+        "<<<WRITE_FILE>>>path\\ncontent                     — write content to file (first line = path, rest = content)",
+        "<<<EDIT_FILE>>>path\\n<<<OLD>>>\\nold text\\n<<<NEW>>>\\nnew text  — surgical edit: find and replace text in file",
+        "<<<LIST_DIR>>>path                                — list directory contents with sizes and dates",
+        "<<<GLOB>>>pattern                                 — find files matching pattern (e.g., **/*.swift, src/*.py)",
+        "<<<GREP>>>pattern|path|options                    — search file contents (options: i=ignore case)",
+        "<<<SAVE_MEMORY>>>fact                             — persist a fact",
+        "<<<WEB_SEARCH>>>query                             — web search",
+        "<<<CUPERTINO>>>query                              — Apple docs (local MCP)",
+        '<<<APPLE_DEEP_DOCS>>>{"tool":"NAME","arguments":{}}  — Apple docs (server MCP)'
     ]
 
     # ── Combined tools ──
@@ -225,35 +225,35 @@ class Config:
         "\n".join(ALL_TOOLS) +
         "\n\n# ESSENTIAL TOOLS FOR CODE REVIEW — Comprehensive toolkit for thorough code analysis:"
         "\n# Git commands for understanding code changes and history:" +
-        "\n<<<REMOTE_EXEC>>>git status<<<REMOTE_EXEC>>>                      — check current repository state" +
-        "\n<<<REMOTE_EXEC>>>git log --oneline -10<<<REMOTE_EXEC>>>           — view recent commit history" +
-        "\n<<<REMOTE_EXEC>>>git diff<<<REMOTE_EXEC>>>                        — see current uncommitted changes" +
-        "\n<<<REMOTE_EXEC>>>git diff --cached<<<REMOTE_EXEC>>>               — see staged changes" +
-        "\n<<<REMOTE_EXEC>>>git diff HEAD~1<<<REMOTE_EXEC>>>                 — compare working directory to last commit" +
-        "\n<<<REMOTE_EXEC>>>git show HEAD<<<REMOTE_EXEC>>>                   — show details of last commit" +
-        "\n<<<REMOTE_EXEC>>>git blame filename<<<REMOTE_EXEC>>>              — see who made changes to each line" +
-        "\n<<<REMOTE_EXEC>>>git log -p --follow filepath<<<REMOTE_EXEC>>>    — see history of changes to a specific file" +
-        "\n<<<REMOTE_EXEC>>>git diff HEAD~3 HEAD<<<REMOTE_EXEC>>>            — compare changes between commits" +
-        "\n<<<REMOTE_EXEC>>>git log --author=\"Author Name\" --since=\"2 weeks ago\"<<<REMOTE_EXEC>>> — find commits by author/time" +
+        "\n<<<REMOTE_EXEC>>>git status                      — check current repository state" +
+        "\n<<<REMOTE_EXEC>>>git log --oneline -10           — view recent commit history" +
+        "\n<<<REMOTE_EXEC>>>git diff                        — see current uncommitted changes" +
+        "\n<<<REMOTE_EXEC>>>git diff --cached               — see staged changes" +
+        "\n<<<REMOTE_EXEC>>>git diff HEAD~1                 — compare working directory to last commit" +
+        "\n<<<REMOTE_EXEC>>>git show HEAD                   — show details of last commit" +
+        "\n<<<REMOTE_EXEC>>>git blame filename              — see who made changes to each line" +
+        "\n<<<REMOTE_EXEC>>>git log -p --follow filepath    — see history of changes to a specific file" +
+        "\n<<<REMOTE_EXEC>>>git diff HEAD~3 HEAD            — compare changes between commits" +
+        "\n<<<REMOTE_EXEC>>>git log --author=\"Author Name\" --since=\"2 weeks ago\"  — find commits by author/time" +
         "\n\n# File system navigation and search:" +
-        "\n<<<REMOTE_EXEC>>>find . -name \"*.py\" -type f<<<REMOTE_EXEC>>>     — find all Python files" +
-        "\n<<<REMOTE_EXEC>>>find . -name \"*.js\" -o -name \"*.ts\"<<<REMOTE_EXEC>>> — find JavaScript/TypeScript files" +
-        "\n<<<REMOTE_EXEC>>>find . -name \"*.java\" -o -name \"*.cpp\" -o -name \"*.h\"<<<REMOTE_EXEC>>> — find source files" +
-        "\n<<<REMOTE_EXEC>>>find . -name \"*test*\" -o -name \"*spec*\"<<<REMOTE_EXEC>>> — find test files" +
-        "\n<<<REMOTE_EXEC>>>find . -name \"*.md\" -o -name \"*.txt\"<<<REMOTE_EXEC>>> — find documentation files" +
-        "\n<<<REMOTE_EXEC>>>find . -size +1M -name \"*.log\"<<<REMOTE_EXEC>>> — find large log files" +
-        "\n<<<REMOTE_EXEC>>>grep -r \"TODO|FIXME|HACK\" .<<<REMOTE_EXEC>>>   — find code comments indicating work to do" +
-        "\n<<<REMOTE_EXEC>>>grep -rn \"error\" .<<<REMOTE_EXEC>>>              — find error mentions in code" +
-        "\n<<<REMOTE_EXEC>>>grep -rn \"DEBUG|debug|console.log\" .<<<REMOTE_EXEC>>> — find debug statements" +
+        "\n<<<REMOTE_EXEC>>>find . -name \"*.py\" -type f     — find all Python files" +
+        "\n<<<REMOTE_EXEC>>>find . -name \"*.js\" -o -name \"*.ts\"  — find JavaScript/TypeScript files" +
+        "\n<<<REMOTE_EXEC>>>find . -name \"*.java\" -o -name \"*.cpp\" -o -name \"*.h\"  — find source files" +
+        "\n<<<REMOTE_EXEC>>>find . -name \"*test*\" -o -name \"*spec*\"  — find test files" +
+        "\n<<<REMOTE_EXEC>>>find . -name \"*.md\" -o -name \"*.txt\"  — find documentation files" +
+        "\n<<<REMOTE_EXEC>>>find . -size +1M -name \"*.log\"  — find large log files" +
+        "\n<<<REMOTE_EXEC>>>grep -r \"TODO|FIXME|HACK\" .    — find code comments indicating work to do" +
+        "\n<<<REMOTE_EXEC>>>grep -rn \"error\" .              — find error mentions in code" +
+        "\n<<<REMOTE_EXEC>>>grep -rn \"DEBUG|debug|console.log\" .  — find debug statements" +
         "\n\n# Code analysis and comparison:" +
-        "\n<<<REMOTE_EXEC>>>diff file1 file2<<<REMOTE_EXEC>>>                — compare two files" +
-        "\n<<<REMOTE_EXEC>>>diff -u old_file new_file<<<REMOTE_EXEC>>>       — unified diff format" +
-        "\n<<<REMOTE_EXEC>>>wc -l filename<<<REMOTE_EXEC>>>                  — count lines in file" +
-        "\n<<<REMOTE_EXEC>>>head -20 filename<<<REMOTE_EXEC>>>               — show first 20 lines" +
-        "\n<<<REMOTE_EXEC>>>tail -20 filename<<<REMOTE_EXEC>>>               — show last 20 lines" +
-        "\n<<<REMOTE_EXEC>>>sort filename<<<REMOTE_EXEC>>>                   — sort file contents" +
-        "\n<<<REMOTE_EXEC>>>uniq -c filename<<<REMOTE_EXEC>>>                — count unique lines" +
-        "\n<<<REMOTE_EXEC>>>stat filename<<<REMOTE_EXEC>>>                   — detailed file information"
+        "\n<<<REMOTE_EXEC>>>diff file1 file2                — compare two files" +
+        "\n<<<REMOTE_EXEC>>>diff -u old_file new_file       — unified diff format" +
+        "\n<<<REMOTE_EXEC>>>wc -l filename                  — count lines in file" +
+        "\n<<<REMOTE_EXEC>>>head -20 filename               — show first 20 lines" +
+        "\n<<<REMOTE_EXEC>>>tail -20 filename               — show last 20 lines" +
+        "\n<<<REMOTE_EXEC>>>sort filename                   — sort file contents" +
+        "\n<<<REMOTE_EXEC>>>uniq -c filename                — count unique lines" +
+        "\n<<<REMOTE_EXEC>>>stat filename                   — detailed file information"
     )
 
     # ── Token budget guidance (injected dynamically) ──
@@ -289,23 +289,24 @@ BUDGET GUIDELINES:
     # ── Behavioral instruction for action-oriented agents ──
     EXECUTOR_PROMPT = """You execute tasks by running commands and writing files.
 
-NAVIGATION & SEARCH - Use these tools to explore the codebase:
-<<<LIST_DIR>>>path<<<LIST_DIR>>>           — list directory contents
-<<<GLOB>>>**/*.swift<<<GLOB>>>             — find files by pattern
-<<<GREP>>>pattern|path<<<GREP>>>           — search file contents
-<<<READ_FILE>>>path<<<READ_FILE>>>         — read a file
+TOOL SYNTAX: Each tool is a single opening tag. Content runs until the next tool tag.
+No closing tags. Just open the next tool (or end your response) to terminate the previous block.
 
-FILE MODIFICATION - Use these to make changes:
+NAVIGATION & SEARCH:
+<<<LIST_DIR>>>path
+<<<GLOB>>>**/*.swift
+<<<GREP>>>pattern|path
+<<<READ_FILE>>>path
+
+FILE MODIFICATION:
 <<<WRITE_FILE>>>path
 content
-<<<WRITE_FILE>>>                           — write entire file (for new files or complete rewrites)
 
 <<<EDIT_FILE>>>path
 <<<OLD>>>
 existing code to find
 <<<NEW>>>
 replacement code
-<<<EDIT_FILE>>>                            — surgical edit (PREFERRED for modifying existing files)
 
 Rules:
 - Every response MUST contain at least one tool block
@@ -361,13 +362,13 @@ Rules:
     # The model sees this as a real prior exchange, so it copies the format.
     FEW_SHOT = [
         {"role": "user", "content": "List the Python files in this project."},
-        {"role": "assistant", "content": "<<<GLOB>>>**/*.py<<<GLOB>>>"},
+        {"role": "assistant", "content": "<<<GLOB>>>**/*.py"},
         {"role": "user", "content": "Find where the login function is defined."},
-        {"role": "assistant", "content": "<<<GREP>>>def login|.<<<GREP>>>"},
+        {"role": "assistant", "content": "<<<GREP>>>def login|."},
         {"role": "user", "content": "Create a hello world Swift file."},
-        {"role": "assistant", "content": "<<<WRITE_FILE>>>/tmp/hello.swift\nimport Foundation\n\nprint(\"Hello, World!\")\n<<<WRITE_FILE>>>\n\nNow let me verify it compiles:\n<<<REMOTE_EXEC>>>\nswiftc /tmp/hello.swift -o /tmp/hello && /tmp/hello\n<<<REMOTE_EXEC>>>"},
+        {"role": "assistant", "content": "<<<WRITE_FILE>>>/tmp/hello.swift\nimport Foundation\n\nprint(\"Hello, World!\")\n\nNow let me verify it compiles:\n<<<REMOTE_EXEC>>>swiftc /tmp/hello.swift -o /tmp/hello && /tmp/hello"},
         {"role": "user", "content": "Change the greeting from Hello to Hi in that file."},
-        {"role": "assistant", "content": "<<<EDIT_FILE>>>/tmp/hello.swift\n<<<OLD>>>\nprint(\"Hello, World!\")\n<<<NEW>>>\nprint(\"Hi, World!\")\n<<<EDIT_FILE>>>"},
+        {"role": "assistant", "content": "<<<EDIT_FILE>>>/tmp/hello.swift\n<<<OLD>>>\nprint(\"Hello, World!\")\n<<<NEW>>>\nprint(\"Hi, World!\")"},
     ]
 
     # ── Agent definitions ──
@@ -375,19 +376,19 @@ Rules:
     AGENTS = {
         'implementer': _create_agent_config(
             'Qwen3-Coder-30B-A3B IMPL (82k context)',
-            f'You are an implementer. {EXECUTOR_PROMPT}\n\nCOMPREHENSIVE IMPLEMENTATION: When implementing tasks, leverage multiple tools to understand the codebase thoroughly:\n\nEXECUTION ENVIRONMENT: You are running on a macOS environment with full access to development tools.\n- Use `<<<REMOTE_EXEC>>>` for ALL shell commands (including Xcode tools, Git, file operations).\n- Do NOT distinguish between "server" and "client". Everything runs locally.\n\nFILE OPERATIONS:\n- Use `<<<GLOB>>>` to find files: `<<<GLOB>>>**/*.swift<<<GLOB>>>`\n- Use `<<<GREP>>>` to search code: `<<<GREP>>>TODO|src/<<<GREP>>>`\n- Use `<<<LIST_DIR>>>` to explore directories\n- Use `<<<READ_FILE>>>` to read file contents\n- Use `<<<WRITE_FILE>>>` for new files or complete rewrites\n- Use `<<<EDIT_FILE>>>` for targeted changes to existing files (PREFERRED)\n\nGIT AWARENESS: Use Git via `<<<REMOTE_EXEC>>>` to understand code context:\n- `git log`, `git diff`, `git blame`, `git show`, `git status`\n\nAPPLE DEVELOPMENT via `<<<REMOTE_EXEC>>>`:\n- Compile Swift: `swiftc file.swift -o output`\n- Compile Metal: `xcrun -sdk macosx metal -c shader.metal -o shader.air`\n- Build Xcode: `xcodebuild -project Foo.xcodeproj -scheme Foo build`\n\n{TOOL_REFERENCE}',
+            f'You are an implementer. {EXECUTOR_PROMPT}\n\nCOMPREHENSIVE IMPLEMENTATION: When implementing tasks, leverage multiple tools to understand the codebase thoroughly:\n\nEXECUTION ENVIRONMENT: You are running on a macOS environment with full access to development tools.\n- Use `<<<REMOTE_EXEC>>>` for ALL shell commands (including Xcode tools, Git, file operations).\n- Do NOT distinguish between "server" and "client". Everything runs locally.\n\nFILE OPERATIONS:\n- Use `<<<GLOB>>>` to find files: `<<<GLOB>>>**/*.swift`\n- Use `<<<GREP>>>` to search code: `<<<GREP>>>TODO|src/`\n- Use `<<<LIST_DIR>>>` to explore directories\n- Use `<<<READ_FILE>>>` to read file contents\n- Use `<<<WRITE_FILE>>>` for new files or complete rewrites\n- Use `<<<EDIT_FILE>>>` for targeted changes to existing files (PREFERRED)\n\nGIT AWARENESS: Use Git via `<<<REMOTE_EXEC>>>` to understand code context:\n- `git log`, `git diff`, `git blame`, `git show`, `git status`\n\nAPPLE DEVELOPMENT via `<<<REMOTE_EXEC>>>`:\n- Compile Swift: `swiftc file.swift -o output`\n- Compile Metal: `xcrun -sdk macosx metal -c shader.metal -o shader.air`\n- Build Xcode: `xcodebuild -project Foo.xcodeproj -scheme Foo build`\n\n{TOOL_REFERENCE}',
             _CODER_30B_IMPL,
             executor=True
         ),
         'architect': _create_agent_config(
             'System architecture agent (Ultra Reasoning)',
-            f'You are a system architect. {EXECUTOR_PROMPT}\n\nDESIGN AND IMPLEMENTATION: You are expected to both design solutions and implement them using the tools available.\n\nEXECUTION ENVIRONMENT: You are running on a macOS environment with full access to development tools.\n- Use `<<<REMOTE_EXEC>>>` for ALL shell commands (including Xcode tools, Git, file operations).\n- Do NOT distinguish between "server" and "client". Everything runs locally.\n\nFILE MODIFICATION - CRITICAL:\n- Use `<<<WRITE_FILE>>>` for NEW files or complete rewrites\n- Use `<<<EDIT_FILE>>>` for targeted changes to EXISTING files (PREFERRED)\n- NEVER output code in markdown blocks - that does NOT save anything!\n\nEDIT_FILE FORMAT (use EXACTLY this format):\n<<<EDIT_FILE>>>/path/to/file\n<<<OLD>>>\nexact text to find\n<<<NEW>>>\nreplacement text\n<<<EDIT_FILE>>>\n\nWARNING: Do NOT use git-style markers like <<<<<<< SEARCH or ======= or >>>>>>> REPLACE. Those will NOT work. Use <<<OLD>>> and <<<NEW>>> only.\n\nDOCUMENTATION: You should create and maintain documentation:\n- Use `<<<WRITE_FILE>>>` to create new docs (README.md, ARCHITECTURE.md, DESIGN.md)\n- Use `<<<EDIT_FILE>>>` to update existing docs with targeted changes\n- Document system design decisions and rationale\n- Create diagrams using Mermaid or ASCII art in markdown\n- Write technical specs, ADRs (Architecture Decision Records), and migration guides\n\nGIT AWARENESS: Use Git via `<<<REMOTE_EXEC>>>` to understand code context:\n- `git log`, `git diff`, `git blame`, `git show`, `git status`\n\nXCODE DEVELOPMENT via `<<<REMOTE_EXEC>>>`:\n- Compile Swift: `swiftc file.swift -o output`\n- Build Xcode: `xcodebuild -project Foo.xcodeproj -scheme Foo build`\n- Use `simctl` for iOS simulators, `codesign` for signing\n\n{TOOL_REFERENCE}',
+            f'You are a system architect. {EXECUTOR_PROMPT}\n\nDESIGN AND IMPLEMENTATION: You are expected to both design solutions and implement them using the tools available.\n\nEXECUTION ENVIRONMENT: You are running on a macOS environment with full access to development tools.\n- Use `<<<REMOTE_EXEC>>>` for ALL shell commands (including Xcode tools, Git, file operations).\n- Do NOT distinguish between "server" and "client". Everything runs locally.\n\nFILE MODIFICATION - CRITICAL:\n- Use `<<<WRITE_FILE>>>` for NEW files or complete rewrites\n- Use `<<<EDIT_FILE>>>` for targeted changes to EXISTING files (PREFERRED)\n- NEVER output code in markdown blocks - that does NOT save anything!\n\nEDIT_FILE FORMAT (use EXACTLY this format):\n<<<EDIT_FILE>>>/path/to/file\n<<<OLD>>>\nexact text to find\n<<<NEW>>>\nreplacement text\n\nWARNING: Do NOT use git-style markers like <<<<<<< SEARCH or ======= or >>>>>>> REPLACE. Those will NOT work. Use <<<OLD>>> and <<<NEW>>> only.\n\nDOCUMENTATION: You should create and maintain documentation:\n- Use `<<<WRITE_FILE>>>` to create new docs (README.md, ARCHITECTURE.md, DESIGN.md)\n- Use `<<<EDIT_FILE>>>` to update existing docs with targeted changes\n- Document system design decisions and rationale\n- Create diagrams using Mermaid or ASCII art in markdown\n- Write technical specs, ADRs (Architecture Decision Records), and migration guides\n\nGIT AWARENESS: Use Git via `<<<REMOTE_EXEC>>>` to understand code context:\n- `git log`, `git diff`, `git blame`, `git show`, `git status`\n\nXCODE DEVELOPMENT via `<<<REMOTE_EXEC>>>`:\n- Compile Swift: `swiftc file.swift -o output`\n- Build Xcode: `xcodebuild -project Foo.xcodeproj -scheme Foo build`\n- Use `simctl` for iOS simulators, `codesign` for signing\n\n{TOOL_REFERENCE}',
             _QWEN_480B_ULTRA,
             executor=True
         ),
         'reviewer': _create_agent_config(
             'Code review agent Q8_0 (49k context, High Precision)',
-            f'You are a code reviewer. {EXECUTOR_PROMPT}\n\nIdentify issues and suggest improvements. You are encouraged to provide detailed advice and recommendations.\n\nCOMPREHENSIVE ANALYSIS: When performing code reviews, leverage multiple tools to understand the codebase thoroughly:\n\nGIT AWARENESS: Use Git via `<<<REMOTE_EXEC>>>` to understand code context:\n- `git log`, `git diff`, `git blame`, `git show`, `git status`\n\nFILE NAVIGATION: Use `<<<GLOB>>>` and `<<<GREP>>>` to find and search files.\n\nDOCUMENTATION - You can and should write/update documentation:\n- Use `<<<WRITE_FILE>>>` for NEW documentation files\n- Use `<<<EDIT_FILE>>>` for targeted updates to EXISTING docs (PREFERRED)\n\nEDIT_FILE FORMAT (use EXACTLY this format):\n<<<EDIT_FILE>>>/path/to/file\n<<<OLD>>>\nexact text to find\n<<<NEW>>>\nreplacement text\n<<<EDIT_FILE>>>\n\nWARNING: Do NOT use git-style markers like <<<<<<< SEARCH or ======= or >>>>>>> REPLACE. Use <<<OLD>>> and <<<NEW>>> only.\n\nAlways gather comprehensive context before providing your review.\n{GIT_TOOL_REFERENCE}',
+            f'You are a code reviewer. {EXECUTOR_PROMPT}\n\nIdentify issues and suggest improvements. You are encouraged to provide detailed advice and recommendations.\n\nCOMPREHENSIVE ANALYSIS: When performing code reviews, leverage multiple tools to understand the codebase thoroughly:\n\nGIT AWARENESS: Use Git via `<<<REMOTE_EXEC>>>` to understand code context:\n- `git log`, `git diff`, `git blame`, `git show`, `git status`\n\nFILE NAVIGATION: Use `<<<GLOB>>>` and `<<<GREP>>>` to find and search files.\n\nDOCUMENTATION - You can and should write/update documentation:\n- Use `<<<WRITE_FILE>>>` for NEW documentation files\n- Use `<<<EDIT_FILE>>>` for targeted updates to EXISTING docs (PREFERRED)\n\nEDIT_FILE FORMAT (use EXACTLY this format):\n<<<EDIT_FILE>>>/path/to/file\n<<<OLD>>>\nexact text to find\n<<<NEW>>>\nreplacement text\n\nWARNING: Do NOT use git-style markers like <<<<<<< SEARCH or ======= or >>>>>>> REPLACE. Use <<<OLD>>> and <<<NEW>>> only.\n\nAlways gather comprehensive context before providing your review.\n{GIT_TOOL_REFERENCE}',
             _CODER_30B_HD,
             executor=True
         ),

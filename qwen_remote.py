@@ -1453,67 +1453,48 @@ def process_remote_commands(response_text: str) -> Optional[str]:
     Finds and executes every tool marker in the response, in order of appearance.
     Returns aggregated output from all commands, or None if no markers found.
     """
-    # Define all command patterns with their handlers
-    # Update regex to handle malformed closing tags (e.g. <<<<<<<)
-    command_defs = [
-        (r'<<<REMOTE_EXEC>>>\s*(.*?)\s*(?:<<<REMOTE_EXEC>>>|<<<<<<<)',
-         lambda cmd: execute_remote_command(cmd.strip()),
-         True),
-        (r'<<<READ_FILE>>>\s*(.*?)\s*<<<READ_FILE>>>',
-         lambda path: read_file_content(path.strip()),
-         True),
-        (r'<<<WRITE_FILE>>>\s*(.*?)\s*<<<WRITE_FILE>>>',
-         lambda payload: write_file_content(payload),
-         True),
-        (r'<<<EDIT_FILE>>>\s*(.*?)\s*<<<EDIT_FILE>>>',
-         lambda payload: edit_file_content(payload),
-         True),
-        (r'<<<LIST_DIR>>>\s*(.*?)\s*<<<LIST_DIR>>>',
-         lambda path: list_directory(path),
-         True),
-        (r'<<<GLOB>>>\s*(.*?)\s*<<<GLOB>>>',
-         lambda pattern: glob_files(pattern),
-         True),
-        (r'<<<GREP>>>\s*(.*?)\s*<<<GREP>>>',
-         lambda payload: grep_search(payload),
-         True),
-        (r'<<<SAVE_MEMORY>>>\s*(.*?)\s*<<<SAVE_MEMORY>>>',
-         lambda text: save_memory(text.strip()),
-         True),
-        (r'<<<WEB_SEARCH>>>\s*(.*?)\s*<<<WEB_SEARCH>>>',
-         lambda query: web_search(query.strip()),
-         True),
-        (r'<<<CUPERTINO>>>\s*(.*?)\s*<<<CUPERTINO>>>',
-         lambda query: handle_cupertino_search(query.strip()),
-         True),
-        (r'<<<APPLE_DEEP_DOCS>>>\s*(.*?)\s*<<<APPLE_DEEP_DOCS>>>',
-         lambda payload_str: handle_apple_deep_docs(payload_str.strip()),
-         True),
-    ]
+    # Dispatch table: opening tag name -> handler
+    command_handlers = {
+        'REMOTE_EXEC':    lambda arg: execute_remote_command(arg.strip()),
+        'READ_FILE':      lambda arg: read_file_content(arg.strip()),
+        'WRITE_FILE':     lambda arg: write_file_content(arg),
+        'EDIT_FILE':      lambda arg: edit_file_content(arg),
+        'LIST_DIR':       lambda arg: list_directory(arg),
+        'GLOB':           lambda arg: glob_files(arg),
+        'GREP':           lambda arg: grep_search(arg),
+        'SAVE_MEMORY':    lambda arg: save_memory(arg.strip()),
+        'WEB_SEARCH':     lambda arg: web_search(arg.strip()),
+        'CUPERTINO':      lambda arg: handle_cupertino_search(arg.strip()),
+        'APPLE_DEEP_DOCS': lambda arg: handle_apple_deep_docs(arg.strip()),
+    }
 
-    # Find ALL matches across all command types, sorted by position in the response
+    # Build regex from known tags so internal markers (<<<OLD>>>, <<<NEW>>>) are not
+    # mistaken for command boundaries.  Each command block runs from its opening tag
+    # to the next known opening tag (or end of string).  No closing tags required.
+    _TAG_NAMES = '|'.join(command_handlers.keys())
+    _COMMAND_RE = rf'<<<({_TAG_NAMES})>>>\s*(.*?)(?=<<<(?:{_TAG_NAMES})>>>|\Z)'
+
     all_matches = []
-    for pattern, handler, has_capture in command_defs:
-        for match in re.finditer(pattern, response_text, re.DOTALL):
-            all_matches.append((match.start(), match, handler, has_capture))
+    for match in re.finditer(_COMMAND_RE, response_text, re.DOTALL):
+        tag = match.group(1)
+        content = match.group(2).strip()
+        if content:  # skip empty blocks (e.g. stale closing tags parsed as openers)
+            all_matches.append((match.start(), match, command_handlers[tag]))
 
     if not all_matches:
         return None
-
-    # Sort by position in the response text (execute in order of appearance)
-    all_matches.sort(key=lambda x: x[0])
 
     # Execute all commands and aggregate results
     results = []
     total_len = 0
     GLOBAL_MAX_LEN = 40000 # ~10k tokens global cap for tool outputs in one turn
 
-    for i, (_, match, handler, has_capture) in enumerate(all_matches):
+    for i, (_, match, handler) in enumerate(all_matches):
         if total_len > GLOBAL_MAX_LEN:
             results.append(f"\n... [OMITTED {len(all_matches) - i} ADDITIONAL COMMANDS TO PREVENT CONTEXT OVERFLOW] ...")
             break
 
-        arg = match.group(1) if has_capture else None
+        arg = match.group(2)
         try:
             result = handler(arg)
             if result:
@@ -2033,38 +2014,7 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                     save_chat_history(history, model)
                     continue  # loop back to get the agent's next response
 
-                # No commands found — check if we should auto-retry once
-                completion_phrases = ["complete summary", "work summary", "complete implementation status", "final report", "implementation complete", "summary"]
-                is_finishing_summary = any(phrase in response_text.lower() for phrase in completion_phrases)
-                is_exempt_agent = model in ["architect", "reviewer"]
-
-                last_msg_to_agent = history[-2] if len(history) >= 2 else {}
-                already_retried = last_msg_to_agent.get("_retried")
-
-                # Retry if:
-                # 1. It's an executor agent (not exempt) AND no commands have been executed yet (REGARDLESS of summary)
-                # 2. OR it's any agent that didn't provide a summary AND hasn't been retried yet
-                should_retry = False
-                
-                if not already_retried:
-                    if not is_exempt_agent and not task_commands_executed:
-                        # Force executor agents to work at least once
-                        should_retry = True
-                    elif not is_finishing_summary:
-                        # Standard retry for non-summary responses
-                        should_retry = True
-
-                if should_retry:
-                    print_colored("\nAgent gave advice instead of executing. Retrying...", COLORS['WARNING'])
-                    history.append({
-                        "role": "user",
-                        "content": "You did not execute any commands. Do not explain — act. Use <<<REMOTE_EXEC>>> blocks to perform the task now. If you are finished, provide a 'complete summary' or 'work summary'.",
-                        "_retried": True,
-                    })
-                    save_chat_history(history, model)
-                    continue  # one more round-trip
-
-                # Agent is done with this task (summary or exempt agent)
+                # No commands found — agent is done with this task
                 break
 
             if task_aborted:
