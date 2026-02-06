@@ -309,7 +309,7 @@ def save_readline_history():
     if not READLINE_AVAILABLE:
         return
     try:
-        readline.write_history_file(HISTORY_FILE)
+        readline.write_history_file(config.HISTORY_FILE)
     except (IOError, OSError):
         pass  # Can't write history file
 
@@ -1713,7 +1713,7 @@ def chat(model="implementer"):
         print_colored("  Shell mode: DISABLED (safer, no shell injection)", COLORS['GREEN'])
 
     if config.COMMAND_WHITELIST:
-        print_colored(f"  Whitelist: {len(COMMAND_WHITELIST)} commands allowed", COLORS['GREEN'])
+        print_colored(f"  Whitelist: {len(config.COMMAND_WHITELIST)} commands allowed", COLORS['GREEN'])
         print_colored(f"    {', '.join(config.COMMAND_WHITELIST[:5])}{'...' if len(config.COMMAND_WHITELIST) > 5 else ''}", COLORS['CYAN'])
     else:
         print_colored("  Whitelist: DISABLED (all commands allowed)", COLORS['WARNING'])
@@ -1787,14 +1787,11 @@ def chat(model="implementer"):
             if user_input.lower() == '/resume':
                 with _pending_tasks_lock:
                     if not PENDING_TASKS:
-                            print_colored("No interrupted tasks to resume.", COLORS['WARNING'])
-                    continue
-                
-                print_colored(f"Resuming {len(PENDING_TASKS)} pending tasks...", COLORS['GREEN'])
-                # Pop all pending tasks to run them
-                with _pending_tasks_lock:
+                        print_colored("No interrupted tasks to resume.", COLORS['WARNING'])
+                        continue
+                    # Atomically copy and clear to prevent race conditions
+                    print_colored(f"Resuming {len(PENDING_TASKS)} pending tasks...", COLORS['GREEN'])
                     tasks = list(PENDING_TASKS)
-                with _pending_tasks_lock:
                     PENDING_TASKS.clear()
             else:
                 # Normal Multi-Agent Orchestration Logic

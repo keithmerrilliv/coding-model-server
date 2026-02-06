@@ -404,8 +404,6 @@ async def verify_admin_key(x_admin_key: Optional[str] = Header(None)):
 # Model Manager
 # ============================================================================
 
-from collections import OrderedDict
-
 class ModelManager:
     def __init__(self):
         self.lock = Lock()
@@ -538,7 +536,61 @@ def get_model_params(max_tokens: int, temperature: float, stream: bool = False) 
     }
 
 
-# ============================================================================ 
+def calculate_token_budget(model, messages: List, system_prompt: str, model_path: str,
+                           max_tokens: int, model_id: str) -> tuple:
+    """Calculate token budget and build final prompt with budget guidance.
+
+    Returns:
+        tuple: (prompt, clamped_max_tokens, n_prompt, error_message)
+               error_message is None on success, or a string describing the error
+    """
+    n_ctx = model.n_ctx()
+
+    # Estimate the token count for the budget guidance string itself
+    budget_guidance_template = Config.TOKEN_BUDGET_GUIDANCE.format(available_tokens=1000)
+    budget_guidance_tokens = len(model.tokenize(budget_guidance_template.encode("utf-8")))
+
+    # Build prompt without budget guidance to get the base token count
+    preliminary_prompt = build_model_prompt(messages, system_prompt, model_path)
+    preliminary_tokens = model.tokenize(preliminary_prompt.encode("utf-8"))
+    n_preliminary = len(preliminary_tokens)
+
+    # Calculate available tokens accounting for budget guidance overhead
+    available = n_ctx - n_preliminary - budget_guidance_tokens
+    if available < 1:
+        error_msg = (f"Prompt ({n_preliminary} tokens) fills the entire context window ({n_ctx}). "
+                     "Reduce conversation history and retry.")
+        return None, 0, n_preliminary, error_msg
+
+    # Clamp to requested max_tokens
+    clamped_max = min(max_tokens, available)
+
+    # Now build the final prompt with actual budget guidance
+    budget_guidance = Config.TOKEN_BUDGET_GUIDANCE.format(available_tokens=clamped_max)
+    augmented_system_prompt = f"{system_prompt}\n{budget_guidance}"
+    prompt = build_model_prompt(messages, augmented_system_prompt, model_path)
+
+    # Final token count for logging
+    final_tokens = model.tokenize(prompt.encode("utf-8"))
+    n_prompt = len(final_tokens)
+    final_available = n_ctx - n_prompt
+    clamped_max = min(max_tokens, final_available)
+
+    if clamped_max < max_tokens:
+        logger.info(
+            "Clamped max_tokens %d -> %d for %s (prompt=%d, n_ctx=%d)",
+            max_tokens, clamped_max, model_id, n_prompt, n_ctx
+        )
+
+    logger.info(
+        "Token budget injected for %s: budget=%d tokens communicated to model",
+        model_id, clamped_max
+    )
+
+    return prompt, clamped_max, n_prompt, None
+
+
+# ============================================================================
 # Response Builders
 # ============================================================================ 
 
@@ -845,50 +897,13 @@ def sync_completion(messages: List[ChatMessage], system_prompt: str, model_path:
     with model_manager.inference_lock:
         try:
             model = model_manager.get_model(model_id)
-            n_ctx = model.n_ctx()
 
-            # Estimate the token count for the budget guidance string itself
-            budget_guidance_template = Config.TOKEN_BUDGET_GUIDANCE.format(available_tokens=1000)  # Placeholder value
-            budget_guidance_tokens = len(model.tokenize(budget_guidance_template.encode("utf-8")))
-
-            # Build prompt without budget guidance to get the base token count
-            preliminary_prompt = build_model_prompt(messages, system_prompt, model_path)
-            preliminary_tokens = model.tokenize(preliminary_prompt.encode("utf-8"))
-            n_preliminary = len(preliminary_tokens)
-
-            # Calculate available tokens accounting for budget guidance overhead
-            available = n_ctx - n_preliminary - budget_guidance_tokens
-            if available < 1:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Prompt ({n_preliminary} tokens) fills the entire context window ({n_ctx}). "
-                           "Reduce conversation history and retry."
-                )
-
-            # Clamp to requested max_tokens
-            clamped_max = min(max_tokens, available)
-
-            # Now build the final prompt with actual budget guidance
-            budget_guidance = Config.TOKEN_BUDGET_GUIDANCE.format(available_tokens=clamped_max)
-            augmented_system_prompt = f"{system_prompt}\n{budget_guidance}"
-            prompt = build_model_prompt(messages, augmented_system_prompt, model_path)
-
-            # Final token count for logging
-            final_tokens = model.tokenize(prompt.encode("utf-8"))
-            n_prompt = len(final_tokens)
-            final_available = n_ctx - n_prompt
-            clamped_max = min(max_tokens, final_available)
-
-            if clamped_max < max_tokens:
-                logger.info(
-                    "Clamped max_tokens %d -> %d for %s (prompt=%d, n_ctx=%d)",
-                    max_tokens, clamped_max, model_id, n_prompt, n_ctx
-                )
-
-            logger.info(
-                "Token budget injected for %s: budget=%d tokens communicated to model",
-                model_id, clamped_max
+            prompt, clamped_max, n_prompt, error_msg = calculate_token_budget(
+                model, messages, system_prompt, model_path, max_tokens, model_id
             )
+
+            if error_msg:
+                raise HTTPException(status_code=400, detail=error_msg)
 
             params = get_model_params(clamped_max, temperature, stream=False)
             response = model(prompt, **params)
@@ -902,8 +917,6 @@ def sync_completion(messages: List[ChatMessage], system_prompt: str, model_path:
 
             return build_completion_response(model_id, text, response['usage'],
                                              finish_reason=finish_reason)
-        except Exception:
-            raise
         finally:
             # Explicitly delete and cleanup
             if 'model' in locals():
@@ -926,54 +939,20 @@ def stream_completion(messages: List[ChatMessage], system_prompt: str, model_pat
         with model_manager.inference_lock:
             try:
                 model = model_manager.get_model(model_id)
-                n_ctx = model.n_ctx()
 
-                # Estimate the token count for the budget guidance string itself
-                budget_guidance_template = Config.TOKEN_BUDGET_GUIDANCE.format(available_tokens=1000)  # Placeholder value
-                budget_guidance_tokens = len(model.tokenize(budget_guidance_template.encode("utf-8")))
+                prompt, clamped_max, n_prompt, error_msg = calculate_token_budget(
+                    model, messages, system_prompt, model_path, max_tokens, model_id
+                )
 
-                # Build prompt without budget guidance to get the base token count
-                preliminary_prompt = build_model_prompt(messages, system_prompt, model_path)
-                preliminary_tokens = model.tokenize(preliminary_prompt.encode("utf-8"))
-                n_preliminary = len(preliminary_tokens)
-
-                # Calculate available tokens accounting for budget guidance overhead
-                available = n_ctx - n_preliminary - budget_guidance_tokens
-                if available < 1:
+                if error_msg:
                     error_chunk = {
                         "error": {
-                            "message": f"Prompt ({n_preliminary} tokens) fills the entire context window "
-                                       f"({n_ctx}). Reduce conversation history and retry.",
+                            "message": error_msg,
                             "type": "context_length_exceeded"
                         }
                     }
                     yield f"data: {json.dumps(error_chunk)}\n\n"
                     return
-
-                # Clamp to requested max_tokens
-                clamped_max = min(max_tokens, available)
-
-                # Now build the final prompt with actual budget guidance
-                budget_guidance = Config.TOKEN_BUDGET_GUIDANCE.format(available_tokens=clamped_max)
-                augmented_system_prompt = f"{system_prompt}\n{budget_guidance}"
-                prompt = build_model_prompt(messages, augmented_system_prompt, model_path)
-
-                # Final token count for logging
-                final_tokens = model.tokenize(prompt.encode("utf-8"))
-                n_prompt = len(final_tokens)
-                final_available = n_ctx - n_prompt
-                clamped_max = min(max_tokens, final_available)
-
-                if clamped_max < max_tokens:
-                    logger.info(
-                        "Clamped max_tokens %d -> %d for %s (prompt=%d, n_ctx=%d)",
-                        max_tokens, clamped_max, model_id, n_prompt, n_ctx
-                    )
-
-                logger.info(
-                    "Token budget injected for %s: budget=%d tokens communicated to model",
-                    model_id, clamped_max
-                )
 
                 params = get_model_params(clamped_max, temperature, stream=True)
                 token_count = 0
@@ -997,9 +976,9 @@ def stream_completion(messages: List[ChatMessage], system_prompt: str, model_pat
 
                 # Always log completion stats for debugging truncation issues
                 logger.info(
-                    "Completion stats for %s: prompt=%d, available=%d, clamped_max=%d, "
+                    "Completion stats for %s: prompt=%d, clamped_max=%d, "
                     "generated=%d, finish_reason=%s",
-                    model_id, n_prompt, final_available, clamped_max, token_count, finish_reason
+                    model_id, n_prompt, clamped_max, token_count, finish_reason
                 )
             finally:
                 # Explicitly delete and cleanup
