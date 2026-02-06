@@ -303,14 +303,14 @@ Rules:
     _CODER_30B_TURBO = _create_model_config(
         'MODEL_PATH_30B_TURBO',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
-        32, 81920, 2048
+        33, 81920, 2048
     )
 
     # HD: Optimized for high-precision code generation and review
     _CODER_30B_HD = _create_model_config(
         'MODEL_PATH_30B_HD',
         '/home/keith-merrill/.lmstudio/models/lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q8_0.gguf',
-        21, 32768, 2048
+        22, 24576, 2048
     )
 
     # Lite: Faster reasoning on system RAM
@@ -355,9 +355,9 @@ Rules:
             _CODER_30B_HD
         ),
         'debugger': _create_agent_config(
-            'Qwen3-Coder-30B-A3B HD',
+            'Qwen3-Coder-30B-A3B Turbo',
             f'You are a debugger. {EXECUTOR_PROMPT}\n{TOOL_REFERENCE}',
-            _CODER_30B_HD,
+            _CODER_30B_TURBO,
             executor=True
         ),
         'metal_implementer': _create_agent_config(
@@ -407,7 +407,7 @@ async def verify_admin_key(x_admin_key: Optional[str] = Header(None)):
 from collections import OrderedDict
 
 class ModelManager:
-    def __init__(self, max_cached_models=3):
+    def __init__(self, max_cached_models=1):
         self.models: OrderedDict[str, Any] = OrderedDict()  # Use OrderedDict for LRU behavior
         self.lock = Lock()
         self.inference_lock = Lock()
@@ -615,7 +615,7 @@ def build_stream_chunk(completion_id: str, model_id: str, content: Optional[str]
 # FastAPI Application
 # ============================================================================ 
 
-model_manager = ModelManager(max_cached_models=3)
+model_manager = ModelManager(max_cached_models=1)
 memory_service = None
 web_search_service = None
 apple_deep_docs_service = None
