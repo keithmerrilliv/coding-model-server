@@ -1042,6 +1042,420 @@ def read_file_content(path):
     except Exception as e:
         return f"Error reading file: {str(e)}"
 
+
+def write_file_content(payload):
+    """Write content to a local file safely.
+
+    Payload format: first line is the path, rest is the content.
+    Example:
+        /path/to/file.txt
+        content goes here
+        multiple lines ok
+    """
+    try:
+        lines = payload.split('\n', 1)
+        if len(lines) < 2:
+            return "Error: WRITE_FILE requires path on first line and content on subsequent lines"
+
+        path = lines[0].strip()
+        content = lines[1] if len(lines) > 1 else ""
+
+        if not path:
+            return "Error: No file path provided"
+
+        # Expand user path
+        full_path = os.path.expanduser(path)
+
+        # Create parent directories if they don't exist
+        parent_dir = os.path.dirname(full_path)
+        if parent_dir and not os.path.exists(parent_dir):
+            os.makedirs(parent_dir, exist_ok=True)
+            logger.info(f"Created directory: {parent_dir}")
+
+        # Security check - log what we're doing
+        logger.info(f"Writing file: {full_path} ({len(content)} bytes)")
+
+        # Prompt for confirmation unless ALLOW_ALL is set
+        print_colored(f"\nAgent wants to write file: {full_path}", COLORS['WARNING'])
+        print_colored(f"   Content size: {len(content)} bytes", COLORS['WARNING'])
+
+        # Show preview of content (first few lines)
+        preview_lines = content.split('\n')[:5]
+        preview = '\n'.join(preview_lines)
+        if len(preview_lines) < len(content.split('\n')):
+            preview += f"\n... ({len(content.split(chr(10)))} total lines)"
+        print_colored(f"   Preview:\n{preview[:500]}", COLORS['CYAN'])
+
+        if config.ALLOW_ALL:
+            print_colored(f"   Auto-approved (ALLOW_ALL mode enabled)", COLORS['GREEN'])
+            logger.info(f"Auto-approving file write due to ALLOW_ALL setting: {full_path}")
+            choice = 'y'
+        else:
+            try:
+                choice = input(f"{COLORS['BOLD']}Allow write? [y/N] > {COLORS['ENDC']}")
+            except (EOFError, KeyboardInterrupt):
+                logger.info(f"File write cancelled by user: {full_path}")
+                return "User cancelled file write."
+
+            if choice.lower() != 'y':
+                logger.info(f"File write denied by user: {full_path}")
+                return "User denied file write."
+
+        # Write the file
+        with open(full_path, 'w', encoding='utf-8') as f:
+            f.write(content)
+
+        logger.info(f"File written successfully: {full_path}")
+        return f"Successfully wrote {len(content)} bytes to {path}"
+
+    except PermissionError as e:
+        return f"Error: Permission denied writing to {path}: {str(e)}"
+    except Exception as e:
+        logger.error(f"Error writing file {path}: {str(e)}")
+        return f"Error writing file: {str(e)}"
+
+
+def edit_file_content(payload):
+    """Edit a file by replacing specific text (search and replace).
+
+    Payload format:
+        /path/to/file
+        <<<OLD>>>
+        text to find (exact match)
+        <<<NEW>>>
+        replacement text
+
+    Supports multiple replacements in one call by repeating <<<OLD>>>...<<<NEW>>> blocks.
+    """
+    try:
+        lines = payload.split('\n', 1)
+        if len(lines) < 2:
+            return "Error: EDIT_FILE requires path on first line and OLD/NEW blocks"
+
+        path = lines[0].strip()
+        edit_content = lines[1] if len(lines) > 1 else ""
+
+        if not path:
+            return "Error: No file path provided"
+
+        full_path = os.path.expanduser(path)
+
+        if not os.path.exists(full_path):
+            return f"Error: File not found: {path}"
+
+        # Read current file content
+        with open(full_path, 'r', encoding='utf-8', errors='replace') as f:
+            content = f.read()
+
+        original_content = content
+
+        # Parse OLD/NEW blocks
+        # Pattern: <<<OLD>>>\n...\n<<<NEW>>>\n...
+        edit_pattern = r'<<<OLD>>>\n(.*?)\n<<<NEW>>>\n(.*?)(?=\n<<<OLD>>>|$)'
+        matches = list(re.finditer(edit_pattern, edit_content, re.DOTALL))
+
+        if not matches:
+            # Try alternate format without trailing newline requirement
+            edit_pattern = r'<<<OLD>>>(.*?)<<<NEW>>>(.*?)(?=<<<OLD>>>|$)'
+            matches = list(re.finditer(edit_pattern, edit_content, re.DOTALL))
+
+        if not matches:
+            return "Error: No valid <<<OLD>>>...<<<NEW>>> blocks found. Format:\n<<<OLD>>>\nold text\n<<<NEW>>>\nnew text"
+
+        replacements_made = 0
+        for match in matches:
+            old_text = match.group(1).strip('\n')
+            new_text = match.group(2).strip('\n')
+
+            if old_text not in content:
+                logger.warning(f"EDIT_FILE: old_text not found in {path}: {old_text[:100]}...")
+                return f"Error: Text to replace not found in file. Searched for:\n{old_text[:200]}"
+
+            # Count occurrences
+            occurrences = content.count(old_text)
+            if occurrences > 1:
+                logger.warning(f"EDIT_FILE: Multiple occurrences ({occurrences}) of old_text in {path}")
+                # Still proceed but warn
+                print_colored(f"   Warning: Found {occurrences} occurrences, replacing all", COLORS['WARNING'])
+
+            content = content.replace(old_text, new_text)
+            replacements_made += occurrences
+
+        if content == original_content:
+            return "Error: No changes made - old text may not match exactly"
+
+        # Show diff preview
+        print_colored(f"\nAgent wants to edit file: {full_path}", COLORS['WARNING'])
+        print_colored(f"   Replacements: {replacements_made}", COLORS['CYAN'])
+
+        # Show brief diff
+        old_lines = original_content.split('\n')
+        new_lines = content.split('\n')
+        print_colored(f"   Lines: {len(old_lines)} -> {len(new_lines)}", COLORS['CYAN'])
+
+        if config.ALLOW_ALL:
+            print_colored(f"   Auto-approved (ALLOW_ALL mode enabled)", COLORS['GREEN'])
+            logger.info(f"Auto-approving file edit due to ALLOW_ALL setting: {full_path}")
+            choice = 'y'
+        else:
+            try:
+                choice = input(f"{COLORS['BOLD']}Allow edit? [y/N] > {COLORS['ENDC']}")
+            except (EOFError, KeyboardInterrupt):
+                logger.info(f"File edit cancelled by user: {full_path}")
+                return "User cancelled file edit."
+
+            if choice.lower() != 'y':
+                logger.info(f"File edit denied by user: {full_path}")
+                return "User denied file edit."
+
+        # Write the edited content
+        with open(full_path, 'w', encoding='utf-8') as f:
+            f.write(content)
+
+        logger.info(f"File edited successfully: {full_path} ({replacements_made} replacements)")
+        return f"Successfully edited {path}: {replacements_made} replacement(s) made"
+
+    except Exception as e:
+        logger.error(f"Error editing file {path}: {str(e)}")
+        return f"Error editing file: {str(e)}"
+
+
+def list_directory(path):
+    """List contents of a directory with file info.
+
+    Returns structured listing with file types, sizes, and modification times.
+    """
+    try:
+        full_path = os.path.expanduser(path.strip()) if path else os.getcwd()
+
+        if not os.path.exists(full_path):
+            return f"Error: Directory not found: {path}"
+
+        if not os.path.isdir(full_path):
+            return f"Error: Not a directory: {path}"
+
+        entries = []
+        try:
+            items = sorted(os.listdir(full_path))
+        except PermissionError:
+            return f"Error: Permission denied reading directory: {path}"
+
+        for item in items:
+            item_path = os.path.join(full_path, item)
+            try:
+                stat = os.stat(item_path)
+                is_dir = os.path.isdir(item_path)
+                size = stat.st_size if not is_dir else 0
+                mtime = datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d %H:%M')
+
+                if is_dir:
+                    entries.append(f"  {item}/")
+                else:
+                    # Human-readable size
+                    if size < 1024:
+                        size_str = f"{size}B"
+                    elif size < 1024 * 1024:
+                        size_str = f"{size // 1024}K"
+                    else:
+                        size_str = f"{size // (1024 * 1024)}M"
+                    entries.append(f"  {item:<40} {size_str:>8}  {mtime}")
+            except (OSError, PermissionError):
+                entries.append(f"  {item} (inaccessible)")
+
+        result = f"Directory: {full_path}\n"
+        result += f"Total: {len(items)} items\n\n"
+        result += "\n".join(entries) if entries else "(empty)"
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Error listing directory {path}: {str(e)}")
+        return f"Error listing directory: {str(e)}"
+
+
+def glob_files(pattern):
+    """Find files matching a glob pattern.
+
+    Supports patterns like:
+        *.swift           - Swift files in current dir
+        **/*.swift        - Swift files recursively
+        src/**/*.py       - Python files under src/
+        /absolute/path/*  - Files in absolute path
+    """
+    import glob as glob_module
+
+    try:
+        pattern = pattern.strip()
+        if not pattern:
+            return "Error: No glob pattern provided"
+
+        # If pattern doesn't start with / or ., assume current directory
+        if not pattern.startswith('/') and not pattern.startswith('.'):
+            # Check if it's a relative path or just a pattern
+            if '/' not in pattern or pattern.startswith('**'):
+                pattern = os.path.join(os.getcwd(), pattern)
+
+        # Expand user home if present
+        pattern = os.path.expanduser(pattern)
+
+        # Use recursive glob
+        matches = sorted(glob_module.glob(pattern, recursive=True))
+
+        if not matches:
+            return f"No files found matching: {pattern}"
+
+        # Limit output to prevent overwhelming responses
+        max_results = 200
+        truncated = len(matches) > max_results
+
+        result_lines = [f"Found {len(matches)} file(s) matching: {pattern}"]
+        if truncated:
+            result_lines.append(f"(showing first {max_results})")
+        result_lines.append("")
+
+        for match in matches[:max_results]:
+            # Show relative path if possible
+            try:
+                rel_path = os.path.relpath(match)
+                if not rel_path.startswith('..'):
+                    result_lines.append(f"  {rel_path}")
+                else:
+                    result_lines.append(f"  {match}")
+            except ValueError:
+                result_lines.append(f"  {match}")
+
+        if truncated:
+            result_lines.append(f"\n... and {len(matches) - max_results} more")
+
+        return "\n".join(result_lines)
+
+    except Exception as e:
+        logger.error(f"Error in glob {pattern}: {str(e)}")
+        return f"Error in glob: {str(e)}"
+
+
+def grep_search(payload):
+    """Search for pattern in files.
+
+    Payload format (one of):
+        pattern                     - Search pattern in current directory
+        pattern|path                - Search pattern in specific path
+        pattern|path|options        - With options like -i (case insensitive), -n (line numbers)
+
+    Examples:
+        TODO                        - Find TODO in current dir
+        def.*init|*.py              - Find 'def.*init' in Python files
+        import|src/|i               - Case-insensitive search for 'import' in src/
+    """
+    try:
+        parts = payload.strip().split('|')
+        pattern = parts[0].strip() if parts else ""
+        path = parts[1].strip() if len(parts) > 1 else "."
+        options = parts[2].strip().lower() if len(parts) > 2 else ""
+
+        if not pattern:
+            return "Error: No search pattern provided"
+
+        # Expand path
+        search_path = os.path.expanduser(path)
+        if not os.path.exists(search_path):
+            return f"Error: Path not found: {path}"
+
+        # Build regex flags
+        flags = re.MULTILINE
+        if 'i' in options:
+            flags |= re.IGNORECASE
+
+        try:
+            regex = re.compile(pattern, flags)
+        except re.error as e:
+            return f"Error: Invalid regex pattern: {e}"
+
+        results = []
+        files_searched = 0
+        files_matched = 0
+        max_results = 100
+        max_files = 500
+
+        # Determine files to search
+        if os.path.isfile(search_path):
+            files_to_search = [search_path]
+        else:
+            # Walk directory
+            files_to_search = []
+            for root, dirs, files in os.walk(search_path):
+                # Skip hidden and common non-code directories
+                dirs[:] = [d for d in dirs if not d.startswith('.') and d not in
+                          ['node_modules', '__pycache__', 'venv', 'env', '.git', 'build', 'dist', 'DerivedData']]
+
+                for filename in files:
+                    if filename.startswith('.'):
+                        continue
+                    files_to_search.append(os.path.join(root, filename))
+
+                    if len(files_to_search) >= max_files:
+                        break
+                if len(files_to_search) >= max_files:
+                    break
+
+        for filepath in files_to_search:
+            files_searched += 1
+            try:
+                with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read()
+
+                matches = list(regex.finditer(content))
+                if matches:
+                    files_matched += 1
+                    lines = content.split('\n')
+
+                    # Get relative path
+                    try:
+                        rel_path = os.path.relpath(filepath)
+                    except ValueError:
+                        rel_path = filepath
+
+                    for match in matches[:10]:  # Limit matches per file
+                        if len(results) >= max_results:
+                            break
+
+                        # Find line number
+                        line_num = content[:match.start()].count('\n') + 1
+                        line_content = lines[line_num - 1] if line_num <= len(lines) else ""
+
+                        # Truncate long lines
+                        if len(line_content) > 200:
+                            line_content = line_content[:200] + "..."
+
+                        if 'n' in options or True:  # Always show line numbers
+                            results.append(f"{rel_path}:{line_num}: {line_content.strip()}")
+                        else:
+                            results.append(f"{rel_path}: {line_content.strip()}")
+
+                    if len(results) >= max_results:
+                        break
+
+            except (IOError, OSError, UnicodeDecodeError):
+                continue  # Skip unreadable files
+
+        # Build result
+        header = f"Search: '{pattern}' in {path}\n"
+        header += f"Files searched: {files_searched}, Files matched: {files_matched}\n"
+
+        if not results:
+            return header + "\nNo matches found."
+
+        truncated = len(results) >= max_results
+        if truncated:
+            header += f"Showing first {max_results} results:\n"
+
+        return header + "\n" + "\n".join(results)
+
+    except Exception as e:
+        logger.error(f"Error in grep search: {str(e)}")
+        return f"Error in search: {str(e)}"
+
+
 def process_remote_commands(response_text: str) -> Optional[str]:
     """Process ALL remote command markers in agent response.
 
@@ -1056,6 +1470,21 @@ def process_remote_commands(response_text: str) -> Optional[str]:
          True),
         (r'<<<READ_FILE>>>\s*(.*?)\s*<<<READ_FILE>>>',
          lambda path: read_file_content(path.strip()),
+         True),
+        (r'<<<WRITE_FILE>>>\s*(.*?)\s*<<<WRITE_FILE>>>',
+         lambda payload: write_file_content(payload),
+         True),
+        (r'<<<EDIT_FILE>>>\s*(.*?)\s*<<<EDIT_FILE>>>',
+         lambda payload: edit_file_content(payload),
+         True),
+        (r'<<<LIST_DIR>>>\s*(.*?)\s*<<<LIST_DIR>>>',
+         lambda path: list_directory(path),
+         True),
+        (r'<<<GLOB>>>\s*(.*?)\s*<<<GLOB>>>',
+         lambda pattern: glob_files(pattern),
+         True),
+        (r'<<<GREP>>>\s*(.*?)\s*<<<GREP>>>',
+         lambda payload: grep_search(payload),
          True),
         (r'<<<SAVE_MEMORY>>>\s*(.*?)\s*<<<SAVE_MEMORY>>>',
          lambda text: save_memory(text.strip()),
