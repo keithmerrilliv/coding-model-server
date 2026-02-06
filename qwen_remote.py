@@ -1028,8 +1028,11 @@ def read_file_content(path):
         size = len(content)
         if size > 100000:
             return f"Error: File too large ({size} bytes). Use head/tail via shell or read specific lines."
-            
-        return f"File: {path}\nContent:\n{content}"
+
+        output = f"File: {path}\nContent:\n{content}"
+        if len(output) > config.CHUNK_THRESHOLD:
+            return get_chunk_for_display(output, log_path=full_path)
+        return output
     except Exception as e:
         return f"Error reading file: {str(e)}"
 
@@ -1550,6 +1553,34 @@ def _trim_history_for_context(history):
     return None
 
 
+def _compress_history(messages, keep_recent=6, summary_len=200):
+    """Compress older messages to reduce context usage.
+
+    Keeps the last `keep_recent` messages at full fidelity.
+    Older tool-output messages (> 500 chars) and large assistant messages
+    (> 2000 chars) are truncated to head + tail summaries.
+    """
+    if len(messages) <= keep_recent:
+        return messages
+
+    compressed = []
+    cutoff = len(messages) - keep_recent
+
+    for i, msg in enumerate(messages):
+        if i < cutoff:
+            content = msg["content"]
+            is_tool_output = content.startswith("Tool output:\n")
+            threshold = 500 if is_tool_output else 2000
+
+            if len(content) > threshold:
+                head = content[:summary_len]
+                tail = content[-summary_len:]
+                msg = {**msg, "content": f"{head}\n... [truncated, was {len(content)} chars] ...\n{tail}"}
+        compressed.append(msg)
+
+    return compressed
+
+
 def get_completion(history, model, agent_theme):
     """Internal helper to get a completion from the server with full error handling and streaming.
 
@@ -1576,7 +1607,10 @@ def get_completion(history, model, agent_theme):
     # If history is empty after sanitization (e.g. only had empty messages), add a fallback prompt
     if not sanitized_history:
         sanitized_history.append({"role": "user", "content": "Hello"})
-    
+
+    # Compress older messages to save context
+    sanitized_history = _compress_history(sanitized_history)
+
     payload = {
         "model": model, 
         "messages": sanitized_history, 
@@ -1920,6 +1954,20 @@ def handle_user_command(user_input, history, model, agent_theme):
     return False, model
 
 
+HISTORY_CHAR_BUDGET = 150000  # ~37.5k tokens, leaves room for system prompt + response
+
+
+def _check_history_budget(history):
+    """Proactively trim history if total size approaches context limit."""
+    total_chars = sum(len(m.get("content", "")) for m in history)
+    if total_chars > HISTORY_CHAR_BUDGET:
+        print_colored(
+            f"\n[Client] History size ({total_chars // 1000}k chars) exceeds budget. Trimming...",
+            COLORS['WARNING']
+        )
+        _trim_history_for_context(history)
+
+
 def process_agent_tasks(tasks, history, initial_model, agent_theme):
     """Execute a list of agent tasks sequentially"""
     model = initial_model
@@ -1951,6 +1999,7 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
             task_commands_executed = False # Track if any commands were run for this task
             max_continuations = 5  # safety cap for truncation retries
             while True:
+                _check_history_budget(history)
                 response_text, finish_reason = get_completion(history, model, agent_theme)
                 if response_text is None:
                     task_aborted = True
