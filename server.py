@@ -197,7 +197,7 @@ class Config:
     # Increased default threads to 24 to match physical core count (8 P-cores + 16 E-cores)
     # This maximizes CPU utilization for the layers not offloaded to GPU
     DEFAULT_N_THREADS = int(os.getenv('MODEL_N_THREADS', 24))
-    DEFAULT_N_BATCH = int(os.getenv('MODEL_N_BATCH', 4096))  # Increased to 4096 for better CPU saturation
+    DEFAULT_N_BATCH = int(os.getenv('MODEL_N_BATCH', 2048))  # Reverted to 2048 to prevent OOM
     
     # ── Unified tool reference ──
     BASE_TOOLS = [
@@ -303,14 +303,14 @@ Rules:
     _CODER_30B_TURBO = _create_model_config(
         'MODEL_PATH_30B_TURBO',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
-        32, 81920, 4096
+        32, 81920, 2048
     )
 
     # HD: Optimized for high-precision code generation and review
     _CODER_30B_HD = _create_model_config(
         'MODEL_PATH_30B_HD',
         '/home/keith-merrill/.lmstudio/models/lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q8_0.gguf',
-        22, 32768, 4096
+        22, 32768, 2048
     )
 
     # Lite: Faster reasoning on system RAM
