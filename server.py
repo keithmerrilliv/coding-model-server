@@ -327,11 +327,20 @@ Rules:
         33, 81920, 2048
     )
 
-    # HD: Optimized for high-precision code generation and review
+    # IMPL: High-context implementer using Q4_K_M for maximum context (82k)
+    # Optimized for complex implementation tasks requiring large context windows
+    _CODER_30B_IMPL = _create_model_config(
+        'MODEL_PATH_30B_IMPL',
+        '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
+        33, 81920, 2048
+    )
+
+    # HD: High-precision Q8_0 with expanded context (49k) for review and Metal work
+    # Reduced GPU layers (16) to free VRAM for larger KV cache
     _CODER_30B_HD = _create_model_config(
         'MODEL_PATH_30B_HD',
         '/home/keith-merrill/.lmstudio/models/lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q8_0.gguf',
-        22, 24576, 2048
+        16, 49152, 2048
     )
 
     # Lite: Faster reasoning on system RAM
@@ -365,9 +374,9 @@ Rules:
     # 'executor': True means few-shot + fallback extraction are enabled.
     AGENTS = {
         'implementer': _create_agent_config(
-            'Qwen3-Coder-30B-A3B HD',
+            'Qwen3-Coder-30B-A3B IMPL (82k context)',
             f'You are an implementer. {EXECUTOR_PROMPT}\n\nCOMPREHENSIVE IMPLEMENTATION: When implementing tasks, leverage multiple tools to understand the codebase thoroughly:\n\nEXECUTION ENVIRONMENT: You are running on a macOS environment with full access to development tools.\n- Use `<<<REMOTE_EXEC>>>` for ALL shell commands (including Xcode tools, Git, file operations).\n- Do NOT distinguish between "server" and "client". Everything runs locally.\n\nFILE OPERATIONS:\n- Use `<<<GLOB>>>` to find files: `<<<GLOB>>>**/*.swift<<<GLOB>>>`\n- Use `<<<GREP>>>` to search code: `<<<GREP>>>TODO|src/<<<GREP>>>`\n- Use `<<<LIST_DIR>>>` to explore directories\n- Use `<<<READ_FILE>>>` to read file contents\n- Use `<<<WRITE_FILE>>>` for new files or complete rewrites\n- Use `<<<EDIT_FILE>>>` for targeted changes to existing files (PREFERRED)\n\nGIT AWARENESS: Use Git via `<<<REMOTE_EXEC>>>` to understand code context:\n- `git log`, `git diff`, `git blame`, `git show`, `git status`\n\nAPPLE DEVELOPMENT via `<<<REMOTE_EXEC>>>`:\n- Compile Swift: `swiftc file.swift -o output`\n- Compile Metal: `xcrun -sdk macosx metal -c shader.metal -o shader.air`\n- Build Xcode: `xcodebuild -project Foo.xcodeproj -scheme Foo build`\n\n{TOOL_REFERENCE}',
-            _CODER_30B_HD,
+            _CODER_30B_IMPL,
             executor=True
         ),
         'architect': _create_agent_config(
@@ -377,7 +386,7 @@ Rules:
             executor=True
         ),
         'reviewer': _create_agent_config(
-            'Code review agent (High Precision)',
+            'Code review agent Q8_0 (49k context, High Precision)',
             f'You are a code reviewer. {EXECUTOR_PROMPT}\n\nIdentify issues and suggest improvements. You are encouraged to provide detailed advice and recommendations.\n\nCOMPREHENSIVE ANALYSIS: When performing code reviews, leverage multiple tools to understand the codebase thoroughly:\n\nGIT AWARENESS: Use Git to understand code changes, history, and context:\n- Use `git log` to understand recent changes and history\n- Use `git diff` to see specific code differences\n- Use `git blame` to identify who made changes and why\n- Use `git show` to examine specific commits\n- Use `git status` to see current state of the repository\n\nFILE SYSTEM NAVIGATION: Use find/grep to locate and analyze relevant files:\n- Use `find` to locate specific file types or patterns\n- Use `grep` to search for specific terms, TODOs, FIXMEs, or error patterns\n- Use `grep -r` for recursive searches across the codebase\n\nCODE COMPARISON: Use diff and other tools to analyze code changes:\n- Use `diff` to compare files and see changes\n- Use `wc`, `head`, `tail` to analyze file contents\n\nDOCUMENTATION: You can and should write documentation:\n- Use `<<<WRITE_FILE>>>` to create or update README.md, ARCHITECTURE.md, API docs, etc.\n- Document code review findings in markdown files\n- Create or update inline documentation and comments\n- Write migration guides, changelogs, and release notes\n\nAlways use these tools to gather comprehensive context before providing your review. This helps you understand the evolution of code, locate related files, and provide more accurate feedback.\n{GIT_TOOL_REFERENCE}',
             _CODER_30B_HD,
             executor=True
@@ -389,7 +398,7 @@ Rules:
             executor=True
         ),
         'metal_implementer': _create_agent_config(
-            'Qwen3-Coder-30B-A3B HD',
+            'Metal Engineer Q8_0 (49k context, High Precision)',
             f'You are a Metal 4 graphics engineer (compute kernels, mesh shaders, ray tracing, argument buffers). {EXECUTOR_PROMPT}\n\nEXECUTION ENVIRONMENT: You are running on a macOS environment with full access to Metal tools.\n- Use `<<<REMOTE_EXEC>>>` for ALL shell commands.\n- Do NOT distinguish between "server" and "client". Everything runs locally.\n\nFILE WRITING - CRITICAL: When implementing code, you MUST write files to disk:\n- Use `<<<WRITE_FILE>>>` to create or update source files (.metal, .swift, .h, etc.)\n- NEVER just output code in markdown blocks - that does NOT save the file!\n- After writing, use `<<<REMOTE_EXEC>>>` to compile and verify the code works.\n\nMETAL DEVELOPMENT:\n- Write Metal shaders using `<<<WRITE_FILE>>>` to .metal files\n- Compile Metal shaders: `xcrun -sdk macosx metal -c shader.metal -o shader.air`\n- Create Metal library: `xcrun -sdk macosx metallib shader.air -o shader.metallib`\n- Validate shaders: `xcrun metal-compiler shader.metal`\n- Use `<<<REMOTE_EXEC>>>` for compilation and validation\n\n{TOOL_REFERENCE}',
             _CODER_30B_HD,
             executor=True
