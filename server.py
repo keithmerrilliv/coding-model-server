@@ -344,11 +344,11 @@ Rules:
         21, 49152, 2048
     )
 
-    # Lite: Faster reasoning on system RAM
+    # Lite: Faster reasoning on system RAM (49k context via YaRN scaling from 32k training length)
     _QWEN_480B_LITE = _create_model_config(
         'MODEL_PATH_480B_LITE',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/Qwen3-Coder-480B-A35B-Instruct-UD-IQ1_M.gguf',
-        4, 32768, 1024
+        4, 49152, 1024
     )
 
     # Ultra: Premium reasoning using Q2_K_XL on 192GB RAM
