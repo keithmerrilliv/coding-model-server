@@ -45,7 +45,6 @@ class Config:
     INGEST_API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/memory/ingest"
     SEARCH_API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/tools/search"
     DEEP_DOCS_API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/tools/apple_deep_docs"
-    UNLOAD_API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/admin/unload"
     HEALTH_URL = f"http://{LINUX_SERVER_IP}:5000/health"
     MODELS_URL = f"http://{LINUX_SERVER_IP}:5000/v1/models"
     ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
@@ -179,16 +178,8 @@ def _load_fallback_themes():
             "desc": desc
         }
 
-def cleanup_server_resources():
-    """Tell the server to unload models and free VRAM"""
-    try:
-        headers = {"X-Admin-Key": config.ADMIN_API_KEY} if config.ADMIN_API_KEY else {}
-        requests.post(config.UNLOAD_API_URL, headers=headers, timeout=config.REQUEST_TIMEOUT)
-    except Exception:
-        pass
-
-# Register cleanup on exit
-atexit.register(cleanup_server_resources)
+# Register cleanup on exit (DISABLED: Server now handles auto-unload)
+# atexit.register(cleanup_server_resources)
 
 _INTERNAL_KEYS = {"auto_send", "_retried", "_retried_prompt"}
 
