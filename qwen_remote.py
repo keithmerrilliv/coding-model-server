@@ -1609,27 +1609,55 @@ def get_completion(history, model, agent_theme):
 
     context_retries = 0
     MAX_CONTEXT_RETRIES = 3
+    TTFT_TIMEOUT = 600  # seconds — bail if no first token within 10 minutes
+
+    def _is_context_error(text):
+        return any(phrase in text for phrase in (
+            "exceed context window", "context_length_exceeded",
+            "fills the entire context window",
+        ))
+
+    def _try_trim_and_retry():
+        nonlocal context_retries
+        if context_retries < MAX_CONTEXT_RETRIES:
+            context_retries += 1
+            print_colored(
+                f"\n[Client] Context limit likely reached. Trimming history and retrying "
+                f"({context_retries}/{MAX_CONTEXT_RETRIES})...",
+                COLORS['WARNING']
+            )
+            sanitized_retry = _trim_history_for_context(history)
+            if sanitized_retry:
+                payload["messages"] = sanitized_retry
+                return True
+        return False
 
     while True:
         try:
             response = requests.post(config.API_URL, json=payload, stream=True, timeout=7200)
-            
+
             if response.status_code != 200:
                 stop_progress.set()
                 error_text = response.text
-                if "exceed context window" in error_text or "context_length_exceeded" in error_text or "fills the entire context window" in error_text:
-                    if context_retries < MAX_CONTEXT_RETRIES:
-                        print_colored(f"\n[Client] Context limit reached. Trimming history and retrying ({context_retries+1}/{MAX_CONTEXT_RETRIES})...", COLORS['WARNING'])
-                        sanitized_retry = _trim_history_for_context(history)
-                        if sanitized_retry:
-                            payload["messages"] = sanitized_retry
-                            context_retries += 1
-                            stop_progress = threading.Event(); progress_thread = threading.Thread(target=show_progress, daemon=True); progress_thread.start()
-                            continue
+                if _is_context_error(error_text) and _try_trim_and_retry():
+                    stop_progress = threading.Event(); progress_thread = threading.Thread(target=show_progress, daemon=True); progress_thread.start()
+                    continue
                 print_colored(f"\nError: {error_text}", COLORS['FAIL'])
                 return None, None
 
             for line in response.iter_lines():
+                # TTFT deadline: if we haven't received a first token yet,
+                # check if we've exceeded the timeout.  The server is likely
+                # stuck tokenizing an oversized prompt.
+                if not first_token_time and (time.time() - start_time) > TTFT_TIMEOUT:
+                    stop_progress.set()
+                    response.close()
+                    if _try_trim_and_retry():
+                        server_error_occurred = True
+                        break
+                    print_colored(f"\n[Client] TTFT timeout ({TTFT_TIMEOUT}s) — server not responding.", COLORS['FAIL'])
+                    return None, None
+
                 if line:
                     line = line.decode('utf-8')
                     if line.startswith("data: "):
@@ -1654,21 +1682,16 @@ def get_completion(history, model, agent_theme):
                             elif "error" in data:
                                 stop_progress.set()
                                 error_msg = data['error'].get('message', 'Unknown error')
-                                if "exceed context window" in error_msg or "context_length_exceeded" in error_msg or "fills the entire context window" in error_msg:
-                                    if context_retries < MAX_CONTEXT_RETRIES:
-                                        print_colored(f"\n[Client] Context limit reached (during generation). Trimming and retrying...", COLORS['WARNING'])
-                                        sanitized_retry = _trim_history_for_context(history)
-                                        if sanitized_retry:
-                                            payload["messages"] = sanitized_retry
-                                            context_retries += 1
-                                            server_error_occurred = True
-                                            break
+                                if _is_context_error(error_msg) and _try_trim_and_retry():
+                                    server_error_occurred = True
+                                    break
                                 print_colored(f"\nServer Error: {error_msg}", COLORS['FAIL'])
                                 break
                         except Exception: pass
-            
+
             if server_error_occurred and context_retries <= MAX_CONTEXT_RETRIES:
                  server_error_occurred = False; full_response = ""; chunk_count = 0
+                 start_time = time.time(); first_token_time = None
                  stop_progress = threading.Event(); progress_thread = threading.Thread(target=show_progress, daemon=True); progress_thread.start()
                  continue
             break
