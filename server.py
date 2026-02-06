@@ -340,7 +340,7 @@ Rules:
     _CODER_30B_HD = _create_model_config(
         'MODEL_PATH_30B_HD',
         '/home/keith-merrill/.lmstudio/models/lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q8_0.gguf',
-        22, 49152, 2048
+        21, 49152, 2048
     )
 
     # Lite: Faster reasoning on system RAM
