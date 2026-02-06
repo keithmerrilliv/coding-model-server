@@ -17,6 +17,10 @@ import time
 import tempfile
 import select
 import logging
+
+# Thread lock for managing pending tasks safely
+_pending_tasks_lock = threading.Lock()
+
 from datetime import datetime
 from typing import Optional, List
 import requests
@@ -338,8 +342,12 @@ def _cleanup_temp_files():
         try:
             if os.path.exists(path):
                 os.remove(path)
-        except Exception:
-            pass
+        except PermissionError as e:
+            print_colored(f"Permission denied removing temp file {path}: {e}", COLORS["WARNING"])
+        except OSError as e:
+            print_colored(f"OS error removing temp file {path}: {e}", COLORS["WARNING"])
+        except Exception as e:
+            print_colored(f"Unexpected error removing temp file {path}: {e}", COLORS["FAIL"])
     _temp_files.clear()
 
 
@@ -1642,7 +1650,8 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
             if task_aborted:
                 remaining_tasks = tasks[task_idx+1:]
                 if remaining_tasks:
-                    PENDING_TASKS.extend(remaining_tasks)
+                    with _pending_tasks_lock:
+                            PENDING_TASKS.extend(remaining_tasks)
                     print_colored(f"\n⚠️  Task aborted. Saved {len(remaining_tasks)} pending tasks.", COLORS['WARNING'])
                     print_colored("   Type '/resume' to retry/continue.", COLORS['BLUE'])
                 break  # stop processing remaining tasks
@@ -1651,7 +1660,8 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
         print_colored("\nInterrupt received.", COLORS['WARNING'])
         remaining_tasks = tasks[task_idx+1:]
         if remaining_tasks:
-            PENDING_TASKS.extend(remaining_tasks)
+            with _pending_tasks_lock:
+                            PENDING_TASKS.extend(remaining_tasks)
             remaining_agents = [t[0] for t in remaining_tasks]
             print_colored(f"⚠️  Skipped remaining tasks for: {', '.join(remaining_agents)}", COLORS['WARNING'])
             print_colored("   Type '/resume' to continue later.", COLORS['BLUE'])
@@ -1659,8 +1669,9 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
         print_colored(f"\nMain Loop Error: {e}", COLORS['FAIL'])
     
     set_terminal_title("Qwen - Idle")
-    if not PENDING_TASKS:
-        send_macos_notification("All tasks completed.", title="Qwen Client")
+    with _pending_tasks_lock:
+                    if not PENDING_TASKS:
+                    send_macos_notification("All tasks completed.", title="Qwen Client")
         
     return model
 
@@ -1774,14 +1785,17 @@ def chat(model="implementer"):
 
             # Resume Interrupted Chain
             if user_input.lower() == '/resume':
-                if not PENDING_TASKS:
-                    print_colored("No interrupted tasks to resume.", COLORS['WARNING'])
+                with _pending_tasks_lock:
+                    if not PENDING_TASKS:
+                            print_colored("No interrupted tasks to resume.", COLORS['WARNING'])
                     continue
                 
                 print_colored(f"Resuming {len(PENDING_TASKS)} pending tasks...", COLORS['GREEN'])
                 # Pop all pending tasks to run them
-                tasks = list(PENDING_TASKS)
-                PENDING_TASKS.clear()
+                with _pending_tasks_lock:
+                    tasks = list(PENDING_TASKS)
+                with _pending_tasks_lock:
+                    PENDING_TASKS.clear()
             else:
                 # Normal Multi-Agent Orchestration Logic
                 try:

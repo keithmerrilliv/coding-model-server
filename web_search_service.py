@@ -1,3 +1,9 @@
+import importlib.util
+
+# Validate that ddgs is available
+if importlib.util.find_spec("ddgs") is None:
+    raise ImportError("ddgs package is not installed. Please install it with: pip install duckduckgo_search")
+
 import logging
 from typing import List, Dict, Any, Optional
 from ddgs import DDGS
