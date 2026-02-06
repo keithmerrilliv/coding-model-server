@@ -32,8 +32,8 @@ class MemoryService:
         try:
             logger.info(f"Initializing Memory Service at {self.persist_directory}...")
             
-            # Initialize Embedding Model (CPU-based, lightweight)
-            self._embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+            # Initialize Embedding Model (Force CPU to avoid RTX 5080 sm_120 compatibility issues)
+            self._embedding_model = SentenceTransformer('all-MiniLM-L6-v2', device='cpu')
             
             # Initialize ChromaDB Client
             self.client = chromadb.PersistentClient(path=self.persist_directory)
