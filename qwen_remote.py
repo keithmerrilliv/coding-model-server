@@ -1670,8 +1670,8 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
     
     set_terminal_title("Qwen - Idle")
     with _pending_tasks_lock:
-                    if not PENDING_TASKS:
-                    send_macos_notification("All tasks completed.", title="Qwen Client")
+        if not PENDING_TASKS:
+            send_macos_notification("All tasks completed.", title="Qwen Client")
         
     return model
 
