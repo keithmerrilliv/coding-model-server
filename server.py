@@ -407,108 +407,81 @@ async def verify_admin_key(x_admin_key: Optional[str] = Header(None)):
 from collections import OrderedDict
 
 class ModelManager:
-    def __init__(self, max_cached_models=1):
-        self.models: OrderedDict[str, Any] = OrderedDict()  # Use OrderedDict for LRU behavior
+    def __init__(self):
         self.lock = Lock()
         self.inference_lock = Lock()
-        self.max_cached_models = max_cached_models  # Maximum number of models to keep cached
 
     def unload_model(self):
-        """Unload all models and free VRAM with aggressive cleanup"""
+        """Force cleanup of VRAM with aggressive cleanup"""
         with self.lock:
-            if self.models:
-                logger.info("Unloading models (Cleaning VRAM)...")
+            logger.info("Cleaning VRAM/RAM...")
+            try:
+                # Force garbage collection multiple times to ensure objects are freed
+                import gc
+                import time
+                gc.collect()
+                gc.collect()
+                gc.collect()
+
+                # Clear CUDA cache if PyTorch is available
                 try:
-                    # Clear internal references
-                    self.models.clear()
+                    import torch
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                        torch.cuda.ipc_collect()
+                except ImportError:
+                    pass
 
-                    # Force garbage collection multiple times to ensure objects are freed
-                    import gc
-                    import time
-                    gc.collect()
-                    gc.collect()
-                    gc.collect()
-
-                    # Clear CUDA cache if PyTorch is available
-                    try:
-                        import torch
-                        if torch.cuda.is_available():
-                            torch.cuda.empty_cache()
-                            torch.cuda.ipc_collect()
-                    except ImportError:
-                        pass
-
-                    time.sleep(1) # Allow async cleanup
-                    logger.info("Models unloaded, memory freed")
-                except Exception as e:
-                    logger.error(f"Error during model unload: {e}")
+                time.sleep(0.5) # Short delay for async cleanup
+                logger.info("Memory cleanup complete")
+            except Exception as e:
+                logger.error(f"Error during memory cleanup: {e}")
 
     def get_model(self, agent_name: str):
-        """Get or load the model for the specific agent, using LRU caching"""
+        """Load the model for the specific agent (no caching)"""
         if agent_name not in Config.AGENTS:
             raise ValueError(f"Unknown agent: {agent_name}")
 
         model_config = Config.AGENTS[agent_name]['model_config']
         model_path = model_config['path']
 
-        with self.lock:
-            # Check if model is already cached
-            if model_path in self.models:
-                # Move to end to mark as most recently used
-                model = self.models.pop(model_path)
-                self.models[model_path] = model
-                logger.info(f"Reusing cached model for {agent_name}")
-                return model
+        # Load the model fresh
+        logger.info("Loading model for %s: %s", agent_name, model_path)
+        try:
+            model = Llama(
+                model_path=model_path,
+                n_ctx=model_config.get('n_ctx', Config.DEFAULT_CONTEXT_SIZE),
+                n_gpu_layers=model_config.get('n_gpu_layers', 0),
+                n_threads=Config.DEFAULT_N_THREADS,
+                n_threads_batch=Config.DEFAULT_N_THREADS,
+                n_batch=model_config.get('n_batch', Config.DEFAULT_N_BATCH),
+                flash_attn=True,   # Enabled for better performance
+                type_k=model_config.get('type_k'), # None = Model default (usually F16)
+                type_v=model_config.get('type_v'), # None = Model default (usually F16)
+                use_mmap=True,
+                use_mlock=False,
+                offload_kqv=model_config.get('offload_kqv', True), # True = Offload to GPU, False = RAM
+                # RoPE / YaRN Scaling for extended context
+                rope_scaling_type=model_config.get('rope_scaling_type', -1), # -1 = Unspecified
+                rope_freq_base=model_config.get('rope_freq_base', 0.0),      # 0.0 = Model default
+                rope_freq_scale=model_config.get('rope_freq_scale', 0.0),    # 0.0 = Model default
+                yarn_ext_factor=model_config.get('yarn_ext_factor', -1.0),   # -1.0 = Unspecified
+                yarn_attn_factor=model_config.get('yarn_attn_factor', 1.0),
+                yarn_beta_fast=model_config.get('yarn_beta_fast', 32.0),
+                yarn_beta_slow=model_config.get('yarn_beta_slow', 1.0),
+                yarn_orig_ctx=model_config.get('yarn_orig_ctx', 0),          # 0 = Model default
+                verbose=True
+            )
 
-            # Evict oldest if cache is full
-            if len(self.models) >= self.max_cached_models:
-                logger.info("Cache full, evicting all models for clean VRAM state...")
-                # We unload EVERYTHING to ensure maximum VRAM for the next model
-                # as llama-cpp-python can sometimes fragment VRAM
-                self.unload_model()
-
-            # Load the model (still inside the lock to prevent race conditions)
-            logger.info("Loading model for %s: %s", agent_name, model_path)
-            try:
-    
-    
-
-                model = Llama(
-                    model_path=model_path,
-                    n_ctx=model_config.get('n_ctx', Config.DEFAULT_CONTEXT_SIZE),
-                    n_gpu_layers=model_config.get('n_gpu_layers', 0),
-                    n_threads=Config.DEFAULT_N_THREADS,
-                    n_threads_batch=Config.DEFAULT_N_THREADS,
-                    n_batch=model_config.get('n_batch', Config.DEFAULT_N_BATCH),
-                    flash_attn=True,   # Enabled for better performance
-                    type_k=model_config.get('type_k'), # None = Model default (usually F16)
-                    type_v=model_config.get('type_v'), # None = Model default (usually F16)
-                    use_mmap=True,
-                    use_mlock=False,
-                    offload_kqv=model_config.get('offload_kqv', True), # True = Offload to GPU, False = RAM
-                    # RoPE / YaRN Scaling for extended context
-                    rope_scaling_type=model_config.get('rope_scaling_type', -1), # -1 = Unspecified
-                    rope_freq_base=model_config.get('rope_freq_base', 0.0),      # 0.0 = Model default
-                    rope_freq_scale=model_config.get('rope_freq_scale', 0.0),    # 0.0 = Model default
-                    yarn_ext_factor=model_config.get('yarn_ext_factor', -1.0),   # -1.0 = Unspecified
-                    yarn_attn_factor=model_config.get('yarn_attn_factor', 1.0),
-                    yarn_beta_fast=model_config.get('yarn_beta_fast', 32.0),
-                    yarn_beta_slow=model_config.get('yarn_beta_slow', 1.0),
-                    yarn_orig_ctx=model_config.get('yarn_orig_ctx', 0),          # 0 = Model default
-                    verbose=True
-                )
-
-                # Add to cache
-                self.models[model_path] = model
-                logger.info("Model loaded successfully: %s", model_path)
-                return model
-            except Exception as e:
-                logger.error("Failed to load model %s: %s", model_path, e)
-                raise
+            logger.info("Model loaded successfully: %s", model_path)
+            return model
+        except Exception as e:
+            logger.error("Failed to load model %s: %s", model_path, e)
+            raise
 
     def is_loaded(self) -> bool:
-        """Check if any model is loaded"""
-        return len(self.models) > 0
+        """Check if any model is loaded (always returns false since we don't cache)"""
+        return False
 
 
 # ============================================================================ 
@@ -615,7 +588,7 @@ def build_stream_chunk(completion_id: str, model_id: str, content: Optional[str]
 # FastAPI Application
 # ============================================================================ 
 
-model_manager = ModelManager(max_cached_models=1)
+model_manager = ModelManager()
 memory_service = None
 web_search_service = None
 apple_deep_docs_service = None
@@ -809,14 +782,6 @@ def ingest_memory(request: IngestRequest):
     return result
 
 
-@app.post("/v1/admin/unload", dependencies=[Depends(verify_admin_key)])
-def unload_models():
-    """Manually unload all models to free VRAM"""
-    with model_manager.inference_lock:
-        model_manager.unload_model()
-    return {"status": "success", "message": "All models unloaded"}
-
-
 @app.post("/v1/chat/completions")
 def chat_completions(request: ChatCompletionRequest, raw_request: Request):
     """Handle chat completion requests (OpenAI-compatible)"""
@@ -939,6 +904,11 @@ def sync_completion(messages: List[ChatMessage], system_prompt: str, model_path:
                                              finish_reason=finish_reason)
         except Exception:
             raise
+        finally:
+            # Explicitly delete and cleanup
+            if 'model' in locals():
+                del model
+            model_manager.unload_model()
 
 
 def stream_completion(messages: List[ChatMessage], system_prompt: str, model_path: str,
@@ -954,82 +924,88 @@ def stream_completion(messages: List[ChatMessage], system_prompt: str, model_pat
 
     try:
         with model_manager.inference_lock:
-            model = model_manager.get_model(model_id)
-            n_ctx = model.n_ctx()
+            try:
+                model = model_manager.get_model(model_id)
+                n_ctx = model.n_ctx()
 
-            # Estimate the token count for the budget guidance string itself
-            budget_guidance_template = Config.TOKEN_BUDGET_GUIDANCE.format(available_tokens=1000)  # Placeholder value
-            budget_guidance_tokens = len(model.tokenize(budget_guidance_template.encode("utf-8")))
+                # Estimate the token count for the budget guidance string itself
+                budget_guidance_template = Config.TOKEN_BUDGET_GUIDANCE.format(available_tokens=1000)  # Placeholder value
+                budget_guidance_tokens = len(model.tokenize(budget_guidance_template.encode("utf-8")))
 
-            # Build prompt without budget guidance to get the base token count
-            preliminary_prompt = build_model_prompt(messages, system_prompt, model_path)
-            preliminary_tokens = model.tokenize(preliminary_prompt.encode("utf-8"))
-            n_preliminary = len(preliminary_tokens)
+                # Build prompt without budget guidance to get the base token count
+                preliminary_prompt = build_model_prompt(messages, system_prompt, model_path)
+                preliminary_tokens = model.tokenize(preliminary_prompt.encode("utf-8"))
+                n_preliminary = len(preliminary_tokens)
 
-            # Calculate available tokens accounting for budget guidance overhead
-            available = n_ctx - n_preliminary - budget_guidance_tokens
-            if available < 1:
-                error_chunk = {
-                    "error": {
-                        "message": f"Prompt ({n_preliminary} tokens) fills the entire context window "
-                                   f"({n_ctx}). Reduce conversation history and retry.",
-                        "type": "context_length_exceeded"
+                # Calculate available tokens accounting for budget guidance overhead
+                available = n_ctx - n_preliminary - budget_guidance_tokens
+                if available < 1:
+                    error_chunk = {
+                        "error": {
+                            "message": f"Prompt ({n_preliminary} tokens) fills the entire context window "
+                                       f"({n_ctx}). Reduce conversation history and retry.",
+                            "type": "context_length_exceeded"
+                        }
                     }
-                }
-                yield f"data: {json.dumps(error_chunk)}\n\n"
-                return
+                    yield f"data: {json.dumps(error_chunk)}\n\n"
+                    return
 
-            # Clamp to requested max_tokens
-            clamped_max = min(max_tokens, available)
+                # Clamp to requested max_tokens
+                clamped_max = min(max_tokens, available)
 
-            # Now build the final prompt with actual budget guidance
-            budget_guidance = Config.TOKEN_BUDGET_GUIDANCE.format(available_tokens=clamped_max)
-            augmented_system_prompt = f"{system_prompt}\n{budget_guidance}"
-            prompt = build_model_prompt(messages, augmented_system_prompt, model_path)
+                # Now build the final prompt with actual budget guidance
+                budget_guidance = Config.TOKEN_BUDGET_GUIDANCE.format(available_tokens=clamped_max)
+                augmented_system_prompt = f"{system_prompt}\n{budget_guidance}"
+                prompt = build_model_prompt(messages, augmented_system_prompt, model_path)
 
-            # Final token count for logging
-            final_tokens = model.tokenize(prompt.encode("utf-8"))
-            n_prompt = len(final_tokens)
-            final_available = n_ctx - n_prompt
-            clamped_max = min(max_tokens, final_available)
+                # Final token count for logging
+                final_tokens = model.tokenize(prompt.encode("utf-8"))
+                n_prompt = len(final_tokens)
+                final_available = n_ctx - n_prompt
+                clamped_max = min(max_tokens, final_available)
 
-            if clamped_max < max_tokens:
+                if clamped_max < max_tokens:
+                    logger.info(
+                        "Clamped max_tokens %d -> %d for %s (prompt=%d, n_ctx=%d)",
+                        max_tokens, clamped_max, model_id, n_prompt, n_ctx
+                    )
+
                 logger.info(
-                    "Clamped max_tokens %d -> %d for %s (prompt=%d, n_ctx=%d)",
-                    max_tokens, clamped_max, model_id, n_prompt, n_ctx
+                    "Token budget injected for %s: budget=%d tokens communicated to model",
+                    model_id, clamped_max
                 )
 
-            logger.info(
-                "Token budget injected for %s: budget=%d tokens communicated to model",
-                model_id, clamped_max
-            )
+                params = get_model_params(clamped_max, temperature, stream=True)
+                token_count = 0
 
-            params = get_model_params(clamped_max, temperature, stream=True)
-            token_count = 0
+                for output in model(prompt, **params):
+                    if 'choices' in output and len(output['choices']) > 0:
+                        choice = output['choices'][0]
+                        token = choice.get('text', '')
+                        if token:
+                            token_count += 1
+                            chunk = build_stream_chunk(completion_id, model_id, content=token)
+                            yield f"data: {json.dumps(chunk)}\n\n"
+                        # Capture finish_reason from the last chunk llama-cpp emits
+                        if choice.get('finish_reason'):
+                            finish_reason = choice['finish_reason']
 
-            for output in model(prompt, **params):
-                if 'choices' in output and len(output['choices']) > 0:
-                    choice = output['choices'][0]
-                    token = choice.get('text', '')
-                    if token:
-                        token_count += 1
-                        chunk = build_stream_chunk(completion_id, model_id, content=token)
-                        yield f"data: {json.dumps(chunk)}\n\n"
-                    # Capture finish_reason from the last chunk llama-cpp emits
-                    if choice.get('finish_reason'):
-                        finish_reason = choice['finish_reason']
+                # If llama-cpp didn't set a finish_reason but we hit the token limit,
+                # infer "length" so the client knows the response was truncated
+                if finish_reason == "stop" and token_count >= clamped_max:
+                    finish_reason = "length"
 
-            # If llama-cpp didn't set a finish_reason but we hit the token limit,
-            # infer "length" so the client knows the response was truncated
-            if finish_reason == "stop" and token_count >= clamped_max:
-                finish_reason = "length"
-
-            # Always log completion stats for debugging truncation issues
-            logger.info(
-                "Completion stats for %s: prompt=%d, available=%d, clamped_max=%d, "
-                "generated=%d, finish_reason=%s",
-                model_id, n_prompt, final_available, clamped_max, token_count, finish_reason
-            )
+                # Always log completion stats for debugging truncation issues
+                logger.info(
+                    "Completion stats for %s: prompt=%d, available=%d, clamped_max=%d, "
+                    "generated=%d, finish_reason=%s",
+                    model_id, n_prompt, final_available, clamped_max, token_count, finish_reason
+                )
+            finally:
+                # Explicitly delete and cleanup
+                if 'model' in locals():
+                    del model
+                model_manager.unload_model()
 
         final_chunk = build_stream_chunk(completion_id, model_id, finish=True,
                                          finish_reason=finish_reason)
