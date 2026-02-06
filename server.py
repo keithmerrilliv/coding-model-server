@@ -324,7 +324,7 @@ Rules:
     _CODER_30B_TURBO = _create_model_config(
         'MODEL_PATH_30B_TURBO',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
-        33, 81920, 2048
+        32, 81920, 2048
     )
 
     # IMPL: High-context implementer using Q4_K_M for maximum context (82k)
@@ -332,7 +332,7 @@ Rules:
     _CODER_30B_IMPL = _create_model_config(
         'MODEL_PATH_30B_IMPL',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
-        33, 81920, 2048
+        32, 81920, 2048
     )
 
     # HD: High-precision Q8_0 with expanded context (49k) for review and Metal work
