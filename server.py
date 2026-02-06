@@ -18,6 +18,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request, Header, Depends
 from fastapi.responses import JSONResponse, StreamingResponse
+import llama_cpp
+from llama_cpp import Llama
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 from memory_service import MemoryService
@@ -468,8 +470,8 @@ class ModelManager:
             # Load the model (still inside the lock to prevent race conditions)
             logger.info("Loading model for %s: %s", agent_name, model_path)
             try:
-                import llama_cpp
-                from llama_cpp import Llama
+    
+    
 
                 model = Llama(
                     model_path=model_path,

@@ -36,7 +36,7 @@ class AppleDeepDocsService:
         self.process = None
         self.msg_id = 1
         self.lock = Lock()
-        self.venv_python = os.path.join(self.mcp_path, "venv/bin/python")
+        self.venv_python = self._get_venv_python_path()
         self.is_running = False
 
     def _readline_with_timeout(self, timeout: float = 30) -> Optional[str]:
@@ -51,6 +51,13 @@ class AppleDeepDocsService:
         
         logger.error("MCP readline timed out after %.1f seconds", timeout)
         return None
+
+    def _get_venv_python_path(self):
+        """Get the correct Python executable path for the virtual environment based on OS"""
+        if os.name == "nt":  # Windows
+            return os.path.join(self.mcp_path, "venv", "Scripts", "python.exe")
+        else:  # Unix-like (Linux, macOS)
+            return os.path.join(self.mcp_path, "venv", "bin", "python")
 
     def start(self):
         """Start the MCP server process and perform handshake if not already running"""
