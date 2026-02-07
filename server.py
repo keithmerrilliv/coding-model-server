@@ -735,6 +735,7 @@ class LlamaServerManager:
                     logger.error("llama-server returned %d: %s", resp.status_code, error_body)
                     error_chunk = {"error": {"message": f"llama-server error: {error_body}", "type": "server_error"}}
                     yield f"data: {json.dumps(error_chunk)}\n\n"
+                    yield "data: [DONE]\n\n"
                     return
 
                 for line in resp.iter_lines(decode_unicode=True):
@@ -761,6 +762,7 @@ class LlamaServerManager:
 
                         if content:
                             accumulated_text.append(content)
+                            self.last_request_time = time.time()  # Keep watchdog at bay during long streams
                             out_chunk = build_stream_chunk(completion_id, model_id, content=content)
                             yield f"data: {json.dumps(out_chunk)}\n\n"
                     except json.JSONDecodeError:
@@ -770,6 +772,7 @@ class LlamaServerManager:
             logger.error("Error proxying stream from llama-server: %s", e, exc_info=True)
             error_chunk = {"error": {"message": str(e), "type": "server_error"}}
             yield f"data: {json.dumps(error_chunk)}\n\n"
+            yield "data: [DONE]\n\n"
             return
 
         # Log the full response for diagnostics (repr escapes newlines for single-line journald)
@@ -1191,21 +1194,20 @@ def upload_file(request: FileUploadRequest):
     try:
         import base64
         import tempfile
-        import os
-        
+
         # Decode the base64 content
         try:
             file_content = base64.b64decode(request.content)
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Invalid base64 content: {str(e)}")
         
-        # Create a secure temporary file
+        # Sanitize filename: strip directory components to prevent path traversal
+        safe_filename = os.path.basename(request.filename)
+        if not safe_filename:
+            raise HTTPException(status_code=400, detail="Invalid filename")
+
         temp_dir = tempfile.gettempdir()
-        temp_path = os.path.join(temp_dir, request.filename)
-        
-        # Additional security: ensure the filename doesn't contain path traversal
-        if '..' in request.filename or request.filename.startswith('/'):
-            raise HTTPException(status_code=400, detail="Invalid filename: path traversal detected")
+        temp_path = os.path.join(temp_dir, safe_filename)
         
         # Write the file
         with open(temp_path, 'wb') as f:
