@@ -8,6 +8,7 @@ import zipfile
 import io
 import shutil
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 
 # Server Configuration
 LINUX_SERVER_IP = os.getenv("QWEN_SERVER_IP", "192.168.50.101")
@@ -19,6 +20,12 @@ INDEX_URLS = [
 ]
 BASE_DATA_URL = "https://developer.apple.com/tutorials/data"
 ASSET_URL_ROOT = "https://docs-assets.developer.apple.com/published"
+
+# Use a session for better performance (connection pooling) and a real User-Agent
+session = requests.Session()
+session.headers.update({
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+})
 
 # Track progress to allow resuming
 PROGRESS_FILE = "ingest_progress.json"
@@ -56,22 +63,30 @@ def extract_text_from_json(content_list):
             text_parts.append(extract_text_from_json(item))
     return "\n".join(text_parts)
 
-def ingest_content(text, source, sample_title, chunk_size=3000):
-    """General helper to chunk and send text to server."""
+def send_chunk(payload):
+    try:
+        session.post(MEMORY_API_URL, json=payload, timeout=30)
+    except:
+        pass
+
+def ingest_content(text, source, sample_title, chunk_size=3000, pool=None):
+    """Chunk and send text to server using optional thread pool."""
     overlap = 300
     start = 0
+    payloads = []
     while start < len(text):
         end = start + chunk_size
         chunk = text[start:end]
-        payload = {
+        payloads.append({
             "text": f"Source: {source}\nSample: {sample_title}\n\n{chunk}"
-        }
-        try:
-            requests.post(MEMORY_API_URL, json=payload, timeout=15)
-        except:
-            pass # Skip failed chunks to keep moving
+        })
         if end >= len(text): break
         start += (chunk_size - overlap)
+    
+    if pool:
+        pool.map(send_chunk, payloads)
+    else:
+        for p in payloads: send_chunk(p)
 
 def process_zip(zip_id, title):
     """Download and ingest all source files in the project zip."""
@@ -79,25 +94,31 @@ def process_zip(zip_id, title):
     print(f"    Downloading Source: {zip_url}")
     
     try:
-        r = requests.get(zip_url, timeout=60)
-        if r.status_code != 200: return
-        
-        with zipfile.ZipFile(io.BytesIO(r.content)) as z:
-            for file_info in z.infolist():
-                if file_info.is_dir(): continue
-                
-                ext = os.path.splitext(file_info.filename)[1].lower()
-                if ext in ['.swift', '.metal', '.h', '.m', '.cpp', '.mm', '.c', '.txt', '.md']:
-                    with z.open(file_info) as f:
-                        try:
-                            content = f.read().decode('utf-8', errors='replace')
-                            if len(content.strip()) < 10: continue
-                            
-                            source_label = f"{zip_url} -> {file_info.filename}"
-                            # Smaller chunks for actual code files for precision
-                            ingest_content(content, source_label, title, chunk_size=2000)
-                        except:
-                            continue
+        start_time = time.time()
+        with session.get(zip_url, timeout=60, stream=True) as r:
+            if r.status_code != 200: return
+            content = io.BytesIO()
+            for chunk in r.iter_content(chunk_size=8192): content.write(chunk)
+            
+            elapsed = time.time() - start_time
+            size_mb = content.tell() / (1024 * 1024)
+            print(f"      ✓ Downloaded {size_mb:.2f} MB in {elapsed:.1f}s ({(size_mb/elapsed):.2f} MB/s)")
+            
+            content.seek(0)
+            with zipfile.ZipFile(content) as z:
+                # Use more workers to saturate the Linux server's 24-core CPU
+                with ThreadPoolExecutor(max_workers=20) as pool:
+                    for file_info in z.infolist():
+                        if file_info.is_dir(): continue
+                        ext = os.path.splitext(file_info.filename)[1].lower()
+                        if ext in ['.swift', '.metal', '.h', '.m', '.cpp', '.mm', '.c', '.txt', '.md']:
+                            with z.open(file_info) as f:
+                                try:
+                                    file_text = f.read().decode('utf-8', errors='replace')
+                                    if len(file_text.strip()) < 10: continue
+                                    source_label = f"{zip_url} -> {file_info.filename}"
+                                    ingest_content(file_text, source_label, title, chunk_size=2000, pool=pool)
+                                except: continue
         print(f"      ✓ Processed all source files in zip.")
     except Exception as e:
         print(f"      ✗ Zip processing failed: {e}")
@@ -107,31 +128,28 @@ def ingest_sample(identifier):
     data_url = f"{BASE_DATA_URL}{path}.json"
     
     try:
-        resp = requests.get(data_url, timeout=20)
+        resp = session.get(data_url, timeout=20)
         if resp.status_code in [301, 302]:
             data_url = resp.headers['Location']
             if not data_url.startswith('http'): data_url = f"https://developer.apple.com{data_url}"
-            resp = requests.get(data_url, timeout=20)
-            
-        if resp.status_code != 200: return
+            resp = session.get(data_url, timeout=20)
         
+        if resp.status_code != 200: return
         data = resp.json()
-        role = data.get('metadata', {}).get('role', '')
-        if role != 'sampleCode': return
+        if data.get('metadata', {}).get('role', '') != 'sampleCode': return
             
         title = data.get('metadata', {}).get('title', 'Unknown Sample')
         print(f"\n🚀 Processing: {title}")
         
-        # 1. Ingest Prose/Snippets from JSON
+        # 1. Ingest Prose
         abstract = " ".join([item.get('text', '') for item in data.get('abstract', []) if 'text' in item])
         prose = extract_text_from_json(data.get('primaryContentSections', []))
         ingest_content(f"Title: {title}\nAbstract: {abstract}\n\n{prose}", data_url, title)
         print(f"    ✓ Ingested documentation prose.")
         
-        # 2. Ingest Full Source Code from Zip if available
+        # 2. Ingest Source
         zip_id = data.get('sampleCodeDownload', {}).get('action', {}).get('identifier')
-        if zip_id:
-            process_zip(zip_id, title)
+        if zip_id: process_zip(zip_id, title)
             
     except Exception as e:
         print(f"    ✗ Error: {e}")
@@ -149,21 +167,19 @@ def main():
     all_identifiers = set()
     
     for index_url in INDEX_URLS:
-        print(f"Fetching Index: {index_url}")
         try:
-            resp = requests.get(index_url, timeout=30)
+            resp = session.get(index_url, timeout=30)
             if resp.status_code == 200: find_all_identifiers(resp.json(), all_identifiers)
         except Exception as e: print(f"Error: {e}")
             
     unique_ids = sorted(list(all_identifiers))
     to_process = [i for i in unique_ids if i not in progress["processed_identifiers"]]
     
-    print(f"Found {len(unique_ids)} samples. {len(to_process)} remaining to be deep-scraped.")
+    print(f"Found {len(unique_ids)} samples. {len(to_process)} remaining.")
     
     for i, ident in enumerate(to_process):
         print(f"[{i+1}/{len(to_process)}] {ident}")
         ingest_sample(ident)
-        
         progress["processed_identifiers"].append(ident)
         save_progress(progress)
         time.sleep(3.0)
