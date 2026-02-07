@@ -214,7 +214,8 @@ class Config:
         "<<<SAVE_MEMORY>>>fact                             — persist a fact",
         "<<<WEB_SEARCH>>>query                             — web search",
         "<<<CUPERTINO>>>query                              — Apple docs (local MCP)",
-        '<<<APPLE_DEEP_DOCS>>>{"tool":"NAME","arguments":{}}  — Apple docs (server MCP)'
+        '<<<APPLE_DEEP_DOCS>>>{"tool":"NAME","arguments":{}}  — Apple docs (server MCP)',
+        "<<<INGEST_PDF>>>path                              — ingest a PDF file into memory"
     ]
 
     # ── Combined tools ──
