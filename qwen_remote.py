@@ -1503,6 +1503,10 @@ def process_remote_commands(response_text: str) -> Optional[str]:
             break
 
         arg = match.group(2)
+        # Strip closing tags the model generates (e.g. </REMOTE_EXEC>, </list_dir>).
+        # These get captured as part of the content and corrupt shell commands
+        # (the shell interprets </TAG> as input redirection < /TAG>).
+        arg = re.sub(r'</\w+>\s*$', '', arg)
         try:
             result = handler(arg)
             if result:
