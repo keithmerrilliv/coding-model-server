@@ -352,7 +352,7 @@ CONTEXT MANAGEMENT — your context window is limited. Work efficiently:
     _CODER_NEXT_Q8 = _create_model_config(
         'MODEL_PATH_NEXT_Q8',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-Next-GGUF/Q8_0/Qwen3-Coder-Next-Q8_0-00001-of-00003.gguf',
-        7, 262144, 1024, backend='llama_server'
+        8, 262144, 1024, backend='llama_server'
     )
 
     # HD: High-precision Q8_0 with expanded context (49k) for review and Metal work
@@ -586,7 +586,7 @@ class LlamaServerManager:
             '-b', str(model_config.get('n_batch', 2048)),
             '-t', str(Config.DEFAULT_N_THREADS),
             '-tb', str(Config.DEFAULT_N_THREADS),
-            '-fa',
+            '-fa', 'on',
             '--host', '127.0.0.1',
             '--port', str(self.LLAMA_SERVER_PORT),
             '-np', '1',

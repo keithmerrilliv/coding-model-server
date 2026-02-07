@@ -56,7 +56,10 @@ echo ""
 export CMAKE_ARGS="-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=120"
 export FORCE_CMAKE=1
 
-pip install llama-cpp-python>=0.3.16 --force-reinstall --no-cache-dir --verbose
+# PyPI 0.3.16 is from Aug 2025 and lacks qwen3next architecture support.
+# Build from GitHub main branch which includes latest llama.cpp with qwen3next.
+pip install "llama-cpp-python @ git+https://github.com/abetlen/llama-cpp-python.git@main" \
+    --force-reinstall --no-cache-dir --verbose
 
 echo ""
 echo -e "${GREEN}✓ Compilation complete${NC}"
