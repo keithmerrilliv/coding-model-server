@@ -343,6 +343,14 @@ CONTEXT MANAGEMENT — your context window is limited. Work efficiently:
         32, 81920, 2048
     )
 
+    # NEXT: Qwen3-Coder-Next-Q8_0 (80B MoE with 3B active params)
+    # Very smart but runs mostly on system RAM (slow). Optimized for 32k context.
+    _CODER_NEXT_Q8 = _create_model_config(
+        'MODEL_PATH_NEXT_Q8',
+        '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-Next-GGUF/Q8_0/Qwen3-Coder-Next-Q8_0-00001-of-00003.gguf',
+        4, 32768, 1024
+    )
+
     # HD: High-precision Q8_0 with expanded context (49k) for review and Metal work
     # Reduced GPU layers (16) to free VRAM for larger KV cache
     _CODER_30B_HD = _create_model_config(
@@ -383,9 +391,9 @@ CONTEXT MANAGEMENT — your context window is limited. Work efficiently:
     # 'executor': True means few-shot + fallback extraction are enabled.
     AGENTS = {
         'implementer': _create_agent_config(
-            'Qwen3-Coder-30B-A3B IMPL (82k context)',
+            'Qwen3-Coder-Next Q8_0 (80B MoE)',
             f'You are an implementer. {EXECUTOR_PROMPT}\n\nCOMPREHENSIVE IMPLEMENTATION: When implementing tasks, leverage multiple tools to understand the codebase thoroughly:\n\nEXECUTION ENVIRONMENT: You are running on a macOS environment with full access to development tools.\n- Use `<<<REMOTE_EXEC>>>` for ALL shell commands (including Xcode tools, Git, file operations).\n- Do NOT distinguish between "server" and "client". Everything runs locally.\n\nFILE OPERATIONS:\n- Use `<<<GLOB>>>` to find files: `<<<GLOB>>>**/*.swift`\n- Use `<<<GREP>>>` to search code: `<<<GREP>>>TODO|src/`\n- Use `<<<LIST_DIR>>>` to explore directories\n- Use `<<<READ_FILE>>>` to read file contents\n- Use `<<<WRITE_FILE>>>` for new files or complete rewrites\n- Use `<<<EDIT_FILE>>>` for targeted changes to existing files (PREFERRED)\n\nGIT AWARENESS: Use Git via `<<<REMOTE_EXEC>>>` to understand code context:\n- `git log`, `git diff`, `git blame`, `git show`, `git status`\n\nAPPLE DEVELOPMENT via `<<<REMOTE_EXEC>>>`:\n- Compile Swift: `swiftc file.swift -o output`\n- Compile Metal: `xcrun -sdk macosx metal -c shader.metal -o shader.air`\n- Build Xcode: `xcodebuild -project Foo.xcodeproj -scheme Foo build`\n\n{TOOL_REFERENCE}',
-            _CODER_30B_IMPL,
+            _CODER_NEXT_Q8,
             executor=True
         ),
         'architect': _create_agent_config(
@@ -407,9 +415,9 @@ CONTEXT MANAGEMENT — your context window is limited. Work efficiently:
             executor=True
         ),
         'metal_implementer': _create_agent_config(
-            'Metal Engineer Q8_0 (49k context, High Precision)',
+            'Metal Engineer Next Q8_0 (32k context)',
             f'You are a Metal 4 graphics engineer (compute kernels, mesh shaders, ray tracing, argument buffers). {EXECUTOR_PROMPT}\n\nEXECUTION ENVIRONMENT: You are running on a macOS environment with full access to Metal tools.\n- Use `<<<REMOTE_EXEC>>>` for ALL shell commands.\n- Do NOT distinguish between "server" and "client". Everything runs locally.\n\nFILE WRITING - CRITICAL: When implementing code, you MUST write files to disk:\n- Use `<<<WRITE_FILE>>>` to create or update source files (.metal, .swift, .h, etc.)\n- NEVER just output code in markdown blocks - that does NOT save the file!\n- After writing, use `<<<REMOTE_EXEC>>>` to compile and verify the code works.\n\nMETAL DEVELOPMENT:\n- Write Metal shaders using `<<<WRITE_FILE>>>` to .metal files\n- Compile Metal shaders: `xcrun -sdk macosx metal -c shader.metal -o shader.air`\n- Create Metal library: `xcrun -sdk macosx metallib shader.air -o shader.metallib`\n- Validate shaders: `xcrun metal-compiler shader.metal`\n- Use `<<<REMOTE_EXEC>>>` for compilation and validation\n\n{TOOL_REFERENCE}',
-            _CODER_30B_HD,
+            _CODER_NEXT_Q8,
             executor=True
         ),
         'lite_architect': _create_agent_config(
