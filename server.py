@@ -716,15 +716,11 @@ class LlamaServerManager:
             # end-of-turn tokens (im_end, EOT, etc.) natively. Passing them here
             # causes premature stopping via double-matching.
             "repeat_penalty": 1.15,
-            # Ban native Qwen3 special tokens so the model uses <<<MARKER>>> format
-            # from the system prompt instead of <tool_call>...<TAG>>> hybrid format.
-            # IDs via /tokenize: <tool_call>=151657 </tool_call>=151658
-            #   <tool_response>=151665 </tool_response>=151666 <think>=151667 </think>=151668
-            "logit_bias": [
-                [151657, -100.0], [151658, -100.0],  # tool_call
-                [151665, -100.0], [151666, -100.0],  # tool_response
-                [151667, -100.0], [151668, -100.0],  # think
-            ],
+            # Ban <tool_call> tokens — the main cause of format corruption where
+            # the model produces <tool_call>\n<TAG>>> (single <) instead of <<<TAG>>>.
+            # Other native tokens (think, tool_response) are left unbanned:
+            # thinking improves quality, and the client regex handles any bracket variations.
+            "logit_bias": [[151657, -100.0], [151658, -100.0]],
         }
 
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
@@ -799,11 +795,7 @@ class LlamaServerManager:
             "temperature": temperature,
             "stream": False,
             "repeat_penalty": 1.15,
-            "logit_bias": [
-                [151657, -100.0], [151658, -100.0],  # tool_call
-                [151665, -100.0], [151666, -100.0],  # tool_response
-                [151667, -100.0], [151668, -100.0],  # think
-            ],
+            "logit_bias": [[151657, -100.0], [151658, -100.0]],
         }
 
         resp = http_requests.post(url, json=payload, timeout=600)
