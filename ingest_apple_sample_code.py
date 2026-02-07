@@ -166,7 +166,7 @@ def main():
         
         progress["processed_identifiers"].append(ident)
         save_progress(progress)
-        time.sleep(0.5)
+        time.sleep(3.0)
             
     print("\nMission Complete.")
 
