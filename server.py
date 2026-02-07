@@ -351,11 +351,12 @@ CONTEXT MANAGEMENT — your context window is limited. Work efficiently:
         21, 49152, 2048
     )
 
-    # Lite: Faster reasoning on system RAM (64k context via YaRN 2x scaling from 32k training length)
+    # Lite: Faster reasoning on system RAM (32k native context, no YaRN — IQ1_M too
+    # aggressively quantized for reliable extended-context output)
     _QWEN_480B_LITE = _create_model_config(
         'MODEL_PATH_480B_LITE',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/Qwen3-Coder-480B-A35B-Instruct-UD-IQ1_M.gguf',
-        4, 65536, 1024
+        4, 32768, 1024
     )
 
     # Ultra: Premium reasoning using Q2_K_XL on 192GB RAM (64k context via YaRN 2x scaling)
