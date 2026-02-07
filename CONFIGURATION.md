@@ -72,5 +72,23 @@ The client supports various commands and features:
 
 - `/scrape <framework>` - Scrape documentation for a specific Apple framework
 - `/cupertino <query>` - Search Apple documentation (macOS only)
-- `/ingest <path>` - Ingest files into memory
+- `/ingest <path>` - Ingest PDF files into memory (supports server files or local: prefix for client files)
 - `/model <name>` - Switch between different agent models
+
+### PDF Ingestion
+
+The system supports ingesting PDF documents for enhanced AI knowledge and RAG (Retrieval Augmented Generation):
+
+**Using the slash command:**
+- `/ingest /path/to/server/file.pdf` - Ingest a PDF file that exists on the server
+- `/ingest local:/path/to/client/file.pdf` - Ingest a PDF file from your local client machine
+
+**Using the tool in agent responses:**
+- `<<<INGEST_PDF>>>/path/to/server/file.pdf` - Ingest a server-side PDF
+- `<<<INGEST_PDF>>>local:/path/to/client/file.pdf` - Ingest a client-side PDF (automatically uploads to server first)
+
+When using the `local:` prefix, the system will:
+1. Read the PDF file from your client machine
+2. Securely upload it to the server
+3. Ingest the uploaded file into the memory service
+4. Make the content available for RAG queries
