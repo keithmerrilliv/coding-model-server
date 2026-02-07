@@ -18,6 +18,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request, Header, Depends
 from fastapi.responses import JSONResponse, StreamingResponse
+import signal
+import requests as http_requests
 import llama_cpp
 from llama_cpp import Llama
 from fastapi.middleware.cors import CORSMiddleware
@@ -151,7 +153,7 @@ class IngestRequest(BaseModel):
 # Helper Functions
 # ============================================================================
 
-def _create_model_config(path_env, path_default, n_gpu_layers, n_ctx=32768, n_batch=2048):
+def _create_model_config(path_env, path_default, n_gpu_layers, n_ctx=32768, n_batch=2048, backend='llama_cpp'):
     """Helper function to create standardized model configurations"""
     return {
         'path': os.getenv(path_env, path_default),
@@ -166,6 +168,7 @@ def _create_model_config(path_env, path_default, n_gpu_layers, n_ctx=32768, n_ba
         'yarn_beta_slow': 1.0,
         'yarn_orig_ctx': 32768,
         'type_k': 8, 'type_v': 8, 'offload_kqv': True,
+        'backend': backend,
     }
 
 
@@ -345,10 +348,11 @@ CONTEXT MANAGEMENT — your context window is limited. Work efficiently:
 
     # NEXT: Qwen3-Coder-Next-Q8_0 (80B MoE with 3B active params)
     # Very smart but runs mostly on system RAM (slow). Native 256k context enabled.
+    # Uses llama-server subprocess backend (qwen3next arch not supported by llama-cpp-python 0.3.16)
     _CODER_NEXT_Q8 = _create_model_config(
         'MODEL_PATH_NEXT_Q8',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-Next-GGUF/Q8_0/Qwen3-Coder-Next-Q8_0-00001-of-00003.gguf',
-        7, 262144, 1024
+        7, 262144, 1024, backend='llama_server'
     )
 
     # HD: High-precision Q8_0 with expanded context (49k) for review and Metal work
@@ -503,6 +507,9 @@ class ModelManager:
         model_config = Config.AGENTS[agent_name]['model_config']
         model_path = model_config['path']
 
+        # Free VRAM from llama-server subprocess before loading a llama_cpp model
+        llama_server_manager.shutdown()
+
         # Load the model fresh
         logger.info("Loading model for %s: %s", agent_name, model_path)
         try:
@@ -542,7 +549,262 @@ class ModelManager:
         return False
 
 
-# ============================================================================ 
+# ============================================================================
+# Llama-Server Subprocess Manager
+# ============================================================================
+
+class LlamaServerManager:
+    """Manages a llama-server subprocess for models that require it (e.g. qwen3next arch)."""
+
+    LLAMA_SERVER_PORT = 8081
+    IDLE_TIMEOUT = 600  # 10 minutes
+    HEALTH_POLL_INTERVAL = 0.5
+    HEALTH_TIMEOUT = 120  # seconds to wait for /health
+
+    def __init__(self):
+        self.lock = Lock()
+        self.process: Optional[subprocess.Popen] = None
+        self.current_model_path: Optional[str] = None
+        self.last_request_time: float = 0
+        self._watchdog_thread: Optional[Thread] = None
+        self._watchdog_running = False
+
+    def start(self, model_config: dict):
+        """Spawn llama-server with the given model config, wait for /health."""
+        tools_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tools')
+        binary = os.path.join(tools_dir, 'llama-server')
+
+        if not os.path.isfile(binary):
+            raise FileNotFoundError(f"llama-server binary not found: {binary}")
+
+        model_path = model_config['path']
+        cmd = [
+            binary,
+            '-m', model_path,
+            '-ngl', str(model_config.get('n_gpu_layers', 0)),
+            '-c', str(model_config.get('n_ctx', 32768)),
+            '-b', str(model_config.get('n_batch', 2048)),
+            '-t', str(Config.DEFAULT_N_THREADS),
+            '-tb', str(Config.DEFAULT_N_THREADS),
+            '-fa',
+            '--host', '127.0.0.1',
+            '--port', str(self.LLAMA_SERVER_PORT),
+            '-np', '1',
+        ]
+
+        env = os.environ.copy()
+        env['LD_LIBRARY_PATH'] = tools_dir + ':' + env.get('LD_LIBRARY_PATH', '')
+
+        logger.info("Starting llama-server: %s", ' '.join(cmd))
+        self.process = subprocess.Popen(
+            cmd, env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        )
+        self.current_model_path = model_path
+
+        # Background thread to drain stdout so the pipe doesn't block
+        def _drain_output(proc):
+            try:
+                for line in iter(proc.stdout.readline, b''):
+                    logger.info("[llama-server] %s", line.decode('utf-8', errors='replace').rstrip())
+            except (ValueError, OSError):
+                pass  # Process closed
+        drain_thread = Thread(target=_drain_output, args=(self.process,), daemon=True)
+        drain_thread.start()
+
+        # Poll /health until ready
+        health_url = f"http://127.0.0.1:{self.LLAMA_SERVER_PORT}/health"
+        deadline = time.time() + self.HEALTH_TIMEOUT
+        while time.time() < deadline:
+            # Check if process died
+            if self.process.poll() is not None:
+                raise RuntimeError(
+                    f"llama-server exited with code {self.process.returncode} during startup"
+                )
+            try:
+                resp = http_requests.get(health_url, timeout=2)
+                if resp.status_code == 200:
+                    logger.info("llama-server healthy after %.1fs", time.time() - (deadline - self.HEALTH_TIMEOUT))
+                    self.last_request_time = time.time()
+                    self._start_watchdog()
+                    return
+            except http_requests.ConnectionError:
+                pass
+            time.sleep(self.HEALTH_POLL_INTERVAL)
+
+        # Timeout — kill the process
+        self.shutdown()
+        raise TimeoutError(f"llama-server did not become healthy within {self.HEALTH_TIMEOUT}s")
+
+    def shutdown(self):
+        """Stop the subprocess gracefully, then force-kill if needed."""
+        if self.process is None:
+            return
+
+        self._watchdog_running = False
+        pid = self.process.pid
+        logger.info("Shutting down llama-server (PID %d)...", pid)
+        try:
+            self.process.send_signal(signal.SIGTERM)
+            try:
+                self.process.wait(timeout=10)
+                logger.info("llama-server (PID %d) terminated gracefully", pid)
+            except subprocess.TimeoutExpired:
+                logger.warning("llama-server (PID %d) didn't exit, sending SIGKILL", pid)
+                self.process.kill()
+                self.process.wait(timeout=5)
+        except Exception as e:
+            logger.error("Error shutting down llama-server: %s", e)
+        finally:
+            self.process = None
+            self.current_model_path = None
+
+    def ensure_running(self, model_config: dict):
+        """Ensure llama-server is running with the correct model. Handles model swaps."""
+        with self.lock:
+            model_path = model_config['path']
+            if self.process is not None and self.process.poll() is None:
+                if self.current_model_path == model_path:
+                    # Already running with the right model
+                    self.last_request_time = time.time()
+                    return
+                # Different model — shut down first
+                logger.info("Model swap: shutting down llama-server for new model")
+                self.shutdown()
+
+            # Free VRAM from any llama_cpp model before starting
+            model_manager.unload_model()
+            self.start(model_config)
+
+    def _start_watchdog(self):
+        """Start the idle watchdog thread."""
+        if self._watchdog_thread and self._watchdog_thread.is_alive():
+            return
+        self._watchdog_running = True
+        self._watchdog_thread = Thread(target=self._idle_watchdog, daemon=True)
+        self._watchdog_thread.start()
+
+    def _idle_watchdog(self):
+        """Background thread: shut down subprocess if idle for IDLE_TIMEOUT seconds."""
+        while self._watchdog_running:
+            time.sleep(30)  # Check every 30s
+            if not self._watchdog_running:
+                break
+            with self.lock:
+                if self.process is None:
+                    break
+                idle = time.time() - self.last_request_time
+                if idle >= self.IDLE_TIMEOUT:
+                    logger.info("llama-server idle for %.0fs, shutting down to free resources", idle)
+                    self.shutdown()
+                    break
+
+    def proxy_stream(self, messages: List[dict], system_prompt: str,
+                     model_id: str, max_tokens: int, temperature: float) -> Iterator[str]:
+        """Stream a chat completion via the llama-server subprocess."""
+        self.last_request_time = time.time()
+
+        openai_messages = self._build_openai_messages(messages, system_prompt)
+        url = f"http://127.0.0.1:{self.LLAMA_SERVER_PORT}/v1/chat/completions"
+        payload = {
+            "messages": openai_messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": True,
+            "stop": [CHATML_END, "<|EOT|>", "<|endoftext|>"],
+            "repeat_penalty": 1.15,
+        }
+
+        completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+        finish_reason = None
+
+        try:
+            with http_requests.post(url, json=payload, stream=True, timeout=600) as resp:
+                if resp.status_code != 200:
+                    error_body = resp.text
+                    logger.error("llama-server returned %d: %s", resp.status_code, error_body)
+                    error_chunk = {"error": {"message": f"llama-server error: {error_body}", "type": "server_error"}}
+                    yield f"data: {json.dumps(error_chunk)}\n\n"
+                    return
+
+                for line in resp.iter_lines(decode_unicode=True):
+                    if not line or not line.startswith("data: "):
+                        continue
+                    data = line[6:]
+                    if data.strip() == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data)
+                        choices = chunk.get("choices", [])
+                        if not choices:
+                            continue
+                        delta = choices[0].get("delta", {})
+                        content = delta.get("content")
+                        fr = choices[0].get("finish_reason")
+                        if fr:
+                            finish_reason = fr
+
+                        if content:
+                            out_chunk = build_stream_chunk(completion_id, model_id, content=content)
+                            yield f"data: {json.dumps(out_chunk)}\n\n"
+                    except json.JSONDecodeError:
+                        continue
+
+        except Exception as e:
+            logger.error("Error proxying stream from llama-server: %s", e, exc_info=True)
+            error_chunk = {"error": {"message": str(e), "type": "server_error"}}
+            yield f"data: {json.dumps(error_chunk)}\n\n"
+            return
+
+        final_chunk = build_stream_chunk(completion_id, model_id, finish=True,
+                                         finish_reason=finish_reason or "stop")
+        yield f"data: {json.dumps(final_chunk)}\n\n"
+        yield "data: [DONE]\n\n"
+        self.last_request_time = time.time()
+
+    def proxy_sync(self, messages: List[dict], system_prompt: str,
+                   model_id: str, max_tokens: int, temperature: float) -> dict:
+        """Synchronous chat completion via the llama-server subprocess."""
+        self.last_request_time = time.time()
+
+        openai_messages = self._build_openai_messages(messages, system_prompt)
+        url = f"http://127.0.0.1:{self.LLAMA_SERVER_PORT}/v1/chat/completions"
+        payload = {
+            "messages": openai_messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": False,
+            "stop": [CHATML_END, "<|EOT|>", "<|endoftext|>"],
+            "repeat_penalty": 1.15,
+        }
+
+        resp = http_requests.post(url, json=payload, timeout=600)
+        if resp.status_code != 200:
+            raise HTTPException(status_code=502, detail=f"llama-server error: {resp.text}")
+
+        result = resp.json()
+        text = result["choices"][0]["message"]["content"]
+        finish_reason = result["choices"][0].get("finish_reason", "stop")
+        usage = result.get("usage", {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
+
+        self.last_request_time = time.time()
+        return build_completion_response(model_id, text, usage, finish_reason=finish_reason)
+
+    @staticmethod
+    def _build_openai_messages(messages: List, system_prompt: str) -> List[dict]:
+        """Build OpenAI-format messages array from ChatMessage list + system prompt."""
+        openai_msgs = []
+        if system_prompt:
+            openai_msgs.append({"role": "system", "content": system_prompt})
+        for msg in messages:
+            if isinstance(msg, dict):
+                openai_msgs.append({"role": msg["role"], "content": msg["content"]})
+            else:
+                openai_msgs.append({"role": msg.role, "content": msg.content})
+        return openai_msgs
+
+
+# ============================================================================
 # Prompt Format Helpers
 # ============================================================================ 
 
@@ -701,6 +963,7 @@ def build_stream_chunk(completion_id: str, model_id: str, content: Optional[str]
 # ============================================================================ 
 
 model_manager = ModelManager()
+llama_server_manager = LlamaServerManager()
 memory_service = None
 web_search_service = None
 apple_deep_docs_service = None
@@ -747,6 +1010,7 @@ async def lifespan(app: FastAPI):
     yield
     # Shutdown
     logger.info("Server shutting down - unloading models...")
+    llama_server_manager.shutdown()
     model_manager.unload_model()
     if apple_deep_docs_service:
         apple_deep_docs_service.stop()
@@ -928,18 +1192,52 @@ def chat_completions(request: ChatCompletionRequest, raw_request: Request):
                 except Exception as e:
                     logger.error(f"Memory retrieval failed: {e}")
 
-        # Pass components to completion functions - they will inject token budget
-        model_path = agent_config['model_config']['path']
+        model_config = agent_config['model_config']
+        model_path = model_config['path']
 
-        if request.stream:
-            return StreamingResponse(
-                stream_completion(request.messages, system_prompt, model_path, request.model,
-                                  request.max_tokens, request.temperature),
-                media_type="text/event-stream"
+        # Route by backend
+        if model_config.get('backend') == 'llama_server':
+            # llama-server subprocess backend
+            llama_server_manager.ensure_running(model_config)
+
+            # Estimate token budget (no local model to tokenize with)
+            prompt_text = system_prompt + ''.join(m.content for m in request.messages)
+            est_prompt_tokens = int(len(prompt_text) / 3.5)
+            n_ctx = model_config.get('n_ctx', 32768)
+            available = max(n_ctx - est_prompt_tokens, 1)
+            clamped_max = min(request.max_tokens, available)
+
+            # Inject budget guidance into system prompt
+            budget_guidance = Config.TOKEN_BUDGET_GUIDANCE.format(available_tokens=clamped_max)
+            augmented_system = f"{system_prompt}\n{budget_guidance}"
+
+            logger.info(
+                "llama-server request for %s: est_prompt=%d, budget=%d, n_ctx=%d",
+                request.model, est_prompt_tokens, clamped_max, n_ctx
             )
+
+            if request.stream:
+                return StreamingResponse(
+                    llama_server_manager.proxy_stream(
+                        request.messages, augmented_system, request.model,
+                        clamped_max, request.temperature),
+                    media_type="text/event-stream"
+                )
+            else:
+                return llama_server_manager.proxy_sync(
+                    request.messages, augmented_system, request.model,
+                    clamped_max, request.temperature)
         else:
-            return sync_completion(request.messages, system_prompt, model_path, request.model,
-                                   request.max_tokens, request.temperature)
+            # Standard llama_cpp path
+            if request.stream:
+                return StreamingResponse(
+                    stream_completion(request.messages, system_prompt, model_path, request.model,
+                                      request.max_tokens, request.temperature),
+                    media_type="text/event-stream"
+                )
+            else:
+                return sync_completion(request.messages, system_prompt, model_path, request.model,
+                                       request.max_tokens, request.temperature)
 
     except HTTPException:
         raise
