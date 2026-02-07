@@ -65,6 +65,40 @@ class Config:
     CHUNK_THRESHOLD = 8000
     MAX_DISPLAY_CHARS = 8000
 
+    # Deep Ingestion Tool
+    def ingest_url_content(self, url):
+        """Fetch URL content, strip HTML, and send to server memory."""
+        try:
+            print_colored(f"[Client] Deep-ingesting content from {url}...", COLORS['BLUE'])
+            # Use a simple approach first: requests + beautifulsoup if available, 
+            # otherwise fall back to a text-based fetch
+            response = requests.get(url, timeout=20)
+            if response.status_code != 200:
+                return f"Error: Failed to fetch URL (Status {response.status_code})"
+            
+            # Simple HTML stripping
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # Remove scripts and styles
+            for script in soup(["script", "style"]):
+                script.extract()
+            
+            text = soup.get_text(separator=' ', strip=True)
+            
+            # Send to server memory
+            payload = {"text": f"Source URL: {url}\n\n{text}"}
+            mem_resp = requests.post(self.MEMORY_API_URL, json=payload, timeout=30)
+            
+            if mem_resp.status_code == 200:
+                return f"Successfully ingested full content from {url} into RAG database."
+            else:
+                return f"Error: Server rejected memory ingestion ({mem_resp.status_code})"
+        except ImportError:
+            return "Error: BeautifulSoup4 is required on the client for deep-ingestion. Run 'pip install beautifulsoup4'."
+        except Exception as e:
+            return f"Error during deep-ingestion: {str(e)}"
+
     # Timeout settings
     COMMAND_TIMEOUT = 240  # seconds
     REQUEST_TIMEOUT = 30   # seconds for API requests
@@ -1328,6 +1362,28 @@ def glob_files(pattern):
         return f"Error in glob: {str(e)}"
 
 
+def ingest_pdf_content(payload):
+    """Ingest a PDF file on the server into memory.
+
+    Payload format:
+        /path/to/document.pdf       - Path to PDF file on the server
+
+    Example:
+        /home/user/docs/manual.pdf
+    """
+    try:
+        path = payload.strip()
+        if not path:
+            return "Error: No PDF path provided"
+
+        # Call the existing ingest_pdf function
+        result = ingest_pdf(path)
+        return result
+    except Exception as e:
+        logger.error(f"Error ingesting PDF {path}: {str(e)}")
+        return f"Error ingesting PDF: {str(e)}"
+
+
 def grep_search(payload):
     """Search for pattern in files.
 
@@ -1469,6 +1525,8 @@ def process_remote_commands(response_text: str) -> Optional[str]:
         'WEB_SEARCH':     lambda arg: web_search(arg.strip()),
         'CUPERTINO':      lambda arg: handle_cupertino_search(arg.strip()),
         'APPLE_DEEP_DOCS': lambda arg: handle_apple_deep_docs(arg.strip()),
+        'INGEST_PDF':     lambda arg: ingest_pdf_content(arg),
+        'DEEP_INGEST':    lambda arg: config.ingest_url_content(arg.strip()),
     }
 
     # Build regex from known tags so internal markers (<<<OLD>>>, <<<NEW>>>) are not
