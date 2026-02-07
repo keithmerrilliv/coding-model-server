@@ -1527,11 +1527,15 @@ def extract_fallback_commands(response_text: str) -> List[str]:
 
     Catches the common failure mode where the model writes a correct command
     inside a fenced code block instead of using the marker protocol.
+    Only extracts blocks explicitly tagged as shell languages (bash/shell/sh/zsh).
+    Plain or non-shell code blocks (python, swift, etc.) are ignored to prevent
+    catastrophic misexecution of code snippets as shell commands.
     """
     commands = []
 
-    # Match fenced code blocks: ```bash ... ```, ```shell ... ```, ```sh ... ```, or plain ``` ... ```
-    for m in re.finditer(r'```(?:bash|shell|sh|zsh)?\s*(.+?)```', response_text, re.DOTALL):
+    # REQUIRE a shell language hint — the ? was removed to prevent matching
+    # python/swift/unlabeled blocks which caused catastrophic misexecution.
+    for m in re.finditer(r'```(?:bash|shell|sh|zsh)\s*\n(.+?)```', response_text, re.DOTALL):
         block = m.group(1).strip()
         if block:
             commands.append(block)
@@ -1730,6 +1734,7 @@ def get_completion(history, model, agent_theme):
                                     server_error_occurred = True
                                     break
                                 print_colored(f"\nServer Error: {error_msg}", COLORS['FAIL'])
+                                finish_reason = "error"
                                 break
                         except Exception: pass
 
@@ -2064,8 +2069,10 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                 # ── Execute commands found in the response ──
                 tool_output = process_remote_commands(response_text)
 
-                if not tool_output:
-                    # Fallback: model wrote commands in code blocks instead of markers
+                if not tool_output and finish_reason == "stop":
+                    # Fallback: model wrote commands in code blocks instead of markers.
+                    # Only on clean completions — truncated/errored responses contain
+                    # code examples that are NOT intended as executable commands.
                     fallback_cmds = extract_fallback_commands(response_text)
                     if fallback_cmds:
                         print_colored("\nAgent used code blocks instead of markers. Extracting commands...", COLORS['WARNING'])
