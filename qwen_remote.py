@@ -1484,8 +1484,8 @@ def process_remote_commands(response_text: str) -> Optional[str]:
     _COMMAND_RE = rf'<{{1,3}}({_TAG_NAMES})>{{1,3}}\s*(.*?)(?=<{{1,3}}(?:{_TAG_NAMES})>{{1,3}}|\Z)'
 
     all_matches = []
-    for match in re.finditer(_COMMAND_RE, response_text, re.DOTALL):
-        tag = match.group(1)
+    for match in re.finditer(_COMMAND_RE, response_text, re.DOTALL | re.IGNORECASE):
+        tag = match.group(1).upper()
         content = match.group(2).strip()
         if content:  # skip empty blocks (e.g. stale closing tags parsed as openers)
             all_matches.append((match.start(), match, command_handlers[tag]))
