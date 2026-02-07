@@ -1475,12 +1475,13 @@ def process_remote_commands(response_text: str) -> Optional[str]:
     # mistaken for command boundaries.  Each command block runs from its opening tag
     # to the next known opening tag (or end of string).  No closing tags required.
     #
-    # Accept 1-3 opening angle brackets (<, <<, or <<<) to tolerate Qwen3 models
-    # that sometimes generate native tool-call format with single-bracket markers
-    # (e.g. <tool_call>\n<REMOTE_EXEC>>> or <search_indexing>\n<LIST_DIR>>>).
-    # The closing >>> is always triple.
+    # Accept 1-3 opening AND closing angle brackets to tolerate Qwen3 models
+    # that generate various bracket styles:
+    #   <<<TAG>>>  — standard triple-bracket format
+    #   <TAG>>>    — after <tool_call> special token (single open, triple close)
+    #   <TAG>      — XML-style (single open, single close; seen with EDIT_FILE)
     _TAG_NAMES = '|'.join(command_handlers.keys())
-    _COMMAND_RE = rf'<{{1,3}}({_TAG_NAMES})>>>\s*(.*?)(?=<{{1,3}}(?:{_TAG_NAMES})>>>|\Z)'
+    _COMMAND_RE = rf'<{{1,3}}({_TAG_NAMES})>{{1,3}}\s*(.*?)(?=<{{1,3}}(?:{_TAG_NAMES})>{{1,3}}|\Z)'
 
     all_matches = []
     for match in re.finditer(_COMMAND_RE, response_text, re.DOTALL):
