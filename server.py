@@ -587,6 +587,7 @@ class LlamaServerManager:
             '-t', str(Config.DEFAULT_N_THREADS),
             '-tb', str(Config.DEFAULT_N_THREADS),
             '-fa', 'on',
+            '--chat-template', 'chatml',  # Override model's "Qwen3 Coder" template to prevent native <tool_call> format
             '--host', '127.0.0.1',
             '--port', str(self.LLAMA_SERVER_PORT),
             '-np', '1',
@@ -711,12 +712,19 @@ class LlamaServerManager:
             "max_tokens": max_tokens,
             "temperature": temperature,
             "stream": True,
-            "stop": [CHATML_END, "<|EOT|>", "<|endoftext|>"],
+            # No explicit stop sequences — llama-server's chat template handles
+            # end-of-turn tokens (im_end, EOT, etc.) natively. Passing them here
+            # causes premature stopping via double-matching.
             "repeat_penalty": 1.15,
+            # Ban native Qwen3 tool-call tokens so the model uses <<<MARKER>>> format
+            # from the system prompt instead of <tool_call>...<TAG>>> hybrid format.
+            # Token IDs: <tool_call>=151657, </tool_call>=151658
+            "logit_bias": [[151657, -100.0], [151658, -100.0]],
         }
 
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
         finish_reason = None
+        accumulated_text = []  # Diagnostic: capture full response
 
         try:
             with http_requests.post(url, json=payload, stream=True, timeout=600) as resp:
@@ -744,7 +752,13 @@ class LlamaServerManager:
                         if fr:
                             finish_reason = fr
 
+                        # Also check for tool_calls that might not be in content
+                        if delta.get("tool_calls"):
+                            logger.warning("llama-server returned tool_calls in delta (not proxied): %s",
+                                           json.dumps(delta["tool_calls"]))
+
                         if content:
+                            accumulated_text.append(content)
                             out_chunk = build_stream_chunk(completion_id, model_id, content=content)
                             yield f"data: {json.dumps(out_chunk)}\n\n"
                     except json.JSONDecodeError:
@@ -755,6 +769,11 @@ class LlamaServerManager:
             error_chunk = {"error": {"message": str(e), "type": "server_error"}}
             yield f"data: {json.dumps(error_chunk)}\n\n"
             return
+
+        # Log the full response for diagnostics (repr escapes newlines for single-line journald)
+        full_text = ''.join(accumulated_text)
+        logger.info("llama-server proxy response (%d chars): %s",
+                     len(full_text), repr(full_text[:2000]))
 
         final_chunk = build_stream_chunk(completion_id, model_id, finish=True,
                                          finish_reason=finish_reason or "stop")
@@ -774,8 +793,8 @@ class LlamaServerManager:
             "max_tokens": max_tokens,
             "temperature": temperature,
             "stream": False,
-            "stop": [CHATML_END, "<|EOT|>", "<|endoftext|>"],
             "repeat_penalty": 1.15,
+            "logit_bias": [[151657, -100.0], [151658, -100.0]],
         }
 
         resp = http_requests.post(url, json=payload, timeout=600)
