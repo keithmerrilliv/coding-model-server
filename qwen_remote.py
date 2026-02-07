@@ -1363,22 +1363,72 @@ def glob_files(pattern):
 
 
 def ingest_pdf_content(payload):
-    """Ingest a PDF file on the server into memory.
+    """Ingest a PDF file into memory. Can handle both local client files and server files.
 
     Payload format:
-        /path/to/document.pdf       - Path to PDF file on the server
+        /path/to/document.pdf       - Path to PDF file (on client or server)
+        local:/path/to/document.pdf - Explicitly indicates client-side file to upload first
 
-    Example:
+    Examples:
         /home/user/docs/manual.pdf
+        local:/Users/me/Documents/report.pdf
     """
     try:
+        import base64
         path = payload.strip()
         if not path:
             return "Error: No PDF path provided"
 
-        # Call the existing ingest_pdf function
-        result = ingest_pdf(path)
-        return result
+        # Check if this is a local file that needs to be uploaded
+        if path.startswith('local:') or not path.startswith('/'):
+            # This is a local file path - we need to upload it first
+            if path.startswith('local:'):
+                local_path = path[6:]  # Remove 'local:' prefix
+            else:
+                local_path = path
+            
+            # Expand user path if needed
+            local_path = os.path.expanduser(local_path)
+            
+            # Check if file exists locally
+            if not os.path.exists(local_path):
+                return f"Error: Local file not found: {local_path}"
+            
+            # Read the file content
+            with open(local_path, 'rb') as f:
+                file_content = f.read()
+            
+            # Encode as base64
+            encoded_content = base64.b64encode(file_content).decode('utf-8')
+            
+            # Upload the file to the server
+            upload_payload = {
+                "filename": os.path.basename(local_path),
+                "content": encoded_content
+            }
+            
+            upload_url = f"http://{Config.LINUX_SERVER_IP}:5000/v1/files/upload"
+            print_colored(f"Uploading {local_path} to server...", COLORS['CYAN'])
+            
+            response = requests.post(upload_url, json=upload_payload, timeout=Config.LONG_REQUEST_TIMEOUT)
+            if response.status_code != 200:
+                return f"Error uploading file: {response.text}"
+            
+            upload_result = response.json()
+            server_path = upload_result.get("path", "")
+            
+            if not server_path:
+                return "Error: Upload succeeded but no path returned"
+            
+            print_colored(f"File uploaded to server: {server_path}", COLORS['GREEN'])
+            
+            # Now ingest the uploaded file
+            result = ingest_pdf(server_path)
+            return result
+        else:
+            # This is a server-side file path - ingest directly
+            result = ingest_pdf(path)
+            return result
     except Exception as e:
         logger.error(f"Error ingesting PDF {path}: {str(e)}")
         return f"Error ingesting PDF: {str(e)}"
@@ -1861,8 +1911,9 @@ def handle_user_command(user_input, history, model, agent_theme):
         print(f"                         Example: /cupertino MTLMeshRenderPipelineDescriptor")
         print(f"  /apple <tool> <args> - Search Apple Deep Docs on the Linux server")
         print(f"                         Example: /apple search_swift_evolution {{\"feature\": \"actors\"}}")
-        print(f"  /ingest <path>       - Ingest a local PDF on the Linux server into memory")
-        print(f"                         Example: /ingest /home/user/Metal4_Specs.pdf")
+        print(f"  /ingest <path>       - Ingest a PDF into memory (supports server files or local: prefix for client files)")
+        print(f"                         Examples: /ingest /home/user/Metal4_Specs.pdf")
+        print(f"                                   /ingest local:/Users/me/Reports/annual.pdf")
         print(f"  /scrape [framework]  - Run the documentation scraper (default: Metal)")
         print(f"                         Example: /scrape MetalFX")
         
@@ -1883,10 +1934,15 @@ def handle_user_command(user_input, history, model, agent_theme):
     if user_input.lower().startswith('/ingest '):
         parts = user_input.split(' ', 1)
         if len(parts) < 2 or not parts[1].strip():
-            print_colored("Usage: /ingest <path_on_server>", COLORS['FAIL'])
+            print_colored("Usage: /ingest <path> (path can be on server or local: prefix for client files)", COLORS['FAIL'])
+            print_colored("  Examples:", COLORS['BLUE'])
+            print_colored("    /ingest /path/on/server.pdf", COLORS['BLUE'])
+            print_colored("    /ingest local:/path/on/client.pdf", COLORS['BLUE'])
             return True, model
         path = parts[1].strip()
-        result = ingest_pdf(path)
+        
+        # Use the same logic as the tool version to handle local files
+        result = ingest_pdf_content(path)
         print_colored(f"\n{result}\n", COLORS['GREEN'])
         return True, model
 

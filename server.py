@@ -215,7 +215,7 @@ class Config:
         "<<<WEB_SEARCH>>>query                             — web search",
         "<<<CUPERTINO>>>query                              — Apple docs (local MCP)",
         '<<<APPLE_DEEP_DOCS>>>{"tool":"NAME","arguments":{}}  — Apple docs (server MCP)',
-        "<<<INGEST_PDF>>>path                              — ingest a PDF file into memory"
+        "<<<INGEST_PDF>>>path                              — ingest a PDF file into memory (supports local: prefix for client files)"
     ]
 
     # ── Combined tools ──
@@ -1177,6 +1177,47 @@ def ingest_memory(request: IngestRequest):
         raise HTTPException(status_code=400, detail=result["error"])
 
     return result
+
+
+class FileUploadRequest(BaseModel):
+    """Request to upload a file to the server"""
+    filename: str
+    content: str  # Base64 encoded content
+
+
+@app.post("/v1/files/upload")
+def upload_file(request: FileUploadRequest):
+    """Upload a file to the server's temporary directory"""
+    try:
+        import base64
+        import tempfile
+        import os
+        
+        # Decode the base64 content
+        try:
+            file_content = base64.b64decode(request.content)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid base64 content: {str(e)}")
+        
+        # Create a secure temporary file
+        temp_dir = tempfile.gettempdir()
+        temp_path = os.path.join(temp_dir, request.filename)
+        
+        # Additional security: ensure the filename doesn't contain path traversal
+        if '..' in request.filename or request.filename.startswith('/'):
+            raise HTTPException(status_code=400, detail="Invalid filename: path traversal detected")
+        
+        # Write the file
+        with open(temp_path, 'wb') as f:
+            f.write(file_content)
+        
+        logger.info(f"File uploaded successfully: {temp_path}")
+        return {"status": "success", "path": temp_path, "size": len(file_content)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error uploading file: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/v1/chat/completions")
