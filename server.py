@@ -1132,6 +1132,20 @@ def save_memory(request: MemoryRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/v1/memory/search")
+def search_memory(request: SearchRequest):
+    """Search for relevant memories in the long-term storage"""
+    if not memory_service:
+        raise HTTPException(status_code=503, detail="Memory service not initialized")
+        
+    try:
+        results = memory_service.search_memory(request.query)
+        return {"results": results}
+    except Exception as e:
+        logger.error(f"Error searching memory: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/v1/tools/search")
 def web_search(request: SearchRequest):
     """Perform a web search using DuckDuckGo"""
