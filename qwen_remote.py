@@ -1474,8 +1474,13 @@ def process_remote_commands(response_text: str) -> Optional[str]:
     # Build regex from known tags so internal markers (<<<OLD>>>, <<<NEW>>>) are not
     # mistaken for command boundaries.  Each command block runs from its opening tag
     # to the next known opening tag (or end of string).  No closing tags required.
+    #
+    # Accept 1-3 opening angle brackets (<, <<, or <<<) to tolerate Qwen3 models
+    # that sometimes generate native tool-call format with single-bracket markers
+    # (e.g. <tool_call>\n<REMOTE_EXEC>>> or <search_indexing>\n<LIST_DIR>>>).
+    # The closing >>> is always triple.
     _TAG_NAMES = '|'.join(command_handlers.keys())
-    _COMMAND_RE = rf'<<<({_TAG_NAMES})>>>\s*(.*?)(?=<<<(?:{_TAG_NAMES})>>>|\Z)'
+    _COMMAND_RE = rf'<{{1,3}}({_TAG_NAMES})>>>\s*(.*?)(?=<{{1,3}}(?:{_TAG_NAMES})>>>|\Z)'
 
     all_matches = []
     for match in re.finditer(_COMMAND_RE, response_text, re.DOTALL):
