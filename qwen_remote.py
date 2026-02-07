@@ -1535,7 +1535,9 @@ def extract_fallback_commands(response_text: str) -> List[str]:
 
     # REQUIRE a shell language hint — the ? was removed to prevent matching
     # python/swift/unlabeled blocks which caused catastrophic misexecution.
-    for m in re.finditer(r'```(?:bash|shell|sh|zsh)\s*\n(.+?)```', response_text, re.DOTALL):
+    # Allow matching to end-of-string (```|\Z) for unclosed code blocks —
+    # the model sometimes emits a stop token before closing backticks.
+    for m in re.finditer(r'```(?:bash|shell|sh|zsh)\s*\n(.+?)(?:```|\Z)', response_text, re.DOTALL):
         block = m.group(1).strip()
         if block:
             commands.append(block)
