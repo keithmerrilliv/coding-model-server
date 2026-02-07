@@ -33,6 +33,29 @@ The system includes a comprehensive Apple documentation scraping feature that ca
 
 For detailed information about the scraping system, see [scraping/README.md](scraping/README.md).
 
+## High-Fidelity Documentation Ingestion
+
+The system supports deep ingestion of technical documentation into the RAG database, moving beyond simple search snippets to full-text technical memory.
+
+### Local Xcode Documentation Sync
+Sync your local Apple documentation (Metal, RealityKit, etc.) from Xcode installations directly to the RAG server:
+```bash
+# On the macOS machine:
+./venv/bin/python ingest_xcode_docs.py
+```
+
+### Targeted Web Scraping
+Ingest the latest Metal 4 and RealityKit 4 documentation from the web:
+```bash
+# On the macOS machine:
+pip install beautifulsoup4
+./venv/bin/python scrape_apple_deep.py
+```
+
+### Deep Ingestion Tool (Agent-Accessible)
+Agents can now fetch and ingest the full content of any technical URL:
+- `<<<DEEP_INGEST>>>url<<<DEEP_INGEST>>>` - Fetches the URL, strips HTML noise, and stores the full text in memory.
+
 ## Client Usage
 
 ### Starting the Client
