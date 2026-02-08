@@ -1205,6 +1205,18 @@ def search_memory(request: SearchRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/v1/memory/reset")
+def reset_memory():
+    """Reset the entire RAG database"""
+    if not memory_service:
+        raise HTTPException(status_code=503, detail="Memory service not initialized")
+        
+    result = memory_service.reset_database()
+    if "error" in result:
+        raise HTTPException(status_code=500, detail=result["error"])
+    return result
+
+
 @app.post("/v1/tools/search")
 def web_search(request: SearchRequest):
     """Perform a web search using DuckDuckGo"""

@@ -1,5 +1,8 @@
 import os
+import logging
 from tree_sitter_languages import get_language, get_parser
+
+logger = logging.getLogger(__name__)
 
 class CodeChunker:
     def __init__(self):
@@ -21,8 +24,10 @@ class CodeChunker:
         self.chunk_types = {
             'swift': {'class_declaration', 'extension_declaration', 'function_declaration', 'struct_declaration', 'enum_declaration', 'protocol_declaration'},
             'cpp': {'class_specifier', 'function_definition', 'struct_specifier', 'namespace_definition'},
+            'c': {'function_definition', 'struct_specifier', 'enum_specifier'},
             'python': {'class_definition', 'function_definition'},
-            'objc': {'interface_declaration', 'implementation_declaration', 'function_definition'}
+            'objc': {'interface_declaration', 'implementation_declaration', 'function_definition'},
+            'markdown': {'section', 'atx_heading'},
         }
 
     def get_parser_for_ext(self, ext):
@@ -33,7 +38,8 @@ class CodeChunker:
         if lang_name not in self.parsers:
             try:
                 self.parsers[lang_name] = get_parser(lang_name)
-            except:
+            except Exception as e:
+                logger.warning(f"Failed to load parser for {lang_name}: {e}")
                 return None
         return self.parsers[lang_name]
 
@@ -44,11 +50,11 @@ class CodeChunker:
         try:
             with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
                 content = f.read()
-        except:
+        except Exception as e:
+            logger.warning(f"Failed to read {file_path}: {e}")
             return []
 
-        if not parser or len(content) < max_chars:
-            # Fallback to simple chunking if no parser or file is small
+        if not parser:
             return self.simple_chunk(content, file_path)
 
         lang_name = self.extension_map.get(ext)
@@ -94,14 +100,13 @@ class CodeChunker:
                 return
 
         # If it's the root or we haven't found a chunk type yet, keep digging
-        found_meaningful_child = False
+        chunks_before = len(chunks)
         for child in node.children:
             if child.end_byte - child.start_byte > 200:
                 self._recursive_chunk(child, content, file_path, lang_name, chunks, max_chars, context)
-                found_meaningful_child = True
-        
-        # If we are at a leaf or no children were chunkable, but the node itself has text
-        if not found_meaningful_child and node.type != 'module' and len(node_text.strip()) > 100:
+
+        # If no children produced chunks, but the node itself has text
+        if len(chunks) == chunks_before and node.type != 'module' and len(node_text.strip()) > 100:
              self._add_split_chunks(node_text, file_path, node.type, context, chunks, max_chars)
 
     def _add_split_chunks(self, text, file_path, node_type, context, chunks, max_chars):

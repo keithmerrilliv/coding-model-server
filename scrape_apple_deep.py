@@ -36,21 +36,28 @@ def ingest_url(url):
             return
 
         soup = BeautifulSoup(resp.text, 'html.parser')
-        
+
         # Target the main documentation content area
+        # NOTE: developer.apple.com is a JS-rendered SPA; requests.get() may return
+        # only the shell. For richer content, consider using the Apple data JSON API
+        # (e.g., https://developer.apple.com/tutorials/data/...) instead.
         main_content = soup.find('main') or soup.find('article') or soup.body
-        
+        if not main_content:
+            print(f"  ✗ No content found (page may require JavaScript rendering)")
+            return
+
         # Remove navigation, footer, and scripts
         for element in main_content(["nav", "footer", "script", "style", "header"]):
             element.extract()
-            
-        text = main_content.get_text(separator='
-', strip=True)
-        
-        # Push to RAG
-        payload = {"text": f"Source: {url}
 
-{text}"}
+        text = main_content.get_text(separator='\n', strip=True)
+
+        if len(text.strip()) < 50:
+            print(f"  ✗ Content too short ({len(text.strip())} chars) — likely a JS-rendered SPA shell")
+            return
+
+        # Push to RAG
+        payload = {"text": f"Source: {url}\n\n{text}"}
         m_resp = requests.post(MEMORY_API_URL, json=payload, timeout=30)
         
         if m_resp.status_code == 200:
@@ -66,8 +73,7 @@ def main():
     for url in DOCS_TO_SCRAPE:
         ingest_url(url)
         time.sleep(2) # Politeness delay
-    print("
-Mission Complete.")
+    print("\nMission Complete.")
 
 if __name__ == "__main__":
     main()

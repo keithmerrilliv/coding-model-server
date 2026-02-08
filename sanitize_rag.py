@@ -1,3 +1,9 @@
+#!/usr/bin/env python3
+"""Clean up ChromaDB RAG database from invalid/unwanted entries.
+
+NOTE: This script must be run on the Linux server (192.168.50.101) where
+the ChromaDB database lives, NOT on the macOS client.
+"""
 import chromadb
 import os
 

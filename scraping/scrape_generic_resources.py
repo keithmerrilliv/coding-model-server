@@ -7,6 +7,7 @@ This script retrieves WWDC videos, related frameworks and additional resources f
 
 import os
 import json
+import re
 import subprocess
 import time
 
@@ -54,15 +55,6 @@ class GenericResourcesScraper:
 
                 result_file = f"{self.output_dir}/wwdc_{query.replace(' ', '_')}.json"
 
-                # apple-deep-docs is an MCP server that doesn't work with command-line args
-                # Fall back to cupertino which is known to work
-                apple_deep_docs_path = os.getenv('APPLE_DEEP_DOCS_PATH', '/default/path/not/set')
-                if os.path.exists(apple_deep_docs_path):
-                    # If we wanted to use apple-deep-docs, we would call it like this:
-                    # result = subprocess.run([apple_deep_docs_path, '--query', query], capture_output=True, text=True, timeout=30)
-                    # But since it's an MCP server, we'll stick with cupertino
-                    pass
-
                 result = subprocess.run(['cupertino', 'search', query], capture_output=True, text=True, timeout=30)
                 tool_used = 'cupertino'
 
@@ -70,7 +62,6 @@ class GenericResourcesScraper:
                     # Parse the results to extract video information
                     data = result.stdout
                     # Look for potential video titles and years in the response
-                    import re
                     years = re.findall(r'(20[12]\d)', data)
                     titles = re.findall(r'"([^"]*)"', data)  # Look for quoted titles
 
@@ -80,7 +71,6 @@ class GenericResourcesScraper:
                         video_sessions.append({
                             'year': int(year),
                             'title': title,
-                            'duration': '45min'  # Default duration
                         })
 
                     actual_result = {

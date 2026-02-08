@@ -172,7 +172,7 @@ def main():
         print("\n" + "="*60)
         print("RUNNING MEMORY INGESTION")
         print('='*60)
-        subprocess.run([sys.executable, 'ingest_scraped_data.py'])
+        subprocess.run([sys.executable, 'ingest_scraped_data.py', framework_filter])
 
     print("\n" + "="*60)
     print(f"{framework_filter.upper()} DOCUMENTATION SCRAPING COMPLETED")

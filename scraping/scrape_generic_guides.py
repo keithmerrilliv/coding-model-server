@@ -54,15 +54,6 @@ class GenericGuidesScraper:
 
                 result_file = f"{self.output_dir}/{topic.replace(' ', '_')}_guide.json"
 
-                # apple-deep-docs is an MCP server that doesn't work with command-line args
-                # Fall back to cupertino which is known to work
-                apple_deep_docs_path = os.getenv('APPLE_DEEP_DOCS_PATH', '/default/path/not/set')
-                if os.path.exists(apple_deep_docs_path):
-                    # If we wanted to use apple-deep-docs, we would call it like this:
-                    # result = subprocess.run([apple_deep_docs_path, '--query', f'{self.framework} {topic}'], capture_output=True, text=True, timeout=30)
-                    # But since it's an MCP server, we'll stick with cupertino
-                    pass
-
                 result = subprocess.run(['cupertino', 'search', f'{self.framework} {topic}'], capture_output=True, text=True, timeout=30)
                 tool_used = 'cupertino'
 
@@ -122,15 +113,6 @@ class GenericGuidesScraper:
 
                 result_file = f"{self.output_dir}/{doc.replace(' ', '_')}_spec.json"
 
-                # apple-deep-docs is an MCP server that doesn't work with command-line args
-                # Fall back to cupertino which is known to work
-                apple_deep_docs_path = os.getenv('APPLE_DEEP_DOCS_PATH', '/default/path/not/set')
-                if os.path.exists(apple_deep_docs_path):
-                    # If we wanted to use apple-deep-docs, we would call it like this:
-                    # result = subprocess.run([apple_deep_docs_path, '--query', doc], capture_output=True, text=True, timeout=30)
-                    # But since it's an MCP server, we'll stick with cupertino
-                    pass
-                
                 result = subprocess.run(['cupertino', 'search', doc], capture_output=True, text=True, timeout=30)
                 tool_used = 'cupertino'
 

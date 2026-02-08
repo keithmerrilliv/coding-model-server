@@ -141,8 +141,15 @@ class GenericDocScraper:
 
         return results
 
+    def _run_cupertino(self, query):
+        """Run a cupertino search query and return (data, success) tuple."""
+        result = subprocess.run(['cupertino', 'search', query], capture_output=True, text=True, timeout=30)
+        if result.returncode == 0:
+            return result.stdout, True
+        return result.stderr, False
+
     def scrape_with_apple_deep_docs(self):
-        """Use Apple Deep Docs to get structured documentation"""
+        """Use Apple Deep Docs / Cupertino to get structured documentation"""
         print(f"Scraping {self.framework} documentation with Apple Deep Docs...")
 
         queries = [
@@ -154,92 +161,43 @@ class GenericDocScraper:
         results = {}
 
         for query in queries:
+            tool_used = 'cupertino'
             try:
                 print(f"  Querying deep docs for '{query}'...")
 
-                # Try to use MCP client if available
+                actual_result = None
+
                 if MCP_AVAILABLE:
-                    print(f"    Using MCP client for query: {query}")
                     try:
-                        # Try different MCP tools based on the query
                         if "protocol" in query.lower():
                             mcp_result = call_mcp_tool("search_docs", query=query)
                         else:
                             mcp_result = search_apple_online(query)
 
                         if mcp_result:
+                            tool_used = 'mcp-apple-deep-docs'
                             actual_result = {
                                 'query': query,
-                                'tool_used': 'mcp-apple-deep-docs',
-                                'data': json.dumps(mcp_result),  # Store as JSON string
+                                'tool_used': tool_used,
+                                'data': json.dumps(mcp_result),
                                 'found_results': True,
                                 'timestamp': time.time()
                             }
-                            tool_used = 'mcp-apple-deep-docs'
-                        else:
-                            # MCP call failed, fall back to cupertino
-                            result = subprocess.run(['cupertino', 'search', query], capture_output=True, text=True, timeout=30)
-                            tool_used = 'cupertino'
-
-                            if result.returncode == 0:
-                                actual_result = {
-                                    'query': query,
-                                    'tool_used': tool_used,
-                                    'data': result.stdout,
-                                    'found_results': True,
-                                    'timestamp': time.time()
-                                }
-                            else:
-                                actual_result = {
-                                    'query': query,
-                                    'tool_used': tool_used,
-                                    'error': result.stderr,
-                                    'found_results': False,
-                                    'timestamp': time.time()
-                                }
                     except Exception as e:
                         print(f"    MCP client error for '{query}': {e}, falling back to cupertino")
-                        # Fall back to cupertino
-                        result = subprocess.run(['cupertino', 'search', query], capture_output=True, text=True, timeout=30)
-                        tool_used = 'cupertino'
 
-                        if result.returncode == 0:
-                            actual_result = {
-                                'query': query,
-                                'tool_used': tool_used,
-                                'data': result.stdout,
-                                'found_results': True,
-                                'timestamp': time.time()
-                            }
-                        else:
-                            actual_result = {
-                                'query': query,
-                                'tool_used': tool_used,
-                                'error': result.stderr,
-                                'found_results': False,
-                                'timestamp': time.time()
-                            }
-                else:
-                    # MCP not available, use cupertino
-                    result = subprocess.run(['cupertino', 'search', query], capture_output=True, text=True, timeout=30)
-                    tool_used = 'cupertino'
-
-                    if result.returncode == 0:
-                        actual_result = {
-                            'query': query,
-                            'tool_used': tool_used,
-                            'data': result.stdout,
-                            'found_results': True,
-                            'timestamp': time.time()
-                        }
+                if actual_result is None:
+                    data, success = self._run_cupertino(query)
+                    actual_result = {
+                        'query': query,
+                        'tool_used': tool_used,
+                        'found_results': success,
+                        'timestamp': time.time()
+                    }
+                    if success:
+                        actual_result['data'] = data
                     else:
-                        actual_result = {
-                            'query': query,
-                            'tool_used': tool_used,
-                            'error': result.stderr,
-                            'found_results': False,
-                            'timestamp': time.time()
-                        }
+                        actual_result['error'] = data
 
                 result_file = f"{self.output_dir}/deepdocs_{query.replace(' ', '_')}.json"
                 with open(result_file, 'w') as f:

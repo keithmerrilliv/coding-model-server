@@ -25,29 +25,47 @@ def load_json_file(filepath):
         print(f"Error reading {filepath}: {e}")
         return None
 
+CHUNK_SIZE = 2000
+CHUNK_OVERLAP = 200
+
+def chunk_text(text, size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
+    """Split text into overlapping chunks for better RAG retrieval."""
+    chunks = []
+    if not text:
+        return chunks
+    start = 0
+    while start < len(text):
+        end = start + size
+        chunks.append(text[start:end])
+        if end >= len(text):
+            break
+        start += (size - overlap)
+    return chunks
+
 def ingest_content(content, source_type, source_name):
-    """Send content to memory service"""
+    """Send content to memory service, chunking if necessary."""
     if not content or not isinstance(content, str):
         return False
-
-    # Create a structured memory entry
-    memory_text = f"[{source_type}] {source_name}\n\n{content}"
 
     # Get server details from environment variables
     server_ip = os.getenv('QWEN_SERVER_IP', '127.0.0.1')
     server_port = os.getenv('QWEN_SERVER_PORT', '5000')
     server_url = f"http://{server_ip}:{server_port}/v1/memory"
 
-    try:
-        response = requests.post(server_url, json={"text": memory_text}, timeout=10)
-        if response.status_code == 200:
-            return True
-        else:
-            print(f"Failed to ingest: {response.text}")
-            return False
-    except Exception as e:
-        print(f"Error sending to memory API: {e}")
-        return False
+    chunks = chunk_text(content)
+    success_count = 0
+    for i, chunk in enumerate(chunks):
+        memory_text = f"[{source_type}] {source_name} (chunk {i+1}/{len(chunks)})\n\n{chunk}"
+        try:
+            response = requests.post(server_url, json={"text": memory_text}, timeout=10)
+            if response.status_code == 200:
+                success_count += 1
+            else:
+                print(f"Failed to ingest chunk {i+1}: {response.text}")
+        except Exception as e:
+            print(f"Error sending to memory API: {e}")
+
+    return success_count > 0
 
 def process_docs(output_dir):
     """Process API documentation files"""

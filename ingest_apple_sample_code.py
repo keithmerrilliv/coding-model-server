@@ -65,9 +65,10 @@ def extract_text_from_json(content_list):
 
 def send_chunk(payload):
     try:
-        session.post(MEMORY_API_URL, json=payload, timeout=30)
-    except:
-        pass
+        resp = session.post(MEMORY_API_URL, json=payload, timeout=30)
+        return resp.status_code == 200
+    except Exception:
+        return False
 
 def ingest_content(text, source, sample_title, chunk_size=3000, pool=None):
     """Chunk and send text to server using optional thread pool."""
@@ -126,14 +127,9 @@ def process_zip(zip_id, title):
 def ingest_sample(identifier):
     path = identifier.replace("doc://com.apple.documentation", "").replace("doc://com.apple.metal", "")
     data_url = f"{BASE_DATA_URL}{path}.json"
-    
+
     try:
         resp = session.get(data_url, timeout=20)
-        if resp.status_code in [301, 302]:
-            data_url = resp.headers['Location']
-            if not data_url.startswith('http'): data_url = f"https://developer.apple.com{data_url}"
-            resp = session.get(data_url, timeout=20)
-        
         if resp.status_code != 200: return
         data = resp.json()
         if data.get('metadata', {}).get('role', '') != 'sampleCode': return
@@ -177,12 +173,13 @@ def main():
     
     print(f"Found {len(unique_ids)} samples. {len(to_process)} remaining.")
     
+    delay = 1.0
     for i, ident in enumerate(to_process):
         print(f"[{i+1}/{len(to_process)}] {ident}")
         ingest_sample(ident)
         progress["processed_identifiers"].append(ident)
         save_progress(progress)
-        time.sleep(3.0)
+        time.sleep(delay)
             
     print("\nMission Complete.")
 

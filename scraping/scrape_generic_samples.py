@@ -7,6 +7,7 @@ This script focuses on retrieving framework sample code and examples.
 
 import os
 import json
+import re
 import subprocess
 import time
 
@@ -54,15 +55,6 @@ class GenericSampleScraper:
 
                 result_file = f"{self.output_dir}/search_{query.replace(' ', '_')}.json"
 
-                # apple-deep-docs is an MCP server that doesn't work with command-line args
-                # Fall back to cupertino which is known to work
-                apple_deep_docs_path = os.getenv('APPLE_DEEP_DOCS_PATH', '/default/path/not/set')
-                if os.path.exists(apple_deep_docs_path):
-                    # If we wanted to use apple-deep-docs, we would call it like this:
-                    # result = subprocess.run([apple_deep_docs_path, '--query', query], capture_output=True, text=True, timeout=30)
-                    # But since it's an MCP server, we'll stick with cupertino
-                    pass
-
                 result = subprocess.run(['cupertino', 'search', query], capture_output=True, text=True, timeout=30)
                 tool_used = 'cupertino'
 
@@ -73,8 +65,6 @@ class GenericSampleScraper:
                     for line in data.split('\n'):
                         # Look for common sample-related keywords
                         if any(keyword in line.lower() for keyword in ['sample', 'example', 'tutorial', 'demo', 'project', 'app', 'application', 'code']):
-                            # Extract potential sample names from the line
-                            import re
                             matches = re.findall(r'\b[A-Z][a-zA-Z\s-]*\b', line)
                             for match in matches:
                                 if len(match) > 3 and not any(word in match.lower() for word in ['the', 'and', 'for', 'with', self.framework.lower(), 'apple', 'developer', 'open', 'source']):
@@ -128,15 +118,6 @@ class GenericSampleScraper:
 
                 result_file = f"{self.output_dir}/{sample.replace(' ', '_')}_code.json"
 
-                # apple-deep-docs is an MCP server that doesn't work with command-line args
-                # Fall back to cupertino which is known to work
-                apple_deep_docs_path = os.getenv('APPLE_DEEP_DOCS_PATH', '/default/path/not/set')
-                if os.path.exists(apple_deep_docs_path):
-                    # If we wanted to use apple-deep-docs, we would call it like this:
-                    # result = subprocess.run([apple_deep_docs_path, '--query', f'{self.framework} {sample}'], capture_output=True, text=True, timeout=30)
-                    # But since it's an MCP server, we'll stick with cupertino
-                    pass
-                
                 result = subprocess.run(['cupertino', 'search', f'{self.framework} {sample}'], capture_output=True, text=True, timeout=30)
                 tool_used = 'cupertino'
 
