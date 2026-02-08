@@ -75,19 +75,10 @@ def stop_apple_deep_docs_server():
 def run_scraping(framework="metal"):
     """Run the scraping with the specified framework"""
     try:
-        # Import and run the main scraping
+        # Import and run the scraper
         sys.path.insert(0, SCRIPT_DIR)
-        from main import main
-        import sys
-        
-        # Temporarily replace sys.argv to simulate command line arguments
-        original_argv = sys.argv[:]
-        sys.argv = ['main.py', framework]
-        
-        try:
-            main()
-        finally:
-            sys.argv = original_argv
+        from scrape_all_apple_frameworks import scrape_framework
+        scrape_framework(framework)
             
     except Exception as e:
         print(f"Error running scraping: {e}")
