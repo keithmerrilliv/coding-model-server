@@ -113,9 +113,12 @@ class MemoryService:
             return {"error": "Text cannot be empty"}
 
         ext = os.path.splitext(source)[1].lower() if source else ""
+        # Fall back to bare filename for Makefile, Dockerfile, etc.
+        if not ext and source:
+            ext = os.path.basename(source)
 
         # Try tree-sitter chunking
-        if _chunker and ext and ext in _chunker.extension_map:
+        if _chunker and ext and _chunker.get_lang_name(ext):
             chunks = _chunker.chunk_text(text, ext)
         elif _chunker:
             chunks = _chunker.simple_chunk(text, source or "<unknown>", 2000)

@@ -7,34 +7,121 @@ logger = logging.getLogger(__name__)
 class CodeChunker:
     def __init__(self):
         self.parsers = {}
-        # Mapping extension to tree-sitter language name
+        # Mapping extension to tree-sitter language name.
+        # NOTE: 'swift' is NOT in tree_sitter_languages — it falls back to
+        # simple chunking gracefully via get_parser_for_ext's try/except.
         self.extension_map = {
-            '.swift': 'swift',
-            '.metal': 'cpp',  # Metal is close enough to C++ for basic chunking
+            # Apple / systems
+            '.swift': 'swift',          # not in tree_sitter_languages — graceful fallback
+            '.metal': 'cpp',            # Metal ≈ C++ for basic chunking
             '.h': 'cpp',
             '.cpp': 'cpp',
+            '.cc': 'cpp',
+            '.cxx': 'cpp',
             '.c': 'c',
             '.m': 'objc',
             '.mm': 'cpp',
+            # Python
             '.py': 'python',
-            '.md': 'markdown'
+            '.pyi': 'python',
+            # JavaScript / TypeScript
+            '.js': 'javascript',
+            '.jsx': 'javascript',
+            '.mjs': 'javascript',
+            '.ts': 'typescript',
+            '.tsx': 'tsx',
+            # Shell
+            '.sh': 'bash',
+            '.bash': 'bash',
+            '.zsh': 'bash',
+            # Data / config
+            '.json': 'json',
+            '.yaml': 'yaml',
+            '.yml': 'yaml',
+            '.toml': 'toml',
+            # Web
+            '.html': 'html',
+            '.htm': 'html',
+            '.css': 'css',
+            # Documentation
+            '.md': 'markdown',
+            '.markdown': 'markdown',
+            # Other languages likely to encounter
+            '.rb': 'ruby',
+            '.pl': 'perl',
+            '.pm': 'perl',
+            '.go': 'go',
+            '.rs': 'rust',
+            '.java': 'java',
+            '.kt': 'kotlin',
+            '.cs': 'c_sharp',
+            '.sql': 'sql',
+            '.lua': 'lua',
+            '.r': 'r',
+            '.R': 'r',
+            '.scala': 'scala',
+            '.php': 'php',
+            # Build / infra
+            '.mk': 'make',
+            '.dockerfile': 'dockerfile',
         }
-        
+
+        # Bare filenames that map to a language (no extension)
+        self.filename_map = {
+            'Makefile': 'make',
+            'GNUmakefile': 'make',
+            'Dockerfile': 'dockerfile',
+        }
+
         # Node types that we want to treat as a "chunk"
         self.chunk_types = {
-            'swift': {'class_declaration', 'extension_declaration', 'function_declaration', 'struct_declaration', 'enum_declaration', 'protocol_declaration'},
-            'cpp': {'class_specifier', 'function_definition', 'struct_specifier', 'namespace_definition'},
+            'swift': {'class_declaration', 'extension_declaration', 'function_declaration',
+                      'struct_declaration', 'enum_declaration', 'protocol_declaration'},
+            'cpp': {'class_specifier', 'function_definition', 'struct_specifier',
+                    'namespace_definition', 'template_declaration'},
             'c': {'function_definition', 'struct_specifier', 'enum_specifier'},
             'python': {'class_definition', 'function_definition'},
             'objc': {'interface_declaration', 'implementation_declaration', 'function_definition'},
+            'javascript': {'class_declaration', 'function_declaration', 'function',
+                           'arrow_function', 'method_definition', 'export_statement'},
+            'typescript': {'class_declaration', 'function_declaration', 'function',
+                           'arrow_function', 'method_definition', 'export_statement',
+                           'interface_declaration', 'type_alias_declaration'},
+            'tsx': {'class_declaration', 'function_declaration', 'function',
+                    'arrow_function', 'method_definition', 'export_statement',
+                    'interface_declaration', 'type_alias_declaration'},
+            'bash': {'function_definition', 'compound_statement'},
+            'json': {'pair'},  # top-level keys
+            'yaml': {'block_mapping_pair'},
+            'html': {'element'},
             'markdown': {'section', 'atx_heading'},
+            'ruby': {'class', 'method', 'module', 'singleton_method'},
+            'go': {'function_declaration', 'method_declaration', 'type_declaration'},
+            'rust': {'function_item', 'impl_item', 'struct_item', 'enum_item',
+                     'trait_item', 'mod_item'},
+            'java': {'class_declaration', 'method_declaration', 'interface_declaration',
+                     'enum_declaration'},
+            'kotlin': {'class_declaration', 'function_declaration', 'object_declaration'},
+            'c_sharp': {'class_declaration', 'method_declaration', 'interface_declaration',
+                        'struct_declaration', 'enum_declaration'},
+            'sql': {'create_table_statement', 'select_statement', 'insert_statement'},
+            'lua': {'function_declaration', 'function_definition'},
+            'scala': {'class_definition', 'function_definition', 'object_definition',
+                      'trait_definition'},
+            'php': {'class_declaration', 'function_definition', 'method_declaration'},
+            'perl': {'subroutine_declaration_statement'},
+            'make': {'rule'},
         }
 
+    def get_lang_name(self, ext_or_filename):
+        """Resolve an extension ('.py') or bare filename ('Makefile') to a tree-sitter language name."""
+        return self.extension_map.get(ext_or_filename) or self.filename_map.get(ext_or_filename)
+
     def get_parser_for_ext(self, ext):
-        lang_name = self.extension_map.get(ext)
+        lang_name = self.get_lang_name(ext)
         if not lang_name:
             return None
-        
+
         if lang_name not in self.parsers:
             try:
                 self.parsers[lang_name] = get_parser(lang_name)
@@ -45,6 +132,9 @@ class CodeChunker:
 
     def chunk_file(self, file_path, max_chars=3000):
         ext = os.path.splitext(file_path)[1].lower()
+        # Fall back to bare filename for files like Makefile, Dockerfile
+        if not ext:
+            ext = os.path.basename(file_path)
         parser = self.get_parser_for_ext(ext)
 
         try:
@@ -57,7 +147,7 @@ class CodeChunker:
         if not parser:
             return self.simple_chunk(content, file_path)
 
-        lang_name = self.extension_map.get(ext)
+        lang_name = self.get_lang_name(ext)
         tree = parser.parse(bytes(content, 'utf-8'))
         root_node = tree.root_node
 
@@ -86,7 +176,7 @@ class CodeChunker:
         if not parser:
             return self.simple_chunk(text, source, max_chars)
 
-        lang_name = self.extension_map.get(ext)
+        lang_name = self.get_lang_name(ext)
         tree = parser.parse(bytes(text, 'utf-8'))
         root_node = tree.root_node
 
