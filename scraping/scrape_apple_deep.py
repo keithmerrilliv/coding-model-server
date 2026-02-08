@@ -3,6 +3,7 @@ import requests
 import json
 import time
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from bs4 import BeautifulSoup
 
 # Server Configuration
@@ -15,12 +16,12 @@ DOCS_TO_SCRAPE = [
     "https://developer.apple.com/documentation/metal/metal_4",
     "https://developer.apple.com/documentation/metal/gpu_features/understanding_gpu_family_support",
     "https://developer.apple.com/documentation/metal/compute_passes/writing_data_parallel_compute_functions",
-    
+
     # RealityKit / Object Capture
     "https://developer.apple.com/documentation/realitykit/creating_3d_objects_from_photographs",
     "https://developer.apple.com/documentation/realitykit/objectcaptureview",
     "https://developer.apple.com/documentation/realitykit/objectcapturesession",
-    
+
     # Vision / Face Extraction
     "https://developer.apple.com/documentation/vision/detecting_faces_in_images",
     "https://developer.apple.com/documentation/vision/extracting_facial_features_for_each_face"
@@ -32,7 +33,7 @@ def ingest_url(url):
         headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36'}
         resp = requests.get(url, headers=headers, timeout=20)
         if resp.status_code != 200:
-            print(f"  ✗ Failed to fetch (Status {resp.status_code})")
+            print(f"  Failed to fetch (Status {resp.status_code})")
             return
 
         soup = BeautifulSoup(resp.text, 'html.parser')
@@ -43,7 +44,7 @@ def ingest_url(url):
         # (e.g., https://developer.apple.com/tutorials/data/...) instead.
         main_content = soup.find('main') or soup.find('article') or soup.body
         if not main_content:
-            print(f"  ✗ No content found (page may require JavaScript rendering)")
+            print(f"  No content found (page may require JavaScript rendering)")
             return
 
         # Remove navigation, footer, and scripts
@@ -53,26 +54,33 @@ def ingest_url(url):
         text = main_content.get_text(separator='\n', strip=True)
 
         if len(text.strip()) < 50:
-            print(f"  ✗ Content too short ({len(text.strip())} chars) — likely a JS-rendered SPA shell")
+            print(f"  Content too short ({len(text.strip())} chars) — likely a JS-rendered SPA shell")
             return
 
         # Push to RAG
         payload = {"text": f"Source: {url}\n\n{text}"}
         m_resp = requests.post(MEMORY_API_URL, json=payload, timeout=30)
-        
+
         if m_resp.status_code == 200:
-            print(f"  ✓ Ingested successfully.")
+            print(f"  Ingested successfully.")
         else:
-            print(f"  ✗ Server rejected ingestion ({m_resp.status_code})")
-            
+            print(f"  Server rejected ingestion ({m_resp.status_code})")
+
+        # Politeness delay
+        time.sleep(0.5)
+
     except Exception as e:
-        print(f"  ✗ Exception: {e}")
+        print(f"  Exception: {e}")
 
 def main():
     print(f"Starting High-Fidelity Apple Documentation Scrape...")
-    for url in DOCS_TO_SCRAPE:
-        ingest_url(url)
-        time.sleep(2) # Politeness delay
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = {pool.submit(ingest_url, url): url for url in DOCS_TO_SCRAPE}
+        for future in as_completed(futures):
+            try:
+                future.result()
+            except Exception as e:
+                print(f"  Exception: {e}")
     print("\nMission Complete.")
 
 if __name__ == "__main__":

@@ -4,17 +4,27 @@ Ingest Scraped Framework Documentation into Memory Service
 
 This script reads the JSON output from the scrapers and sends the content
 to the Qwen Server's memory service for RAG.
+
+When invoked without arguments, auto-discovers and processes all framework
+directories under output/.
 """
 
 import os
 import sys
 import json
 import requests
-import time
+from concurrent.futures import ThreadPoolExecutor
 
 # Load environment variables
 from dotenv import load_dotenv
 load_dotenv()
+
+# Server configuration (resolved once)
+SERVER_IP = os.getenv('QWEN_SERVER_IP', '127.0.0.1')
+SERVER_PORT = os.getenv('QWEN_SERVER_PORT', '5000')
+SERVER_URL = f"http://{SERVER_IP}:{SERVER_PORT}/v1/memory"
+
+session = requests.Session()
 
 def load_json_file(filepath):
     """Load JSON content from a file"""
@@ -42,28 +52,33 @@ def chunk_text(text, size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
         start += (size - overlap)
     return chunks
 
+def send_chunk(payload):
+    """Send a single chunk to the memory server."""
+    try:
+        resp = session.post(SERVER_URL, json=payload, timeout=10)
+        return resp.status_code == 200
+    except Exception as e:
+        print(f"Error sending to memory API: {e}")
+        return False
+
 def ingest_content(content, source_type, source_name):
-    """Send content to memory service, chunking if necessary."""
+    """Send content to memory service, chunking if necessary. Uses ThreadPool for sends."""
     if not content or not isinstance(content, str):
         return False
 
-    # Get server details from environment variables
-    server_ip = os.getenv('QWEN_SERVER_IP', '127.0.0.1')
-    server_port = os.getenv('QWEN_SERVER_PORT', '5000')
-    server_url = f"http://{server_ip}:{server_port}/v1/memory"
-
     chunks = chunk_text(content)
-    success_count = 0
+    payloads = []
     for i, chunk in enumerate(chunks):
         memory_text = f"[{source_type}] {source_name} (chunk {i+1}/{len(chunks)})\n\n{chunk}"
-        try:
-            response = requests.post(server_url, json={"text": memory_text}, timeout=10)
-            if response.status_code == 200:
-                success_count += 1
-            else:
-                print(f"Failed to ingest chunk {i+1}: {response.text}")
-        except Exception as e:
-            print(f"Error sending to memory API: {e}")
+        payloads.append({"text": memory_text})
+
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        results = list(pool.map(send_chunk, payloads))
+
+    success_count = sum(results)
+    if success_count < len(chunks):
+        failed = len(chunks) - success_count
+        print(f"  Warning: {failed}/{len(chunks)} chunks failed for {source_name}")
 
     return success_count > 0
 
@@ -193,43 +208,66 @@ def process_resources(output_dir):
 
     return count
 
+def process_framework(framework, base_output_dir="output"):
+    """Process a single framework directory and return ingestion count."""
+    output_dir = os.path.join(base_output_dir, framework)
+    if not os.path.isdir(output_dir):
+        print(f"Warning: {output_dir} not found, skipping")
+        return 0
+
+    print(f"\n--- Ingesting framework: {framework} ---")
+    total = 0
+
+    print(f"  Processing {framework} API Docs...")
+    total += process_docs(output_dir)
+
+    print(f"  Processing {framework} Guides...")
+    total += process_guides(output_dir)
+
+    print(f"  Processing {framework} Samples...")
+    total += process_samples(output_dir)
+
+    print(f"  Processing {framework} Resources...")
+    total += process_resources(output_dir)
+
+    print(f"  {framework}: {total} items ingested")
+    return total
+
 def main():
-    # Get framework from command line argument, default to 'metal'
-    framework = sys.argv[1] if len(sys.argv) > 1 else "metal"
-    output_dir = f"output/{framework}"
-    
     print("INGESTING SCRAPED DATA INTO MEMORY")
-    print("="*50)
+    print("=" * 50)
 
-    # Wait for server to be potentially ready if this is running in a chain
-    server_ip = os.getenv('QWEN_SERVER_IP', '127.0.0.1')
-    server_port = os.getenv('QWEN_SERVER_PORT', '5000')
-    server_health_url = f"http://{server_ip}:{server_port}/health"
-
+    # Health check
+    health_url = f"http://{SERVER_IP}:{SERVER_PORT}/health"
     try:
-        requests.get(server_health_url, timeout=5)
+        requests.get(health_url, timeout=5)
     except Exception:
-        print(f"Warning: Memory server might not be reachable at {server_ip}:{server_port}")
+        print(f"Warning: Memory server might not be reachable at {SERVER_IP}:{SERVER_PORT}")
+
+    # Determine which frameworks to process
+    if len(sys.argv) > 1:
+        # Explicit framework argument(s)
+        frameworks = sys.argv[1:]
+    else:
+        # Auto-discover all framework directories under output/
+        output_base = "output"
+        if not os.path.isdir(output_base):
+            print(f"No output/ directory found. Run scrapers first.")
+            return
+        frameworks = sorted([
+            d for d in os.listdir(output_base)
+            if os.path.isdir(os.path.join(output_base, d))
+        ])
+        if not frameworks:
+            print("No framework directories found in output/")
+            return
+        print(f"Auto-discovered {len(frameworks)} frameworks: {', '.join(frameworks)}")
 
     total_ingested = 0
+    for fw in frameworks:
+        total_ingested += process_framework(fw)
 
-    print(f"\nProcessing {framework} API Docs...")
-    docs_count = process_docs(output_dir)
-    total_ingested += docs_count
-
-    print(f"\nProcessing {framework} Guides...")
-    guides_count = process_guides(output_dir)
-    total_ingested += guides_count
-
-    print(f"\nProcessing {framework} Samples...")
-    samples_count = process_samples(output_dir)
-    total_ingested += samples_count
-
-    print(f"\nProcessing {framework} Resources...")
-    resources_count = process_resources(output_dir)
-    total_ingested += resources_count
-
-    print("\n" + "="*50)
+    print("\n" + "=" * 50)
     print(f"Ingestion Complete. Total items added to memory: {total_ingested}")
 
 if __name__ == "__main__":
