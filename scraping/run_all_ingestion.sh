@@ -65,9 +65,10 @@ echo -e "  ${GREEN}Progress files cleared${NC}"
 # ─── Track overall stats ───
 TOTAL_START=$SECONDS
 
-# Associative arrays for PID tracking
-declare -A STAGE_PIDS
-declare -A STAGE_LOGS
+# Parallel indexed arrays for PID tracking (bash 3.2 compatible)
+STAGE_NAMES=()
+STAGE_PIDS=()
+STAGE_LOGS=()
 
 echo ""
 echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
@@ -77,35 +78,31 @@ echo -e "${CYAN}═════════════════════�
 # =============================================================================
 # STAGE 1: Local Dev Projects (tree-sitter intelligent chunking)
 # =============================================================================
-STAGE_LOGS[local-dev-intelligent]="$LOG_DIR/local-dev-intelligent.log"
 echo -e "  Starting: ${YELLOW}local-dev-intelligent${NC}"
-python3 "$SCRIPT_DIR/ingest_intelligent.py" > "${STAGE_LOGS[local-dev-intelligent]}" 2>&1 &
-STAGE_PIDS[local-dev-intelligent]=$!
+python3 "$SCRIPT_DIR/ingest_intelligent.py" > "$LOG_DIR/local-dev-intelligent.log" 2>&1 &
+STAGE_NAMES+=("local-dev-intelligent"); STAGE_PIDS+=($!); STAGE_LOGS+=("$LOG_DIR/local-dev-intelligent.log")
 
 # =============================================================================
 # STAGE 2: Apple Documentation Scraping (web)
 # =============================================================================
-STAGE_LOGS[apple-docs-scrape]="$LOG_DIR/apple-docs-scrape.log"
 echo -e "  Starting: ${YELLOW}apple-docs-scrape${NC}"
-python3 "$SCRIPT_DIR/scrape_apple_deep.py" > "${STAGE_LOGS[apple-docs-scrape]}" 2>&1 &
-STAGE_PIDS[apple-docs-scrape]=$!
+python3 "$SCRIPT_DIR/scrape_apple_deep.py" > "$LOG_DIR/apple-docs-scrape.log" 2>&1 &
+STAGE_NAMES+=("apple-docs-scrape"); STAGE_PIDS+=($!); STAGE_LOGS+=("$LOG_DIR/apple-docs-scrape.log")
 
 # =============================================================================
 # STAGE 3: Apple Sample Code Index (web)
 # =============================================================================
-STAGE_LOGS[apple-sample-code]="$LOG_DIR/apple-sample-code.log"
 echo -e "  Starting: ${YELLOW}apple-sample-code${NC}"
-python3 "$SCRIPT_DIR/ingest_apple_sample_code.py" > "${STAGE_LOGS[apple-sample-code]}" 2>&1 &
-STAGE_PIDS[apple-sample-code]=$!
+python3 "$SCRIPT_DIR/ingest_apple_sample_code.py" > "$LOG_DIR/apple-sample-code.log" 2>&1 &
+STAGE_NAMES+=("apple-sample-code"); STAGE_PIDS+=($!); STAGE_LOGS+=("$LOG_DIR/apple-sample-code.log")
 
 # =============================================================================
 # STAGE 4: Xcode Local Documentation
 # =============================================================================
 if [ -d "/Applications/Xcode.app" ] || [ -d "/Applications/Xcode-beta.app" ]; then
-    STAGE_LOGS[xcode-docs]="$LOG_DIR/xcode-docs.log"
     echo -e "  Starting: ${YELLOW}xcode-docs${NC}"
-    python3 "$SCRIPT_DIR/ingest_xcode_docs.py" > "${STAGE_LOGS[xcode-docs]}" 2>&1 &
-    STAGE_PIDS[xcode-docs]=$!
+    python3 "$SCRIPT_DIR/ingest_xcode_docs.py" > "$LOG_DIR/xcode-docs.log" 2>&1 &
+    STAGE_NAMES+=("xcode-docs"); STAGE_PIDS+=($!); STAGE_LOGS+=("$LOG_DIR/xcode-docs.log")
 else
     echo -e "  ${YELLOW}Skipping Xcode docs — Xcode not installed${NC}"
 fi
@@ -116,11 +113,10 @@ fi
 SCRAPED_OUTPUT="$SCRIPT_DIR/output"
 if [ -d "$SCRAPED_OUTPUT" ] && [ "$(ls -A "$SCRAPED_OUTPUT" 2>/dev/null)" ]; then
     export QWEN_SERVER_PORT=5000
-    STAGE_LOGS[scraped-frameworks]="$LOG_DIR/scraped-frameworks.log"
     echo -e "  Starting: ${YELLOW}scraped-frameworks${NC}"
     # ingest_scraped_data.py now auto-discovers all frameworks when called without args
-    (cd "$SCRIPT_DIR" && python3 ingest_scraped_data.py) > "${STAGE_LOGS[scraped-frameworks]}" 2>&1 &
-    STAGE_PIDS[scraped-frameworks]=$!
+    (cd "$SCRIPT_DIR" && python3 ingest_scraped_data.py) > "$LOG_DIR/scraped-frameworks.log" 2>&1 &
+    STAGE_NAMES+=("scraped-frameworks"); STAGE_PIDS+=($!); STAGE_LOGS+=("$LOG_DIR/scraped-frameworks.log")
 else
     echo -e "  ${YELLOW}Skipping scraped frameworks — no output data found${NC}"
 fi
@@ -133,13 +129,15 @@ echo ""
 STAGES_OK=0
 STAGES_FAIL=0
 
-for stage in "${!STAGE_PIDS[@]}"; do
-    pid=${STAGE_PIDS[$stage]}
+for i in "${!STAGE_NAMES[@]}"; do
+    stage="${STAGE_NAMES[$i]}"
+    pid="${STAGE_PIDS[$i]}"
+    log="${STAGE_LOGS[$i]}"
     if wait "$pid"; then
-        echo -e "  ${GREEN}✓ ${stage} completed${NC} (log: ${STAGE_LOGS[$stage]})"
+        echo -e "  ${GREEN}✓ ${stage} completed${NC} (log: ${log})"
         STAGES_OK=$((STAGES_OK + 1))
     else
-        echo -e "  ${RED}✗ ${stage} failed${NC} — see ${STAGE_LOGS[$stage]}"
+        echo -e "  ${RED}✗ ${stage} failed${NC} — see ${log}"
         STAGES_FAIL=$((STAGES_FAIL + 1))
     fi
 done
