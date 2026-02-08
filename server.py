@@ -290,6 +290,59 @@ BUDGET GUIDELINES:
 - If budget < 1000: Keep response very concise
 - If budget < 500: Single focused answer only"""
 
+    # ── macOS development toolkit (injected into EXECUTOR_PROMPT) ──
+    MACOS_TOOLKIT = """
+MACOS DEVELOPMENT TOOLKIT — Available via `<<<REMOTE_EXEC>>>`:
+You are running on macOS with FULL local access. You CAN and SHOULD write and execute scripts.
+
+SCRIPTING RUNTIMES — Write scripts to files and execute them for complex tasks:
+- Python 3: `python3 script.py` — data processing, API calls, complex logic, automation
+- Node.js: `node script.js` or `npx <package>` — JS scripting, ad-hoc npm packages
+- Swift: `swift script.swift` — Apple-native scripting, no Xcode project needed
+- Ruby: `ruby script.rb` — quick scripting
+- Perl: `perl -e '...'` — powerful one-liners, regex processing
+
+DATA PROCESSING — Transform, query, and convert data:
+- jq: `jq '.key' file.json` — parse/transform JSON (use this for ALL JSON manipulation)
+- xmllint: `xmllint --xpath '//tag' file.xml` — parse/query XML and HTML
+- awk: `awk '{print $2}' file` — columnar data extraction, field processing
+- sqlite3: `sqlite3 db.sqlite 'SELECT ...'` — query any SQLite database directly
+- plutil: `plutil -convert json file.plist -o -` — convert plists to/from JSON/XML
+- textutil: `textutil -convert txt file.docx` — convert between doc formats (html, rtf, txt, docx)
+
+macOS-SPECIFIC POWER TOOLS:
+- mdfind: `mdfind -name "file"` or `mdfind "content"` — Spotlight search (extremely fast)
+- mdls: `mdls file` — rich file metadata (dimensions, author, dates, etc.)
+- sips: `sips -z 100 100 img.png` — resize/convert/rotate images (no ImageMagick needed)
+- pbcopy/pbpaste: pipe to/from clipboard
+- osascript: `osascript -e 'tell app "Finder" to ...'` — automate any macOS app
+- open: `open file.pdf` or `open -a Safari url` — open files/URLs in apps
+- defaults: `defaults read com.apple.finder` — read/write macOS preferences
+
+MEDIA & PDF (Homebrew):
+- ffmpeg: audio/video processing, conversion, extraction
+- pdftotext/pdfinfo (poppler): extract text from PDFs, get PDF metadata
+
+BUILD & COMPILATION:
+- make / cmake: build automation
+- clang / clang++: C/C++ compilation
+- swiftc: Swift compilation
+- xcodebuild / xcrun: full Xcode CLI toolchain
+- gh: GitHub CLI (issues, PRs, releases, API)
+
+NETWORKING:
+- curl: HTTP requests, API calls, downloads
+- wget: file downloads with resume support
+
+BINARY INSPECTION:
+- otool -L: list linked libraries (like ldd)
+- nm: list symbols in object files
+- lipo -info: inspect universal binary architectures
+- file: identify file types
+
+IMPORTANT: Do NOT hesitate to write a Python/Node/Swift script when the task is complex.
+A 20-line Python script is often better than a long chain of shell commands."""
+
     # ── Behavioral instruction for action-oriented agents ──
     EXECUTOR_PROMPT = """You execute tasks by running commands and writing files.
 
@@ -329,7 +382,7 @@ CONTEXT MANAGEMENT — your context window is limited. Work efficiently:
 - After reading a file, save key findings with <<<SAVE_MEMORY>>> before moving on.
   This lets you drop the raw content from context while retaining what matters.
 - Prefer <<<GREP>>> over <<<READ_FILE>>> when you only need to find specific content.
-"""
+""" + MACOS_TOOLKIT
 
     # ── Shared model configs ──
     # Turbo: Optimized for speed and 80k context on RTX 5080 (Success Formula)
@@ -390,6 +443,12 @@ CONTEXT MANAGEMENT — your context window is limited. Work efficiently:
         {"role": "assistant", "content": "<<<WRITE_FILE>>>/tmp/hello.swift\nimport Foundation\n\nprint(\"Hello, World!\")\n\nNow let me verify it compiles:\n<<<REMOTE_EXEC>>>swiftc /tmp/hello.swift -o /tmp/hello && /tmp/hello"},
         {"role": "user", "content": "Change the greeting from Hello to Hi in that file."},
         {"role": "assistant", "content": "<<<EDIT_FILE>>>/tmp/hello.swift\n<<<OLD>>>\nprint(\"Hello, World!\")\n<<<NEW>>>\nprint(\"Hi, World!\")"},
+        {"role": "user", "content": "Parse the API response in /tmp/response.json and extract all user emails."},
+        {"role": "assistant", "content": "<<<REMOTE_EXEC>>>jq '[.users[].email]' /tmp/response.json"},
+        {"role": "user", "content": "Write a script to find all Swift files over 500 lines and report their line counts."},
+        {"role": "assistant", "content": "<<<WRITE_FILE>>>/tmp/long_files.py\nimport subprocess, os\n\nresult = subprocess.run(['find', '.', '-name', '*.swift', '-type', 'f'], capture_output=True, text=True)\nfor path in sorted(result.stdout.strip().split('\\n')):\n    if path:\n        with open(path) as f:\n            count = sum(1 for _ in f)\n        if count > 500:\n            print(f'{count:>6} {path}')\n\n<<<REMOTE_EXEC>>>python3 /tmp/long_files.py"},
+        {"role": "user", "content": "Resize all PNG images in assets/ to 512x512."},
+        {"role": "assistant", "content": "Let me find the PNGs first:\n<<<GLOB>>>assets/**/*.png\n\nNow I'll resize them using macOS sips:\n<<<REMOTE_EXEC>>>for f in assets/*.png; do sips -z 512 512 \"$f\"; done"},
     ]
 
     # ── Agent definitions ──
