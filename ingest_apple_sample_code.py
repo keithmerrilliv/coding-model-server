@@ -9,6 +9,7 @@ import io
 import shutil
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
+from code_chunker import CodeChunker
 
 # Server Configuration
 LINUX_SERVER_IP = os.getenv("QWEN_SERVER_IP", "192.168.50.101")
@@ -27,13 +28,18 @@ session.headers.update({
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
 })
 
+chunker = CodeChunker()
+
 # Track progress to allow resuming
 PROGRESS_FILE = "ingest_progress.json"
 
 def load_progress():
     if os.path.exists(PROGRESS_FILE):
-        with open(PROGRESS_FILE, 'r') as f:
-            return json.load(f)
+        try:
+            with open(PROGRESS_FILE, 'r') as f:
+                return json.load(f)
+        except:
+            pass
     return {"processed_identifiers": []}
 
 def save_progress(progress):
@@ -65,10 +71,9 @@ def extract_text_from_json(content_list):
 
 def send_chunk(payload):
     try:
-        resp = session.post(MEMORY_API_URL, json=payload, timeout=30)
-        return resp.status_code == 200
-    except Exception:
-        return False
+        session.post(MEMORY_API_URL, json=payload, timeout=30)
+    except:
+        pass
 
 def ingest_content(text, source, sample_title, chunk_size=3000, pool=None):
     """Chunk and send text to server using optional thread pool."""
@@ -112,13 +117,38 @@ def process_zip(zip_id, title):
                     for file_info in z.infolist():
                         if file_info.is_dir(): continue
                         ext = os.path.splitext(file_info.filename)[1].lower()
-                        if ext in ['.swift', '.metal', '.h', '.m', '.cpp', '.mm', '.c', '.txt', '.md']:
+                        
+                        # Use CodeChunker for supported extensions
+                        if ext in chunker.extension_map:
                             with z.open(file_info) as f:
                                 try:
                                     file_text = f.read().decode('utf-8', errors='replace')
                                     if len(file_text.strip()) < 10: continue
-                                    source_label = f"{zip_url} -> {file_info.filename}"
-                                    ingest_content(file_text, source_label, title, chunk_size=2000, pool=pool)
+                                    
+                                    # Perform intelligent chunking
+                                    # Note: CodeChunker usually reads from disk, but we can bypass that
+                                    # by calling its internal _recursive_chunk if we wanted, but for 
+                                    # simplicity, we'll write to a temp file or just use simple_chunk if needed.
+                                    # Actually, let's just use the text-based ingest for prose and 
+                                    # Tree-sitter for actual source files.
+                                    
+                                    # Extract chunks using Tree-sitter logic
+                                    # (We temporarily save to /tmp to use the existing chunk_file method)
+                                    temp_path = f"/tmp/{os.path.basename(file_info.filename)}"
+                                    with open(temp_path, 'w') as tf:
+                                        tf.write(file_text)
+                                    
+                                    chunks = chunker.chunk_file(temp_path)
+                                    os.remove(temp_path)
+                                    
+                                    payloads = []
+                                    for c in chunks:
+                                        ctx = c['metadata'].get('context', '')
+                                        node_type = c['metadata']['type']
+                                        payloads.append({
+                                            "text": f"Sample: {title}\nSource: {zip_url} -> {file_info.filename}\nContext: {ctx}\nType: {node_type}\n\n{c['text']}"
+                                        })
+                                    pool.map(send_chunk, payloads)
                                 except: continue
         print(f"      ✓ Processed all source files in zip.")
     except Exception as e:
@@ -127,9 +157,14 @@ def process_zip(zip_id, title):
 def ingest_sample(identifier):
     path = identifier.replace("doc://com.apple.documentation", "").replace("doc://com.apple.metal", "")
     data_url = f"{BASE_DATA_URL}{path}.json"
-
+    
     try:
         resp = session.get(data_url, timeout=20)
+        if resp.status_code in [301, 302]:
+            data_url = resp.headers['Location']
+            if not data_url.startswith('http'): data_url = f"https://developer.apple.com{data_url}"
+            resp = session.get(data_url, timeout=20)
+        
         if resp.status_code != 200: return
         data = resp.json()
         if data.get('metadata', {}).get('role', '') != 'sampleCode': return
@@ -137,13 +172,13 @@ def ingest_sample(identifier):
         title = data.get('metadata', {}).get('title', 'Unknown Sample')
         print(f"\n🚀 Processing: {title}")
         
-        # 1. Ingest Prose
+        # 1. Ingest Prose (Simple character-based chunking is fine for documentation prose)
         abstract = " ".join([item.get('text', '') for item in data.get('abstract', []) if 'text' in item])
         prose = extract_text_from_json(data.get('primaryContentSections', []))
         ingest_content(f"Title: {title}\nAbstract: {abstract}\n\n{prose}", data_url, title)
         print(f"    ✓ Ingested documentation prose.")
         
-        # 2. Ingest Source
+        # 2. Ingest Source (Intelligent Chunking)
         zip_id = data.get('sampleCodeDownload', {}).get('action', {}).get('identifier')
         if zip_id: process_zip(zip_id, title)
             
@@ -173,13 +208,12 @@ def main():
     
     print(f"Found {len(unique_ids)} samples. {len(to_process)} remaining.")
     
-    delay = 1.0
     for i, ident in enumerate(to_process):
         print(f"[{i+1}/{len(to_process)}] {ident}")
         ingest_sample(ident)
         progress["processed_identifiers"].append(ident)
         save_progress(progress)
-        time.sleep(delay)
+        time.sleep(3.0)
             
     print("\nMission Complete.")
 
