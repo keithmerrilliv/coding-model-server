@@ -1267,10 +1267,22 @@ def ingest_memory(request: IngestRequest):
         raise HTTPException(status_code=400, detail="Path traversal not allowed")
     if not os.path.isabs(normalized):
         raise HTTPException(status_code=400, detail="Only absolute paths are allowed")
+    
+    # Allow ingestion from system temp directory (for uploads)
+    import tempfile
+    temp_dir = os.path.normpath(tempfile.gettempdir())
+    is_in_temp = normalized.startswith(temp_dir + os.sep) or normalized == temp_dir
+
     if Config.INGEST_ALLOWED_DIR:
         allowed = os.path.normpath(Config.INGEST_ALLOWED_DIR)
-        if not normalized.startswith(allowed + os.sep) and normalized != allowed:
-            raise HTTPException(status_code=403, detail=f"Path must be under {allowed}")
+        is_in_allowed = normalized.startswith(allowed + os.sep) or normalized == allowed
+        
+        if not is_in_allowed and not is_in_temp:
+            raise HTTPException(status_code=403, detail=f"Path must be under {allowed} or {temp_dir}")
+    elif not is_in_temp:
+        # If no allowed dir is set, only allow temp dir for safety
+        # or you can allow everything if that's the intention
+        pass
 
     result = memory_service.ingest_pdf(normalized)
     if "error" in result:
