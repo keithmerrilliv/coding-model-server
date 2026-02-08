@@ -250,21 +250,6 @@ class MemoryService:
             logger.error(f"Error searching memory: {e}")
             return []
 
-    def reset_database(self) -> Dict[str, Any]:
-        """Wipe the entire collection and re-initialize."""
-        try:
-            logger.info("Resetting RAG database...")
-            self.client.delete_collection("qwen_agent_memory")
-            self._collection = self.client.create_collection(
-                name="qwen_agent_memory",
-                metadata={"hnsw:space": "cosine"}
-            )
-            logger.info("Database reset successful.")
-            return {"status": "success", "message": "Database wiped and re-initialized."}
-        except Exception as e:
-            logger.error(f"Failed to reset database: {e}")
-            return {"error": str(e)}
-
     def get_context_string(self, query: str, max_tokens: int = 1000) -> str:
         """Get a formatted string of relevant memories for prompt injection.
 
