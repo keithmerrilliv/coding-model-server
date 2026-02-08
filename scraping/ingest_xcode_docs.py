@@ -4,8 +4,9 @@ import json
 import requests
 import hashlib
 import logging
+import threading
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 logger = logging.getLogger(__name__)
@@ -22,8 +23,10 @@ CHUNK_SIZE = 2000  # Characters
 CHUNK_OVERLAP = 200
 
 # Progress tracking to avoid re-ingesting on reruns
-PROGRESS_FILE = "ingest_xcode_docs_progress.json"
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROGRESS_FILE = os.path.join(SCRIPT_DIR, "ingest_xcode_docs_progress.json")
 session = requests.Session()
+progress_lock = threading.Lock()
 
 def get_file_hash(file_path):
     """Calculate a simple hash to de-duplicate content."""
@@ -59,10 +62,10 @@ def send_chunk(payload):
 def find_docs():
     """Find all markdown and header documentation in Xcode installations, de-duplicated."""
     docs_map = {} # Hash -> Path
-    
+
     for xcode_app in APPLICATIONS_DIR.glob("Xcode*.app"):
         print(f"Searching {xcode_app.name}...")
-        
+
         # 1. Markdown files throughout the bundle
         for md_file in xcode_app.rglob("*.md"):
             if any(part in md_file.parts for part in ["node_modules", ".git", "DerivedData"]):
@@ -70,14 +73,14 @@ def find_docs():
             f_hash = get_file_hash(md_file)
             if f_hash and f_hash not in docs_map:
                 docs_map[f_hash] = md_file
-            
+
         # 2. ALL Framework headers in SDKs across platforms
         platforms = ["MacOSX.platform", "iPhoneOS.platform", "XROS.platform", "XRSimulator.platform"]
-        
+
         for platform in platforms:
             platform_dir = xcode_app / f"Contents/Developer/Platforms/{platform}/Developer/SDKs"
             if not platform_dir.exists(): continue
-            
+
             # Find the primary SDK (latest or non-versioned)
             for sdk_dir in platform_dir.glob("*.sdk"):
                 sdks_fw_dir = sdk_dir / "System/Library/Frameworks"
@@ -91,14 +94,14 @@ def find_docs():
                                 f_hash = get_file_hash(h_file)
                                 if f_hash and f_hash not in docs_map:
                                     docs_map[f_hash] = h_file
-    
+
     return list(docs_map.values())
 
 def chunk_text(text, size, overlap):
     """Split text into overlapping chunks."""
     chunks = []
     if not text: return chunks
-    
+
     start = 0
     while start < len(text):
         end = start + size
@@ -108,8 +111,8 @@ def chunk_text(text, size, overlap):
         start += (size - overlap)
     return chunks
 
-def ingest_file(file_path, pool):
-    """Read a file, chunk it, and send to the server's RAG memory using thread pool."""
+def process_file(file_path):
+    """Process a single file end-to-end: read, chunk, send all chunks."""
     try:
         content = file_path.read_text(encoding='utf-8', errors='replace')
         filename = file_path.name
@@ -122,7 +125,6 @@ def ingest_file(file_path, pool):
         else:
             context = "/".join(parts[-min(len(parts), 3):])
 
-        # Chunking
         chunks = chunk_text(content, CHUNK_SIZE, CHUNK_OVERLAP)
 
         payloads = []
@@ -131,16 +133,15 @@ def ingest_file(file_path, pool):
                 "text": f"Source: {context}\nChunk: {i+1}/{len(chunks)}\nFile: {filename}\n\n{chunk}"
             })
 
-        results = list(pool.map(send_chunk, payloads))
+        results = [send_chunk(p) for p in payloads]
         success_count = sum(results)
 
         if success_count > 0:
-            print(f"  ✓ {context} ({success_count}/{len(chunks)} chunks ingested)")
             return True
         return False
 
     except Exception as e:
-        print(f"  ✗ {file_path.name} (Exception: {e})")
+        logger.debug(f"Failed to process {file_path}: {e}")
         return False
 
 def main():
@@ -170,17 +171,36 @@ def main():
     elif len(docs_to_process) > 1000:
         print(f"Non-interactive mode: auto-confirming {len(docs_to_process)} files.")
 
-    count = 0
-    with ThreadPoolExecutor(max_workers=10) as pool:
-        for i, (doc, f_hash) in enumerate(docs_to_process):
-            if ingest_file(doc, pool):
-                ingested_hashes.add(f_hash)
-                count += 1
-            if (i + 1) % 100 == 0:
-                save_progress(ingested_hashes)
+    # Process files in parallel — ~20 files in flight concurrently
+    completed = 0
+    failed = 0
+    with ThreadPoolExecutor(max_workers=20) as pool:
+        future_to_hash = {}
+        for doc, f_hash in docs_to_process:
+            future = pool.submit(process_file, doc)
+            future_to_hash[future] = (doc, f_hash)
+
+        for future in as_completed(future_to_hash):
+            doc, f_hash = future_to_hash[future]
+            try:
+                success = future.result()
+            except Exception:
+                success = False
+
+            with progress_lock:
+                if success:
+                    ingested_hashes.add(f_hash)
+                    completed += 1
+                else:
+                    failed += 1
+
+                total_done = completed + failed
+                if total_done % 100 == 0:
+                    print(f"[{total_done}/{len(docs_to_process)}] {completed} ok, {failed} failed")
+                    save_progress(ingested_hashes)
 
     save_progress(ingested_hashes)
-    print(f"Finished! Ingested {count} files (in chunks) into RAG.")
+    print(f"Finished! Ingested {completed} files (in chunks) into RAG. {failed} failed.")
 
 if __name__ == "__main__":
     main()

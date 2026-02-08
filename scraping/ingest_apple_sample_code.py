@@ -3,12 +3,15 @@ import requests
 import json
 import time
 import os
+import sys
 import re
 import zipfile
 import io
-import shutil
+import threading
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from code_chunker import CodeChunker
 
 # Server Configuration
@@ -31,7 +34,9 @@ session.headers.update({
 chunker = CodeChunker()
 
 # Track progress to allow resuming
-PROGRESS_FILE = "ingest_progress.json"
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROGRESS_FILE = os.path.join(SCRIPT_DIR, "ingest_progress.json")
+progress_lock = threading.Lock()
 
 def load_progress():
     if os.path.exists(PROGRESS_FILE):
@@ -88,7 +93,7 @@ def ingest_content(text, source, sample_title, chunk_size=3000, pool=None):
         })
         if end >= len(text): break
         start += (chunk_size - overlap)
-    
+
     if pool:
         pool.map(send_chunk, payloads)
     else:
@@ -98,49 +103,34 @@ def process_zip(zip_id, title):
     """Download and ingest all source files in the project zip."""
     zip_url = f"{ASSET_URL_ROOT}/{zip_id}"
     print(f"    Downloading Source: {zip_url}")
-    
+
     try:
         start_time = time.time()
         with session.get(zip_url, timeout=60, stream=True) as r:
             if r.status_code != 200: return
             content = io.BytesIO()
             for chunk in r.iter_content(chunk_size=8192): content.write(chunk)
-            
+
             elapsed = time.time() - start_time
             size_mb = content.tell() / (1024 * 1024)
-            print(f"      ✓ Downloaded {size_mb:.2f} MB in {elapsed:.1f}s ({(size_mb/elapsed):.2f} MB/s)")
-            
+            print(f"      Downloaded {size_mb:.2f} MB in {elapsed:.1f}s ({(size_mb/elapsed):.2f} MB/s)")
+
             content.seek(0)
             with zipfile.ZipFile(content) as z:
-                # Use more workers to saturate the Linux server's 24-core CPU
                 with ThreadPoolExecutor(max_workers=20) as pool:
                     for file_info in z.infolist():
                         if file_info.is_dir(): continue
                         ext = os.path.splitext(file_info.filename)[1].lower()
-                        
-                        # Use CodeChunker for supported extensions
+
                         if ext in chunker.extension_map:
                             with z.open(file_info) as f:
                                 try:
                                     file_text = f.read().decode('utf-8', errors='replace')
                                     if len(file_text.strip()) < 10: continue
-                                    
-                                    # Perform intelligent chunking
-                                    # Note: CodeChunker usually reads from disk, but we can bypass that
-                                    # by calling its internal _recursive_chunk if we wanted, but for 
-                                    # simplicity, we'll write to a temp file or just use simple_chunk if needed.
-                                    # Actually, let's just use the text-based ingest for prose and 
-                                    # Tree-sitter for actual source files.
-                                    
-                                    # Extract chunks using Tree-sitter logic
-                                    # (We temporarily save to /tmp to use the existing chunk_file method)
-                                    temp_path = f"/tmp/{os.path.basename(file_info.filename)}"
-                                    with open(temp_path, 'w') as tf:
-                                        tf.write(file_text)
-                                    
-                                    chunks = chunker.chunk_file(temp_path)
-                                    os.remove(temp_path)
-                                    
+
+                                    # Use chunk_text() directly — no temp files needed
+                                    chunks = chunker.chunk_text(file_text, ext)
+
                                     payloads = []
                                     for c in chunks:
                                         ctx = c['metadata'].get('context', '')
@@ -150,40 +140,46 @@ def process_zip(zip_id, title):
                                         })
                                     pool.map(send_chunk, payloads)
                                 except: continue
-        print(f"      ✓ Processed all source files in zip.")
+        print(f"      Processed all source files in zip.")
     except Exception as e:
-        print(f"      ✗ Zip processing failed: {e}")
+        print(f"      Zip processing failed: {e}")
 
 def ingest_sample(identifier):
+    """Process a single sample — returns the identifier on success, None on failure."""
     path = identifier.replace("doc://com.apple.documentation", "").replace("doc://com.apple.metal", "")
     data_url = f"{BASE_DATA_URL}{path}.json"
-    
+
     try:
         resp = session.get(data_url, timeout=20)
         if resp.status_code in [301, 302]:
             data_url = resp.headers['Location']
             if not data_url.startswith('http'): data_url = f"https://developer.apple.com{data_url}"
             resp = session.get(data_url, timeout=20)
-        
-        if resp.status_code != 200: return
+
+        if resp.status_code != 200: return identifier
         data = resp.json()
-        if data.get('metadata', {}).get('role', '') != 'sampleCode': return
-            
+        if data.get('metadata', {}).get('role', '') != 'sampleCode': return identifier
+
         title = data.get('metadata', {}).get('title', 'Unknown Sample')
-        print(f"\n🚀 Processing: {title}")
-        
-        # 1. Ingest Prose (Simple character-based chunking is fine for documentation prose)
+        print(f"\nProcessing: {title}")
+
+        # 1. Ingest Prose
         abstract = " ".join([item.get('text', '') for item in data.get('abstract', []) if 'text' in item])
         prose = extract_text_from_json(data.get('primaryContentSections', []))
         ingest_content(f"Title: {title}\nAbstract: {abstract}\n\n{prose}", data_url, title)
-        print(f"    ✓ Ingested documentation prose.")
-        
+        print(f"    Ingested documentation prose.")
+
         # 2. Ingest Source (Intelligent Chunking)
         zip_id = data.get('sampleCodeDownload', {}).get('action', {}).get('identifier')
         if zip_id: process_zip(zip_id, title)
-            
+
+        # Politeness delay — still respect Apple's CDN
+        time.sleep(0.5)
+        return identifier
+
     except Exception as e:
-        print(f"    ✗ Error: {e}")
+        print(f"    Error processing {identifier}: {e}")
+        return identifier
 
 def find_all_identifiers(obj, identifiers):
     if isinstance(obj, dict):
@@ -196,25 +192,33 @@ def find_all_identifiers(obj, identifiers):
 def main():
     progress = load_progress()
     all_identifiers = set()
-    
+
     for index_url in INDEX_URLS:
         try:
             resp = session.get(index_url, timeout=30)
             if resp.status_code == 200: find_all_identifiers(resp.json(), all_identifiers)
         except Exception as e: print(f"Error: {e}")
-            
+
     unique_ids = sorted(list(all_identifiers))
     to_process = [i for i in unique_ids if i not in progress["processed_identifiers"]]
-    
+
     print(f"Found {len(unique_ids)} samples. {len(to_process)} remaining.")
-    
-    for i, ident in enumerate(to_process):
-        print(f"[{i+1}/{len(to_process)}] {ident}")
-        ingest_sample(ident)
-        progress["processed_identifiers"].append(ident)
-        save_progress(progress)
-        time.sleep(3.0)
-            
+
+    # Process samples concurrently (4 workers — moderate to avoid hammering Apple's CDN)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = {pool.submit(ingest_sample, ident): ident for ident in to_process}
+
+        for future in as_completed(futures):
+            ident = futures[future]
+            try:
+                result = future.result()
+                if result:
+                    with progress_lock:
+                        progress["processed_identifiers"].append(result)
+                        save_progress(progress)
+            except Exception as e:
+                print(f"    Error: {e}")
+
     print("\nMission Complete.")
 
 if __name__ == "__main__":

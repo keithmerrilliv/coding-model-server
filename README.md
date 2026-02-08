@@ -41,7 +41,7 @@ The system supports deep ingestion of technical documentation into the RAG datab
 Sync your local Apple documentation (Metal, RealityKit, etc.) from Xcode installations directly to the RAG server:
 ```bash
 # On the macOS machine:
-./venv/bin/python ingest_xcode_docs.py
+./venv/bin/python scraping/ingest_xcode_docs.py
 ```
 
 ### Targeted Web Scraping
@@ -49,7 +49,7 @@ Ingest the latest Metal 4 and RealityKit 4 documentation from the web:
 ```bash
 # On the macOS machine:
 pip install beautifulsoup4
-./venv/bin/python scrape_apple_deep.py
+./venv/bin/python scraping/scrape_apple_deep.py
 ```
 
 ### Deep Ingestion Tool (Agent-Accessible)

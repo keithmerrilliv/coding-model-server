@@ -16,7 +16,8 @@ LINUX_SERVER_IP = os.getenv("QWEN_SERVER_IP", "192.168.50.101")
 MEMORY_API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/memory"
 
 DEV_ROOT = os.path.expanduser("~/Dev")
-PROGRESS_FILE = "ingest_local_dev_progress.json"
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROGRESS_FILE = os.path.join(SCRIPT_DIR, "ingest_local_dev_progress.json")
 
 # Extensions to ingest
 EXTENSIONS = {'.swift', '.metal', '.h', '.m', '.cpp', '.mm', '.py', '.c', '.txt', '.md', '.json', '.yaml', '.yml', '.sh'}

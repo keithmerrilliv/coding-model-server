@@ -12,21 +12,24 @@ import time
 import signal
 import atexit
 
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(SCRIPT_DIR)
+
 # Global variable to hold the server process
 server_process = None
 
 def start_apple_deep_docs_server():
     """Start the appledeepdoc-mcp server"""
     global server_process
-    
-    server_dir = "/Users/km4/Dev/Qwen/appledeepdoc-mcp"
-    
+
+    server_dir = os.path.join(REPO_ROOT, "appledeepdoc-mcp")
+
     print("Starting Apple Deep Docs MCP server...")
-    
+
     try:
         # Start the server in the background
         server_process = subprocess.Popen(
-            ["/Users/km4/Dev/Qwen/appledeepdoc-mcp/run.sh"],
+            [os.path.join(server_dir, "run.sh")],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             stdin=subprocess.PIPE
@@ -73,7 +76,7 @@ def run_scraping(framework="metal"):
     """Run the scraping with the specified framework"""
     try:
         # Import and run the main scraping
-        sys.path.insert(0, '/Users/km4/Dev/Qwen/scraping')
+        sys.path.insert(0, SCRIPT_DIR)
         from main import main
         import sys
         
