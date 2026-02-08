@@ -7,8 +7,6 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-User=keith-merrill
-Group=keith-merrill
 WorkingDirectory=/home/keith-merrill/Dev/qwen-server
 ExecStart=/home/keith-merrill/Dev/qwen-server/venv/bin/python server.py
 Restart=always
@@ -31,14 +29,7 @@ LimitNOFILE=65536
 LimitMEMLOCK=infinity
 NoNewPrivileges=true
 
-# GPU access - disable device policy to allow all devices
-DevicePolicy=closed
-DeviceAllow=/dev/nvidia0 rwm
-DeviceAllow=/dev/nvidiactl rwm
-DeviceAllow=/dev/nvidia-modeset rwm
-DeviceAllow=/dev/nvidia-uvm rwm
-DeviceAllow=/dev/nvidia-uvm-tools rwm
-DeviceAllow=char-drm rwm
+# GPU access (device policy not available in user services)
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target
