@@ -7,6 +7,7 @@ logger = logging.getLogger(__name__)
 class CodeChunker:
     def __init__(self):
         self.parsers = {}
+        self._failed_langs = set()  # languages that failed to load — skip silently
         # Mapping extension to tree-sitter language name.
         # NOTE: 'swift' is NOT in tree_sitter_languages — it falls back to
         # simple chunking gracefully via get_parser_for_ext's try/except.
@@ -121,12 +122,15 @@ class CodeChunker:
         lang_name = self.get_lang_name(ext)
         if not lang_name:
             return None
+        if lang_name in self._failed_langs:
+            return None
 
         if lang_name not in self.parsers:
             try:
                 self.parsers[lang_name] = get_parser(lang_name)
             except Exception as e:
                 logger.warning(f"Failed to load parser for {lang_name}: {e}")
+                self._failed_langs.add(lang_name)
                 return None
         return self.parsers[lang_name]
 
@@ -148,7 +152,11 @@ class CodeChunker:
             return self.simple_chunk(content, file_path)
 
         lang_name = self.get_lang_name(ext)
-        tree = parser.parse(bytes(content, 'utf-8'))
+        try:
+            tree = parser.parse(bytes(content, 'utf-8'))
+        except Exception as e:
+            logger.warning(f"tree-sitter parse failed for {file_path}: {e}")
+            return self.simple_chunk(content, file_path)
         root_node = tree.root_node
 
         chunks = []
@@ -177,7 +185,11 @@ class CodeChunker:
             return self.simple_chunk(text, source, max_chars)
 
         lang_name = self.get_lang_name(ext)
-        tree = parser.parse(bytes(text, 'utf-8'))
+        try:
+            tree = parser.parse(bytes(text, 'utf-8'))
+        except Exception as e:
+            logger.warning(f"tree-sitter parse failed for {source}: {e}")
+            return self.simple_chunk(text, source, max_chars)
         root_node = tree.root_node
 
         chunks = []

@@ -19,8 +19,33 @@ MEMORY_API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/memory"
 DEV_ROOT = os.path.expanduser("~/Dev")
 PROGRESS_FILE = "ingest_intelligent_progress.json"
 
-# Directories to ignore
-IGNORE_DIRS = {'.git', 'node_modules', 'venv', 'env', 'build', 'dist', 'DerivedData', '.xcodeproj', '.xcassets', '__pycache__', '.idea', '.vscode', 'myenv', 'ingest_venv'}
+# Directories to ignore — includes third-party vendored code, build artifacts,
+# IDE configs, and VCS metadata to keep the ingestion focused on your own code.
+IGNORE_DIRS = {
+    # VCS / IDE
+    '.git', '.svn', '.hg', '.idea', '.vscode', '.vs',
+    # Build artifacts
+    'build', 'Build', 'dist', 'DerivedData', 'cmake-build-debug', 'cmake-build-release',
+    'out', 'output', 'target', 'bin', 'obj',
+    # Apple / Xcode
+    '.xcodeproj', '.xcworkspace', '.xcassets', 'Pods', '.build',
+    # Package managers / vendored deps
+    'node_modules', 'vendor', 'Vendor',
+    # Third-party / external code (don't ingest someone else's libraries)
+    'ThirdParty', 'thirdparty', 'third_party', 'third-party',
+    'External', 'external', 'extern', 'Extern',
+    'deps', 'Dependencies', 'Submodules', 'submodules',
+    # Python
+    'venv', 'env', '.venv', '.env', 'myenv', 'ingest_venv', '__pycache__',
+    'site-packages', '.tox', '.eggs',
+    # Game engines (Unreal, Unity)
+    'Intermediate', 'Saved', 'Binaries', 'Library', 'Temp',
+    # Other
+    '.cache', '.gradle', '.cargo',
+}
+
+# Skip files larger than this (100 KB) — huge generated files aren't useful for RAG
+MAX_FILE_SIZE = int(os.getenv('INGEST_MAX_FILE_SIZE', 100_000))
 
 session = requests.Session()
 chunker = CodeChunker()
@@ -75,6 +100,9 @@ def main():
             if ext in chunker.extension_map:
                 file_path = os.path.join(root, file)
                 try:
+                    size = os.path.getsize(file_path)
+                    if size > MAX_FILE_SIZE:
+                        continue
                     f_hash = get_file_hash(file_path)
                     if file_path not in processed_hashes or processed_hashes[file_path] != f_hash:
                         files_to_process.append((file_path, project_name, f_hash))
@@ -93,7 +121,7 @@ def main():
             # Use Tree-sitter to get logical chunks
             chunks = chunker.chunk_file(file_path)
 
-            # Prepare payloads
+            # Prepare payloads — include source for server-side chunked storage
             payloads = []
             for c in chunks:
                 ctx = c['metadata'].get('context', '')
@@ -101,7 +129,8 @@ def main():
                 node_type = c['metadata']['type']
 
                 payloads.append({
-                    "text": f"Project: {project_name}\nSource: {source}\nContext: {ctx}\nType: {node_type}\n\n{c['text']}"
+                    "text": f"Project: {project_name}\nSource: {source}\nContext: {ctx}\nType: {node_type}\n\n{c['text']}",
+                    "source": source,
                 })
 
             # Send chunks to server — only record progress if at least one succeeded

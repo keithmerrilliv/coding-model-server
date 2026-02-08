@@ -8,7 +8,8 @@
 # The database should be cleared before running this.
 # Scripts are run in dependency order. Each stage logs to its own file.
 # =============================================================================
-set -euo pipefail
+set -uo pipefail
+# NOTE: no `set -e` — stages are allowed to fail without killing the whole script
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LOG_DIR="$SCRIPT_DIR/ingestion_logs"
@@ -143,11 +144,17 @@ fi
 # =============================================================================
 SCRAPED_OUTPUT="$SCRIPT_DIR/scraping/output"
 if [ -d "$SCRAPED_OUTPUT" ] && [ "$(ls -A "$SCRAPED_OUTPUT" 2>/dev/null)" ]; then
-    # Export vars that ingest_scraped_data.py reads from .env / environment
+    # Export vars that ingest_scraped_data.py reads from environment
     export QWEN_SERVER_PORT=5000
 
+    # ingest_scraped_data.py takes a single framework name — loop over all
+    FRAMEWORK_LIST=""
+    for fw_dir in "$SCRAPED_OUTPUT"/*/; do
+        fw="$(basename "$fw_dir")"
+        FRAMEWORK_LIST="$FRAMEWORK_LIST $fw"
+    done
     run_tracked "scraped-frameworks" \
-        "cd '$SCRIPT_DIR/scraping' && python3 ingest_scraped_data.py"
+        "cd '$SCRIPT_DIR/scraping' && for fw in $FRAMEWORK_LIST; do echo \"--- Ingesting framework: \$fw ---\"; python3 ingest_scraped_data.py \$fw; done"
 else
     echo -e "  ${YELLOW}⊘ Skipping scraped frameworks — no output data found${NC}"
 fi

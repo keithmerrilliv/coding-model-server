@@ -162,11 +162,13 @@ def main():
 
     print(f"{len(docs_to_process)} new files to ingest ({len(all_docs) - len(docs_to_process)} already done).")
 
-    if len(docs_to_process) > 1000:
+    if len(docs_to_process) > 1000 and os.isatty(0):
         confirm = input(f"Ingesting {len(docs_to_process)} files will create many chunks. Continue? [y/N] ")
         if confirm.lower() != 'y':
             print("Aborted.")
             return
+    elif len(docs_to_process) > 1000:
+        print(f"Non-interactive mode: auto-confirming {len(docs_to_process)} files.")
 
     count = 0
     with ThreadPoolExecutor(max_workers=10) as pool:
