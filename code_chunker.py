@@ -46,7 +46,7 @@ class CodeChunker:
     def chunk_file(self, file_path, max_chars=3000):
         ext = os.path.splitext(file_path)[1].lower()
         parser = self.get_parser_for_ext(ext)
-        
+
         try:
             with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
                 content = f.read()
@@ -60,14 +60,42 @@ class CodeChunker:
         lang_name = self.extension_map.get(ext)
         tree = parser.parse(bytes(content, 'utf-8'))
         root_node = tree.root_node
-        
+
         chunks = []
         self._recursive_chunk(root_node, content, file_path, lang_name, chunks, max_chars)
-        
+
         # If no chunks were extracted (e.g. no recognized node types), do simple chunk
         if not chunks:
             return self.simple_chunk(content, file_path)
-            
+
+        return chunks
+
+    def chunk_text(self, text, ext, max_chars=3000):
+        """Chunk raw text content given a file extension hint (e.g. '.py', '.swift').
+
+        Works like chunk_file() but operates on text directly instead of reading
+        from disk. Useful when the server receives code as a string.
+        """
+        if not ext.startswith('.'):
+            ext = '.' + ext
+        ext = ext.lower()
+
+        source = f"<text>{ext}"
+        parser = self.get_parser_for_ext(ext)
+
+        if not parser:
+            return self.simple_chunk(text, source, max_chars)
+
+        lang_name = self.extension_map.get(ext)
+        tree = parser.parse(bytes(text, 'utf-8'))
+        root_node = tree.root_node
+
+        chunks = []
+        self._recursive_chunk(root_node, text, source, lang_name, chunks, max_chars)
+
+        if not chunks:
+            return self.simple_chunk(text, source, max_chars)
+
         return chunks
 
     def _recursive_chunk(self, node, content, file_path, lang_name, chunks, max_chars, context=""):

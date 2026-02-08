@@ -137,6 +137,7 @@ class ErrorResponse(BaseModel):
 class MemoryRequest(BaseModel):
     """Request to save a memory"""
     text: str
+    source: Optional[str] = None  # file path hint for language detection
 
 
 class SearchRequest(BaseModel):
@@ -1176,16 +1177,27 @@ async def list_models():
 
 @app.post("/v1/memory")
 def save_memory(request: MemoryRequest):
-    """Save a memory/fact to the long-term storage"""
+    """Save a memory/fact to the long-term storage.
+
+    If *source* is provided (e.g. a file path like "main.swift"), the text is
+    parsed into language-aware chunks using tree-sitter before storage.
+    Without *source*, the text is stored as a single document (backward compatible).
+    """
     if not memory_service:
         raise HTTPException(status_code=503, detail="Memory service not initialized")
-        
+
     try:
-        mem_id = memory_service.add_memory(request.text)
-        if not mem_id:
-            raise HTTPException(status_code=500, detail="Failed to save memory")
-            
-        return {"status": "success", "id": mem_id}
+        if request.source:
+            result = memory_service.add_memory_chunked(request.text, source=request.source)
+        else:
+            result = memory_service.add_memory(request.text)
+
+        if "error" in result:
+            raise HTTPException(status_code=500, detail=result["error"])
+
+        return result
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error saving memory: {e}")
         raise HTTPException(status_code=500, detail=str(e))

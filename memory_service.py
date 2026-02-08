@@ -11,7 +11,16 @@ try:
 except ImportError:
     PdfReader = None
 
+try:
+    from code_chunker import CodeChunker
+    _chunker = CodeChunker()
+except ImportError:
+    _chunker = None
+
 logger = logging.getLogger(__name__)
+
+if _chunker is None:
+    logger.warning("tree_sitter_languages not available; language-aware chunking disabled")
 
 MEMORY_RELEVANCE_THRESHOLD = float(os.getenv('MEMORY_RELEVANCE_THRESHOLD', '0.35'))
 PDF_CHUNK_SIZE = int(os.getenv('PDF_CHUNK_SIZE', '1000'))
@@ -90,6 +99,66 @@ class MemoryService:
         except Exception as e:
             logger.error(f"Error adding memory: {e}")
             return {"error": str(e)}
+
+    def add_memory_chunked(self, text: str, source: str, metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Add text to the database using language-aware chunking when possible.
+
+        If *source* has a recognized code extension and tree-sitter is available,
+        the text is parsed into AST-aware chunks. Otherwise a simple sliding-window
+        chunker is used (2000 chars, 200 overlap).
+
+        Returns dict with status and chunks_added count.
+        """
+        if not text or not text.strip():
+            return {"error": "Text cannot be empty"}
+
+        ext = os.path.splitext(source)[1].lower() if source else ""
+
+        # Try tree-sitter chunking
+        if _chunker and ext and ext in _chunker.extension_map:
+            chunks = _chunker.chunk_text(text, ext)
+        elif _chunker:
+            chunks = _chunker.simple_chunk(text, source or "<unknown>", 2000)
+        else:
+            # Fallback: simple sliding-window (no tree-sitter available)
+            chunks = self._simple_chunk(text, source or "<unknown>", 2000, 200)
+
+        if not chunks:
+            # Single chunk fallback
+            return self.add_memory(text, metadata={"source": source or "manual", **(metadata or {})})
+
+        added = 0
+        for i, chunk in enumerate(chunks):
+            chunk_meta = {
+                "source": chunk.get("metadata", {}).get("source", source or "manual"),
+                "node_type": chunk.get("metadata", {}).get("type", "plain_text"),
+                "context": chunk.get("metadata", {}).get("context", ""),
+                "chunk_index": i,
+            }
+            if metadata:
+                chunk_meta.update(metadata)
+
+            result = self.add_memory(chunk["text"], metadata=chunk_meta)
+            if "error" not in result:
+                added += 1
+
+        return {"status": "success", "chunks_added": added}
+
+    @staticmethod
+    def _simple_chunk(text: str, source: str, max_chars: int = 2000, overlap: int = 200) -> List[Dict]:
+        """Basic sliding-window chunker used when tree-sitter is unavailable."""
+        chunks = []
+        start = 0
+        while start < len(text):
+            end = start + max_chars
+            chunks.append({
+                "text": text[start:end],
+                "metadata": {"source": source, "type": "plain_text"}
+            })
+            if end >= len(text):
+                break
+            start += (max_chars - overlap)
+        return chunks
 
     def ingest_pdf(self, file_path: str) -> Dict[str, Any]:
         """Read a PDF, chunk it, and add to vector store"""
@@ -177,6 +246,21 @@ class MemoryService:
         except Exception as e:
             logger.error(f"Error searching memory: {e}")
             return []
+
+    def reset_database(self) -> Dict[str, Any]:
+        """Wipe the entire collection and re-initialize."""
+        try:
+            logger.info("Resetting RAG database...")
+            self.client.delete_collection("qwen_agent_memory")
+            self._collection = self.client.create_collection(
+                name="qwen_agent_memory",
+                metadata={"hnsw:space": "cosine"}
+            )
+            logger.info("Database reset successful.")
+            return {"status": "success", "message": "Database wiped and re-initialized."}
+        except Exception as e:
+            logger.error(f"Failed to reset database: {e}")
+            return {"error": str(e)}
 
     def get_context_string(self, query: str, max_tokens: int = 1000) -> str:
         """Get a formatted string of relevant memories for prompt injection.

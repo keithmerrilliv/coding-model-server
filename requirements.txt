@@ -19,5 +19,8 @@ chromadb==1.4.1
 sentence-transformers==5.2.2
 pypdf>=5.1.0
 
+# Code chunking (tree-sitter)
+tree_sitter_languages
+
 # Web search
 ddgs>=9.10.0
