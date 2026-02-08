@@ -137,6 +137,7 @@ PROMPT_COLORS = {
 # Theme definitions (Visuals only)
 THEME_STYLES = {
     "implementer": {"color": COLORS['GREEN'], "icon": "💻", "prompt": "Implementer"},
+    "fast_implementer": {"color": COLORS['GREEN'], "icon": "⏩", "prompt": "Fast Implementer"},
     "architect":   {"color": COLORS['HEADER'], "icon": "🏗️", "prompt": "Architect"},
     "reviewer":    {"color": COLORS['CYAN'], "icon": "🔍", "prompt": "Reviewer"},
     "debugger":    {"color": COLORS['FAIL'], "icon": "🐞", "prompt": "Debugger"},
@@ -198,6 +199,7 @@ def _load_fallback_themes():
     AGENT_THEMES.clear()
     defaults = {
         "implementer": "Code Agent (Offline)",
+        "fast_implementer": "Fast Code Agent (Offline)",
         "architect": "System Design (Offline)",
         "reviewer": "Code Review (Offline)",
         "debugger": "Debugging (Offline)",
