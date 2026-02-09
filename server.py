@@ -393,12 +393,12 @@ CONTEXT MANAGEMENT — your context window is limited. Work efficiently:
         32, 81920, 2048
     )
 
-    # FAST: Lightweight Q4_K_M for quick implementation tasks (256k native context, minimal GPU)
+    # FAST: Lightweight Q4_K_M for quick implementation tasks (256k native context, moderate GPU)
     # Alternative to the 80B Next model when speed matters more than quality
     _CODER_30B_FAST = _create_model_config(
         'MODEL_PATH_30B_FAST',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
-        8, 262144, 1024
+        16, 262144, 1024
     )
 
     # NEXT: Qwen3-Coder-Next-Q8_0 (80B MoE with 3B active params)
