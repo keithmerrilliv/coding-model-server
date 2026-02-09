@@ -7,8 +7,9 @@ and scrapes docs, guides, samples, and resources for each one, then ingests the
 results into the RAG database.
 
 Usage:
-    python3 scrape_all_apple_frameworks.py              # scrape all discovered frameworks
-    python3 scrape_all_apple_frameworks.py metal vision  # scrape only these two
+    python3 scrape_all_apple_frameworks.py                       # scrape all discovered frameworks
+    python3 scrape_all_apple_frameworks.py Metal Vision ARKit    # scrape only these
+    python3 scrape_all_apple_frameworks.py FRAMEWORKS.txt        # read names from a text file
 """
 
 import os
@@ -128,7 +129,13 @@ def main():
     print("="*60)
 
     if len(sys.argv) > 1:
-        frameworks = [f for f in sys.argv[1:]]
+        # Single arg that's a readable file → read framework names from it
+        if len(sys.argv) == 2 and os.path.isfile(sys.argv[1]):
+            with open(sys.argv[1]) as f:
+                frameworks = [line.strip() for line in f if line.strip() and not line.startswith('#')]
+            print(f"Loaded {len(frameworks)} frameworks from {sys.argv[1]}")
+        else:
+            frameworks = list(sys.argv[1:])
         print(f"Target frameworks: {', '.join(frameworks)}")
     else:
         frameworks = discover_frameworks()
