@@ -19,6 +19,9 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# Suppress noisy pypdf warnings about malformed PDF objects
+logging.getLogger("pypdf").setLevel(logging.ERROR)
+
 if _chunker is None:
     logger.warning("tree_sitter_languages not available; language-aware chunking disabled")
 
@@ -63,7 +66,7 @@ class MemoryService:
         """Generate embedding for text using local model"""
         if not self._embedding_model:
             raise RuntimeError("Embedding model not initialized")
-        return self._embedding_model.encode(text).tolist()
+        return self._embedding_model.encode(text, show_progress_bar=False).tolist()
 
     def add_memory(self, text: str, metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Add a new memory string to the database. Returns dict with status on success, error on failure."""
