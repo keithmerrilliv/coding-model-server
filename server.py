@@ -1443,7 +1443,7 @@ def sync_completion(messages: List[ChatMessage], system_prompt: str, model_path:
             model_manager.unload_model()
 
 
-STREAM_TTFT_TIMEOUT = 300  # seconds — abort if no token generated within 5 minutes
+STREAM_TTFT_TIMEOUT = 600  # seconds — abort if no token generated within 10 minutes
 
 
 def stream_completion(messages: List[ChatMessage], system_prompt: str, model_path: str,
