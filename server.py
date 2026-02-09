@@ -11,6 +11,7 @@ import uuid
 import subprocess
 import logging
 import select
+import multiprocessing
 from datetime import datetime
 from typing import Dict, List, Optional, Any, Literal, Iterator
 from threading import Lock, Thread
@@ -198,9 +199,8 @@ class Config:
     
     # Global defaults (can be overridden per model)
     DEFAULT_CONTEXT_SIZE = int(os.getenv('MODEL_CONTEXT_SIZE', 524288))
-    # Increased default threads to 24 to match physical core count (8 P-cores + 16 E-cores)
-    # This maximizes CPU utilization for the layers not offloaded to GPU
-    DEFAULT_N_THREADS = int(os.getenv('MODEL_N_THREADS', 24))
+    # Dynamically set threads to use most CPU cores, with environment override
+    DEFAULT_N_THREADS = int(os.getenv('MODEL_N_THREADS', min(32, multiprocessing.cpu_count())))
     DEFAULT_N_BATCH = int(os.getenv('MODEL_N_BATCH', 2048))  # Reverted to 2048 to prevent OOM
     
     # ── Unified tool reference ──
@@ -1555,7 +1555,8 @@ def stream_completion(messages: List[ChatMessage], system_prompt: str, model_pat
 
 if __name__ == "__main__":
     import uvicorn
-    
+    import multiprocessing
+
     # Validate configuration
     errors = Config.validate()
     if errors:
@@ -1565,11 +1566,19 @@ if __name__ == "__main__":
         # The endpoints will just fail for those specific models
         logger.warning("Starting server with configuration errors...")
 
+    # Calculate number of workers based on CPU cores, leaving some room for the main process
+    cpu_count = multiprocessing.cpu_count()
+    num_workers = max(1, cpu_count - 2)  # Leave 2 cores for system processes and model inference
+    
+    logger.info(f"Starting server with {num_workers} workers on {cpu_count} CPU cores")
+
     uvicorn.run(
         "server:app",
         host=Config.HOST,
         port=Config.PORT,
         log_level="info",
         reload=False,
-        loop="asyncio" # Force standard asyncio loop for stability
+        workers=num_workers,  # Use multiple workers for better concurrency
+        loop="asyncio", # Force standard asyncio loop for stability
+        timeout_keep_alive=30  # Increase keep-alive timeout for better connection reuse
     )

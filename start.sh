@@ -35,6 +35,13 @@ fi
 # Try to set unlimited locked memory for mlock support
 ulimit -l unlimited 2>/dev/null || echo "Warning: Could not set unlimited locked memory (ulimit -l)"
 
+# Set environment variables for optimal performance
+export OMP_NUM_THREADS=$(nproc)  # Use all available CPU cores for OpenMP
+export OPENBLAS_NUM_THREADS=$(nproc)
+export MKL_NUM_THREADS=$(nproc)
+export VECLIB_MAXIMUM_THREADS=$(nproc)
+export NUMEXPR_NUM_THREADS=$(nproc)
+
 # Start the server
 echo "Starting Qwen Multi-Agent Server (FastAPI)..."
 python server.py
