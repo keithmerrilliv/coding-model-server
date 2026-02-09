@@ -398,7 +398,7 @@ CONTEXT MANAGEMENT — your context window is limited. Work efficiently:
     _CODER_30B_FAST = _create_model_config(
         'MODEL_PATH_30B_FAST',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
-        4, 262144, 1024
+        8, 262144, 1024
     )
 
     # NEXT: Qwen3-Coder-Next-Q8_0 (80B MoE with 3B active params)
