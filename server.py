@@ -393,12 +393,12 @@ CONTEXT MANAGEMENT — your context window is limited. Work efficiently:
         32, 81920, 2048
     )
 
-    # FAST: Lightweight Q4_K_M for quick implementation tasks (82k context, GPU-heavy)
+    # FAST: Lightweight Q4_K_M for quick implementation tasks (256k native context, minimal GPU)
     # Alternative to the 80B Next model when speed matters more than quality
     _CODER_30B_FAST = _create_model_config(
         'MODEL_PATH_30B_FAST',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
-        32, 81920, 2048
+        4, 262144, 1024
     )
 
     # NEXT: Qwen3-Coder-Next-Q8_0 (80B MoE with 3B active params)
@@ -462,7 +462,7 @@ CONTEXT MANAGEMENT — your context window is limited. Work efficiently:
             executor=True
         ),
         'fast_implementer': _create_agent_config(
-            'Qwen3-Coder-30B Q4_K_M Fast (82k context)',
+            'Qwen3-Coder-30B Q4_K_M Fast (256k native context)',
             f'You are an implementer. {EXECUTOR_PROMPT}\n\nCOMPREHENSIVE IMPLEMENTATION: When implementing tasks, leverage multiple tools to understand the codebase thoroughly:\n\nEXECUTION ENVIRONMENT: You are running on a macOS environment with full access to development tools.\n- Use `<<<REMOTE_EXEC>>>` for ALL shell commands (including Xcode tools, Git, file operations).\n- Do NOT distinguish between "server" and "client". Everything runs locally.\n\nFILE OPERATIONS:\n- Use `<<<GLOB>>>` to find files: `<<<GLOB>>>**/*.swift`\n- Use `<<<GREP>>>` to search code: `<<<GREP>>>TODO|src/`\n- Use `<<<LIST_DIR>>>` to explore directories\n- Use `<<<READ_FILE>>>` to read file contents\n- Use `<<<WRITE_FILE>>>` for new files or complete rewrites\n- Use `<<<EDIT_FILE>>>` for targeted changes to existing files (PREFERRED)\n\nGIT AWARENESS: Use Git via `<<<REMOTE_EXEC>>>` to understand code context:\n- `git log`, `git diff`, `git blame`, `git show`, `git status`\n\nAPPLE DEVELOPMENT via `<<<REMOTE_EXEC>>>`:\n- Compile Swift: `swiftc file.swift -o output`\n- Compile Metal: `xcrun -sdk macosx metal -c shader.metal -o shader.air`\n- Build Xcode: `xcodebuild -project Foo.xcodeproj -scheme Foo build`\n\n{TOOL_REFERENCE}',
             _CODER_30B_FAST,
             executor=True
