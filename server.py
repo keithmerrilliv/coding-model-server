@@ -198,8 +198,7 @@ class Config:
     
     # Global defaults (can be overridden per model)
     DEFAULT_CONTEXT_SIZE = int(os.getenv('MODEL_CONTEXT_SIZE', 524288))
-    # Increased default threads to 24 to match physical core count (8 P-cores + 16 E-cores)
-    # This maximizes CPU utilization for the layers not offloaded to GPU
+    # 24 = physical core count (8 P-cores + 16 E-cores); hyperthreads hurt llama.cpp
     DEFAULT_N_THREADS = int(os.getenv('MODEL_N_THREADS', 24))
     DEFAULT_N_BATCH = int(os.getenv('MODEL_N_BATCH', 2048))  # Reverted to 2048 to prevent OOM
     
@@ -398,7 +397,7 @@ CONTEXT MANAGEMENT — your context window is limited. Work efficiently:
     _CODER_30B_FAST = _create_model_config(
         'MODEL_PATH_30B_FAST',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
-        16, 262144, 1024
+        22, 262144, 1024
     )
 
     # NEXT: Qwen3-Coder-Next-Q8_0 (80B MoE with 3B active params)
@@ -1444,7 +1443,7 @@ def sync_completion(messages: List[ChatMessage], system_prompt: str, model_path:
             model_manager.unload_model()
 
 
-STREAM_TTFT_TIMEOUT = 300  # seconds — abort if no token generated within 5 minutes
+STREAM_TTFT_TIMEOUT = 600  # seconds — abort if no token generated within 10 minutes
 
 
 def stream_completion(messages: List[ChatMessage], system_prompt: str, model_path: str,
@@ -1555,7 +1554,7 @@ def stream_completion(messages: List[ChatMessage], system_prompt: str, model_pat
 
 if __name__ == "__main__":
     import uvicorn
-    
+
     # Validate configuration
     errors = Config.validate()
     if errors:
@@ -1571,5 +1570,5 @@ if __name__ == "__main__":
         port=Config.PORT,
         log_level="info",
         reload=False,
-        loop="asyncio" # Force standard asyncio loop for stability
+        loop="asyncio"  # Force standard asyncio loop for stability
     )
