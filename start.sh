@@ -36,11 +36,13 @@ fi
 ulimit -l unlimited 2>/dev/null || echo "Warning: Could not set unlimited locked memory (ulimit -l)"
 
 # Set environment variables for optimal performance
-export OMP_NUM_THREADS=$(nproc)  # Use all available CPU cores for OpenMP
-export OPENBLAS_NUM_THREADS=$(nproc)
-export MKL_NUM_THREADS=$(nproc)
-export VECLIB_MAXIMUM_THREADS=$(nproc)
-export NUMEXPR_NUM_THREADS=$(nproc)
+# Use physical core count (24) — hyperthreads hurt llama.cpp throughput
+PHYS_CORES=24
+export OMP_NUM_THREADS=$PHYS_CORES
+export OPENBLAS_NUM_THREADS=$PHYS_CORES
+export MKL_NUM_THREADS=$PHYS_CORES
+export VECLIB_MAXIMUM_THREADS=$PHYS_CORES
+export NUMEXPR_NUM_THREADS=$PHYS_CORES
 
 # Start the server
 echo "Starting Qwen Multi-Agent Server (FastAPI)..."

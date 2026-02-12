@@ -32,11 +32,6 @@ try:
 except ImportError:
     READLINE_AVAILABLE = False
 
-# History file configuration
-HISTORY_FILE = os.path.expanduser("~/.qwen_client_history")
-CHAT_HISTORY_FILE = os.path.expanduser("~/.qwen_chat_history.json")
-HISTORY_MAX_LENGTH = 1000
-
 # Configuration class
 class Config:
     LINUX_SERVER_IP = os.getenv("QWEN_SERVER_IP", "192.168.50.101")
@@ -64,40 +59,6 @@ class Config:
     CHUNK_OVERLAP = 500
     CHUNK_THRESHOLD = 8000
     MAX_DISPLAY_CHARS = 8000
-
-    # Deep Ingestion Tool
-    def ingest_url_content(self, url):
-        """Fetch URL content, strip HTML, and send to server memory."""
-        try:
-            print_colored(f"[Client] Deep-ingesting content from {url}...", COLORS['BLUE'])
-            # Use a simple approach first: requests + beautifulsoup if available, 
-            # otherwise fall back to a text-based fetch
-            response = requests.get(url, timeout=20)
-            if response.status_code != 200:
-                return f"Error: Failed to fetch URL (Status {response.status_code})"
-            
-            # Simple HTML stripping
-            from bs4 import BeautifulSoup
-            soup = BeautifulSoup(response.text, 'html.parser')
-            
-            # Remove scripts and styles
-            for script in soup(["script", "style"]):
-                script.extract()
-            
-            text = soup.get_text(separator=' ', strip=True)
-            
-            # Send to server memory
-            payload = {"text": f"Source URL: {url}\n\n{text}"}
-            mem_resp = requests.post(self.MEMORY_API_URL, json=payload, timeout=30)
-            
-            if mem_resp.status_code == 200:
-                return f"Successfully ingested full content from {url} into RAG database."
-            else:
-                return f"Error: Server rejected memory ingestion ({mem_resp.status_code})"
-        except ImportError:
-            return "Error: BeautifulSoup4 is required on the client for deep-ingestion. Run 'pip install beautifulsoup4'."
-        except Exception as e:
-            return f"Error during deep-ingestion: {str(e)}"
 
     # Timeout settings
     COMMAND_TIMEOUT = 240  # seconds
@@ -417,6 +378,33 @@ atexit.register(_cleanup_temp_files)
 
 def print_colored(text, color):
     print(f"{color}{text}{COLORS['ENDC']}")
+
+
+def ingest_url_content(url):
+    """Fetch URL content, strip HTML, and send to server memory."""
+    try:
+        print_colored(f"[Client] Deep-ingesting content from {url}...", COLORS['BLUE'])
+        response = requests.get(url, timeout=20)
+        if response.status_code != 200:
+            return f"Error: Failed to fetch URL (Status {response.status_code})"
+
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(response.text, 'html.parser')
+        for script in soup(["script", "style"]):
+            script.extract()
+        text = soup.get_text(separator=' ', strip=True)
+
+        payload = {"text": f"Source URL: {url}\n\n{text}"}
+        mem_resp = requests.post(config.MEMORY_API_URL, json=payload, timeout=30)
+
+        if mem_resp.status_code == 200:
+            return f"Successfully ingested full content from {url} into RAG database."
+        else:
+            return f"Error: Server rejected memory ingestion ({mem_resp.status_code})"
+    except ImportError:
+        return "Error: BeautifulSoup4 is required on the client for deep-ingestion. Run 'pip install beautifulsoup4'."
+    except Exception as e:
+        return f"Error during deep-ingestion: {str(e)}"
 
 
 def save_memory(text):
@@ -809,9 +797,6 @@ def execute_remote_command(command, chunk_output=True):
         logger.debug("Returning command output directly, length: %d", len(content) if content else 0)
         return content if content else "(empty output)"
 
-    except subprocess.TimeoutExpired:
-        logger.error("Command timed out after %d seconds", config.COMMAND_TIMEOUT)
-        return f"Error: Command timed out after {config.COMMAND_TIMEOUT} seconds."
     except Exception as e:
         logger.error("Error executing command: %s", str(e), exc_info=True)
         return f"Error executing command: {str(e)}"
@@ -1112,8 +1097,9 @@ def write_file_content(payload):
         # Show preview of content (first few lines)
         preview_lines = content.split('\n')[:5]
         preview = '\n'.join(preview_lines)
-        if len(preview_lines) < len(content.split('\n')):
-            preview += f"\n... ({len(content.split(chr(10)))} total lines)"
+        total_lines = content.count('\n') + 1
+        if len(preview_lines) < total_lines:
+            preview += f"\n... ({total_lines} total lines)"
         print_colored(f"   Preview:\n{preview[:500]}", COLORS['CYAN'])
 
         if config.ALLOW_ALL:
@@ -1529,10 +1515,7 @@ def grep_search(payload):
                         if len(line_content) > 200:
                             line_content = line_content[:200] + "..."
 
-                        if 'n' in options or True:  # Always show line numbers
-                            results.append(f"{rel_path}:{line_num}: {line_content.strip()}")
-                        else:
-                            results.append(f"{rel_path}: {line_content.strip()}")
+                        results.append(f"{rel_path}:{line_num}: {line_content.strip()}")
 
                     if len(results) >= max_results:
                         break
@@ -1578,7 +1561,7 @@ def process_remote_commands(response_text: str) -> Optional[str]:
         'CUPERTINO':      lambda arg: handle_cupertino_search(arg.strip()),
         'APPLE_DEEP_DOCS': lambda arg: handle_apple_deep_docs(arg.strip()),
         'INGEST_PDF':     lambda arg: ingest_pdf_content(arg),
-        'DEEP_INGEST':    lambda arg: config.ingest_url_content(arg.strip()),
+        'DEEP_INGEST':    lambda arg: ingest_url_content(arg.strip()),
     }
 
     # Build regex from known tags so internal markers (<<<OLD>>>, <<<NEW>>>) are not
@@ -1905,6 +1888,8 @@ def handle_user_command(user_input, history, model, agent_theme):
         print(f"  /help                - Show this help menu")
         print(f"  /exit, /quit         - Exit the CLI and cleanup resources")
         print(f"  /model <name>        - Switch the active agent (e.g. /model architect)")
+        print(f"  /clear               - Clear conversation history and start fresh")
+        print(f"  /resume              - Resume interrupted multi-agent tasks")
         print(f"  /history             - Show recent command history")
         print(f"  /history clear       - Clear command history")
         
@@ -2083,6 +2068,22 @@ def handle_user_command(user_input, history, model, agent_theme):
         else:
             print_colored(f"Unknown agent '{requested_model}'. Available: {', '.join(AGENT_THEMES.keys())}", COLORS['FAIL'])
         return True, model
+
+    # Clear conversation history
+    if user_input.lower() == '/clear':
+        history.clear()
+        save_chat_history(history, model)
+        print_colored("Conversation history cleared. Starting fresh.", COLORS['GREEN'])
+        return True, model
+
+    # Resume interrupted tasks
+    if user_input.lower() == '/resume':
+        with _pending_tasks_lock:
+            if not PENDING_TASKS:
+                print_colored("No interrupted tasks to resume.", COLORS['WARNING'])
+                return True, model
+        # Return False so the main loop picks up the /resume and processes tasks
+        return False, model
 
     return False, model
 
@@ -2300,7 +2301,7 @@ def chat(model="implementer"):
     else:
         print_colored("  Command approval: Manual (will prompt for each command)", COLORS['GREEN'])
 
-    print_colored("\nCommands: /help, /exit, /model <name>, /history, /cupertino <query>, /apple <tool> <args>, /ingest <path>, /scrape", COLORS['BLUE'])
+    print_colored("\nCommands: /help, /exit, /model <name>, /clear, /resume, /history, /cupertino <query>, /apple <tool> <args>, /ingest <path>, /scrape", COLORS['BLUE'])
     if READLINE_AVAILABLE:
         print_colored("Use ↑/↓ arrows to navigate history. History saved to ~/.qwen_client_history\n", COLORS['BLUE'])
     else:
@@ -2360,13 +2361,9 @@ def chat(model="implementer"):
             if should_continue:
                 continue
 
-            # Resume Interrupted Chain
+            # Resume Interrupted Chain (handled by handle_user_command returning False)
             if user_input.lower() == '/resume':
                 with _pending_tasks_lock:
-                    if not PENDING_TASKS:
-                        print_colored("No interrupted tasks to resume.", COLORS['WARNING'])
-                        continue
-                    # Atomically copy and clear to prevent race conditions
                     print_colored(f"Resuming {len(PENDING_TASKS)} pending tasks...", COLORS['GREEN'])
                     tasks = list(PENDING_TASKS)
                     PENDING_TASKS.clear()

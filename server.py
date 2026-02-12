@@ -10,7 +10,6 @@ import time
 import uuid
 import subprocess
 import logging
-import select
 from datetime import datetime
 from typing import Dict, List, Optional, Any, Literal, Iterator
 from threading import Lock, Thread
@@ -451,18 +450,23 @@ CONTEXT MANAGEMENT — your context window is limited. Work efficiently:
         {"role": "assistant", "content": "Let me find the PNGs first:\n<<<GLOB>>>assets/**/*.png\n\nNow I'll resize them using macOS sips:\n<<<REMOTE_EXEC>>>for f in assets/*.png; do sips -z 512 512 \"$f\"; done"},
     ]
 
+    # ── Shared agent prompts ──
+    _IMPLEMENTER_SYSTEM_PROMPT = (
+        f'You are an implementer. {EXECUTOR_PROMPT}\n\nCOMPREHENSIVE IMPLEMENTATION: When implementing tasks, leverage multiple tools to understand the codebase thoroughly:\n\nEXECUTION ENVIRONMENT: You are running on a macOS environment with full access to development tools.\n- Use `<<<REMOTE_EXEC>>>` for ALL shell commands (including Xcode tools, Git, file operations).\n- Do NOT distinguish between "server" and "client". Everything runs locally.\n\nFILE OPERATIONS:\n- Use `<<<GLOB>>>` to find files: `<<<GLOB>>>**/*.swift`\n- Use `<<<GREP>>>` to search code: `<<<GREP>>>TODO|src/`\n- Use `<<<LIST_DIR>>>` to explore directories\n- Use `<<<READ_FILE>>>` to read file contents\n- Use `<<<WRITE_FILE>>>` for new files or complete rewrites\n- Use `<<<EDIT_FILE>>>` for targeted changes to existing files (PREFERRED)\n\nGIT AWARENESS: Use Git via `<<<REMOTE_EXEC>>>` to understand code context:\n- `git log`, `git diff`, `git blame`, `git show`, `git status`\n\nAPPLE DEVELOPMENT via `<<<REMOTE_EXEC>>>`:\n- Compile Swift: `swiftc file.swift -o output`\n- Compile Metal: `xcrun -sdk macosx metal -c shader.metal -o shader.air`\n- Build Xcode: `xcodebuild -project Foo.xcodeproj -scheme Foo build`\n\n{TOOL_REFERENCE}'
+    )
+
     # ── Agent definitions ──
     # 'executor': True means few-shot + fallback extraction are enabled.
     AGENTS = {
         'implementer': _create_agent_config(
             'Qwen3-Coder-Next Q8_0 (80B MoE)',
-            f'You are an implementer. {EXECUTOR_PROMPT}\n\nCOMPREHENSIVE IMPLEMENTATION: When implementing tasks, leverage multiple tools to understand the codebase thoroughly:\n\nEXECUTION ENVIRONMENT: You are running on a macOS environment with full access to development tools.\n- Use `<<<REMOTE_EXEC>>>` for ALL shell commands (including Xcode tools, Git, file operations).\n- Do NOT distinguish between "server" and "client". Everything runs locally.\n\nFILE OPERATIONS:\n- Use `<<<GLOB>>>` to find files: `<<<GLOB>>>**/*.swift`\n- Use `<<<GREP>>>` to search code: `<<<GREP>>>TODO|src/`\n- Use `<<<LIST_DIR>>>` to explore directories\n- Use `<<<READ_FILE>>>` to read file contents\n- Use `<<<WRITE_FILE>>>` for new files or complete rewrites\n- Use `<<<EDIT_FILE>>>` for targeted changes to existing files (PREFERRED)\n\nGIT AWARENESS: Use Git via `<<<REMOTE_EXEC>>>` to understand code context:\n- `git log`, `git diff`, `git blame`, `git show`, `git status`\n\nAPPLE DEVELOPMENT via `<<<REMOTE_EXEC>>>`:\n- Compile Swift: `swiftc file.swift -o output`\n- Compile Metal: `xcrun -sdk macosx metal -c shader.metal -o shader.air`\n- Build Xcode: `xcodebuild -project Foo.xcodeproj -scheme Foo build`\n\n{TOOL_REFERENCE}',
+            _IMPLEMENTER_SYSTEM_PROMPT,
             _CODER_NEXT_Q8,
             executor=True
         ),
         'fast_implementer': _create_agent_config(
             'Qwen3-Coder-30B Q4_K_M Fast (256k native context)',
-            f'You are an implementer. {EXECUTOR_PROMPT}\n\nCOMPREHENSIVE IMPLEMENTATION: When implementing tasks, leverage multiple tools to understand the codebase thoroughly:\n\nEXECUTION ENVIRONMENT: You are running on a macOS environment with full access to development tools.\n- Use `<<<REMOTE_EXEC>>>` for ALL shell commands (including Xcode tools, Git, file operations).\n- Do NOT distinguish between "server" and "client". Everything runs locally.\n\nFILE OPERATIONS:\n- Use `<<<GLOB>>>` to find files: `<<<GLOB>>>**/*.swift`\n- Use `<<<GREP>>>` to search code: `<<<GREP>>>TODO|src/`\n- Use `<<<LIST_DIR>>>` to explore directories\n- Use `<<<READ_FILE>>>` to read file contents\n- Use `<<<WRITE_FILE>>>` for new files or complete rewrites\n- Use `<<<EDIT_FILE>>>` for targeted changes to existing files (PREFERRED)\n\nGIT AWARENESS: Use Git via `<<<REMOTE_EXEC>>>` to understand code context:\n- `git log`, `git diff`, `git blame`, `git show`, `git status`\n\nAPPLE DEVELOPMENT via `<<<REMOTE_EXEC>>>`:\n- Compile Swift: `swiftc file.swift -o output`\n- Compile Metal: `xcrun -sdk macosx metal -c shader.metal -o shader.air`\n- Build Xcode: `xcodebuild -project Foo.xcodeproj -scheme Foo build`\n\n{TOOL_REFERENCE}',
+            _IMPLEMENTER_SYSTEM_PROMPT,
             _CODER_30B_FAST,
             executor=True
         ),
@@ -532,35 +536,35 @@ class ModelManager:
     def __init__(self):
         self.lock = Lock()
         self.inference_lock = Lock()
+        self._cached_model = None
+        self._cached_agent: Optional[str] = None
 
     def unload_model(self):
-        """Force cleanup of VRAM with aggressive cleanup"""
+        """Release cached model and free VRAM"""
         with self.lock:
-            logger.info("Cleaning VRAM/RAM...")
+            if self._cached_model is not None:
+                logger.info("Unloading cached model for %s...", self._cached_agent)
+                del self._cached_model
+                self._cached_model = None
+                self._cached_agent = None
+
+            import gc
+            gc.collect()
+            gc.collect()
+
             try:
-                # Force garbage collection multiple times to ensure objects are freed
-                import gc
-                import time
-                gc.collect()
-                gc.collect()
-                gc.collect()
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    torch.cuda.ipc_collect()
+            except ImportError:
+                pass
 
-                # Clear CUDA cache if PyTorch is available
-                try:
-                    import torch
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                        torch.cuda.ipc_collect()
-                except ImportError:
-                    pass
-
-                time.sleep(0.5) # Short delay for async cleanup
-                logger.info("Memory cleanup complete")
-            except Exception as e:
-                logger.error(f"Error during memory cleanup: {e}")
+            time.sleep(0.5)
+            logger.info("Memory cleanup complete")
 
     def get_model(self, agent_name: str):
-        """Load the model for the specific agent (no caching)"""
+        """Load the model for the specific agent (LRU-1 cache: reuse if same agent)"""
         if agent_name not in Config.AGENTS:
             raise ValueError(f"Unknown agent: {agent_name}")
 
@@ -570,7 +574,21 @@ class ModelManager:
         # Free VRAM from llama-server subprocess before loading a llama_cpp model
         llama_server_manager.shutdown()
 
-        # Load the model fresh
+        with self.lock:
+            # Cache hit — same agent as last time
+            if self._cached_model is not None and self._cached_agent == agent_name:
+                logger.info("Reusing cached model for %s", agent_name)
+                return self._cached_model
+
+            # Cache miss — unload previous model first
+            if self._cached_model is not None:
+                logger.info("Agent switch: unloading %s to load %s", self._cached_agent, agent_name)
+                del self._cached_model
+                self._cached_model = None
+                self._cached_agent = None
+                import gc; gc.collect(); gc.collect()
+
+        # Load the model fresh (outside lock to avoid blocking health checks)
         logger.info("Loading model for %s: %s", agent_name, model_path)
         try:
             model = Llama(
@@ -580,33 +598,35 @@ class ModelManager:
                 n_threads=Config.DEFAULT_N_THREADS,
                 n_threads_batch=Config.DEFAULT_N_THREADS,
                 n_batch=model_config.get('n_batch', Config.DEFAULT_N_BATCH),
-                flash_attn=True,   # Enabled for better performance
-                type_k=model_config.get('type_k'), # None = Model default (usually F16)
-                type_v=model_config.get('type_v'), # None = Model default (usually F16)
+                flash_attn=True,
+                type_k=model_config.get('type_k'),
+                type_v=model_config.get('type_v'),
                 use_mmap=True,
                 use_mlock=False,
-                offload_kqv=model_config.get('offload_kqv', True), # True = Offload to GPU, False = RAM
-                # RoPE / YaRN Scaling for extended context
-                rope_scaling_type=model_config.get('rope_scaling_type', -1), # -1 = Unspecified
-                rope_freq_base=model_config.get('rope_freq_base', 0.0),      # 0.0 = Model default
-                rope_freq_scale=model_config.get('rope_freq_scale', 0.0),    # 0.0 = Model default
-                yarn_ext_factor=model_config.get('yarn_ext_factor', -1.0),   # -1.0 = Unspecified
+                offload_kqv=model_config.get('offload_kqv', True),
+                rope_scaling_type=model_config.get('rope_scaling_type', -1),
+                rope_freq_base=model_config.get('rope_freq_base', 0.0),
+                rope_freq_scale=model_config.get('rope_freq_scale', 0.0),
+                yarn_ext_factor=model_config.get('yarn_ext_factor', -1.0),
                 yarn_attn_factor=model_config.get('yarn_attn_factor', 1.0),
                 yarn_beta_fast=model_config.get('yarn_beta_fast', 32.0),
                 yarn_beta_slow=model_config.get('yarn_beta_slow', 1.0),
-                yarn_orig_ctx=model_config.get('yarn_orig_ctx', 0),          # 0 = Model default
+                yarn_orig_ctx=model_config.get('yarn_orig_ctx', 0),
                 verbose=True
             )
 
             logger.info("Model loaded successfully: %s", model_path)
+            with self.lock:
+                self._cached_model = model
+                self._cached_agent = agent_name
             return model
         except Exception as e:
             logger.error("Failed to load model %s: %s", model_path, e)
             raise
 
     def is_loaded(self) -> bool:
-        """Check if any model is loaded (always returns false since we don't cache)"""
-        return False
+        """Check if a model is currently cached and ready"""
+        return self._cached_model is not None
 
 
 # ============================================================================
@@ -896,37 +916,16 @@ CHATML_END = "<|im_end|>"
 
 
 def build_model_prompt(messages: List[ChatMessage], system_prompt: str, model_path: str) -> str:
-    """Build a prompt using the appropriate format for the model"""
-    
-    # Detect DeepSeek-Coder (original) vs DeepSeek-R1-Distill-Qwen (ChatML)
-    is_legacy_deepseek = "deepseek" in model_path.lower() and "qwen" not in model_path.lower()
-    
-    if is_legacy_deepseek:
-        # DeepSeek-Coder-Instruct/Alpaca format
-        parts = []
-        if system_prompt:
-            parts.append(f"### Instruction:\n{system_prompt}\n")
-        
-        for msg in messages:
-            if msg.role == "user":
-                parts.append(f"### Instruction:\n{msg.content}\n")
-            elif msg.role == "assistant":
-                parts.append(f"### Response:\n{msg.content}\n")
-        
-        parts.append("### Response:\n")
-        return "".join(parts)
-    
-    else:
-        # Standard ChatML format (Qwen, DeepSeek-R1-Distill-Qwen)
-        parts = []
-        if system_prompt:
-            parts.append(f"{CHATML_START}system\n{system_prompt}{CHATML_END}\n")
+    """Build a ChatML-formatted prompt for Qwen models"""
+    parts = []
+    if system_prompt:
+        parts.append(f"{CHATML_START}system\n{system_prompt}{CHATML_END}\n")
 
-        for msg in messages:
-            parts.append(f"{CHATML_START}{msg.role}\n{msg.content}{CHATML_END}\n")
+    for msg in messages:
+        parts.append(f"{CHATML_START}{msg.role}\n{msg.content}{CHATML_END}\n")
 
-        parts.append(f"{CHATML_START}assistant\n")
-        return "".join(parts)
+    parts.append(f"{CHATML_START}assistant\n")
+    return "".join(parts)
 
 
 def get_model_params(max_tokens: int, temperature: float, stream: bool = False) -> Dict[str, Any]:
@@ -1106,7 +1105,19 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-_cors_origins = os.getenv("CORS_ORIGINS", "localhost,127.0.0.1").split(",")
+_cors_origins_raw = os.getenv("CORS_ORIGINS", "localhost,127.0.0.1").split(",")
+_cors_origins = []
+for origin in _cors_origins_raw:
+    origin = origin.strip()
+    if origin == "*":
+        _cors_origins = ["*"]
+        break
+    # Ensure origins have a scheme — bare hostnames don't match in CORS
+    if origin and not origin.startswith("http"):
+        _cors_origins.append(f"http://{origin}")
+    else:
+        _cors_origins.append(origin)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
@@ -1268,9 +1279,7 @@ def ingest_memory(request: IngestRequest):
         if not is_in_allowed and not is_in_temp:
             raise HTTPException(status_code=403, detail=f"Path must be under {allowed} or {temp_dir}")
     elif not is_in_temp:
-        # If no allowed dir is set, only allow temp dir for safety
-        # or you can allow everything if that's the intention
-        pass
+        raise HTTPException(status_code=403, detail=f"Path must be under {temp_dir} (set INGEST_ALLOWED_DIR to allow other paths)")
 
     result = memory_service.ingest_pdf(normalized)
     if "error" in result:
@@ -1333,8 +1342,9 @@ def chat_completions(request: ChatCompletionRequest, raw_request: Request):
         agent_config = Config.AGENTS[request.model]
         system_prompt = agent_config['system_prompt']
 
-        # Few-shot: inject a fake exchange so executor agents see the correct format
-        if agent_config.get('executor') and Config.FEW_SHOT:
+        # Few-shot: inject format examples only for short conversations
+        # (once the model has seen enough real exchanges, the examples waste tokens)
+        if agent_config.get('executor') and Config.FEW_SHOT and len(request.messages) <= 4:
             few_shot_msgs = [ChatMessage(role=m['role'], content=m['content']) for m in Config.FEW_SHOT]
             request.messages = few_shot_msgs + list(request.messages)
 
@@ -1414,33 +1424,26 @@ def sync_completion(messages: List[ChatMessage], system_prompt: str, model_path:
                     model_id: str, max_tokens: int, temperature: float) -> Dict[str, Any]:
     """Generate synchronous completion with token budget awareness"""
     with model_manager.inference_lock:
-        try:
-            model = model_manager.get_model(model_id)
+        model = model_manager.get_model(model_id)
 
-            prompt, clamped_max, n_prompt, error_msg = calculate_token_budget(
-                model, messages, system_prompt, model_path, max_tokens, model_id
-            )
+        prompt, clamped_max, n_prompt, error_msg = calculate_token_budget(
+            model, messages, system_prompt, model_path, max_tokens, model_id
+        )
 
-            if error_msg:
-                raise HTTPException(status_code=400, detail=error_msg)
+        if error_msg:
+            raise HTTPException(status_code=400, detail=error_msg)
 
-            params = get_model_params(clamped_max, temperature, stream=False)
-            response = model(prompt, **params)
+        params = get_model_params(clamped_max, temperature, stream=False)
+        response = model(prompt, **params)
 
-            text = response['choices'][0]['text'].strip()
+        text = response['choices'][0]['text'].strip()
 
-            # Extract real finish_reason from llama-cpp response
-            finish_reason = response['choices'][0].get('finish_reason', 'stop')
-            if not finish_reason:
-                finish_reason = 'stop'
+        finish_reason = response['choices'][0].get('finish_reason', 'stop')
+        if not finish_reason:
+            finish_reason = 'stop'
 
-            return build_completion_response(model_id, text, response['usage'],
-                                             finish_reason=finish_reason)
-        finally:
-            # Explicitly delete and cleanup
-            if 'model' in locals():
-                del model
-            model_manager.unload_model()
+        return build_completion_response(model_id, text, response['usage'],
+                                         finish_reason=finish_reason)
 
 
 STREAM_TTFT_TIMEOUT = 600  # seconds — abort if no token generated within 10 minutes
@@ -1460,7 +1463,6 @@ def stream_completion(messages: List[ChatMessage], system_prompt: str, model_pat
 
     try:
         with model_manager.inference_lock:
-            try:
                 model = model_manager.get_model(model_id)
 
                 prompt, clamped_max, n_prompt, error_msg = calculate_token_budget(
@@ -1535,11 +1537,6 @@ def stream_completion(messages: List[ChatMessage], system_prompt: str, model_pat
                     "generated=%d, finish_reason=%s",
                     model_id, n_prompt, clamped_max, token_count, finish_reason
                 )
-            finally:
-                # Explicitly delete and cleanup
-                if 'model' in locals():
-                    del model
-                model_manager.unload_model()
 
         final_chunk = build_stream_chunk(completion_id, model_id, finish=True,
                                          finish_reason=finish_reason)
