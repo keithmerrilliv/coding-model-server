@@ -2090,6 +2090,47 @@ def handle_user_command(user_input, history, model, agent_theme):
 
 HISTORY_CHAR_BUDGET = 150000  # ~37.5k tokens, leaves room for system prompt + response
 
+MAX_STALL_NUDGES = 2  # Max times we'll nudge a stalled agent before accepting its response
+
+# Patterns that suggest the agent is planning/summarizing rather than delivering a final answer
+_STALL_PATTERNS = re.compile(
+    r'(?:'
+    r'(?:let me|I need to|I should|I will|I\'ll|now I\'ll|next I\'ll)\s'
+    r'|(?:^|\n)\s*(?:let me (?:now |also )?(?:check|read|search|write|implement|create|update|fix|modify|look|open|see|try))'
+    r'|(?:^|\n)\s*(?:Now (?:let me|I\'ll|I need to|I should))'
+    r'|(?:here\'s (?:my|the) (?:plan|approach|strategy))'
+    r'|(?:steps? (?:to|I\'ll|we\'ll|needed))'
+    r')',
+    re.IGNORECASE | re.MULTILINE
+)
+
+# Patterns that suggest the agent has genuinely finished
+_DONE_PATTERNS = re.compile(
+    r'(?:'
+    r'(?:implementation is (?:now )?complete|I\'ve (?:finished|completed|implemented|done))'
+    r'|(?:the (?:changes|implementation|fix|update|code) (?:is|are) (?:now )?(?:complete|done|ready|in place))'
+    r'|(?:all (?:changes|tasks|work) (?:have been|are) (?:completed|done|applied))'
+    r'|(?:(?:task|work) (?:is )?(?:complete|done|finished))'
+    r'|(?:successfully (?:implemented|completed|updated|created|fixed|written))'
+    r')',
+    re.IGNORECASE
+)
+
+
+def _looks_like_stall(response_text: str) -> bool:
+    """Detect if the agent is stalling (planning/summarizing) rather than delivering a final answer.
+
+    Returns True if the response appears to describe future work rather than
+    presenting a completed result.
+    """
+    # If the agent explicitly says it's done, trust it
+    if _DONE_PATTERNS.search(response_text):
+        return False
+    # If the response contains stall patterns, it's likely planning
+    if _STALL_PATTERNS.search(response_text):
+        return True
+    return False
+
 
 def _check_history_budget(history):
     """Proactively trim history if total size approaches context limit."""
@@ -2131,6 +2172,7 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
             # produces a response with no actionable commands.
             task_aborted = False
             task_commands_executed = False # Track if any commands were run for this task
+            nudge_count = 0  # Track how many times we've nudged a stalling agent
             max_continuations = 5  # safety cap for truncation retries
             while True:
                 _check_history_budget(history)
@@ -2215,6 +2257,7 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
 
                 if tool_output:
                     task_commands_executed = True
+                    nudge_count = 0  # Reset nudge counter after successful tool use
                     cmd_count = tool_output.count("[Command ")
                     label = f"{cmd_count} command(s) executed" if cmd_count > 1 else "Tool result"
                     print_colored(f"\n{label}. Sending output back to agent...", COLORS['CYAN'])
@@ -2222,7 +2265,31 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                     save_chat_history(history, model)
                     continue  # loop back to get the agent's next response
 
-                # No commands found — agent is done with this task
+                # No commands found — check if the agent is stalling
+                # If it was previously executing tools and now produced a
+                # plan/summary without acting, nudge it to continue.
+                if (task_commands_executed
+                        and nudge_count < MAX_STALL_NUDGES
+                        and _looks_like_stall(response_text)):
+                    nudge_count += 1
+                    print_colored(
+                        f"\n[Nudge {nudge_count}/{MAX_STALL_NUDGES}] "
+                        "Agent produced a summary instead of acting. Nudging to continue...",
+                        COLORS['WARNING']
+                    )
+                    history.append({
+                        "role": "user",
+                        "content": (
+                            "You described what needs to be done but didn't execute any commands. "
+                            "Stop summarizing and proceed with the implementation now. "
+                            "Use your tools (<<<WRITE_FILE>>>, <<<EDIT_FILE>>>, <<<REMOTE_EXEC>>>, etc.) "
+                            "to make the actual changes."
+                        ),
+                    })
+                    save_chat_history(history, model)
+                    continue  # loop back for the agent's next response
+
+                # Agent is genuinely done with this task
                 break
 
             if task_aborted:
