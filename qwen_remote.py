@@ -1131,6 +1131,26 @@ def write_file_content(payload):
         return f"Error writing file: {str(e)}"
 
 
+def _normalize_git_style_markers(text):
+    """Convert git-style SEARCH/REPLACE markers to <<<OLD>>>/<<<NEW>>> format.
+
+    Qwen models sometimes emit Aider/Cursor-style edit blocks from training data:
+        <<<<<<< SEARCH
+        old text
+        =======
+        new text
+        >>>>>>> REPLACE
+    This normalizes them so edit_file_content can parse them.
+    """
+    # <<<<<<< SEARCH\n  ->  <<<OLD>>>\n  (preserve the newline after the marker)
+    text = re.sub(r'<{1,7}\s*SEARCH\s*>{0,7}\s*\n', '<<<OLD>>>\n', text)
+    # =======  (separator between old and new)  ->  <<<NEW>>>
+    text = re.sub(r'\n={3,}\s*\n', '\n<<<NEW>>>\n', text)
+    # >>>>>>> REPLACE  ->  remove (it's just a closing marker)
+    text = re.sub(r'\n>{1,7}\s*REPLACE\s*>{0,7}', '', text)
+    return text
+
+
 def edit_file_content(payload):
     """Edit a file by replacing specific text (search and replace).
 
@@ -1142,8 +1162,12 @@ def edit_file_content(payload):
         replacement text
 
     Supports multiple replacements in one call by repeating <<<OLD>>>...<<<NEW>>> blocks.
+    Also handles git-style <<<<<<< SEARCH / ======= / >>>>>>> REPLACE markers.
     """
     try:
+        # Normalize git-style markers before parsing
+        payload = _normalize_git_style_markers(payload)
+
         lines = payload.split('\n', 1)
         if len(lines) < 2:
             return "Error: EDIT_FILE requires path on first line and OLD/NEW blocks"
@@ -1541,12 +1565,53 @@ def grep_search(payload):
         return f"Error in search: {str(e)}"
 
 
+def _normalize_standalone_search_replace(text):
+    """Convert standalone git-style SEARCH/REPLACE blocks into <<<EDIT_FILE>>> blocks.
+
+    Catches the case where the model emits a bare search/replace block without
+    wrapping it in <<<EDIT_FILE>>>:
+        /path/to/file
+        <<<<<<< SEARCH
+        old text
+        =======
+        new text
+        >>>>>>> REPLACE
+
+    Converts to:
+        <<<EDIT_FILE>>>/path/to/file
+        <<<OLD>>>
+        old text
+        <<<NEW>>>
+        new text
+    """
+    # Match: filepath line, then <<<<<<< SEARCH block(s)
+    # The filepath is on the line before <<<<<<< SEARCH
+    pattern = (
+        r'^([^\n<>]+?)\s*\n'                  # filepath (line without angle brackets)
+        r'<{1,7}\s*SEARCH\s*>{0,7}\s*\n'      # <<<<<<< SEARCH
+        r'(.*?)'                                # old text (multi-line, lazy)
+        r'\n={3,}\s*\n'                         # =======
+        r'(.*?)'                                # new text (multi-line, lazy)
+        r'\n>{1,7}\s*REPLACE\s*>{0,7}'         # >>>>>>> REPLACE
+    )
+    def _replace(m):
+        path = m.group(1).strip()
+        old = m.group(2)
+        new = m.group(3)
+        return f'<<<EDIT_FILE>>>{path}\n<<<OLD>>>\n{old}\n<<<NEW>>>\n{new}\n'
+
+    return re.sub(pattern, _replace, text, flags=re.DOTALL | re.MULTILINE)
+
+
 def process_remote_commands(response_text: str) -> Optional[str]:
     """Process ALL remote command markers in agent response.
 
     Finds and executes every tool marker in the response, in order of appearance.
     Returns aggregated output from all commands, or None if no markers found.
     """
+    # Pre-process: convert standalone git-style SEARCH/REPLACE into EDIT_FILE blocks
+    response_text = _normalize_standalone_search_replace(response_text)
+
     # Dispatch table: opening tag name -> handler
     command_handlers = {
         'REMOTE_EXEC':    lambda arg: execute_remote_command(arg.strip()),
