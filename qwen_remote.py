@@ -2212,6 +2212,15 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                     # The continuation becomes the new response_text for the
                     # next iteration (the partial is already in history above).
                     response_text = cont_text
+
+                    # If the previous segment ended mid-tag (e.g. "<<<WRITE")
+                    # and the continuation starts with whitespace + rest of tag
+                    # (e.g. "\n_FILE>>>"), the newline would corrupt the tag
+                    # name making it unmatchable.  Strip leading whitespace
+                    # from the continuation when we detect a partial tag at the
+                    # boundary so the aggregated text reconstructs correctly.
+                    if re.search(r'<{1,3}\w*$', aggregated_response):
+                        cont_text = cont_text.lstrip()
                     aggregated_response += cont_text
 
                 if task_aborted:

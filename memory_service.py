@@ -39,28 +39,33 @@ class MemoryService:
         # Initialize automatically
         self._init_db()
 
-    def _init_db(self):
-        """Initialize ChromaDB and Embedding Model"""
-        try:
-            logger.info(f"Initializing Memory Service at {self.persist_directory}...")
-            
-            # Initialize Embedding Model (Force CPU to avoid RTX 5080 sm_120 compatibility issues)
-            self._embedding_model = SentenceTransformer('all-MiniLM-L6-v2', device='cpu')
-            
-            # Initialize ChromaDB Client
-            self.client = chromadb.PersistentClient(path=self.persist_directory)
-            
-            # Get or Create Collection
-            self._collection = self.client.get_or_create_collection(
-                name="qwen_agent_memory",
-                metadata={"hnsw:space": "cosine"} # Cosine similarity for semantic search
-            )
-            
-            logger.info("Memory Service initialized successfully.")
-            
-        except Exception as e:
-            logger.error(f"Failed to initialize Memory Service: {e}")
-            raise
+    def _init_db(self, max_retries: int = 3):
+        """Initialize ChromaDB and Embedding Model with retry for transient httpx errors."""
+        for attempt in range(1, max_retries + 1):
+            try:
+                logger.info(f"Initializing Memory Service at {self.persist_directory}... (attempt {attempt}/{max_retries})")
+
+                # Initialize Embedding Model (Force CPU to avoid RTX 5080 sm_120 compatibility issues)
+                self._embedding_model = SentenceTransformer('all-MiniLM-L6-v2', device='cpu')
+
+                # Initialize ChromaDB Client
+                self.client = chromadb.PersistentClient(path=self.persist_directory)
+
+                # Get or Create Collection
+                self._collection = self.client.get_or_create_collection(
+                    name="qwen_agent_memory",
+                    metadata={"hnsw:space": "cosine"} # Cosine similarity for semantic search
+                )
+
+                logger.info("Memory Service initialized successfully.")
+                return
+
+            except Exception as e:
+                logger.error(f"Failed to initialize Memory Service (attempt {attempt}/{max_retries}): {e}")
+                if attempt < max_retries:
+                    time.sleep(2)
+                else:
+                    raise
 
     def _get_embedding(self, text: str) -> List[float]:
         """Generate embedding for text using local model"""
