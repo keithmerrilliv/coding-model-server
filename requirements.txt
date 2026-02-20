@@ -1,4 +1,4 @@
-# Qwen Multi-Agent Server - FastAPI Implementation
+# Qwen Multi-Agent Server
 
 # Model inference
 llama-cpp-python>=0.3.16
@@ -8,12 +8,10 @@ huggingface-hub>=1.4.0
 # Web server (FastAPI)
 fastapi>=0.128.1
 uvicorn[standard]>=0.40.0
-
-# Client dependencies
 requests>=2.32.3
-
-# Optional
 python-dotenv>=1.0.1
+
+# RAG / memory
 chromadb==1.4.1
 sentence-transformers==5.2.2
 pypdf>=5.1.0
