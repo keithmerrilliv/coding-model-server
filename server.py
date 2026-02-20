@@ -443,7 +443,7 @@ CONTEXT MANAGEMENT — your context window is limited. Work efficiently:
     # Uses llama-server subprocess backend with native Jinja template
     _MINIMAX_M25 = _create_model_config(
         'MODEL_PATH_MINIMAX_M25',
-        '/home/keith-merrill/.lmstudio/models/unsloth/MiniMax-M2.5-GGUF/MiniMax-M2.5-Q4_K_M-00001-of-00005.gguf',
+        '/home/keith-merrill/.lmstudio/models/unsloth/MiniMax-M2.5-GGUF/Q4_K_M/MiniMax-M2.5-Q4_K_M-00001-of-00004.gguf',
         4, 32768, 4096, backend='llama_server',
         server_extra_args=['--jinja', '--reasoning-format', 'none'],
         logit_bias=[[200052, -100.0], [200053, -100.0]],
