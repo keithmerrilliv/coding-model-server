@@ -103,6 +103,8 @@ THEME_STYLES = {
     "reviewer":    {"color": COLORS['CYAN'], "icon": "🔍", "prompt": "Reviewer"},
     "debugger":    {"color": COLORS['FAIL'], "icon": "🐞", "prompt": "Debugger"},
     "metal_implementer": {"color": COLORS['BLUE'], "icon": "🤘", "prompt": "Metal"},
+    "m25_implementer": {"color": COLORS['GREEN'], "icon": "🌙", "prompt": "M2.5 Impl"},
+    "m25_architect": {"color": COLORS['HEADER'], "icon": "🌙", "prompt": "M2.5 Arch"},
     "default":     {"color": COLORS['WARNING'], "icon": "🤖", "prompt": "Agent"},
 }
 
@@ -164,7 +166,9 @@ def _load_fallback_themes():
         "architect": "System Design (Offline)",
         "reviewer": "Code Review (Offline)",
         "debugger": "Debugging (Offline)",
-        "metal_implementer": "Metal & Graphics (Offline)"
+        "metal_implementer": "Metal & Graphics (Offline)",
+        "m25_implementer": "MiniMax M2.5 Implementer (Offline)",
+        "m25_architect": "MiniMax M2.5 Architect (Offline)"
     }
     for mid, desc in defaults.items():
         style = THEME_STYLES.get(mid, THEME_STYLES["default"])

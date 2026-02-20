@@ -153,9 +153,10 @@ class IngestRequest(BaseModel):
 # Helper Functions
 # ============================================================================
 
-def _create_model_config(path_env, path_default, n_gpu_layers, n_ctx=32768, n_batch=2048, backend='llama_cpp'):
+def _create_model_config(path_env, path_default, n_gpu_layers, n_ctx=32768, n_batch=2048, backend='llama_cpp',
+                         server_extra_args=None, logit_bias=None):
     """Helper function to create standardized model configurations"""
-    return {
+    config = {
         'path': os.getenv(path_env, path_default),
         'n_gpu_layers': n_gpu_layers,
         'n_ctx': n_ctx,
@@ -170,6 +171,11 @@ def _create_model_config(path_env, path_default, n_gpu_layers, n_ctx=32768, n_ba
         'type_k': 8, 'type_v': 8, 'offload_kqv': True,
         'backend': backend,
     }
+    if server_extra_args is not None:
+        config['server_extra_args'] = server_extra_args
+    if logit_bias is not None:
+        config['logit_bias'] = logit_bias
+    return config
 
 
 
@@ -405,7 +411,9 @@ CONTEXT MANAGEMENT — your context window is limited. Work efficiently:
     _CODER_NEXT_Q8 = _create_model_config(
         'MODEL_PATH_NEXT_Q8',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-Next-GGUF/Q8_0/Qwen3-Coder-Next-Q8_0-00001-of-00003.gguf',
-        8, 262144, 1024, backend='llama_server'
+        8, 262144, 1024, backend='llama_server',
+        server_extra_args=['--chat-template', 'chatml'],
+        logit_bias=[[151657, -100.0], [151658, -100.0]],
     )
 
     # HD: High-precision Q8_0 with expanded context (49k) for review and Metal work
@@ -429,6 +437,16 @@ CONTEXT MANAGEMENT — your context window is limited. Work efficiently:
         'MODEL_PATH_480B_ULTRA',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/Qwen3-Coder-480B-A35B-Instruct-UD-Q2_K_XL-00001-of-00004.gguf',
         4, 65536, 1024
+    )
+
+    # MINIMAX: MiniMax M2.5 (230B MoE, 10B active params)
+    # Uses llama-server subprocess backend with native Jinja template
+    _MINIMAX_M25 = _create_model_config(
+        'MODEL_PATH_MINIMAX_M25',
+        '/home/keith-merrill/.lmstudio/models/unsloth/MiniMax-M2.5-GGUF/MiniMax-M2.5-Q4_K_M-00001-of-00005.gguf',
+        4, 32768, 4096, backend='llama_server',
+        server_extra_args=['--jinja', '--reasoning-format', 'none'],
+        logit_bias=[[200052, -100.0], [200053, -100.0]],
     )
 
     # ── Few-shot example injected for executor agents ──
@@ -455,6 +473,10 @@ CONTEXT MANAGEMENT — your context window is limited. Work efficiently:
         f'You are an implementer. {EXECUTOR_PROMPT}\n\nCOMPREHENSIVE IMPLEMENTATION: When implementing tasks, leverage multiple tools to understand the codebase thoroughly:\n\nEXECUTION ENVIRONMENT: You are running on a macOS environment with full access to development tools.\n- Use `<<<REMOTE_EXEC>>>` for ALL shell commands (including Xcode tools, Git, file operations).\n- Do NOT distinguish between "server" and "client". Everything runs locally.\n\nFILE OPERATIONS:\n- Use `<<<GLOB>>>` to find files: `<<<GLOB>>>**/*.swift`\n- Use `<<<GREP>>>` to search code: `<<<GREP>>>TODO|src/`\n- Use `<<<LIST_DIR>>>` to explore directories\n- Use `<<<READ_FILE>>>` to read file contents\n- Use `<<<WRITE_FILE>>>` for new files or complete rewrites\n- Use `<<<EDIT_FILE>>>` for targeted changes to existing files (PREFERRED)\n\nGIT AWARENESS: Use Git via `<<<REMOTE_EXEC>>>` to understand code context:\n- `git log`, `git diff`, `git blame`, `git show`, `git status`\n\nAPPLE DEVELOPMENT via `<<<REMOTE_EXEC>>>`:\n- Compile Swift: `swiftc file.swift -o output`\n- Compile Metal: `xcrun -sdk macosx metal -c shader.metal -o shader.air`\n- Build Xcode: `xcodebuild -project Foo.xcodeproj -scheme Foo build`\n\n{TOOL_REFERENCE}'
     )
 
+    _ARCHITECT_SYSTEM_PROMPT = (
+        f'You are a system architect. {EXECUTOR_PROMPT}\n\nDESIGN AND IMPLEMENTATION: You are expected to both design solutions and implement them using the tools available.\n\nEXECUTION ENVIRONMENT: You are running on a macOS environment with full access to development tools.\n- Use `<<<REMOTE_EXEC>>>` for ALL shell commands (including Xcode tools, Git, file operations).\n- Do NOT distinguish between "server" and "client". Everything runs locally.\n\nFILE MODIFICATION - CRITICAL:\n- Use `<<<WRITE_FILE>>>` for NEW files or complete rewrites\n- Use `<<<EDIT_FILE>>>` for targeted changes to EXISTING files (PREFERRED)\n- NEVER output code in markdown blocks - that does NOT save anything!\n\nEDIT_FILE FORMAT (use EXACTLY this format):\n<<<EDIT_FILE>>>/path/to/file\n<<<OLD>>>\nexact text to find\n<<<NEW>>>\nreplacement text\n\nWARNING: Do NOT use git-style markers like <<<<<<< SEARCH or ======= or >>>>>>> REPLACE. Those will NOT work. Use <<<OLD>>> and <<<NEW>>> only.\n\nDOCUMENTATION: You should create and maintain documentation:\n- Use `<<<WRITE_FILE>>>` to create new docs (README.md, ARCHITECTURE.md, DESIGN.md)\n- Use `<<<EDIT_FILE>>>` to update existing docs with targeted changes\n- Document system design decisions and rationale\n- Create diagrams using Mermaid or ASCII art in markdown\n- Write technical specs, ADRs (Architecture Decision Records), and migration guides\n\nGIT AWARENESS: Use Git via `<<<REMOTE_EXEC>>>` to understand code context:\n- `git log`, `git diff`, `git blame`, `git show`, `git status`\n\nXCODE DEVELOPMENT via `<<<REMOTE_EXEC>>>`:\n- Compile Swift: `swiftc file.swift -o output`\n- Build Xcode: `xcodebuild -project Foo.xcodeproj -scheme Foo build`\n- Use `simctl` for iOS simulators, `codesign` for signing\n\n{TOOL_REFERENCE}'
+    )
+
     # ── Agent definitions ──
     # 'executor': True means few-shot + fallback extraction are enabled.
     AGENTS = {
@@ -472,7 +494,7 @@ CONTEXT MANAGEMENT — your context window is limited. Work efficiently:
         ),
         'architect': _create_agent_config(
             'System architecture agent (Ultra Reasoning)',
-            f'You are a system architect. {EXECUTOR_PROMPT}\n\nDESIGN AND IMPLEMENTATION: You are expected to both design solutions and implement them using the tools available.\n\nEXECUTION ENVIRONMENT: You are running on a macOS environment with full access to development tools.\n- Use `<<<REMOTE_EXEC>>>` for ALL shell commands (including Xcode tools, Git, file operations).\n- Do NOT distinguish between "server" and "client". Everything runs locally.\n\nFILE MODIFICATION - CRITICAL:\n- Use `<<<WRITE_FILE>>>` for NEW files or complete rewrites\n- Use `<<<EDIT_FILE>>>` for targeted changes to EXISTING files (PREFERRED)\n- NEVER output code in markdown blocks - that does NOT save anything!\n\nEDIT_FILE FORMAT (use EXACTLY this format):\n<<<EDIT_FILE>>>/path/to/file\n<<<OLD>>>\nexact text to find\n<<<NEW>>>\nreplacement text\n\nWARNING: Do NOT use git-style markers like <<<<<<< SEARCH or ======= or >>>>>>> REPLACE. Those will NOT work. Use <<<OLD>>> and <<<NEW>>> only.\n\nDOCUMENTATION: You should create and maintain documentation:\n- Use `<<<WRITE_FILE>>>` to create new docs (README.md, ARCHITECTURE.md, DESIGN.md)\n- Use `<<<EDIT_FILE>>>` to update existing docs with targeted changes\n- Document system design decisions and rationale\n- Create diagrams using Mermaid or ASCII art in markdown\n- Write technical specs, ADRs (Architecture Decision Records), and migration guides\n\nGIT AWARENESS: Use Git via `<<<REMOTE_EXEC>>>` to understand code context:\n- `git log`, `git diff`, `git blame`, `git show`, `git status`\n\nXCODE DEVELOPMENT via `<<<REMOTE_EXEC>>>`:\n- Compile Swift: `swiftc file.swift -o output`\n- Build Xcode: `xcodebuild -project Foo.xcodeproj -scheme Foo build`\n- Use `simctl` for iOS simulators, `codesign` for signing\n\n{TOOL_REFERENCE}',
+            _ARCHITECT_SYSTEM_PROMPT,
             _QWEN_480B_ULTRA,
             executor=True
         ),
@@ -498,6 +520,18 @@ CONTEXT MANAGEMENT — your context window is limited. Work efficiently:
             'System architecture agent (Lite Reasoning)',
             f'You are a system architect. {EXECUTOR_PROMPT}\n\nFILE WRITING: Use `<<<WRITE_FILE>>>` to create or update source files. After writing, use `<<<REMOTE_EXEC>>>` to compile and verify.\n\n{TOOL_REFERENCE}',
             _QWEN_480B_LITE,
+            executor=True
+        ),
+        'm25_implementer': _create_agent_config(
+            'MiniMax M2.5 Q4_K_M (230B MoE, 10B active)',
+            _IMPLEMENTER_SYSTEM_PROMPT,
+            _MINIMAX_M25,
+            executor=True
+        ),
+        'm25_architect': _create_agent_config(
+            'MiniMax M2.5 Architect (230B MoE, 10B active)',
+            _ARCHITECT_SYSTEM_PROMPT,
+            _MINIMAX_M25,
             executor=True
         ),
     }
@@ -667,11 +701,14 @@ class LlamaServerManager:
             '-t', str(Config.DEFAULT_N_THREADS),
             '-tb', str(Config.DEFAULT_N_THREADS),
             '-fa', 'on',
-            '--chat-template', 'chatml',  # Override model's "Qwen3 Coder" template to prevent native <tool_call> format
             '--host', '127.0.0.1',
             '--port', str(self.LLAMA_SERVER_PORT),
             '-np', '1',
         ]
+
+        # Add model-specific server args (chat template, jinja, etc.)
+        extra_args = model_config.get('server_extra_args', ['--chat-template', 'chatml'])
+        cmd.extend(extra_args)
 
         env = os.environ.copy()
         env['LD_LIBRARY_PATH'] = tools_dir + ':' + env.get('LD_LIBRARY_PATH', '')
@@ -781,7 +818,8 @@ class LlamaServerManager:
                     break
 
     def proxy_stream(self, messages: List[dict], system_prompt: str,
-                     model_id: str, max_tokens: int, temperature: float) -> Iterator[str]:
+                     model_id: str, max_tokens: int, temperature: float,
+                     model_config: dict = None) -> Iterator[str]:
         """Stream a chat completion via the llama-server subprocess."""
         self.last_request_time = time.time()
 
@@ -796,11 +834,9 @@ class LlamaServerManager:
             # end-of-turn tokens (im_end, EOT, etc.) natively. Passing them here
             # causes premature stopping via double-matching.
             "repeat_penalty": 1.15,
-            # Ban <tool_call> tokens — the main cause of format corruption where
-            # the model produces <tool_call>\n<TAG>>> (single <) instead of <<<TAG>>>.
-            # Other native tokens (think, tool_response) are left unbanned:
-            # thinking improves quality, and the client regex handles any bracket variations.
-            "logit_bias": [[151657, -100.0], [151658, -100.0]],
+            # Ban model-specific native tool tokens to prevent format corruption.
+            # Each model config specifies which tokens to ban via logit_bias.
+            "logit_bias": (model_config or {}).get('logit_bias', []),
         }
 
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
@@ -866,7 +902,8 @@ class LlamaServerManager:
         self.last_request_time = time.time()
 
     def proxy_sync(self, messages: List[dict], system_prompt: str,
-                   model_id: str, max_tokens: int, temperature: float) -> dict:
+                   model_id: str, max_tokens: int, temperature: float,
+                   model_config: dict = None) -> dict:
         """Synchronous chat completion via the llama-server subprocess."""
         self.last_request_time = time.time()
 
@@ -878,7 +915,7 @@ class LlamaServerManager:
             "temperature": temperature,
             "stream": False,
             "repeat_penalty": 1.15,
-            "logit_bias": [[151657, -100.0], [151658, -100.0]],
+            "logit_bias": (model_config or {}).get('logit_bias', []),
         }
 
         resp = http_requests.post(url, json=payload, timeout=600)
@@ -1391,13 +1428,13 @@ def chat_completions(request: ChatCompletionRequest, raw_request: Request):
                 return StreamingResponse(
                     llama_server_manager.proxy_stream(
                         request.messages, augmented_system, request.model,
-                        clamped_max, request.temperature),
+                        clamped_max, request.temperature, model_config=model_config),
                     media_type="text/event-stream"
                 )
             else:
                 return llama_server_manager.proxy_sync(
                     request.messages, augmented_system, request.model,
-                    clamped_max, request.temperature)
+                    clamped_max, request.temperature, model_config=model_config)
         else:
             # Standard llama_cpp path
             if request.stream:
