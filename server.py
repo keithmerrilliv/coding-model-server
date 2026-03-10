@@ -18,6 +18,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request, Header, Depends
 from fastapi.responses import JSONResponse, StreamingResponse
 import signal
+import hmac
 import requests as http_requests
 import llama_cpp
 from llama_cpp import Llama
@@ -558,7 +559,7 @@ CONTEXT MANAGEMENT — your context window is limited. Work efficiently:
 async def verify_admin_key(x_admin_key: Optional[str] = Header(None)):
     """Verify admin API key if ADMIN_API_KEY is configured"""
     if Config.ADMIN_API_KEY:
-        if not x_admin_key or x_admin_key != Config.ADMIN_API_KEY:
+        if not x_admin_key or not hmac.compare_digest(x_admin_key, Config.ADMIN_API_KEY):
             raise HTTPException(status_code=401, detail="Invalid or missing admin API key")
 
 
@@ -622,41 +623,41 @@ class ModelManager:
                 self._cached_agent = None
                 import gc; gc.collect(); gc.collect()
 
-        # Load the model fresh (outside lock to avoid blocking health checks)
-        logger.info("Loading model for %s: %s", agent_name, model_path)
-        try:
-            model = Llama(
-                model_path=model_path,
-                n_ctx=model_config.get('n_ctx', Config.DEFAULT_CONTEXT_SIZE),
-                n_gpu_layers=model_config.get('n_gpu_layers', 0),
-                n_threads=Config.DEFAULT_N_THREADS,
-                n_threads_batch=Config.DEFAULT_N_THREADS,
-                n_batch=model_config.get('n_batch', Config.DEFAULT_N_BATCH),
-                flash_attn=True,
-                type_k=model_config.get('type_k'),
-                type_v=model_config.get('type_v'),
-                use_mmap=True,
-                use_mlock=False,
-                offload_kqv=model_config.get('offload_kqv', True),
-                rope_scaling_type=model_config.get('rope_scaling_type', -1),
-                rope_freq_base=model_config.get('rope_freq_base', 0.0),
-                rope_freq_scale=model_config.get('rope_freq_scale', 0.0),
-                yarn_ext_factor=model_config.get('yarn_ext_factor', -1.0),
-                yarn_attn_factor=model_config.get('yarn_attn_factor', 1.0),
-                yarn_beta_fast=model_config.get('yarn_beta_fast', 32.0),
-                yarn_beta_slow=model_config.get('yarn_beta_slow', 1.0),
-                yarn_orig_ctx=model_config.get('yarn_orig_ctx', 0),
-                verbose=True
-            )
+            # Load the model fresh (inside lock to prevent concurrent loads;
+            # health checks use is_loaded() which doesn't acquire this lock)
+            logger.info("Loading model for %s: %s", agent_name, model_path)
+            try:
+                model = Llama(
+                    model_path=model_path,
+                    n_ctx=model_config.get('n_ctx', Config.DEFAULT_CONTEXT_SIZE),
+                    n_gpu_layers=model_config.get('n_gpu_layers', 0),
+                    n_threads=Config.DEFAULT_N_THREADS,
+                    n_threads_batch=Config.DEFAULT_N_THREADS,
+                    n_batch=model_config.get('n_batch', Config.DEFAULT_N_BATCH),
+                    flash_attn=True,
+                    type_k=model_config.get('type_k'),
+                    type_v=model_config.get('type_v'),
+                    use_mmap=True,
+                    use_mlock=False,
+                    offload_kqv=model_config.get('offload_kqv', True),
+                    rope_scaling_type=model_config.get('rope_scaling_type', -1),
+                    rope_freq_base=model_config.get('rope_freq_base', 0.0),
+                    rope_freq_scale=model_config.get('rope_freq_scale', 0.0),
+                    yarn_ext_factor=model_config.get('yarn_ext_factor', -1.0),
+                    yarn_attn_factor=model_config.get('yarn_attn_factor', 1.0),
+                    yarn_beta_fast=model_config.get('yarn_beta_fast', 32.0),
+                    yarn_beta_slow=model_config.get('yarn_beta_slow', 1.0),
+                    yarn_orig_ctx=model_config.get('yarn_orig_ctx', 0),
+                    verbose=True
+                )
 
-            logger.info("Model loaded successfully: %s", model_path)
-            with self.lock:
+                logger.info("Model loaded successfully: %s", model_path)
                 self._cached_model = model
                 self._cached_agent = agent_name
-            return model
-        except Exception as e:
-            logger.error("Failed to load model %s: %s", model_path, e)
-            raise
+                return model
+            except Exception as e:
+                logger.error("Failed to load model %s: %s", model_path, e)
+                raise
 
     def is_loaded(self) -> bool:
         """Check if a model is currently cached and ready"""
@@ -988,16 +989,16 @@ def calculate_token_budget(model, messages: List, system_prompt: str, model_path
     n_ctx = model.n_ctx()
 
     # Estimate the token count for the budget guidance string itself
-    budget_guidance_template = Config.TOKEN_BUDGET_GUIDANCE.format(available_tokens=1000)
+    budget_guidance_template = Config.TOKEN_BUDGET_GUIDANCE.format(available_tokens=99999)
     budget_guidance_tokens = len(model.tokenize(budget_guidance_template.encode("utf-8")))
 
-    # Build prompt without budget guidance to get the base token count
+    # Tokenize the prompt ONCE without budget guidance
     preliminary_prompt = build_model_prompt(messages, system_prompt, model_path)
-    preliminary_tokens = model.tokenize(preliminary_prompt.encode("utf-8"))
-    n_preliminary = len(preliminary_tokens)
+    n_preliminary = len(model.tokenize(preliminary_prompt.encode("utf-8")))
 
-    # Calculate available tokens accounting for budget guidance overhead
-    available = n_ctx - n_preliminary - budget_guidance_tokens
+    # Estimate final prompt size (preliminary + budget guidance overhead)
+    n_prompt_estimated = n_preliminary + budget_guidance_tokens
+    available = n_ctx - n_prompt_estimated
     if available < 1:
         error_msg = (f"Prompt ({n_preliminary} tokens) fills the entire context window ({n_ctx}). "
                      "Reduce conversation history and retry.")
@@ -1006,21 +1007,15 @@ def calculate_token_budget(model, messages: List, system_prompt: str, model_path
     # Clamp to requested max_tokens
     clamped_max = min(max_tokens, available)
 
-    # Now build the final prompt with actual budget guidance
+    # Build the final prompt with budget guidance (skip second tokenization)
     budget_guidance = Config.TOKEN_BUDGET_GUIDANCE.format(available_tokens=clamped_max)
     augmented_system_prompt = f"{system_prompt}\n{budget_guidance}"
     prompt = build_model_prompt(messages, augmented_system_prompt, model_path)
 
-    # Final token count for logging
-    final_tokens = model.tokenize(prompt.encode("utf-8"))
-    n_prompt = len(final_tokens)
-    final_available = n_ctx - n_prompt
-    clamped_max = min(max_tokens, final_available)
-
     if clamped_max < max_tokens:
         logger.info(
-            "Clamped max_tokens %d -> %d for %s (prompt=%d, n_ctx=%d)",
-            max_tokens, clamped_max, model_id, n_prompt, n_ctx
+            "Clamped max_tokens %d -> %d for %s (prompt~%d, n_ctx=%d)",
+            max_tokens, clamped_max, model_id, n_prompt_estimated, n_ctx
         )
 
     logger.info(
@@ -1028,7 +1023,7 @@ def calculate_token_budget(model, messages: List, system_prompt: str, model_path
         model_id, clamped_max
     )
 
-    return prompt, clamped_max, n_prompt, None
+    return prompt, clamped_max, n_prompt_estimated, None
 
 
 # ============================================================================
@@ -1083,6 +1078,7 @@ def build_stream_chunk(completion_id: str, model_id: str, content: Optional[str]
 
 model_manager = ModelManager()
 llama_server_manager = LlamaServerManager()
+_SERVER_START_TIME = int(time.time())
 memory_service = None
 web_search_service = None
 apple_deep_docs_service = None
@@ -1214,7 +1210,7 @@ async def list_models():
         models.append({
             "id": agent_id,
             "object": "model",
-            "created": int(time.time()),
+            "created": _SERVER_START_TIME,
             "owned_by": "qwen-multi-agent",
             "description": agent_config['description']
         })
@@ -1331,6 +1327,9 @@ class FileUploadRequest(BaseModel):
     content: str  # Base64 encoded content
 
 
+MAX_UPLOAD_SIZE = 100 * 1024 * 1024  # 100 MB
+
+
 @app.post("/v1/files/upload")
 def upload_file(request: FileUploadRequest):
     """Upload a file to the server's temporary directory"""
@@ -1343,19 +1342,26 @@ def upload_file(request: FileUploadRequest):
             file_content = base64.b64decode(request.content)
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Invalid base64 content: {str(e)}")
-        
+
+        if len(file_content) > MAX_UPLOAD_SIZE:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File too large ({len(file_content)} bytes, max {MAX_UPLOAD_SIZE})"
+            )
+
         # Sanitize filename: strip directory components to prevent path traversal
         safe_filename = os.path.basename(request.filename)
         if not safe_filename:
             raise HTTPException(status_code=400, detail="Invalid filename")
 
+        # Use a unique temp path to avoid overwriting existing files
         temp_dir = tempfile.gettempdir()
-        temp_path = os.path.join(temp_dir, safe_filename)
-        
-        # Write the file
-        with open(temp_path, 'wb') as f:
-            f.write(file_content)
-        
+        fd, temp_path = tempfile.mkstemp(suffix=f"_{safe_filename}", dir=temp_dir)
+        try:
+            os.write(fd, file_content)
+        finally:
+            os.close(fd)
+
         logger.info(f"File uploaded successfully: {temp_path}")
         return {"status": "success", "path": temp_path, "size": len(file_content)}
     except HTTPException:

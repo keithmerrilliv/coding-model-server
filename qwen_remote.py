@@ -552,37 +552,6 @@ def chunk_large_output(content, chunk_size=None, overlap=None):
     start = 0
     content_len = len(content)
 
-    # Pre-calculate line breaks for faster processing
-    line_breaks = []
-    pos = 0
-    while pos < content_len:
-        pos = content.find('\n', pos)
-        if pos == -1:
-            break
-        line_breaks.append(pos)
-        pos += 1
-
-    # Binary search helper to find nearest line break
-    def find_nearest_line_break(start_pos, max_pos):
-        # Find the closest line break before max_pos
-        if not line_breaks:
-            return -1
-
-        low, high = 0, len(line_breaks) - 1
-        best_break = -1
-
-        while low <= high:
-            mid = (low + high) // 2
-            if line_breaks[mid] <= max_pos and line_breaks[mid] >= start_pos:
-                best_break = line_breaks[mid]
-                low = mid + 1  # Look for a later line break
-            elif line_breaks[mid] < start_pos:
-                low = mid + 1
-            else:
-                high = mid - 1
-
-        return best_break
-
     while start < content_len:
         end = start + chunk_size
 
@@ -591,7 +560,7 @@ def chunk_large_output(content, chunk_size=None, overlap=None):
             chunk = content[start:]
         else:
             # Find a good breaking point (try to break at line boundaries)
-            line_break = find_nearest_line_break(start, end)
+            line_break = content.rfind('\n', start, end)
 
             if line_break != -1 and line_break > start:  # Found a newline within range
                 chunk = content[start:line_break + 1]
@@ -1395,38 +1364,34 @@ def ingest_pdf_content(payload):
         if not path:
             return "Error: No PDF path provided"
 
-        # Check if this is a local file that needs to be uploaded
-        if path.startswith('local:') or not path.startswith('/'):
-            # This is a local file path - we need to upload it first
-            if path.startswith('local:'):
-                local_path = path[6:]  # Remove 'local:' prefix
-            else:
-                local_path = path
-            
+        # Check if this is a local file that needs to be uploaded (requires local: prefix)
+        if path.startswith('local:'):
+            local_path = path[6:]  # Remove 'local:' prefix
+
             # Expand user path if needed
             local_path = os.path.expanduser(local_path)
-            
+
             # Check if file exists locally
             if not os.path.exists(local_path):
                 return f"Error: Local file not found: {local_path}"
-            
+
             # Read the file content
             with open(local_path, 'rb') as f:
                 file_content = f.read()
-            
+
             # Encode as base64
             encoded_content = base64.b64encode(file_content).decode('utf-8')
-            
+
             # Upload the file to the server
             upload_payload = {
                 "filename": os.path.basename(local_path),
                 "content": encoded_content
             }
-            
-            upload_url = f"http://{Config.LINUX_SERVER_IP}:5000/v1/files/upload"
+
+            upload_url = f"http://{config.LINUX_SERVER_IP}:5000/v1/files/upload"
             print_colored(f"Uploading {local_path} to server...", COLORS['CYAN'])
-            
-            response = requests.post(upload_url, json=upload_payload, timeout=Config.LONG_REQUEST_TIMEOUT)
+
+            response = requests.post(upload_url, json=upload_payload, timeout=config.LONG_REQUEST_TIMEOUT)
             if response.status_code != 200:
                 return f"Error uploading file: {response.text}"
             
@@ -1517,6 +1482,9 @@ def grep_search(payload):
         for filepath in files_to_search:
             files_searched += 1
             try:
+                # Skip very large files to avoid memory issues
+                if os.path.getsize(filepath) > 5_000_000:
+                    continue
                 with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
                     content = f.read()
 
@@ -1549,7 +1517,7 @@ def grep_search(payload):
                         break
 
             except (IOError, OSError, UnicodeDecodeError):
-                continue  # Skip unreadable files
+                continue  # Skip unreadable/binary files
 
         # Build result
         header = f"Search: '{pattern}' in {path}\n"
@@ -1900,7 +1868,10 @@ def get_completion(history, model, agent_theme):
                                 print_colored(f"\nServer Error: {error_msg}", COLORS['FAIL'])
                                 finish_reason = "error"
                                 break
-                        except Exception: pass
+                        except json.JSONDecodeError:
+                            pass  # Malformed SSE chunk — skip
+                        except Exception as e:
+                            logger.debug("Error parsing stream chunk: %s", e)
 
             if server_error_occurred and context_retries <= MAX_CONTEXT_RETRIES:
                  server_error_occurred = False; full_response = ""; chunk_count = 0
@@ -2299,8 +2270,12 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                 # If we aggregated, we already put segments in history, 
                 # but the final tool processing should use the full combined text.
                 if continuation_count > 0:
-                    # Update response_text to the full aggregated version for tool parsing
+                    # Update response_text to the full aggregated version for tool parsing.
+                    # Also append the final aggregated response to history so subsequent
+                    # turns see a single coherent assistant message instead of fragments.
                     response_text = aggregated_response
+                    history.append({"role": "assistant", "content": aggregated_response})
+                    save_chat_history(history, model)
                 else:
                     history.append({"role": "assistant", "content": response_text})
                     save_chat_history(history, model)

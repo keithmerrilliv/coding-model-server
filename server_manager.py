@@ -134,13 +134,18 @@ class AppleDeepDocsService:
     def stop(self):
         """Stop the MCP server process"""
         if self.process:
-            self.process.terminate()
             try:
+                self.process.terminate()
                 self.process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-            self.process = None
-            self.is_running = False
+            except (subprocess.TimeoutExpired, OSError):
+                try:
+                    self.process.kill()
+                    self.process.wait(timeout=2)
+                except OSError:
+                    pass
+            finally:
+                self.process = None
+                self.is_running = False
             logger.info("Apple Deep Docs MCP server stopped")
 
     def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> str:

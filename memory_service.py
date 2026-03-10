@@ -1,6 +1,6 @@
 import os
 import logging
-import hashlib
+import uuid
 import time
 from typing import List, Dict, Any, Optional
 import chromadb
@@ -80,8 +80,7 @@ class MemoryService:
             
         try:
             timestamp = time.time()
-            text_hash = hashlib.md5(text.encode()).hexdigest()[:8]
-            mem_id = f"mem_{int(timestamp)}_{text_hash}"
+            mem_id = f"mem_{int(timestamp)}_{uuid.uuid4().hex[:12]}"
             
             embedding = self._get_embedding(text)
             
@@ -175,54 +174,41 @@ class MemoryService:
         """Read a PDF, chunk it, and add to vector store"""
         if not PdfReader:
             return {"error": "pypdf library not installed"}
-            
+
         if not os.path.exists(file_path):
             return {"error": f"File not found: {file_path}"}
-            
+
         try:
             reader = PdfReader(file_path)
             filename = os.path.basename(file_path)
             total_pages = len(reader.pages)
-            chunks_added = 0
-            
+
             logger.info(f"Ingesting PDF: {filename} ({total_pages} pages)")
-            
-            # Simple chunking: Page by page, or text sliding window
-            # Let's do a sliding window of 1000 chars with 200 overlap
+
             full_text = ""
             for i, page in enumerate(reader.pages):
                 page_text = page.extract_text()
                 if page_text:
                     full_text += f"\n--- Page {i+1} ---\n{page_text}"
-            
+
             if not full_text.strip():
                 return {"error": "No extractable text found in PDF"}
 
-            # Chunking logic
-            start = 0
-            while start < len(full_text):
-                end = start + PDF_CHUNK_SIZE
-                chunk = full_text[start:end]
-                
-                # Add metadata for the chunk
-                meta = {
-                    "source": filename,
-                    "type": "pdf",
-                    "chunk_index": chunks_added
-                }
-                
-                self.add_memory(chunk, metadata=meta)
-                chunks_added += 1
-                
-                start += (PDF_CHUNK_SIZE - PDF_CHUNK_OVERLAP)
-                
+            chunks = self._simple_chunk(full_text, filename, PDF_CHUNK_SIZE, PDF_CHUNK_OVERLAP)
+            chunks_added = 0
+            for i, chunk in enumerate(chunks):
+                meta = {"source": filename, "type": "pdf", "chunk_index": i}
+                result = self.add_memory(chunk["text"], metadata=meta)
+                if "error" not in result:
+                    chunks_added += 1
+
             return {
                 "status": "success",
                 "filename": filename,
                 "pages": total_pages,
                 "chunks": chunks_added
             }
-            
+
         except Exception as e:
             logger.error(f"Failed to ingest PDF {file_path}: {e}")
             return {"error": str(e)}
