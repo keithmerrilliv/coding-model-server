@@ -113,7 +113,7 @@ class MemoryService:
 
         If *source* has a recognized code extension and tree-sitter is available,
         the text is parsed into AST-aware chunks. Otherwise a simple sliding-window
-        chunker is used (2000 chars, 200 overlap).
+        chunker is used (2000 chars, 300 overlap).
 
         Returns dict with status and chunks_added count.
         """
@@ -132,7 +132,7 @@ class MemoryService:
             chunks = _chunker.simple_chunk(text, source or "<unknown>", 2000)
         else:
             # Fallback: simple sliding-window (no tree-sitter available)
-            chunks = self._simple_chunk(text, source or "<unknown>", 2000, 200)
+            chunks = self._simple_chunk(text, source or "<unknown>", 2000, 300)
 
         if not chunks:
             # Single chunk fallback
@@ -156,8 +156,12 @@ class MemoryService:
         return {"status": "success", "chunks_added": added}
 
     @staticmethod
-    def _simple_chunk(text: str, source: str, max_chars: int = 2000, overlap: int = 200) -> List[Dict]:
-        """Basic sliding-window chunker used when tree-sitter is unavailable."""
+    def _simple_chunk(text: str, source: str, max_chars: int = 2000, overlap: int = 300) -> List[Dict]:
+        """Fallback sliding-window chunker for when tree-sitter is unavailable.
+
+        Mirrors CodeChunker.simple_chunk() from code_chunker.py so that chunk
+        boundaries stay consistent regardless of which path is taken.
+        """
         chunks = []
         start = 0
         while start < len(text):

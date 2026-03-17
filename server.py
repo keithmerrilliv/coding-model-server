@@ -10,6 +10,9 @@ import time
 import uuid
 import subprocess
 import logging
+import gc
+import hmac
+import asyncio
 from datetime import datetime
 from typing import Dict, List, Optional, Any, Literal, Iterator
 from threading import Lock, Thread
@@ -154,23 +157,31 @@ class IngestRequest(BaseModel):
 # ============================================================================
 
 def _create_model_config(path_env, path_default, n_gpu_layers, n_ctx=32768, n_batch=2048, backend='llama_cpp',
-                         server_extra_args=None, logit_bias=None):
-    """Helper function to create standardized model configurations"""
+                         server_extra_args=None, logit_bias=None, yarn=False):
+    """Helper function to create standardized model configurations.
+
+    Args:
+        yarn: If True, include YaRN RoPE scaling parameters. Only needed for models
+              using extended context via YaRN (e.g. 480B Ultra with 2x scaling).
+    """
     config = {
         'path': os.getenv(path_env, path_default),
         'n_gpu_layers': n_gpu_layers,
         'n_ctx': n_ctx,
         'n_batch': n_batch,
-        'rope_scaling_type': 2,
-        'rope_freq_scale': 1.0,
-        'yarn_ext_factor': -1.0,
-        'yarn_attn_factor': 1.0,
-        'yarn_beta_fast': 32.0,
-        'yarn_beta_slow': 1.0,
-        'yarn_orig_ctx': 32768,
         'type_k': 8, 'type_v': 8, 'offload_kqv': True,
         'backend': backend,
     }
+    if yarn:
+        config.update({
+            'rope_scaling_type': 2,
+            'rope_freq_scale': 1.0,
+            'yarn_ext_factor': -1.0,
+            'yarn_attn_factor': 1.0,
+            'yarn_beta_fast': 32.0,
+            'yarn_beta_slow': 1.0,
+            'yarn_orig_ctx': 32768,
+        })
     if server_extra_args is not None:
         config['server_extra_args'] = server_extra_args
     if logit_bias is not None:
@@ -436,7 +447,7 @@ CONTEXT MANAGEMENT — your context window is limited. Work efficiently:
     _QWEN_480B_ULTRA = _create_model_config(
         'MODEL_PATH_480B_ULTRA',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/Qwen3-Coder-480B-A35B-Instruct-UD-Q2_K_XL-00001-of-00004.gguf',
-        4, 65536, 1024
+        4, 65536, 1024, yarn=True
     )
 
     # MINIMAX: MiniMax M2.5 (230B MoE, 10B active params)
@@ -556,9 +567,13 @@ CONTEXT MANAGEMENT — your context window is limited. Work efficiently:
 # ============================================================================
 
 async def verify_admin_key(x_admin_key: Optional[str] = Header(None)):
-    """Verify admin API key if ADMIN_API_KEY is configured"""
+    """Verify admin API key if ADMIN_API_KEY is configured.
+
+    Uses hmac.compare_digest for timing-safe comparison to prevent
+    key extraction via timing side-channel attacks.
+    """
     if Config.ADMIN_API_KEY:
-        if not x_admin_key or x_admin_key != Config.ADMIN_API_KEY:
+        if not x_admin_key or not hmac.compare_digest(x_admin_key, Config.ADMIN_API_KEY):
             raise HTTPException(status_code=401, detail="Invalid or missing admin API key")
 
 
@@ -582,7 +597,6 @@ class ModelManager:
                 self._cached_model = None
                 self._cached_agent = None
 
-            import gc
             gc.collect()
             gc.collect()
 
@@ -598,7 +612,12 @@ class ModelManager:
             logger.info("Memory cleanup complete")
 
     def get_model(self, agent_name: str):
-        """Load the model for the specific agent (LRU-1 cache: reuse if same agent)"""
+        """Load the model for the specific agent (LRU-1 cache: reuse if same agent).
+
+        The entire load-or-reuse sequence is serialized under self.lock to prevent
+        two concurrent requests from loading different models simultaneously (OOM risk).
+        Health checks use is_loaded() which doesn't acquire the lock.
+        """
         if agent_name not in Config.AGENTS:
             raise ValueError(f"Unknown agent: {agent_name}")
 
@@ -620,43 +639,42 @@ class ModelManager:
                 del self._cached_model
                 self._cached_model = None
                 self._cached_agent = None
-                import gc; gc.collect(); gc.collect()
+                gc.collect(); gc.collect()
 
-        # Load the model fresh (outside lock to avoid blocking health checks)
-        logger.info("Loading model for %s: %s", agent_name, model_path)
-        try:
-            model = Llama(
-                model_path=model_path,
-                n_ctx=model_config.get('n_ctx', Config.DEFAULT_CONTEXT_SIZE),
-                n_gpu_layers=model_config.get('n_gpu_layers', 0),
-                n_threads=Config.DEFAULT_N_THREADS,
-                n_threads_batch=Config.DEFAULT_N_THREADS,
-                n_batch=model_config.get('n_batch', Config.DEFAULT_N_BATCH),
-                flash_attn=True,
-                type_k=model_config.get('type_k'),
-                type_v=model_config.get('type_v'),
-                use_mmap=True,
-                use_mlock=False,
-                offload_kqv=model_config.get('offload_kqv', True),
-                rope_scaling_type=model_config.get('rope_scaling_type', -1),
-                rope_freq_base=model_config.get('rope_freq_base', 0.0),
-                rope_freq_scale=model_config.get('rope_freq_scale', 0.0),
-                yarn_ext_factor=model_config.get('yarn_ext_factor', -1.0),
-                yarn_attn_factor=model_config.get('yarn_attn_factor', 1.0),
-                yarn_beta_fast=model_config.get('yarn_beta_fast', 32.0),
-                yarn_beta_slow=model_config.get('yarn_beta_slow', 1.0),
-                yarn_orig_ctx=model_config.get('yarn_orig_ctx', 0),
-                verbose=True
-            )
+            # Load fresh — held under lock to prevent concurrent OOM
+            logger.info("Loading model for %s: %s", agent_name, model_path)
+            try:
+                model = Llama(
+                    model_path=model_path,
+                    n_ctx=model_config.get('n_ctx', Config.DEFAULT_CONTEXT_SIZE),
+                    n_gpu_layers=model_config.get('n_gpu_layers', 0),
+                    n_threads=Config.DEFAULT_N_THREADS,
+                    n_threads_batch=Config.DEFAULT_N_THREADS,
+                    n_batch=model_config.get('n_batch', Config.DEFAULT_N_BATCH),
+                    flash_attn=True,
+                    type_k=model_config.get('type_k'),
+                    type_v=model_config.get('type_v'),
+                    use_mmap=True,
+                    use_mlock=False,
+                    offload_kqv=model_config.get('offload_kqv', True),
+                    rope_scaling_type=model_config.get('rope_scaling_type', -1),
+                    rope_freq_base=model_config.get('rope_freq_base', 0.0),
+                    rope_freq_scale=model_config.get('rope_freq_scale', 0.0),
+                    yarn_ext_factor=model_config.get('yarn_ext_factor', -1.0),
+                    yarn_attn_factor=model_config.get('yarn_attn_factor', 1.0),
+                    yarn_beta_fast=model_config.get('yarn_beta_fast', 32.0),
+                    yarn_beta_slow=model_config.get('yarn_beta_slow', 1.0),
+                    yarn_orig_ctx=model_config.get('yarn_orig_ctx', 0),
+                    verbose=True
+                )
 
-            logger.info("Model loaded successfully: %s", model_path)
-            with self.lock:
+                logger.info("Model loaded successfully: %s", model_path)
                 self._cached_model = model
                 self._cached_agent = agent_name
-            return model
-        except Exception as e:
-            logger.error("Failed to load model %s: %s", model_path, e)
-            raise
+                return model
+            except Exception as e:
+                logger.error("Failed to load model %s: %s", model_path, e)
+                raise
 
     def is_loaded(self) -> bool:
         """Check if a model is currently cached and ready"""
@@ -751,11 +769,11 @@ class LlamaServerManager:
             time.sleep(self.HEALTH_POLL_INTERVAL)
 
         # Timeout — kill the process
-        self.shutdown()
+        self._shutdown_unlocked()
         raise TimeoutError(f"llama-server did not become healthy within {self.HEALTH_TIMEOUT}s")
 
-    def shutdown(self):
-        """Stop the subprocess gracefully, then force-kill if needed."""
+    def _shutdown_unlocked(self):
+        """Internal: stop the subprocess. Caller must hold self.lock or ensure exclusivity."""
         if self.process is None:
             return
 
@@ -777,6 +795,11 @@ class LlamaServerManager:
             self.process = None
             self.current_model_path = None
 
+    def shutdown(self):
+        """Stop the subprocess gracefully, then force-kill if needed. Thread-safe."""
+        with self.lock:
+            self._shutdown_unlocked()
+
     def ensure_running(self, model_config: dict):
         """Ensure llama-server is running with the correct model. Handles model swaps."""
         with self.lock:
@@ -788,7 +811,7 @@ class LlamaServerManager:
                     return
                 # Different model — shut down first
                 logger.info("Model swap: shutting down llama-server for new model")
-                self.shutdown()
+                self._shutdown_unlocked()
 
             # Free VRAM from any llama_cpp model before starting
             model_manager.unload_model()
@@ -814,7 +837,7 @@ class LlamaServerManager:
                 idle = time.time() - self.last_request_time
                 if idle >= self.IDLE_TIMEOUT:
                     logger.info("llama-server idle for %.0fs, shutting down to free resources", idle)
-                    self.shutdown()
+                    self._shutdown_unlocked()
                     break
 
     def proxy_stream(self, messages: List[dict], system_prompt: str,
@@ -981,20 +1004,23 @@ def calculate_token_budget(model, messages: List, system_prompt: str, model_path
                            max_tokens: int, model_id: str) -> tuple:
     """Calculate token budget and build final prompt with budget guidance.
 
+    Uses 2 tokenizations instead of 3: tokenize the budget guidance template once
+    to estimate its overhead, then tokenize the final prompt once.
+
     Returns:
         tuple: (prompt, clamped_max_tokens, n_prompt, error_message)
                error_message is None on success, or a string describing the error
     """
     n_ctx = model.n_ctx()
 
-    # Estimate the token count for the budget guidance string itself
-    budget_guidance_template = Config.TOKEN_BUDGET_GUIDANCE.format(available_tokens=1000)
+    # Tokenize budget guidance template once to estimate its overhead
+    budget_guidance_template = Config.TOKEN_BUDGET_GUIDANCE.format(available_tokens=99999)
     budget_guidance_tokens = len(model.tokenize(budget_guidance_template.encode("utf-8")))
 
-    # Build prompt without budget guidance to get the base token count
+    # Build the final prompt with a placeholder budget, tokenize once
+    # We use the estimated budget to format the guidance string, then measure the real total.
     preliminary_prompt = build_model_prompt(messages, system_prompt, model_path)
-    preliminary_tokens = model.tokenize(preliminary_prompt.encode("utf-8"))
-    n_preliminary = len(preliminary_tokens)
+    n_preliminary = len(model.tokenize(preliminary_prompt.encode("utf-8")))
 
     # Calculate available tokens accounting for budget guidance overhead
     available = n_ctx - n_preliminary - budget_guidance_tokens
@@ -1003,23 +1029,19 @@ def calculate_token_budget(model, messages: List, system_prompt: str, model_path
                      "Reduce conversation history and retry.")
         return None, 0, n_preliminary, error_msg
 
-    # Clamp to requested max_tokens
     clamped_max = min(max_tokens, available)
 
-    # Now build the final prompt with actual budget guidance
+    # Build the real prompt with actual budget number.
+    # The token count difference from changing "99999" to the real number is negligible
+    # (a few tokens at most), so we use the estimated n_prompt without re-tokenizing.
     budget_guidance = Config.TOKEN_BUDGET_GUIDANCE.format(available_tokens=clamped_max)
     augmented_system_prompt = f"{system_prompt}\n{budget_guidance}"
     prompt = build_model_prompt(messages, augmented_system_prompt, model_path)
-
-    # Final token count for logging
-    final_tokens = model.tokenize(prompt.encode("utf-8"))
-    n_prompt = len(final_tokens)
-    final_available = n_ctx - n_prompt
-    clamped_max = min(max_tokens, final_available)
+    n_prompt = n_preliminary + budget_guidance_tokens
 
     if clamped_max < max_tokens:
         logger.info(
-            "Clamped max_tokens %d -> %d for %s (prompt=%d, n_ctx=%d)",
+            "Clamped max_tokens %d -> %d for %s (prompt~%d, n_ctx=%d)",
             max_tokens, clamped_max, model_id, n_prompt, n_ctx
         )
 
@@ -1146,11 +1168,13 @@ _cors_origins_raw = os.getenv("CORS_ORIGINS", "localhost,127.0.0.1").split(",")
 _cors_origins = []
 for origin in _cors_origins_raw:
     origin = origin.strip()
+    if not origin:
+        continue
     if origin == "*":
         _cors_origins = ["*"]
         break
     # Ensure origins have a scheme — bare hostnames don't match in CORS
-    if origin and not origin.startswith("http"):
+    if not origin.startswith("http"):
         _cors_origins.append(f"http://{origin}")
     else:
         _cors_origins.append(origin)
@@ -1222,8 +1246,8 @@ async def list_models():
     return {"object": "list", "data": models}
 
 
-@app.post("/v1/memory")
-def save_memory(request: MemoryRequest):
+@app.post("/v1/memory", dependencies=[Depends(verify_admin_key)])
+def save_memory_endpoint(request: MemoryRequest):
     """Save a memory/fact to the long-term storage.
 
     If *source* is provided (e.g. a file path like "main.swift"), the text is
@@ -1250,8 +1274,8 @@ def save_memory(request: MemoryRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/v1/memory/search")
-def search_memory(request: SearchRequest):
+@app.post("/v1/memory/search", dependencies=[Depends(verify_admin_key)])
+def search_memory_endpoint(request: SearchRequest):
     """Search for relevant memories in the long-term storage"""
     if not memory_service:
         raise HTTPException(status_code=503, detail="Memory service not initialized")
@@ -1265,8 +1289,8 @@ def search_memory(request: SearchRequest):
 
 
 
-@app.post("/v1/tools/search")
-def web_search(request: SearchRequest):
+@app.post("/v1/tools/search", dependencies=[Depends(verify_admin_key)])
+def web_search_endpoint(request: SearchRequest):
     """Perform a web search using DuckDuckGo"""
     if not web_search_service:
         raise HTTPException(status_code=503, detail="Web search service not initialized")
@@ -1281,8 +1305,8 @@ class DeepDocRequest(BaseModel):
     arguments: Dict[str, Any]
 
 
-@app.post("/v1/tools/apple_deep_docs")
-def apple_deep_docs(request: DeepDocRequest):
+@app.post("/v1/tools/apple_deep_docs", dependencies=[Depends(verify_admin_key)])
+def apple_deep_docs_endpoint(request: DeepDocRequest):
     """Perform an Apple Documentation search using the server-side MCP"""
     if not apple_deep_docs_service:
         raise HTTPException(status_code=503, detail="Apple Deep Docs service not initialized")
@@ -1291,8 +1315,8 @@ def apple_deep_docs(request: DeepDocRequest):
     return {"result": result}
 
 
-@app.post("/v1/memory/ingest")
-def ingest_memory(request: IngestRequest):
+@app.post("/v1/memory/ingest", dependencies=[Depends(verify_admin_key)])
+def ingest_memory_endpoint(request: IngestRequest):
     """Ingest a local PDF file into long-term memory"""
     if not memory_service:
         raise HTTPException(status_code=503, detail="Memory service not initialized")
@@ -1331,12 +1355,20 @@ class FileUploadRequest(BaseModel):
     content: str  # Base64 encoded content
 
 
-@app.post("/v1/files/upload")
-def upload_file(request: FileUploadRequest):
+@app.post("/v1/files/upload", dependencies=[Depends(verify_admin_key)])
+def upload_file_endpoint(request: FileUploadRequest):
     """Upload a file to the server's temporary directory"""
     try:
         import base64
         import tempfile
+
+        # Reject oversized uploads before decoding (100 MB base64 ≈ 75 MB file)
+        MAX_UPLOAD_B64_LEN = 100 * 1024 * 1024
+        if len(request.content) > MAX_UPLOAD_B64_LEN:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Upload too large ({len(request.content) // (1024*1024)} MB base64). Max: 100 MB"
+            )
 
         # Decode the base64 content
         try:
@@ -1365,8 +1397,8 @@ def upload_file(request: FileUploadRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/v1/chat/completions")
-def chat_completions(request: ChatCompletionRequest, raw_request: Request):
+@app.post("/v1/chat/completions", dependencies=[Depends(verify_admin_key)])
+async def chat_completions(request: ChatCompletionRequest, raw_request: Request):
     """Handle chat completion requests (OpenAI-compatible)"""
     try:
         # Validate model exists
@@ -1432,9 +1464,14 @@ def chat_completions(request: ChatCompletionRequest, raw_request: Request):
                     media_type="text/event-stream"
                 )
             else:
-                return llama_server_manager.proxy_sync(
-                    request.messages, augmented_system, request.model,
-                    clamped_max, request.temperature, model_config=model_config)
+                # Run blocking sync inference in thread pool to keep event loop responsive
+                loop = asyncio.get_event_loop()
+                return await loop.run_in_executor(
+                    None,
+                    lambda: llama_server_manager.proxy_sync(
+                        request.messages, augmented_system, request.model,
+                        clamped_max, request.temperature, model_config=model_config)
+                )
         else:
             # Standard llama_cpp path
             if request.stream:
@@ -1444,8 +1481,12 @@ def chat_completions(request: ChatCompletionRequest, raw_request: Request):
                     media_type="text/event-stream"
                 )
             else:
-                return sync_completion(request.messages, system_prompt, model_path, request.model,
-                                       request.max_tokens, request.temperature)
+                loop = asyncio.get_event_loop()
+                return await loop.run_in_executor(
+                    None,
+                    lambda: sync_completion(request.messages, system_prompt, model_path, request.model,
+                                            request.max_tokens, request.temperature)
+                )
 
     except HTTPException:
         raise
