@@ -157,19 +157,21 @@ class IngestRequest(BaseModel):
 # ============================================================================
 
 def _create_model_config(path_env, path_default, n_gpu_layers, n_ctx=32768, n_batch=2048, backend='llama_cpp',
-                         server_extra_args=None, logit_bias=None, yarn=False):
+                         server_extra_args=None, logit_bias=None, yarn=False, type_k=8, type_v=8):
     """Helper function to create standardized model configurations.
 
     Args:
         yarn: If True, include YaRN RoPE scaling parameters. Only needed for models
               using extended context via YaRN (e.g. 480B Ultra with 2x scaling).
+        type_k: GGML type for KV cache keys (8=Q8_0, 2=Q4_0). Default Q8_0.
+        type_v: GGML type for KV cache values (8=Q8_0, 2=Q4_0). Default Q8_0.
     """
     config = {
         'path': os.getenv(path_env, path_default),
         'n_gpu_layers': n_gpu_layers,
         'n_ctx': n_ctx,
         'n_batch': n_batch,
-        'type_k': 8, 'type_v': 8, 'offload_kqv': True,
+        'type_k': type_k, 'type_v': type_v, 'offload_kqv': True,
         'backend': backend,
     }
     if yarn:
@@ -402,18 +404,22 @@ CONTEXT MANAGEMENT — your context window is limited. Work efficiently:
 
     # ── Shared model configs ──
     # Turbo: Optimized for speed and 80k context on RTX 5080 (Success Formula)
+    # Q4_0 KV cache halves cache VRAM vs Q8_0, enabling 34 GPU layers (up from 32)
+    # ngl=34: 15,108 MiB / 1,195 MiB free | ngl=35: 813 MiB free (tight) | ngl=36: OOM
     _CODER_30B_TURBO = _create_model_config(
         'MODEL_PATH_30B_TURBO',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
-        32, 81920, 2048
+        34, 81920, 2048, type_k=2, type_v=2
     )
 
     # FAST: Lightweight Q4_K_M for quick implementation tasks (256k native context, moderate GPU)
     # Alternative to the 80B Next model when speed matters more than quality
+    # Q4_0 KV cache is REQUIRED — Q8_0 OOMs at ngl≥22 with 262K context
+    # ngl=26: 14,888 MiB / 1,415 MiB free | ngl=27: 937 MiB free (tight) | ngl=28: OOM
     _CODER_30B_FAST = _create_model_config(
         'MODEL_PATH_30B_FAST',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
-        22, 262144, 1024
+        26, 262144, 1024, type_k=2, type_v=2
     )
 
     # NEXT: Qwen3-Coder-Next-Q8_0 (80B MoE with 3B active params)
@@ -693,6 +699,12 @@ class LlamaServerManager:
     HEALTH_POLL_INTERVAL = 0.5
     HEALTH_TIMEOUT = 120  # seconds to wait for /health
 
+    # GGML type enum → llama-server --cache-type string
+    _CACHE_TYPE_NAMES = {
+        0: 'f32', 1: 'f16', 2: 'q4_0', 3: 'q4_1',
+        6: 'q5_0', 7: 'q5_1', 8: 'q8_0', 9: 'q8_1',
+    }
+
     def __init__(self):
         self.lock = Lock()
         self.process: Optional[subprocess.Popen] = None
@@ -710,6 +722,10 @@ class LlamaServerManager:
             raise FileNotFoundError(f"llama-server binary not found: {binary}")
 
         model_path = model_config['path']
+        # Map GGML type_k/type_v integers to llama-server flag strings
+        cache_k = self._CACHE_TYPE_NAMES.get(model_config.get('type_k', 8), 'q8_0')
+        cache_v = self._CACHE_TYPE_NAMES.get(model_config.get('type_v', 8), 'q8_0')
+
         cmd = [
             binary,
             '-m', model_path,
@@ -719,6 +735,8 @@ class LlamaServerManager:
             '-t', str(Config.DEFAULT_N_THREADS),
             '-tb', str(Config.DEFAULT_N_THREADS),
             '-fa', 'on',
+            '--cache-type-k', cache_k,
+            '--cache-type-v', cache_v,
             '--host', '127.0.0.1',
             '--port', str(self.LLAMA_SERVER_PORT),
             '-np', '1',
