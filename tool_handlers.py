@@ -11,13 +11,21 @@ import re
 import subprocess
 import json
 import shlex
+import shutil
+import hashlib
 import tempfile
 import time
 import logging
+import difflib
 import glob as glob_module
 
 from datetime import datetime
 from typing import Optional, List
+
+try:
+    from rich.syntax import Syntax
+except ImportError:
+    Syntax = None
 
 
 # Module-level references set by configure()
@@ -28,8 +36,18 @@ _logger = None
 _temp_tracker = None  # dict with 'add', 'remove', 'cleanup' functions
 _external_handlers = None  # dict with save_memory, web_search, etc.
 
+# Extended state (set via configure **kwargs)
+_rich_console = None
+_permission_mode = 'default'  # 'default' | 'acceptEdits' | 'yolo'
+_verbose_mode = True  # True=full output, False=compact one-liners
 
-def configure(config, colors, print_colored_fn, logger_inst, temp_tracker, external_handlers):
+# Checkpoint state for /undo
+_CHECKPOINT_DIR = os.path.expanduser("~/.qwen_checkpoints")
+_checkpoint_stack = []  # List of (original_path, checkpoint_path, timestamp)
+_MAX_CHECKPOINTS = 20
+
+
+def configure(config, colors, print_colored_fn, logger_inst, temp_tracker, external_handlers, **kwargs):
     """Initialize module-level references needed by all handler functions.
 
     Args:
@@ -41,14 +59,144 @@ def configure(config, colors, print_colored_fn, logger_inst, temp_tracker, exter
         external_handlers: dict with keys 'save_memory', 'web_search',
             'handle_cupertino_search', 'handle_apple_deep_docs', 'ingest_pdf',
             'ingest_url_content' mapping to their respective functions.
+        **kwargs: Extended options — rich_console, permission_mode, verbose_mode.
     """
     global _config, _colors, _print_colored, _logger, _temp_tracker, _external_handlers
+    global _rich_console, _permission_mode, _verbose_mode
     _config = config
     _colors = colors
     _print_colored = print_colored_fn
     _logger = logger_inst
     _temp_tracker = temp_tracker
     _external_handlers = external_handlers
+    _rich_console = kwargs.get('rich_console', None)
+    _permission_mode = kwargs.get('permission_mode', getattr(config, 'PERMISSION_MODE', 'default'))
+    _verbose_mode = kwargs.get('verbose_mode', getattr(config, 'VERBOSE_MODE', True))
+
+
+def set_permission_mode(mode):
+    """Update permission mode at runtime (called by /permissions command)."""
+    global _permission_mode
+    _permission_mode = mode
+
+
+def set_verbose_mode(mode):
+    """Update verbose mode at runtime (called by /verbose command)."""
+    global _verbose_mode
+    _verbose_mode = mode
+
+
+def _should_auto_approve(tool_name):
+    """Check if a tool operation should be auto-approved based on permission mode.
+
+    Args:
+        tool_name: One of 'REMOTE_EXEC', 'WRITE_FILE', 'EDIT_FILE', 'READ_FILE', etc.
+
+    Returns:
+        bool: True if the operation should be auto-approved.
+    """
+    if _permission_mode == 'yolo':
+        return True
+    if _permission_mode == 'acceptEdits':
+        # Auto-approve everything EXCEPT shell commands
+        return tool_name != 'REMOTE_EXEC'
+    return False  # 'default' — prompt for everything
+
+
+def _display_diff(old_text, new_text, filepath):
+    """Display a colored unified diff. Uses rich if available, else ANSI."""
+    diff_lines = list(difflib.unified_diff(
+        old_text.splitlines(keepends=True),
+        new_text.splitlines(keepends=True),
+        fromfile=f"a/{filepath}",
+        tofile=f"b/{filepath}",
+    ))
+    if not diff_lines:
+        _print_colored("   (no changes)", _colors['CYAN'])
+        return
+
+    diff_text = ''.join(diff_lines)
+    if _rich_console:
+        _rich_console.print(Syntax(diff_text, "diff", theme="monokai", word_wrap=True))
+    else:
+        for line in diff_lines:
+            line = line.rstrip('\n')
+            if line.startswith('+'):
+                _print_colored(line, _colors['GREEN'])
+            elif line.startswith('-'):
+                _print_colored(line, _colors['FAIL'])
+            elif line.startswith('@@'):
+                _print_colored(line, _colors['CYAN'])
+            else:
+                print(line)
+
+
+def _create_checkpoint(filepath):
+    """Backup a file before modification for /undo support."""
+    if not os.path.exists(filepath):
+        return
+    os.makedirs(_CHECKPOINT_DIR, exist_ok=True)
+    path_hash = hashlib.md5(filepath.encode()).hexdigest()[:8]
+    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+    basename = os.path.basename(filepath)
+    checkpoint_name = f"{path_hash}_{ts}_{basename}"
+    checkpoint_path = os.path.join(_CHECKPOINT_DIR, checkpoint_name)
+    shutil.copy2(filepath, checkpoint_path)
+    _checkpoint_stack.append((filepath, checkpoint_path, ts))
+    # FIFO cleanup
+    while len(_checkpoint_stack) > _MAX_CHECKPOINTS:
+        _, old_path, _ = _checkpoint_stack.pop(0)
+        try:
+            os.remove(old_path)
+        except OSError:
+            pass
+    _logger.info(f"Checkpoint created: {checkpoint_path}")
+
+
+def undo_last_checkpoint():
+    """Restore the most recently checkpointed file. Called by /undo command."""
+    if not _checkpoint_stack:
+        return "No checkpoints available to undo."
+    original_path, checkpoint_path, ts = _checkpoint_stack.pop()
+    if not os.path.exists(checkpoint_path):
+        return f"Checkpoint file missing: {checkpoint_path}"
+    shutil.copy2(checkpoint_path, original_path)
+    os.remove(checkpoint_path)
+    return f"Restored {original_path} from checkpoint ({ts})"
+
+
+def _compact_summary(tag, arg, result):
+    """Generate a one-line summary for compact display mode."""
+    if not result:
+        return None
+    result_len = len(result)
+    line_count = result.count('\n') + 1
+    if tag == 'READ_FILE':
+        path = arg.strip().split('\n')[0]
+        return f"  [read] {path} ({line_count} lines)"
+    elif tag == 'REMOTE_EXEC':
+        cmd = arg.strip().split('\n')[0][:60]
+        return f"  [exec] {cmd} ({result_len} chars)"
+    elif tag == 'WRITE_FILE':
+        path = arg.strip().split('\n')[0]
+        return f"  [write] {path} ({result_len} chars)"
+    elif tag == 'EDIT_FILE':
+        path = arg.strip().split('\n')[0]
+        return f"  [edit] {path}"
+    elif tag == 'LIST_DIR':
+        path = arg.strip()
+        return f"  [ls] {path} ({line_count} entries)"
+    elif tag == 'GLOB':
+        return f"  [glob] {arg.strip()[:40]} ({line_count} matches)"
+    elif tag == 'GREP':
+        pattern = arg.strip().split('|')[0][:30]
+        return f"  [grep] {pattern} ({line_count} results)"
+    elif tag == 'SAVE_MEMORY':
+        return f"  [memory] saved ({result_len} chars)"
+    elif tag == 'WEB_SEARCH':
+        return f"  [search] {arg.strip()[:40]}"
+    else:
+        return f"  [{tag.lower()}] ({result_len} chars)"
 
 
 def parse_command_safely(command: str) -> List[str]:
@@ -329,9 +477,9 @@ def execute_remote_command(command, chunk_output=True):
         _logger.error("Unexpected error during command validation: %s - %s", command, str(e), exc_info=True)
         return f"Command validation failed with unexpected error: {str(e)}"
 
-    if _config.ALLOW_ALL:
-        _print_colored(f"   Auto-approved (ALLOW_ALL mode enabled)", _colors['GREEN'])
-        _logger.info("Auto-approving command due to ALLOW_ALL setting: %s", command)
+    if _should_auto_approve('REMOTE_EXEC'):
+        _print_colored(f"   Auto-approved ({_permission_mode} mode)", _colors['GREEN'])
+        _logger.info("Auto-approving command (%s mode): %s", _permission_mode, command)
         choice = 'y'
     else:
         try:
@@ -473,21 +621,29 @@ def write_file_content(payload):
         # Security check - log what we're doing
         _logger.info(f"Writing file: {full_path} ({len(content)} bytes)")
 
-        # Prompt for confirmation unless ALLOW_ALL is set
+        # Show diff if overwriting existing file, else preview
         _print_colored(f"\nAgent wants to write file: {full_path}", _colors['WARNING'])
         _print_colored(f"   Content size: {len(content)} bytes", _colors['WARNING'])
 
-        # Show preview of content (first few lines)
-        preview_lines = content.split('\n')[:5]
-        preview = '\n'.join(preview_lines)
-        total_lines = content.count('\n') + 1
-        if len(preview_lines) < total_lines:
-            preview += f"\n... ({total_lines} total lines)"
-        _print_colored(f"   Preview:\n{preview[:500]}", _colors['CYAN'])
+        if os.path.exists(full_path):
+            try:
+                with open(full_path, 'r', encoding='utf-8', errors='replace') as ef:
+                    existing = ef.read()
+                _display_diff(existing, content, path)
+            except Exception:
+                pass  # Fall through to preview if diff fails
+        else:
+            _print_colored(f"   (new file)", _colors['CYAN'])
+            preview_lines = content.split('\n')[:5]
+            preview = '\n'.join(preview_lines)
+            total_lines = content.count('\n') + 1
+            if len(preview_lines) < total_lines:
+                preview += f"\n... ({total_lines} total lines)"
+            _print_colored(f"   Preview:\n{preview[:500]}", _colors['CYAN'])
 
-        if _config.ALLOW_ALL:
-            _print_colored(f"   Auto-approved (ALLOW_ALL mode enabled)", _colors['GREEN'])
-            _logger.info(f"Auto-approving file write due to ALLOW_ALL setting: {full_path}")
+        if _should_auto_approve('WRITE_FILE'):
+            _print_colored(f"   Auto-approved ({_permission_mode} mode)", _colors['GREEN'])
+            _logger.info(f"Auto-approving file write ({_permission_mode} mode): {full_path}")
             choice = 'y'
         else:
             try:
@@ -499,6 +655,9 @@ def write_file_content(payload):
             if choice.lower() != 'y':
                 _logger.info(f"File write denied by user: {full_path}")
                 return "User denied file write."
+
+        # Checkpoint before overwriting
+        _create_checkpoint(full_path)
 
         # Write the file
         with open(full_path, 'w', encoding='utf-8') as f:
@@ -607,18 +766,17 @@ def edit_file_content(payload):
         if content == original_content:
             return "Error: No changes made - old text may not match exactly"
 
-        # Show diff preview
+        # Show unified diff
         _print_colored(f"\nAgent wants to edit file: {full_path}", _colors['WARNING'])
         _print_colored(f"   Replacements: {replacements_made}", _colors['CYAN'])
-
-        # Show brief diff
         old_lines = original_content.split('\n')
         new_lines = content.split('\n')
         _print_colored(f"   Lines: {len(old_lines)} -> {len(new_lines)}", _colors['CYAN'])
+        _display_diff(original_content, content, path)
 
-        if _config.ALLOW_ALL:
-            _print_colored(f"   Auto-approved (ALLOW_ALL mode enabled)", _colors['GREEN'])
-            _logger.info(f"Auto-approving file edit due to ALLOW_ALL setting: {full_path}")
+        if _should_auto_approve('EDIT_FILE'):
+            _print_colored(f"   Auto-approved ({_permission_mode} mode)", _colors['GREEN'])
+            _logger.info(f"Auto-approving file edit ({_permission_mode} mode): {full_path}")
             choice = 'y'
         else:
             try:
@@ -630,6 +788,9 @@ def edit_file_content(payload):
             if choice.lower() != 'y':
                 _logger.info(f"File edit denied by user: {full_path}")
                 return "User denied file edit."
+
+        # Checkpoint before editing
+        _create_checkpoint(full_path)
 
         # Write the edited content
         with open(full_path, 'w', encoding='utf-8') as f:
@@ -955,7 +1116,7 @@ def process_remote_commands(response_text: str) -> Optional[str]:
         tag = match.group(1).upper()
         content = match.group(2).strip()
         if content:  # skip empty blocks (e.g. stale closing tags parsed as openers)
-            all_matches.append((match.start(), match, command_handlers[tag]))
+            all_matches.append((match.start(), match, tag, command_handlers[tag]))
 
     if not all_matches:
         return None
@@ -965,7 +1126,7 @@ def process_remote_commands(response_text: str) -> Optional[str]:
     total_len = 0
     GLOBAL_MAX_LEN = 40000 # ~10k tokens global cap for tool outputs in one turn
 
-    for i, (_, match, handler) in enumerate(all_matches):
+    for i, (_, match, tag, handler) in enumerate(all_matches):
         if total_len > GLOBAL_MAX_LEN:
             results.append(f"\n... [OMITTED {len(all_matches) - i} ADDITIONAL COMMANDS TO PREVENT CONTEXT OVERFLOW] ...")
             break
@@ -978,6 +1139,11 @@ def process_remote_commands(response_text: str) -> Optional[str]:
         try:
             result = handler(arg)
             if result:
+                # In compact mode, show one-liner to user but keep full result for history
+                if not _verbose_mode:
+                    summary = _compact_summary(tag, arg, result)
+                    if summary:
+                        _print_colored(summary, _colors['CYAN'])
                 res_str = f"[Command {i+1}] {result}"
                 results.append(res_str)
                 total_len += len(res_str)

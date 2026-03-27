@@ -24,6 +24,18 @@ _pending_tasks_lock = threading.Lock()
 from datetime import datetime
 from typing import Optional, List
 import requests
+import difflib
+
+# Rich terminal rendering (optional — graceful fallback)
+try:
+    from rich.console import Console
+    from rich.syntax import Syntax
+    from rich.panel import Panel
+    RICH_AVAILABLE = True
+    rich_console = Console()
+except ImportError:
+    RICH_AVAILABLE = False
+    rich_console = None
 
 # Readline for command history and CLI editing
 try:
@@ -46,8 +58,24 @@ class Config:
 
     # Command execution security settings
     ALLOW_SHELL_MODE = os.getenv('ALLOW_SHELL_MODE', 'true').lower() == 'true'
-    ALLOW_ALL = os.getenv('ALLOW_ALL', 'false').lower() == 'true'
     COMMAND_WHITELIST = os.getenv('COMMAND_WHITELIST', '').split(',') if os.getenv('COMMAND_WHITELIST') else None
+
+    # Permission mode: 'default' (prompt all), 'acceptEdits' (auto-approve file ops), 'yolo' (auto-approve all)
+    # Backward compat: ALLOW_ALL=true maps to 'yolo' if PERMISSION_MODE not explicitly set
+    _explicit_perm = os.getenv('PERMISSION_MODE')
+    if _explicit_perm:
+        PERMISSION_MODE = _explicit_perm
+    elif os.getenv('ALLOW_ALL', 'false').lower() == 'true':
+        PERMISSION_MODE = 'yolo'
+    else:
+        PERMISSION_MODE = 'default'
+    ALLOW_ALL = PERMISSION_MODE == 'yolo'  # backward compat for any direct checks
+
+    # Display settings
+    VERBOSE_MODE = True  # True=full tool output, False=compact one-liners
+
+    # Session settings
+    SESSION_NAME = None
 
     # Temporary file settings
     HISTORY_FILE = os.path.expanduser("~/.qwen_client_history")
@@ -197,6 +225,7 @@ def save_chat_history(history, current_agent="implementer"):
         data = {
             "messages": cleaned,
             "last_agent": current_agent,
+            "session_name": config.SESSION_NAME,
             "timestamp": datetime.now().isoformat()
         }
         with open(config.CHAT_HISTORY_FILE, 'w') as f:
@@ -220,7 +249,7 @@ def _prune_history(history, max_messages=100):
     return pruned
 
 def load_chat_history():
-    """Load chat history from file if it exists. Returns (history, last_agent)"""
+    """Load chat history from file if it exists. Returns (history, last_agent, session_name)"""
     if os.path.exists(config.CHAT_HISTORY_FILE):
         try:
             with open(config.CHAT_HISTORY_FILE, 'r') as f:
@@ -233,6 +262,10 @@ def load_chat_history():
             else:
                 history = data.get("messages", [])
                 last_agent = data.get("last_agent", "implementer")
+                # Restore session name
+                saved_name = data.get("session_name")
+                if saved_name and not config.SESSION_NAME:
+                    config.SESSION_NAME = saved_name
 
             print_colored(f"Found saved session with {len(history)} messages.", COLORS['CYAN'])
             if last_agent != "implementer":
@@ -685,7 +718,10 @@ tool_handlers.configure(
         'handle_apple_deep_docs': handle_apple_deep_docs,
         'ingest_pdf': ingest_pdf,
         'ingest_url_content': ingest_url_content,
-    }
+    },
+    rich_console=rich_console if RICH_AVAILABLE else None,
+    permission_mode=config.PERMISSION_MODE,
+    verbose_mode=config.VERBOSE_MODE,
 )
 
 from tool_handlers import (
@@ -694,6 +730,7 @@ from tool_handlers import (
     read_file_content, write_file_content, edit_file_content,
     list_directory, glob_files, grep_search, ingest_pdf_content,
     process_remote_commands, extract_fallback_commands,
+    undo_last_checkpoint,
 )
 
 # Global queue for interrupted multi-agent chains
@@ -851,50 +888,63 @@ def get_completion(history, model, agent_theme):
                 print_colored(f"\nError: {error_text}", COLORS['FAIL'])
                 return None, None
 
-            for line in response.iter_lines():
-                # TTFT deadline: if we haven't received a first token yet,
-                # check if we've exceeded the timeout.  The server is likely
-                # stuck tokenizing an oversized prompt.
-                if not first_token_time and (time.time() - start_time) > TTFT_TIMEOUT:
-                    stop_progress.set()
-                    response.close()
-                    if _try_trim_and_retry():
-                        server_error_occurred = True
-                        break
-                    print_colored(f"\n[Client] TTFT timeout ({TTFT_TIMEOUT}s) — server not responding.", COLORS['FAIL'])
-                    return None, None
+            try:
+                for line in response.iter_lines():
+                    # TTFT deadline: if we haven't received a first token yet,
+                    # check if we've exceeded the timeout.  The server is likely
+                    # stuck tokenizing an oversized prompt.
+                    if not first_token_time and (time.time() - start_time) > TTFT_TIMEOUT:
+                        stop_progress.set()
+                        response.close()
+                        if _try_trim_and_retry():
+                            server_error_occurred = True
+                            break
+                        print_colored(f"\n[Client] TTFT timeout ({TTFT_TIMEOUT}s) — server not responding.", COLORS['FAIL'])
+                        return None, None
 
-                if line:
-                    line = line.decode('utf-8')
-                    if line.startswith("data: "):
-                        data_str = line[6:]
-                        if data_str == "[DONE]": break
-                        try:
-                            data = json.loads(data_str)
-                            if "choices" in data and len(data["choices"]) > 0:
-                                choice = data["choices"][0]
-                                delta = choice.get("delta", {})
-                                content = delta.get("content", "")
-                                if content:
-                                    if not first_token_time:
-                                        first_token_time = time.time()
-                                        stop_progress.set()
-                                    print(content, end="", flush=True)
-                                    full_response += content
-                                    chunk_count += 1
-                                # Capture finish_reason from the final chunk
-                                if choice.get("finish_reason"):
-                                    finish_reason = choice["finish_reason"]
-                            elif "error" in data:
-                                stop_progress.set()
-                                error_msg = data['error'].get('message', 'Unknown error')
-                                if _is_context_error(error_msg) and _try_trim_and_retry():
-                                    server_error_occurred = True
+                    if line:
+                        line = line.decode('utf-8')
+                        if line.startswith("data: "):
+                            data_str = line[6:]
+                            if data_str == "[DONE]": break
+                            try:
+                                data = json.loads(data_str)
+                                if "choices" in data and len(data["choices"]) > 0:
+                                    choice = data["choices"][0]
+                                    delta = choice.get("delta", {})
+                                    content = delta.get("content", "")
+                                    if content:
+                                        if not first_token_time:
+                                            first_token_time = time.time()
+                                            stop_progress.set()
+                                        print(content, end="", flush=True)
+                                        full_response += content
+                                        chunk_count += 1
+                                    # Capture finish_reason from the final chunk
+                                    if choice.get("finish_reason"):
+                                        finish_reason = choice["finish_reason"]
+                                elif "error" in data:
+                                    stop_progress.set()
+                                    error_msg = data['error'].get('message', 'Unknown error')
+                                    if _is_context_error(error_msg) and _try_trim_and_retry():
+                                        server_error_occurred = True
+                                        break
+                                    print_colored(f"\nServer Error: {error_msg}", COLORS['FAIL'])
+                                    finish_reason = "error"
                                     break
-                                print_colored(f"\nServer Error: {error_msg}", COLORS['FAIL'])
-                                finish_reason = "error"
-                                break
-                        except Exception: pass
+                            except Exception: pass
+            except KeyboardInterrupt:
+                stop_progress.set()
+                try:
+                    response.close()
+                except Exception:
+                    pass
+                if full_response:
+                    print_colored("\n[Interrupted] Keeping partial response.", COLORS['WARNING'])
+                    finish_reason = "interrupted"
+                    break
+                else:
+                    return None, None
 
             if server_error_occurred and context_retries <= MAX_CONTEXT_RETRIES:
                  server_error_occurred = False; full_response = ""; chunk_count = 0
@@ -955,7 +1005,17 @@ def handle_user_command(user_input, history, model, agent_theme):
         print(f"  /resume              - Resume interrupted multi-agent tasks")
         print(f"  /history             - Show recent command history")
         print(f"  /history clear       - Clear command history")
-        
+
+        print_colored(f"\n{COLORS['BOLD']}SESSION & DISPLAY:{COLORS['ENDC']}", COLORS['BLUE'])
+        print(f"  /permissions         - Cycle permission mode (default -> acceptEdits -> yolo)")
+        print(f"  /verbose             - Toggle verbose/compact tool output display")
+        print(f"  /context             - Show context window usage (tokens, budget)")
+        print(f"  /compact             - Manually compress conversation history")
+        print(f"  /undo                - Revert the last file modification")
+        print(f"  /rename <name>       - Name or rename the current session")
+        print(f"  \\ + Enter            - Multiline input (backslash continuation)")
+        print(f"  Ctrl+C               - Interrupt generation (keeps partial response)")
+
         print_colored(f"\n{COLORS['BOLD']}DOCUMENTATION TOOLS:{COLORS['ENDC']}", COLORS['BLUE'])
         print(f"  /cupertino <query>   - Search local Apple documentation on macOS")
         print(f"                         Example: /cupertino MTLMeshRenderPipelineDescriptor")
@@ -1148,6 +1208,87 @@ def handle_user_command(user_input, history, model, agent_theme):
         # Return False so the main loop picks up the /resume and processes tasks
         return False, model
 
+    # Permission mode toggle
+    if user_input.lower() == '/permissions':
+        modes = ['default', 'acceptEdits', 'yolo']
+        labels = {
+            'default': 'Prompt for all operations',
+            'acceptEdits': 'Auto-approve file ops, prompt for shell commands',
+            'yolo': 'Auto-approve everything (dangerous!)',
+        }
+        current_idx = modes.index(config.PERMISSION_MODE) if config.PERMISSION_MODE in modes else 0
+        config.PERMISSION_MODE = modes[(current_idx + 1) % len(modes)]
+        config.ALLOW_ALL = config.PERMISSION_MODE == 'yolo'
+        tool_handlers.set_permission_mode(config.PERMISSION_MODE)
+        color = COLORS['FAIL'] if config.PERMISSION_MODE == 'yolo' else COLORS['GREEN']
+        print_colored(f"Permission mode: {config.PERMISSION_MODE} — {labels[config.PERMISSION_MODE]}", color)
+        return True, model
+
+    # Verbose/compact toggle
+    if user_input.lower() == '/verbose':
+        config.VERBOSE_MODE = not config.VERBOSE_MODE
+        tool_handlers.set_verbose_mode(config.VERBOSE_MODE)
+        mode_str = "verbose (full tool output)" if config.VERBOSE_MODE else "compact (one-line summaries)"
+        print_colored(f"Display mode: {mode_str}", COLORS['GREEN'])
+        return True, model
+
+    # Context usage
+    if user_input.lower() == '/context':
+        total_chars = sum(len(m.get("content", "")) for m in history)
+        est_tokens = total_chars // 4
+        msg_count = len(history)
+        budget = HISTORY_CHAR_BUDGET
+        pct = (total_chars / budget) * 100 if budget > 0 else 0
+        bar_len = 30
+        filled = int(bar_len * pct / 100)
+        bar = f"[{'#' * filled}{'.' * (bar_len - filled)}]"
+        color = COLORS['FAIL'] if pct > 80 else COLORS['WARNING'] if pct > 50 else COLORS['GREEN']
+        print_colored(f"\nContext Usage:", COLORS['HEADER'])
+        print_colored(f"  Messages:  {msg_count}", COLORS['CYAN'])
+        print_colored(f"  Chars:     {total_chars:,} / {budget:,}", COLORS['CYAN'])
+        print_colored(f"  Est tokens: ~{est_tokens:,}", COLORS['CYAN'])
+        print_colored(f"  Budget:    {bar} {pct:.1f}%", color)
+        return True, model
+
+    # Manual context compression
+    if user_input.lower() == '/compact':
+        before_count = len(history)
+        before_chars = sum(len(m.get("content", "")) for m in history)
+        system_msgs = [m for m in history if m['role'] == 'system']
+        non_system = [m for m in history if m['role'] != 'system']
+        if len(non_system) <= 12:
+            print_colored("History is already compact.", COLORS['GREEN'])
+            return True, model
+        keep_start = non_system[:4]
+        keep_end = non_system[-8:]
+        compressed_count = len(non_system) - 12
+        summary_msg = {"role": "system", "content": f"[{compressed_count} earlier messages compressed to save context]"}
+        history[:] = system_msgs + keep_start + [summary_msg] + keep_end
+        after_chars = sum(len(m.get("content", "")) for m in history)
+        saved = before_chars - after_chars
+        print_colored(f"Compacted: {before_count} -> {len(history)} messages, freed ~{saved // 4:,} tokens", COLORS['GREEN'])
+        save_chat_history(history, model)
+        return True, model
+
+    # Undo last file modification
+    if user_input.lower() == '/undo':
+        result = undo_last_checkpoint()
+        color = COLORS['GREEN'] if 'Restored' in result else COLORS['WARNING']
+        print_colored(result, color)
+        return True, model
+
+    # Session rename
+    if user_input.lower().startswith('/rename '):
+        new_name = user_input.split(' ', 1)[1].strip()
+        if not new_name:
+            print_colored("Usage: /rename <session_name>", COLORS['FAIL'])
+            return True, model
+        config.SESSION_NAME = new_name
+        set_terminal_title(f"Qwen - {new_name}")
+        save_chat_history(history, model)
+        print_colored(f"Session renamed to: {new_name}", COLORS['GREEN'])
+        return True, model
+
     return False, model
 
 
@@ -1242,6 +1383,12 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                 response_text, finish_reason = get_completion(history, model, agent_theme)
                 if response_text is None:
                     task_aborted = True
+                    break
+
+                # ── Handle interrupted responses (Ctrl+C) ──
+                if finish_reason == "interrupted":
+                    history.append({"role": "assistant", "content": response_text})
+                    save_chat_history(history, model)
                     break
 
                 # ── Handle truncated responses (finish_reason == "length") ──
@@ -1392,16 +1539,26 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
         
     return model
 
-def chat(model="implementer"):
+def chat(model="implementer", session_name=None):
     """Main interactive chat loop"""
+    # Apply session name
+    if session_name:
+        config.SESSION_NAME = session_name
+        # Use a session-specific history file
+        safe_name = re.sub(r'[^\w\-]', '_', session_name)
+        config.CHAT_HISTORY_FILE = os.path.expanduser(f"~/.qwen_chat_history_{safe_name}.json")
+
     # Initialize readline for command history and editing
     setup_readline()
-    
+
     # Load available models from server
     fetch_available_models()
 
     print_colored(f"\nQwen Remote CLI (Connected to {config.LINUX_SERVER_IP})", COLORS['HEADER'])
-    set_terminal_title("Qwen - Idle")
+    title = f"Qwen - {config.SESSION_NAME}" if config.SESSION_NAME else "Qwen - Idle"
+    set_terminal_title(title)
+    if config.SESSION_NAME:
+        print_colored(f"Session: {config.SESSION_NAME}", COLORS['CYAN'])
     
     # Get initial theme
     if model not in AGENT_THEMES:
@@ -1423,26 +1580,20 @@ def chat(model="implementer"):
     print_colored(f"Agent: {model} {agent_theme['icon']}", COLORS['WARNING'])
     print_colored(f"({agent_theme['desc']})", COLORS['BLUE'])
 
-    print_colored("\nSecurity Settings:", COLORS['HEADER'])
+    perm_labels = {
+        'default': 'Prompt for all operations',
+        'acceptEdits': 'Auto-approve file ops, prompt for shell',
+        'yolo': 'Auto-approve ALL (dangerous!)',
+    }
+    perm_color = COLORS['FAIL'] if config.PERMISSION_MODE == 'yolo' else COLORS['GREEN']
+    print_colored(f"\nPermissions: {config.PERMISSION_MODE} — {perm_labels.get(config.PERMISSION_MODE, '?')}", perm_color)
     if config.ALLOW_SHELL_MODE:
-        print_colored("  Shell mode: ENABLED (allows pipes, redirects, etc.)", COLORS['WARNING'])
-    else:
-        print_colored("  Shell mode: DISABLED (safer, no shell injection)", COLORS['GREEN'])
+        print_colored("  Shell mode: ENABLED", COLORS['WARNING'])
+    print_colored(f"  Display: {'verbose' if config.VERBOSE_MODE else 'compact'} | Multiline: \\ + Enter", COLORS['BLUE'])
 
-    if config.COMMAND_WHITELIST:
-        print_colored(f"  Whitelist: {len(config.COMMAND_WHITELIST)} commands allowed", COLORS['GREEN'])
-        print_colored(f"    {', '.join(config.COMMAND_WHITELIST[:5])}{'...' if len(config.COMMAND_WHITELIST) > 5 else ''}", COLORS['CYAN'])
-    else:
-        print_colored("  Whitelist: DISABLED (all commands allowed)", COLORS['WARNING'])
-
-    if config.ALLOW_ALL:
-        print_colored("  Command approval: AUTO-APPROVE ALL (⚠️  NO PROMPTS - DANGEROUS!)", COLORS['FAIL'])
-    else:
-        print_colored("  Command approval: Manual (will prompt for each command)", COLORS['GREEN'])
-
-    print_colored("\nCommands: /help, /exit, /model <name>, /clear, /resume, /history, /cupertino <query>, /apple <tool> <args>, /ingest <path>, /scrape", COLORS['BLUE'])
+    print_colored("\nCommands: /help /exit /model /clear /resume /permissions /verbose /context /compact /undo /rename", COLORS['BLUE'])
     if READLINE_AVAILABLE:
-        print_colored("Use ↑/↓ arrows to navigate history. History saved to ~/.qwen_client_history\n", COLORS['BLUE'])
+        print_colored("Use arrow keys for history. Ctrl+C to interrupt generation.\n", COLORS['BLUE'])
     else:
         print_colored("(Install readline for command history support)\n", COLORS['WARNING'])
 
@@ -1479,6 +1630,13 @@ def chat(model="implementer"):
             # Pass the prompt directly to input() so readline handles it correctly
             try:
                 user_input = input(full_prompt)
+                # Multiline input: backslash + Enter continues on next line
+                while user_input.endswith('\\'):
+                    user_input = user_input[:-1] + '\n'
+                    try:
+                        user_input += input('... ')
+                    except EOFError:
+                        break
                 # Add user input to readline history (for up/down arrow navigation)
                 if user_input.strip():
                     add_to_history(user_input)
@@ -1546,7 +1704,14 @@ def chat(model="implementer"):
                 agent_theme = AGENT_THEMES[model]
 
         except KeyboardInterrupt:
-            break
+            # First Ctrl+C at prompt: warn. Second exits.
+            print_colored("\n(Press Ctrl+C again to exit, or type /exit)", COLORS['WARNING'])
+            try:
+                # Wait briefly for a second Ctrl+C
+                time.sleep(0.3)
+            except KeyboardInterrupt:
+                break
+            continue
 
     print_colored("\nGoodbye!", COLORS['HEADER'])
 
@@ -1554,10 +1719,11 @@ def chat(model="implementer"):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Qwen Remote Client")
     parser.add_argument("--model", type=str, default="implementer", help="Agent model to use")
+    parser.add_argument("--name", type=str, default=None, help="Name this session")
     args = parser.parse_args()
-    
+
     try:
-        chat(args.model)
+        chat(args.model, session_name=args.name)
     except Exception as e:
         print_colored(f"\nCRITICAL CLIENT ERROR: {e}", COLORS['FAIL'])
         import traceback
