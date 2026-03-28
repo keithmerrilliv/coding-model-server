@@ -233,7 +233,10 @@ class Config:
         "<<<WEB_SEARCH>>>query                             — web search",
         "<<<CUPERTINO>>>query                              — Apple docs (local MCP)",
         '<<<APPLE_DEEP_DOCS>>>{"tool":"NAME","arguments":{}}  — Apple docs (server MCP)',
-        "<<<INGEST_PDF>>>path                              — ingest a PDF file into memory (supports local: prefix for client files)"
+        "<<<INGEST_PDF>>>path                              — ingest a PDF file into memory (supports local: prefix for client files)",
+        "<<<SCRATCHPAD>>>                                  — update your working memory (FACTS, OPEN_QUESTIONS, DEAD_ENDS)",
+        "<<<PLAN>>>                                        — create/update your retrieval plan (GOAL, STEPS with [x]/[ ], CURRENT)",
+        "<<<CONFIDENCE>>>N                                 — report confidence 0-100 in your current information",
     ]
 
     # ── Combined tools ──
@@ -400,6 +403,26 @@ CONTEXT MANAGEMENT — your context window is limited. Work efficiently:
 - After reading a file, save key findings with <<<SAVE_MEMORY>>> before moving on.
   This lets you drop the raw content from context while retaining what matters.
 - Prefer <<<GREP>>> over <<<READ_FILE>>> when you only need to find specific content.
+
+WORKING MEMORY — track your progress across tool calls:
+<<<SCRATCHPAD>>>
+FACTS:
+- list key findings here
+OPEN_QUESTIONS:
+- what you still need to find
+DEAD_ENDS:
+- approaches that didn't work
+
+<<<PLAN>>>
+GOAL: What you're trying to accomplish
+STEPS:
+1. [ ] First step
+2. [ ] Second step
+CURRENT: 1
+
+<<<CONFIDENCE>>>N
+Report your confidence (0-100) that you have enough information to answer.
+Update these after each retrieval step. They help you stay organized and efficient.
 """ + MACOS_TOOLKIT
 
     # ── Shared model configs ──
@@ -483,6 +506,8 @@ CONTEXT MANAGEMENT — your context window is limited. Work efficiently:
         {"role": "assistant", "content": "<<<WRITE_FILE>>>/tmp/long_files.py\nimport subprocess, os\n\nresult = subprocess.run(['find', '.', '-name', '*.swift', '-type', 'f'], capture_output=True, text=True)\nfor path in sorted(result.stdout.strip().split('\\n')):\n    if path:\n        with open(path) as f:\n            count = sum(1 for _ in f)\n        if count > 500:\n            print(f'{count:>6} {path}')\n\n<<<REMOTE_EXEC>>>python3 /tmp/long_files.py"},
         {"role": "user", "content": "Resize all PNG images in assets/ to 512x512."},
         {"role": "assistant", "content": "Let me find the PNGs first:\n<<<GLOB>>>assets/**/*.png\n\nNow I'll resize them using macOS sips:\n<<<REMOTE_EXEC>>>for f in assets/*.png; do sips -z 512 512 \"$f\"; done"},
+        {"role": "user", "content": "Find and fix the bug causing 500 errors on the /api/chat endpoint."},
+        {"role": "assistant", "content": "<<<PLAN>>>\nGOAL: Find and fix 500 error on /api/chat\nSTEPS:\n1. [ ] Find the endpoint handler\n2. [ ] Trace the error path\n3. [ ] Identify the root cause\n4. [ ] Apply fix and verify\nCURRENT: 1\n\n<<<CONFIDENCE>>>10\n\nLet me start by finding the endpoint:\n<<<GREP>>>/api/chat|."},
     ]
 
     # ── Shared agent prompts ──

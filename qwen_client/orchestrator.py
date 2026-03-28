@@ -7,6 +7,7 @@ from qwen_client.display import set_terminal_title, send_macos_notification
 from qwen_client.models import AGENT_THEMES
 from qwen_client.history import save_chat_history
 from qwen_client.completion import get_completion
+from qwen_client.agentic.context import AgenticContext
 
 # Lazy-bound references set by main.py after tool_handlers.configure()
 _process_remote_commands = None
@@ -99,6 +100,14 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                 model = task_agent
                 agent_theme = AGENT_THEMES[model]
 
+            # ── Agentic context for this task ──
+            agentic_ctx = AgenticContext(task_content)
+            print_colored(
+                f"  Query type: {agentic_ctx.query_type.value} "
+                f"(budget: {agentic_ctx.budget.max_iterations} iterations)",
+                COLORS['CYAN']
+            )
+
             history.append({"role": "user", "content": task_content})
             save_chat_history(history, model)
 
@@ -109,7 +118,13 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
 
             while True:
                 _check_history_budget(history)
-                response_text, finish_reason = get_completion(history, model, agent_theme)
+
+                # ── Inject agentic context before completion ──
+                injection = agentic_ctx.get_pre_completion_injection()
+
+                response_text, finish_reason = get_completion(
+                    history, model, agent_theme, agentic_context=injection
+                )
                 if response_text is None:
                     task_aborted = True
                     break
@@ -157,11 +172,26 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                     history.append({"role": "assistant", "content": response_text})
                     save_chat_history(history, model)
 
-                # ── Execute commands found in the response ──
-                tool_output = _process_remote_commands(response_text)
+                # ── Process agentic markers (strip before tool parsing) ──
+                cleaned_response = agentic_ctx.process_response(response_text)
+
+                # Display plan if updated
+                plan_display = agentic_ctx.plan.display()
+                if plan_display:
+                    print_colored(plan_display, COLORS['CYAN'])
+
+                # Display confidence if reported
+                if agentic_ctx.confidence.current_confidence is not None:
+                    print_colored(
+                        f"  [Confidence: {agentic_ctx.confidence.current_confidence}%]",
+                        COLORS['BLUE']
+                    )
+
+                # ── Execute commands found in the cleaned response ──
+                tool_output = _process_remote_commands(cleaned_response)
 
                 if not tool_output and finish_reason == "stop":
-                    fallback_cmds = _extract_fallback_commands(response_text)
+                    fallback_cmds = _extract_fallback_commands(cleaned_response)
                     if fallback_cmds:
                         print_colored(
                             "\nAgent used code blocks instead of markers. Extracting commands...",
@@ -188,11 +218,40 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                             tool_output = "\n\n".join(results)
 
                 if tool_output:
+                    agentic_ctx.budget.increment()
+
+                    # ── Budget exhaustion: force synthesis ──
+                    if agentic_ctx.should_force_synthesis():
+                        print_colored(
+                            f"\n[Budget exhausted: {agentic_ctx.budget.current}/"
+                            f"{agentic_ctx.budget.max_iterations} iterations]",
+                            COLORS['WARNING']
+                        )
+                        history.append({
+                            "role": "user",
+                            "content": (
+                                f"Tool output:\n{tool_output}\n\n"
+                                "RETRIEVAL BUDGET EXHAUSTED. Synthesize your final answer "
+                                "now from all information gathered."
+                            ),
+                        })
+                        save_chat_history(history, model)
+                        # One final completion for synthesis, then done
+                        synth_text, _ = get_completion(history, model, agent_theme)
+                        if synth_text:
+                            history.append({"role": "assistant", "content": synth_text})
+                            save_chat_history(history, model)
+                        break
+
                     task_commands_executed = True
                     nudge_count = 0
                     cmd_count = tool_output.count("[Command ")
                     label = f"{cmd_count} command(s) executed" if cmd_count > 1 else "Tool result"
-                    print_colored(f"\n{label}. Sending output back to agent...", COLORS['CYAN'])
+                    print_colored(
+                        f"\n{label}. Sending output back to agent... "
+                        f"[{agentic_ctx.budget.current}/{agentic_ctx.budget.max_iterations}]",
+                        COLORS['CYAN']
+                    )
                     history.append({"role": "user", "content": f"Tool output:\n{tool_output}"})
                     save_chat_history(history, model)
                     continue
@@ -200,7 +259,7 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                 # ── Stall detection ──
                 if (task_commands_executed
                         and nudge_count < MAX_STALL_NUDGES
-                        and _looks_like_stall(response_text)):
+                        and _looks_like_stall(cleaned_response)):
                     nudge_count += 1
                     print_colored(
                         f"\n[Nudge {nudge_count}/{MAX_STALL_NUDGES}] "
