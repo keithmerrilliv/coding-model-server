@@ -489,6 +489,67 @@ Update these after each retrieval step. They help you stay organized and efficie
         logit_bias=[[200052, -100.0], [200053, -100.0]],
     )
 
+    # ── Qwen3.5 family ──
+
+    # Qwen3.5-35B-A3B Q4_K_M — successor to Coder-30B, same 3B active MoE
+    # 22 GB model. Qwen3.5 arch unsupported by llama-cpp-python 0.3.16 — needs llama_server.
+    # 131K native context. Q4_0 cache at 82K ctx.
+    # ngl=26: 14,691 MiB / 1,612 MiB free | ngl=28: 593 MiB free (too tight)
+    _QWEN35_35B = _create_model_config(
+        'MODEL_PATH_QWEN35_35B',
+        '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3.5-35B-A3B-GGUF/Qwen3.5-35B-A3B-Q4_K_M.gguf',
+        26, 81920, 2048, backend='llama_server',
+        server_extra_args=['--jinja', '--reasoning-format', 'none'],
+        type_k=2, type_v=2,
+    )
+
+    # Qwen3.5-122B-A10B Q4_K_M — mid-tier MoE (10B active, 76.5 GB, 3 shards)
+    # Strong agentic/function-calling (72.2 BFCL-V4). Mostly CPU, 4 GPU layers.
+    # Qwen3.5 arch unsupported by llama-cpp-python 0.3.16 — needs llama_server.
+    # 131K native context, using 65K to leave headroom.
+    _QWEN35_122B = _create_model_config(
+        'MODEL_PATH_QWEN35_122B',
+        '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3.5-122B-A10B-GGUF/Q4_K_M/Qwen3.5-122B-A10B-Q4_K_M-00001-of-00003.gguf',
+        4, 65536, 1024, backend='llama_server',
+        server_extra_args=['--jinja', '--reasoning-format', 'none'],
+    )
+
+    # Qwen3.5-397B-A17B IQ1_M — flagship (17B active, ~100 GB, 4 shards)
+    # Successor to 480B Coder as premium architect. 32K context (IQ1_M too
+    # aggressive for extended context, same lesson as 480B Lite).
+    # Qwen3.5 arch unsupported by llama-cpp-python 0.3.16 — needs llama_server.
+    _QWEN35_397B = _create_model_config(
+        'MODEL_PATH_QWEN35_397B',
+        '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3.5-397B-A17B-GGUF/UD-IQ1_M/Qwen3.5-397B-A17B-UD-IQ1_M-00001-of-00004.gguf',
+        4, 32768, 1024, backend='llama_server',
+        server_extra_args=['--jinja', '--reasoning-format', 'none'],
+    )
+
+    # ── Non-Qwen models ──
+
+    # Nemotron-3-Nano-30B-A3B Q4_K_M — NVIDIA hybrid Mamba-Transformer MoE
+    # 3.5B active, 24.6 GB. Needs llama_server (nemotron_h_moe arch not in llama-cpp-python).
+    # 32K native context. ~3.3x throughput vs Qwen3-30B on same hardware.
+    # ngl=28: 14,339 MiB / 1,964 MiB free | ngl=30: 1,084 MiB free | ngl=32: OOM
+    _NEMOTRON_NANO = _create_model_config(
+        'MODEL_PATH_NEMOTRON_NANO',
+        '/home/keith-merrill/.lmstudio/models/unsloth/Nemotron-3-Nano-30B-A3B-GGUF/Nemotron-3-Nano-30B-A3B-Q4_K_M.gguf',
+        28, 32768, 2048, backend='llama_server',
+        server_extra_args=['--jinja', '--reasoning-format', 'none'],
+    )
+
+    # GLM-4.7-Flash Q4_K_M — Zhipu AI 30B-A3B MoE, 18.3 GB
+    # Uses llama_server for proper glm4 template handling. 128K native context.
+    # Q4_0 cache at 82K ctx. Smallest model — can push most GPU layers.
+    # ngl=34: 14,491 MiB / 1,812 MiB free | ngl=36: 1,022 MiB free | ngl=38: OOM
+    _GLM47_FLASH = _create_model_config(
+        'MODEL_PATH_GLM47_FLASH',
+        '/home/keith-merrill/.lmstudio/models/unsloth/GLM-4.7-Flash-GGUF/GLM-4.7-Flash-Q4_K_M.gguf',
+        34, 81920, 2048, backend='llama_server',
+        server_extra_args=['--jinja', '--reasoning-format', 'none'],
+        type_k=2, type_v=2,
+    )
+
     # ── Few-shot example injected for executor agents ──
     # The model sees this as a real prior exchange, so it copies the format.
     FEW_SHOT = [
@@ -574,6 +635,38 @@ Update these after each retrieval step. They help you stay organized and efficie
             'MiniMax M2.5 Architect (230B MoE, 10B active)',
             _ARCHITECT_SYSTEM_PROMPT,
             _MINIMAX_M25,
+            executor=True
+        ),
+        # ── Qwen3.5 agents ──
+        'q35_implementer': _create_agent_config(
+            'Qwen3.5-35B-A3B Q4_K_M (successor to Coder-30B)',
+            _IMPLEMENTER_SYSTEM_PROMPT,
+            _QWEN35_35B,
+            executor=True
+        ),
+        'q35_architect': _create_agent_config(
+            'Qwen3.5-122B-A10B Mid-tier Architect (10B active, 65K ctx)',
+            _ARCHITECT_SYSTEM_PROMPT,
+            _QWEN35_122B,
+            executor=True
+        ),
+        'q35_ultra': _create_agent_config(
+            'Qwen3.5-397B-A17B Flagship Architect (17B active)',
+            _ARCHITECT_SYSTEM_PROMPT,
+            _QWEN35_397B,
+            executor=True
+        ),
+        # ── Non-Qwen agents ──
+        'nemotron': _create_agent_config(
+            'Nemotron-3-Nano 30B-A3B (3.5B active, Mamba hybrid, fast throughput)',
+            _IMPLEMENTER_SYSTEM_PROMPT,
+            _NEMOTRON_NANO,
+            executor=True
+        ),
+        'glm': _create_agent_config(
+            'GLM-4.7-Flash 30B-A3B (Zhipu AI, 3B active MoE)',
+            _IMPLEMENTER_SYSTEM_PROMPT,
+            _GLM47_FLASH,
             executor=True
         ),
     }

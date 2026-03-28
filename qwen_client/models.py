@@ -44,6 +44,11 @@ def _load_fallback_themes():
         "metal_implementer": "Metal & Graphics (Offline)",
         "m25_implementer": "MiniMax M2.5 Implementer (Offline)",
         "m25_architect": "MiniMax M2.5 Architect (Offline)",
+        "q35_implementer": "Qwen3.5-35B Implementer (Offline)",
+        "q35_architect": "Qwen3.5-122B Architect (Offline)",
+        "q35_ultra": "Qwen3.5-397B Ultra Architect (Offline)",
+        "nemotron": "Nemotron-3-Nano Implementer (Offline)",
+        "glm": "GLM-4.7-Flash Implementer (Offline)",
     }
     for mid, desc in defaults.items():
         style = THEME_STYLES.get(mid, THEME_STYLES["default"])
