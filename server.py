@@ -12,6 +12,7 @@ import subprocess
 import logging
 import gc
 import hmac
+import re
 import asyncio
 from datetime import datetime
 from typing import Dict, List, Optional, Any, Literal, Iterator
@@ -504,24 +505,26 @@ Update these after each retrieval step. They help you stay organized and efficie
     )
 
     # Qwen3.5-122B-A10B Q4_K_M — mid-tier MoE (10B active, 76.5 GB, 3 shards)
-    # Strong agentic/function-calling (72.2 BFCL-V4). Mostly CPU, 4 GPU layers.
+    # Strong agentic/function-calling (72.2 BFCL-V4). Mostly CPU, limited GPU layers.
     # Qwen3.5 arch unsupported by llama-cpp-python 0.3.16 — needs llama_server.
     # 131K native context, using 65K to leave headroom.
+    # ngl=4: 6,984 MiB free | ngl=8: 2,798 MiB free | ngl=9: 1,297 MiB free (~1,507 MiB/layer)
     _QWEN35_122B = _create_model_config(
         'MODEL_PATH_QWEN35_122B',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3.5-122B-A10B-GGUF/Q4_K_M/Qwen3.5-122B-A10B-Q4_K_M-00001-of-00003.gguf',
-        4, 65536, 1024, backend='llama_server',
+        9, 65536, 1024, backend='llama_server',
         server_extra_args=['--jinja', '--reasoning-format', 'none'],
     )
 
-    # Qwen3.5-397B-A17B IQ1_M — flagship (17B active, ~100 GB, 4 shards)
+    # Qwen3.5-397B-A17B IQ1_M — flagship (17B active, ~100 GB, 4 shards, 60 layers)
     # Successor to 480B Coder as premium architect. 32K context (IQ1_M too
     # aggressive for extended context, same lesson as 480B Lite).
     # Qwen3.5 arch unsupported by llama-cpp-python 0.3.16 — needs llama_server.
+    # ngl=4: 8,395 MiB free | ngl=8: 1,647 MiB free (~1,687 MiB/layer, 60 layers total)
     _QWEN35_397B = _create_model_config(
         'MODEL_PATH_QWEN35_397B',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3.5-397B-A17B-GGUF/UD-IQ1_M/Qwen3.5-397B-A17B-UD-IQ1_M-00001-of-00004.gguf',
-        4, 32768, 1024, backend='llama_server',
+        8, 32768, 1024, backend='llama_server',
         server_extra_args=['--jinja', '--reasoning-format', 'none'],
     )
 
@@ -1001,6 +1004,7 @@ class LlamaServerManager:
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
         finish_reason = None
         accumulated_text = []  # Diagnostic: capture full response
+        think_stripper = ThinkingStripper()
 
         try:
             with http_requests.post(url, json=payload, stream=True, timeout=600) as resp:
@@ -1036,9 +1040,12 @@ class LlamaServerManager:
 
                         if content:
                             accumulated_text.append(content)
-                            self.last_request_time = time.time()  # Keep watchdog at bay during long streams
-                            out_chunk = build_stream_chunk(completion_id, model_id, content=content)
-                            yield f"data: {json.dumps(out_chunk)}\n\n"
+                            # Strip <think>...</think> blocks from streaming output
+                            filtered = think_stripper.feed(content)
+                            if filtered:
+                                self.last_request_time = time.time()  # Keep watchdog at bay during long streams
+                                out_chunk = build_stream_chunk(completion_id, model_id, content=filtered)
+                                yield f"data: {json.dumps(out_chunk)}\n\n"
                     except json.JSONDecodeError:
                         continue
 
@@ -1048,6 +1055,12 @@ class LlamaServerManager:
             yield f"data: {json.dumps(error_chunk)}\n\n"
             yield "data: [DONE]\n\n"
             return
+
+        # Flush any remaining buffered content from the thinking stripper
+        remaining = think_stripper.flush()
+        if remaining:
+            out_chunk = build_stream_chunk(completion_id, model_id, content=remaining)
+            yield f"data: {json.dumps(out_chunk)}\n\n"
 
         # Log the full response for diagnostics (repr escapes newlines for single-line journald)
         full_text = ''.join(accumulated_text)
@@ -1083,6 +1096,7 @@ class LlamaServerManager:
 
         result = resp.json()
         text = result["choices"][0]["message"]["content"]
+        text = strip_thinking(text)
         finish_reason = result["choices"][0].get("finish_reason", "stop")
         usage = result.get("usage", {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
 
@@ -1104,8 +1118,85 @@ class LlamaServerManager:
 
 
 # ============================================================================
+# Thinking Tag Stripping
+# ============================================================================
+
+# Models with --reasoning-format none still emit thinking content in raw text.
+# Two patterns observed:
+#   1. Full block:  <think>reasoning...</think>actual response
+#   2. Orphan close: reasoning...</think>actual response  (Jinja consumed <think>)
+_THINK_FULL_RE = re.compile(r'<think>.*?</think>\s*', re.DOTALL)
+_THINK_ORPHAN_RE = re.compile(r'^.*?</think>\s*', re.DOTALL)
+
+
+def strip_thinking(text: str) -> str:
+    """Remove thinking content from completed text."""
+    text = _THINK_FULL_RE.sub('', text)
+    text = _THINK_ORPHAN_RE.sub('', text)
+    return text
+
+
+class ThinkingStripper:
+    """Streaming state machine that suppresses thinking content.
+
+    Handles two patterns:
+        1. <think>reasoning...</think>response  (full block)
+        2. reasoning...</think>response          (orphan — Jinja consumed <think>)
+
+    Buffers all tokens until </think> is found, then emits everything after it.
+    Thinking content can itself contain tool markers (<<<WRITE_FILE>>> etc.)
+    as the model reasons about tools, so we cannot use those as shortcuts.
+
+    If no </think> appears within MAX_BUFFER chars, assumes no thinking block
+    and flushes the buffer as real content.
+    """
+    BUFFERING = 0
+    PASSTHROUGH = 1
+
+    MAX_BUFFER = 8192  # chars — well beyond any realistic thinking block
+
+    def __init__(self):
+        self.state = self.BUFFERING
+        self.buffer = ''
+
+    def feed(self, token: str) -> str:
+        """Feed a token, return text to emit (empty string = suppress)."""
+        if self.state == self.PASSTHROUGH:
+            return token
+
+        self.buffer += token
+
+        # Check for </think> — everything before it (inclusive) is thinking
+        close_idx = self.buffer.find('</think>')
+        if close_idx != -1:
+            after = self.buffer[close_idx + len('</think>'):]
+            self.state = self.PASSTHROUGH
+            self.buffer = ''
+            return after.lstrip()
+
+        # Safety valve: if buffer grows too large without </think>,
+        # this response has no thinking block — flush as real content
+        if len(self.buffer) >= self.MAX_BUFFER:
+            self.state = self.PASSTHROUGH
+            result = self.buffer
+            self.buffer = ''
+            return result
+
+        return ''
+
+    def flush(self) -> str:
+        """Flush remaining buffer at end of stream."""
+        if self.buffer:
+            result = self.buffer
+            self.buffer = ''
+            self.state = self.PASSTHROUGH
+            return result
+        return ''
+
+
+# ============================================================================
 # Prompt Format Helpers
-# ============================================================================ 
+# ============================================================================
 
 CHATML_START = "<|im_start|>"
 CHATML_END = "<|im_end|>"
