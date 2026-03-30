@@ -1017,6 +1017,7 @@ class LlamaServerManager:
                     yield "data: [DONE]\n\n"
                     return
 
+                resp.encoding = 'utf-8'  # llama-server sends UTF-8; override requests' ISO-8859-1 default
                 for line in resp.iter_lines(decode_unicode=True):
                     if not line or not line.startswith("data: "):
                         continue
