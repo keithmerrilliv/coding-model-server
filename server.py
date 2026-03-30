@@ -37,7 +37,6 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
-_SERVER_START_TIME = int(time.time())
 
 
 # ============================================================================ 
@@ -218,8 +217,10 @@ class Config:
     
     # Global defaults (can be overridden per model)
     DEFAULT_CONTEXT_SIZE = int(os.getenv('MODEL_CONTEXT_SIZE', 524288))
-    # 24 = physical core count (8 P-cores + 16 E-cores); hyperthreads hurt llama.cpp
+    # 24 = physical core count (8 P-cores + 16 E-cores); hyperthreads hurt decode
     DEFAULT_N_THREADS = int(os.getenv('MODEL_N_THREADS', 24))
+    # Prefill (batch) benefits from hyperthreads — use all 32 threads
+    DEFAULT_N_THREADS_BATCH = int(os.getenv('MODEL_N_THREADS_BATCH', 32))
     DEFAULT_N_BATCH = int(os.getenv('MODEL_N_BATCH', 2048))  # Reverted to 2048 to prevent OOM
     
     # ── Unified tool reference ──
@@ -777,7 +778,7 @@ class ModelManager:
                     n_ctx=model_config.get('n_ctx', Config.DEFAULT_CONTEXT_SIZE),
                     n_gpu_layers=model_config.get('n_gpu_layers', 0),
                     n_threads=Config.DEFAULT_N_THREADS,
-                    n_threads_batch=Config.DEFAULT_N_THREADS,
+                    n_threads_batch=Config.DEFAULT_N_THREADS_BATCH,
                     n_batch=model_config.get('n_batch', Config.DEFAULT_N_BATCH),
                     flash_attn=True,
                     type_k=model_config.get('type_k'),
@@ -793,7 +794,7 @@ class ModelManager:
                     yarn_beta_fast=model_config.get('yarn_beta_fast', 32.0),
                     yarn_beta_slow=model_config.get('yarn_beta_slow', 1.0),
                     yarn_orig_ctx=model_config.get('yarn_orig_ctx', 0),
-                    verbose=True
+                    verbose=False
                 )
 
                 logger.info("Model loaded successfully: %s", model_path)
@@ -855,8 +856,9 @@ class LlamaServerManager:
             '-c', str(model_config.get('n_ctx', 32768)),
             '-b', str(model_config.get('n_batch', 2048)),
             '-t', str(Config.DEFAULT_N_THREADS),
-            '-tb', str(Config.DEFAULT_N_THREADS),
+            '-tb', str(Config.DEFAULT_N_THREADS_BATCH),
             '-fa', 'on',
+            '--mmap',
             '--cache-type-k', cache_k,
             '--cache-type-v', cache_v,
             '--host', '127.0.0.1',
@@ -1246,10 +1248,16 @@ def calculate_token_budget(model, messages: List, system_prompt: str, model_path
     budget_guidance_template = Config.TOKEN_BUDGET_GUIDANCE.format(available_tokens=99999)
     budget_guidance_tokens = len(model.tokenize(budget_guidance_template.encode("utf-8")))
 
-    # Build the final prompt with a placeholder budget, tokenize once
-    # We use the estimated budget to format the guidance string, then measure the real total.
+    # Build the final prompt with a placeholder budget
     preliminary_prompt = build_model_prompt(messages, system_prompt, model_path)
-    n_preliminary = len(model.tokenize(preliminary_prompt.encode("utf-8")))
+
+    # Fast path: use char-based estimate (~3.5 chars/token) when clearly within budget.
+    # Only pay for full tokenization when the prompt is close to the context limit.
+    approx_tokens = len(preliminary_prompt) // 3
+    if approx_tokens < n_ctx * 0.5:
+        n_preliminary = approx_tokens
+    else:
+        n_preliminary = len(model.tokenize(preliminary_prompt.encode("utf-8")))
 
     # Calculate available tokens accounting for budget guidance overhead
     available = n_ctx - n_preliminary - budget_guidance_tokens
@@ -1292,7 +1300,7 @@ def build_completion_response(model_id: str, text: str, usage: Dict[str, int],
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
         "object": "chat.completion",
-        "created": _SERVER_START_TIME,
+        "created": int(time.time()),
         "model": model_id,
         "choices": [{
             "index": 0,
@@ -1318,7 +1326,7 @@ def build_stream_chunk(completion_id: str, model_id: str, content: Optional[str]
     return {
         "id": completion_id,
         "object": "chat.completion.chunk",
-        "created": _SERVER_START_TIME,
+        "created": int(time.time()),
         "model": model_id,
         "choices": [{
             "index": 0,
@@ -1467,7 +1475,7 @@ async def list_models():
         models.append({
             "id": agent_id,
             "object": "model",
-            "created": _SERVER_START_TIME,
+            "created": int(time.time()),
             "owned_by": "qwen-multi-agent",
             "description": agent_config['description']
         })
@@ -1655,11 +1663,15 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
 
             if last_user_msg:
                 try:
-                    context = memory_service.get_context_string(last_user_msg)
+                    context = await asyncio.wait_for(
+                        asyncio.to_thread(memory_service.get_context_string, last_user_msg),
+                        timeout=0.5
+                    )
                     if context:
                         logger.info(f"Injecting memory context for query: {last_user_msg[:50]}...")
-                        # Prepend context to system prompt
                         system_prompt = f"{system_prompt}\n\n{context}"
+                except asyncio.TimeoutError:
+                    logger.warning("Memory retrieval timed out (>500ms), skipping RAG context")
                 except Exception as e:
                     logger.error(f"Memory retrieval failed: {e}")
 

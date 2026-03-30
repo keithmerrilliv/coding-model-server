@@ -1445,7 +1445,8 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                 if continuation_count > 0:
                     # Update response_text to the full aggregated version for tool parsing
                     response_text = aggregated_response
-                    # Replace fragmented history entries with the coherent aggregated response
+                    # Remove fragmented entries: each continuation added 2 (assistant + user prompt)
+                    del history[-(continuation_count * 2):]
                     history.append({"role": "assistant", "content": aggregated_response})
                     save_chat_history(history, model)
                 else:
