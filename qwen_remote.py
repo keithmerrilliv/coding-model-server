@@ -932,7 +932,10 @@ def get_completion(history, model, agent_theme):
                                     print_colored(f"\nServer Error: {error_msg}", COLORS['FAIL'])
                                     finish_reason = "error"
                                     break
-                            except Exception: pass
+                            except json.JSONDecodeError:
+                                pass
+                            except Exception as e:
+                                logger.debug("SSE parse error: %s", e)
             except KeyboardInterrupt:
                 stop_progress.set()
                 try:
@@ -1442,6 +1445,9 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                 if continuation_count > 0:
                     # Update response_text to the full aggregated version for tool parsing
                     response_text = aggregated_response
+                    # Replace fragmented history entries with the coherent aggregated response
+                    history.append({"role": "assistant", "content": aggregated_response})
+                    save_chat_history(history, model)
                 else:
                     history.append({"role": "assistant", "content": response_text})
                     save_chat_history(history, model)

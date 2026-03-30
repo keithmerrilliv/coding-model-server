@@ -309,37 +309,6 @@ def chunk_large_output(content, chunk_size=None, overlap=None):
     start = 0
     content_len = len(content)
 
-    # Pre-calculate line breaks for faster processing
-    line_breaks = []
-    pos = 0
-    while pos < content_len:
-        pos = content.find('\n', pos)
-        if pos == -1:
-            break
-        line_breaks.append(pos)
-        pos += 1
-
-    # Binary search helper to find nearest line break
-    def find_nearest_line_break(start_pos, max_pos):
-        # Find the closest line break before max_pos
-        if not line_breaks:
-            return -1
-
-        low, high = 0, len(line_breaks) - 1
-        best_break = -1
-
-        while low <= high:
-            mid = (low + high) // 2
-            if line_breaks[mid] <= max_pos and line_breaks[mid] >= start_pos:
-                best_break = line_breaks[mid]
-                low = mid + 1  # Look for a later line break
-            elif line_breaks[mid] < start_pos:
-                low = mid + 1
-            else:
-                high = mid - 1
-
-        return best_break
-
     while start < content_len:
         end = start + chunk_size
 
@@ -347,13 +316,12 @@ def chunk_large_output(content, chunk_size=None, overlap=None):
         if end >= content_len:
             chunk = content[start:]
         else:
-            # Find a good breaking point (try to break at line boundaries)
-            line_break = find_nearest_line_break(start, end)
+            # Try to break at a line boundary using rfind (simpler than binary search)
+            line_break = content.rfind('\n', start, end)
 
-            if line_break != -1 and line_break > start:  # Found a newline within range
+            if line_break != -1 and line_break > start:
                 chunk = content[start:line_break + 1]
             else:
-                # No suitable line break found, just take the chunk
                 chunk = content[start:end]
 
         chunks.append(chunk)
@@ -983,6 +951,9 @@ def grep_search(payload):
         for filepath in files_to_search:
             files_searched += 1
             try:
+                # Skip very large files to avoid memory issues
+                if os.path.getsize(filepath) > 5 * 1024 * 1024:
+                    continue
                 with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
                     content = f.read()
 

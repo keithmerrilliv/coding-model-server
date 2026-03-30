@@ -36,7 +36,8 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
-logger = logging.getLogger(__name__) 
+logger = logging.getLogger(__name__)
+_SERVER_START_TIME = int(time.time())
 
 
 # ============================================================================ 
@@ -1290,7 +1291,7 @@ def build_completion_response(model_id: str, text: str, usage: Dict[str, int],
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
         "object": "chat.completion",
-        "created": int(time.time()),
+        "created": _SERVER_START_TIME,
         "model": model_id,
         "choices": [{
             "index": 0,
@@ -1316,7 +1317,7 @@ def build_stream_chunk(completion_id: str, model_id: str, content: Optional[str]
     return {
         "id": completion_id,
         "object": "chat.completion.chunk",
-        "created": int(time.time()),
+        "created": _SERVER_START_TIME,
         "model": model_id,
         "choices": [{
             "index": 0,
@@ -1465,7 +1466,7 @@ async def list_models():
         models.append({
             "id": agent_id,
             "object": "model",
-            "created": int(time.time()),
+            "created": _SERVER_START_TIME,
             "owned_by": "qwen-multi-agent",
             "description": agent_config['description']
         })
@@ -1609,12 +1610,14 @@ def upload_file_endpoint(request: FileUploadRequest):
             raise HTTPException(status_code=400, detail="Invalid filename")
 
         temp_dir = tempfile.gettempdir()
-        temp_path = os.path.join(temp_dir, safe_filename)
-        
-        # Write the file
-        with open(temp_path, 'wb') as f:
-            f.write(file_content)
-        
+        # Use mkstemp for atomic creation (avoids race conditions and overwrites)
+        suffix = os.path.splitext(safe_filename)[1]
+        fd, temp_path = tempfile.mkstemp(suffix=suffix, dir=temp_dir)
+        try:
+            os.write(fd, file_content)
+        finally:
+            os.close(fd)
+
         logger.info(f"File uploaded successfully: {temp_path}")
         return {"status": "success", "path": temp_path, "size": len(file_content)}
     except HTTPException:
