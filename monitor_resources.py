@@ -6,6 +6,12 @@ import csv
 import shutil
 from datetime import datetime
 
+try:
+    import pynvml
+    HAS_PYNVML = True
+except ImportError:
+    HAS_PYNVML = False
+
 # Configuration
 LOG_FILE = "/home/keith-merrill/Dev/qwen-server/server_stats.csv"
 DB_PATH = "/home/keith-merrill/Dev/qwen-server/qwen_memory_db"
@@ -14,7 +20,18 @@ INTERVAL = 5.0
 MAX_LOG_SIZE_MB = 10  # Rotate when log exceeds this size
 MAX_ROTATED_FILES = 3  # Keep this many rotated files
 
+# Module-level handle set by main() when pynvml is available
+_nvml_handle = None
+
 def get_gpu_power():
+    """Read GPU power draw. Uses pynvml if available, falls back to nvidia-smi."""
+    if _nvml_handle is not None:
+        try:
+            power_mw = pynvml.nvmlDeviceGetPowerUsage(_nvml_handle)  # milliwatts
+            return power_mw / 1000.0
+        except pynvml.NVMLError:
+            return 0.0
+    # Fallback: subprocess call to nvidia-smi
     try:
         result = subprocess.check_output(
             ["nvidia-smi", "--query-gpu=power.draw", "--format=csv,noheader,nounits"],
@@ -32,11 +49,16 @@ def get_cpu_energy():
         return 0
 
 def get_db_size():
-    try:
-        result = subprocess.check_output(["du", "-sb", DB_PATH], encoding="utf-8")
-        return int(result.split()[0])
-    except Exception:
-        return 0
+    """Calculate total size of DB_PATH using os.walk (no subprocess)."""
+    total = 0
+    for dirpath, dirnames, filenames in os.walk(DB_PATH):
+        for f in filenames:
+            fp = os.path.join(dirpath, f)
+            try:
+                total += os.path.getsize(fp)
+            except OSError:
+                pass
+    return total
 
 def init_log():
     if not os.path.exists(LOG_FILE):
@@ -73,7 +95,22 @@ def rotate_log():
         print(f"Log rotation failed: {e}")
 
 def main():
+    global _nvml_handle
+
     init_log()
+
+    # Initialize pynvml for GPU power readings (avoids subprocess per sample)
+    if HAS_PYNVML:
+        try:
+            pynvml.nvmlInit()
+            _nvml_handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+            print("Using pynvml for GPU power monitoring")
+        except pynvml.NVMLError as e:
+            print(f"pynvml init failed ({e}), falling back to nvidia-smi")
+            _nvml_handle = None
+    else:
+        print("pynvml not installed, falling back to nvidia-smi subprocess")
+
     print(f"Monitoring started. Logging to {LOG_FILE}")
 
     last_energy = get_cpu_energy()
@@ -83,37 +120,44 @@ def main():
     # Initial sleep to establish delta
     time.sleep(INTERVAL)
 
-    while True:
-        current_time = time.time()
-        current_energy = get_cpu_energy()
+    try:
+        while True:
+            current_time = time.time()
+            current_energy = get_cpu_energy()
 
-        # Calculate CPU Power (Watts = Joules / Seconds)
-        # energy_uj is in microjoules, so divide by 1,000,000 for Joules
-        time_delta = current_time - last_time
-        energy_delta = (current_energy - last_energy) / 1_000_000
-        cpu_watts = energy_delta / time_delta if time_delta > 0 else 0
+            # Calculate CPU Power (Watts = Joules / Seconds)
+            # energy_uj is in microjoules, so divide by 1,000,000 for Joules
+            time_delta = current_time - last_time
+            energy_delta = (current_energy - last_energy) / 1_000_000
+            cpu_watts = energy_delta / time_delta if time_delta > 0 else 0
 
-        gpu_watts = get_gpu_power()
-        db_size = get_db_size()
-        timestamp = datetime.now().isoformat()
+            gpu_watts = get_gpu_power()
+            db_size = get_db_size()
+            timestamp = datetime.now().isoformat()
 
-        with open(LOG_FILE, "a", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow([timestamp, f"{gpu_watts:.2f}", f"{cpu_watts:.2f}", db_size])
+            with open(LOG_FILE, "a", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow([timestamp, f"{gpu_watts:.2f}", f"{cpu_watts:.2f}", db_size])
 
-        last_energy = current_energy
-        last_time = current_time
+            last_energy = current_energy
+            last_time = current_time
 
-        # Check rotation every ~5 minutes (60 iterations at 5s interval)
-        rotation_check_counter += 1
-        if rotation_check_counter >= 60:
-            rotation_check_counter = 0
-            rotate_log()
+            # Check rotation every ~5 minutes (60 iterations at 5s interval)
+            rotation_check_counter += 1
+            if rotation_check_counter >= 60:
+                rotation_check_counter = 0
+                rotate_log()
 
-        # Sleep for the remaining time of the interval to keep logging regular
-        elapsed = time.time() - current_time
-        sleep_time = max(0, INTERVAL - elapsed)
-        time.sleep(sleep_time)
+            # Sleep for the remaining time of the interval to keep logging regular
+            elapsed = time.time() - current_time
+            sleep_time = max(0, INTERVAL - elapsed)
+            time.sleep(sleep_time)
+    finally:
+        if _nvml_handle is not None:
+            try:
+                pynvml.nvmlShutdown()
+            except pynvml.NVMLError:
+                pass
 
 if __name__ == "__main__":
     main()

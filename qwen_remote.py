@@ -24,6 +24,18 @@ _pending_tasks_lock = threading.Lock()
 from datetime import datetime
 from typing import Optional, List
 import requests
+import difflib
+
+# Rich terminal rendering (optional — graceful fallback)
+try:
+    from rich.console import Console
+    from rich.syntax import Syntax
+    from rich.panel import Panel
+    RICH_AVAILABLE = True
+    rich_console = Console()
+except ImportError:
+    RICH_AVAILABLE = False
+    rich_console = None
 
 # Readline for command history and CLI editing
 try:
@@ -46,8 +58,24 @@ class Config:
 
     # Command execution security settings
     ALLOW_SHELL_MODE = os.getenv('ALLOW_SHELL_MODE', 'true').lower() == 'true'
-    ALLOW_ALL = os.getenv('ALLOW_ALL', 'false').lower() == 'true'
     COMMAND_WHITELIST = os.getenv('COMMAND_WHITELIST', '').split(',') if os.getenv('COMMAND_WHITELIST') else None
+
+    # Permission mode: 'default' (prompt all), 'acceptEdits' (auto-approve file ops), 'yolo' (auto-approve all)
+    # Backward compat: ALLOW_ALL=true maps to 'yolo' if PERMISSION_MODE not explicitly set
+    _explicit_perm = os.getenv('PERMISSION_MODE')
+    if _explicit_perm:
+        PERMISSION_MODE = _explicit_perm
+    elif os.getenv('ALLOW_ALL', 'false').lower() == 'true':
+        PERMISSION_MODE = 'yolo'
+    else:
+        PERMISSION_MODE = 'default'
+    ALLOW_ALL = PERMISSION_MODE == 'yolo'  # backward compat for any direct checks
+
+    # Display settings
+    VERBOSE_MODE = True  # True=full tool output, False=compact one-liners
+
+    # Session settings
+    SESSION_NAME = None
 
     # Temporary file settings
     HISTORY_FILE = os.path.expanduser("~/.qwen_client_history")
@@ -197,6 +225,7 @@ def save_chat_history(history, current_agent="implementer"):
         data = {
             "messages": cleaned,
             "last_agent": current_agent,
+            "session_name": config.SESSION_NAME,
             "timestamp": datetime.now().isoformat()
         }
         with open(config.CHAT_HISTORY_FILE, 'w') as f:
@@ -220,7 +249,7 @@ def _prune_history(history, max_messages=100):
     return pruned
 
 def load_chat_history():
-    """Load chat history from file if it exists. Returns (history, last_agent)"""
+    """Load chat history from file if it exists. Returns (history, last_agent, session_name)"""
     if os.path.exists(config.CHAT_HISTORY_FILE):
         try:
             with open(config.CHAT_HISTORY_FILE, 'r') as f:
@@ -233,6 +262,10 @@ def load_chat_history():
             else:
                 history = data.get("messages", [])
                 last_agent = data.get("last_agent", "implementer")
+                # Restore session name
+                saved_name = data.get("session_name")
+                if saved_name and not config.SESSION_NAME:
+                    config.SESSION_NAME = saved_name
 
             print_colored(f"Found saved session with {len(history)} messages.", COLORS['CYAN'])
             if last_agent != "implementer":
@@ -440,339 +473,6 @@ def ingest_pdf(path):
             return error_msg
     except Exception as e:
         return f"Error ingesting PDF: {str(e)}"
-
-
-def parse_command_safely(command: str) -> List[str]:
-    """Parse command string into argument list safely"""
-    if not command or not isinstance(command, str):
-        raise ValueError("Command must be a non-empty string")
-
-    # Sanitize command string
-    command = command.strip()
-    if not command:
-        raise ValueError("Command cannot be empty after trimming")
-
-    if not config.ALLOW_SHELL_MODE:
-        dangerous_chars = ['|', '&', ';', '$', '`', '\n', '>', '<', '(', ')', '*', '?', '[', ']']
-        if any(char in command for char in dangerous_chars):
-            raise ValueError(
-                f"Command contains shell metacharacters. "
-                f"Set ALLOW_SHELL_MODE=true to enable shell features, "
-                f"or rewrite command without: {', '.join(dangerous_chars)}"
-            )
-
-    try:
-        parsed = shlex.split(command)
-        # Additional validation: ensure no empty arguments that could cause issues
-        if any(arg == '' for arg in parsed):
-            raise ValueError("Command contains empty arguments after parsing")
-        return parsed
-    except ValueError as e:
-        raise ValueError(f"Failed to parse command: {e}")
-    except Exception as e:
-        raise ValueError(f"Unexpected error parsing command: {e}")
-
-
-def expand_paths_in_args(command_args: List[str]) -> List[str]:
-    """Expand tilde (~) in command arguments for proper path resolution
-
-    When using shell=False, tilde expansion doesn't happen automatically.
-    This function expands ~ in arguments that look like paths.
-    """
-    expanded_args = []
-    for arg in command_args:
-        # Expand tilde if argument starts with ~ or contains =~ 
-        if arg.startswith('~'):
-            expanded_args.append(os.path.expanduser(arg))
-        elif '=~' in arg:
-            # Handle cases like --file=~/path or VAR=~/path
-            key, value = arg.split('=', 1)
-            if value.startswith('~'):
-                expanded_args.append(f"{key}={os.path.expanduser(value)}")
-            else:
-                expanded_args.append(arg)
-        else:
-            expanded_args.append(arg)
-    return expanded_args
-
-
-def is_command_allowed(command_args: List[str]) -> tuple:
-    """Check if command is allowed based on whitelist"""
-    if not config.COMMAND_WHITELIST:
-        return True, "No whitelist configured (all commands allowed)"
-
-    if not command_args:
-        return False, "Empty command"
-
-    base_command = command_args[0]
-
-    # Additional security check: prevent path traversal attempts
-    if '..' in base_command:
-        return False, f"Command '{base_command}' contains path traversal ('..') which is not allowed"
-
-    if base_command in config.COMMAND_WHITELIST:
-        return True, f"Command '{base_command}' is whitelisted"
-
-    if '/' in base_command:
-        base_name = os.path.basename(base_command)
-        if base_name in config.COMMAND_WHITELIST:
-            return True, f"Command '{base_name}' is whitelisted"
-
-    return False, f"Command '{base_command}' not in whitelist: {', '.join(config.COMMAND_WHITELIST)}"
-
-
-def chunk_large_output(content, chunk_size=None, overlap=None):
-    """
-    Split large output into chunks with overlap to preserve context.
-
-    Args:
-        content (str): The large output content to chunk
-        chunk_size (int): Maximum size of each chunk in characters (uses config if None)
-        overlap (int): Number of overlapping characters between chunks (uses config if None)
-
-    Returns:
-        dict: Contains 'chunks' list, 'total_chunks', 'chunk_size', and 'original_length'
-    """
-    # Use config values if not provided
-    if chunk_size is None:
-        chunk_size = config.CHUNK_SIZE
-    if overlap is None:
-        overlap = config.CHUNK_OVERLAP
-
-    if len(content) <= chunk_size:
-        return {
-            'chunks': [content],
-            'total_chunks': 1,
-            'chunk_size': chunk_size,
-            'original_length': len(content),
-            'needs_chunking': False
-        }
-
-    chunks = []
-    start = 0
-    content_len = len(content)
-
-    while start < content_len:
-        end = start + chunk_size
-
-        # If this is the last chunk, include the remainder
-        if end >= content_len:
-            chunk = content[start:]
-        else:
-            # Find a good breaking point (try to break at line boundaries)
-            line_break = content.rfind('\n', start, end)
-
-            if line_break != -1 and line_break > start:  # Found a newline within range
-                chunk = content[start:line_break + 1]
-            else:
-                # No suitable line break found, just take the chunk
-                chunk = content[start:end]
-
-        chunks.append(chunk)
-        chunk_len = len(chunk)
-
-        # Calculate next start position with overlap
-        if chunk_len < chunk_size:
-            # Last chunk, no need to continue
-            break
-
-        # Move start forward, accounting for overlap
-        next_start = start + chunk_len - overlap
-        if next_start >= content_len:
-            break
-        start = next_start
-
-    return {
-        'chunks': chunks,
-        'total_chunks': len(chunks),
-        'chunk_size': chunk_size,
-        'original_length': len(content),
-        'needs_chunking': True
-    }
-
-
-def get_chunk_for_display(content, chunk_idx=None, chunk_size=None, overlap=None, log_path=None):
-    """
-    Get a specific chunk or a summary of chunks for display in the context window.
-
-    Args:
-        content (str): The full content to chunk
-        chunk_idx (int, optional): Specific chunk index to return (-1 for all chunks)
-        chunk_size (int): Size of each chunk (uses config if None)
-        overlap (int): Overlap between chunks (uses config if None)
-        log_path (str, optional): Path to the log file for reference
-
-    Returns:
-        str: Formatted output for display
-    """
-    # Use config values if not provided
-    if chunk_size is None:
-        chunk_size = config.CHUNK_SIZE
-    if overlap is None:
-        overlap = config.CHUNK_OVERLAP
-
-    chunk_result = chunk_large_output(content, chunk_size, overlap)
-
-    if not chunk_result['needs_chunking']:
-        return content
-
-    if chunk_idx is not None and 0 <= chunk_idx < len(chunk_result['chunks']):
-        # Return specific chunk
-        return f"[CHUNK {chunk_idx + 1}/{chunk_result['total_chunks']}]\n{chunk_result['chunks'][chunk_idx]}"
-    elif chunk_idx == -1:
-        # Return all chunks (for when space permits)
-        result = []
-        for i, chunk in enumerate(chunk_result['chunks']):
-            result.append(f"[CHUNK {i + 1}/{chunk_result['total_chunks']}]\n{chunk}")
-        return "\n--- CHUNK BREAK ---\n".join(result)
-    else:
-        # Return first chunk + last chunk + error summary (similar to current approach but more structured)
-        first_chunk = chunk_result['chunks'][0]
-        last_chunk = chunk_result['chunks'][-1]
-
-        # Look for errors in all chunks
-        all_error_lines = []
-        for i, chunk in enumerate(chunk_result['chunks'][1:-1]):  # Skip first and last which are displayed fully
-            for line in chunk.splitlines():
-                if 'error' in line.lower() or 'fail' in line.lower() or 'warning' in line.lower():
-                    all_error_lines.append(f"(Chunk {i+2}) {line.strip()}")
-
-        # Limit error lines to prevent overflow
-        error_summary = ""
-        if all_error_lines:
-            error_summary = "\n... [ERROR/WARNING SUMMARY] ...\n" + "\n".join(all_error_lines[:20])
-            if len(all_error_lines) > 20:
-                error_summary += f"\n... ({len(all_error_lines) - 20} more error lines omitted) ..."
-
-        log_ref = f"... [Log: {log_path}] ..." if log_path else ""
-
-        return (
-            f"[CHUNK 1/{chunk_result['total_chunks']} - FIRST]\n{first_chunk}\n"
-            f"\n... [CHUNKED: {chunk_result['original_length']} chars in {chunk_result['total_chunks']} chunks] ...\n"
-            f"{log_ref}\n"
-            f"{error_summary}\n"
-            f"\n[CHUNK {chunk_result['total_chunks']}/{chunk_result['total_chunks']} - LAST]\n{last_chunk}"
-        )
-
-
-def execute_remote_command(command, chunk_output=True):
-    """Internal function to execute a command with security checks"""
-
-    # Validate input
-    if not command or not isinstance(command, str):
-        logger.warning("Invalid command received: %s", command)
-        return "Error: Invalid command - command must be a non-empty string"
-
-    logger.info("Executing command: %s", command)
-    print_colored(f"\nAgent wants to run command: {command}", COLORS['WARNING'])
-
-    if config.ALLOW_SHELL_MODE:
-        print_colored(f"   Shell mode enabled (less safe)", COLORS['WARNING'])
-    else:
-        print_colored(f"   Safe mode (shell=False)", COLORS['GREEN'])
-
-    try:
-        if not config.ALLOW_SHELL_MODE:
-            command_args = parse_command_safely(command)
-            allowed, msg = is_command_allowed(command_args)
-            if not allowed:
-                print_colored(f"   {msg}", COLORS['FAIL'])
-                logger.warning("Command rejected: %s - %s", command, msg)
-                return f"Command rejected: {msg}"
-            print_colored(f"   {msg}", COLORS['GREEN'])
-    except ValueError as e:
-        print_colored(f"   {str(e)}", COLORS['FAIL'])
-        logger.error("Command validation failed: %s - %s", command, str(e))
-        return f"Command validation failed: {str(e)}"
-    except Exception as e:
-        print_colored(f"   Unexpected error during command validation: {str(e)}", COLORS['FAIL'])
-        logger.error("Unexpected error during command validation: %s - %s", command, str(e), exc_info=True)
-        return f"Command validation failed with unexpected error: {str(e)}"
-
-    if config.ALLOW_ALL:
-        print_colored(f"   Auto-approved (ALLOW_ALL mode enabled)", COLORS['GREEN'])
-        logger.info("Auto-approving command due to ALLOW_ALL setting: %s", command)
-        choice = 'y'
-    else:
-        try:
-            choice = input(f"{COLORS['BOLD']}Allow? [y/N] > {COLORS['ENDC']}")
-        except (EOFError, KeyboardInterrupt):
-            logger.info("Command execution cancelled by user: %s", command)
-            return "User cancelled command execution."
-
-        if choice.lower() != 'y':
-            logger.info("Command denied by user: %s", command)
-            return "User denied command execution."
-
-    try:
-        # Create a temp file to capture output
-        # We keep it if output is large so the agent can inspect it later
-        with tempfile.NamedTemporaryFile(mode='w+', delete=False, prefix='qwen_cmd_', suffix='.log') as tmp:
-            tmp_path = tmp.name
-        _add_temp_file(tmp_path)
-
-        # Run process redirecting stdout/stderr to the temp file
-        try:
-            if config.ALLOW_SHELL_MODE:
-                logger.debug("Running command in shell mode: %s", command)
-                with open(tmp_path, 'w') as f:
-                    result = subprocess.run(command, shell=True, stdout=f, stderr=subprocess.STDOUT, text=True, errors='replace', timeout=config.COMMAND_TIMEOUT)
-            else:
-                command_args = parse_command_safely(command)
-                command_args = expand_paths_in_args(command_args)
-                logger.debug("Running command in safe mode: %s", command_args)
-                with open(tmp_path, 'w') as f:
-                    result = subprocess.run(command_args, shell=False, stdout=f, stderr=subprocess.STDOUT, text=True, errors='replace', timeout=config.COMMAND_TIMEOUT)
-        except subprocess.TimeoutExpired:
-            logger.error("Command timed out: %s", command[:100])
-            return f"Error: Command timed out after {config.COMMAND_TIMEOUT} seconds. Command: {command[:100]}..."
-        except Exception as e:
-            logger.error("Error running command subprocess: %s - %s", command[:100], str(e))
-            return f"Error running command subprocess: {str(e)}. Command: {command[:100]}..."
-
-        # Analyze output file
-        try:
-            with open(tmp_path, 'r', errors='replace') as f:
-                content = f.read()
-        except IOError as e:
-            logger.error("Error reading command output: %s", str(e))
-            return f"Error reading command output: {str(e)}"
-
-        output_len = len(content)
-        logger.info("Command executed successfully, output length: %d", output_len)
-
-        # Use chunked processing if output is large and chunking is enabled
-        if chunk_output and output_len > config.CHUNK_THRESHOLD:  # Same threshold as original
-            logger.debug("Using chunked output for command with %d characters", output_len)
-            final_output = get_chunk_for_display(content, chunk_size=config.CHUNK_SIZE, overlap=config.CHUNK_OVERLAP, log_path=tmp_path)
-
-            # Store chunk info in a way that can be accessed later if needed
-            chunk_info_path = tmp_path + '.chunks'
-            _add_temp_file(chunk_info_path)
-            chunk_result = chunk_large_output(content, chunk_size=config.CHUNK_SIZE, overlap=config.CHUNK_OVERLAP)
-
-            # Save chunk metadata for potential later retrieval
-            try:
-                with open(chunk_info_path, 'w') as f:
-                    json.dump({
-                        'total_chunks': chunk_result['total_chunks'],
-                        'original_length': chunk_result['original_length'],
-                        'chunk_size': chunk_result['chunk_size'],
-                        'file_path': tmp_path
-                    }, f)
-            except IOError as e:
-                print_colored(f"Warning: Could not save chunk metadata: {str(e)}", COLORS['WARNING'])
-                logger.warning("Could not save chunk metadata: %s", str(e))
-
-            return final_output
-
-        # If it fits in one go, just return it
-        logger.debug("Returning command output directly, length: %d", len(content) if content else 0)
-        return content if content else "(empty output)"
-
-    except Exception as e:
-        logger.error("Error executing command: %s", str(e), exc_info=True)
-        return f"Error executing command: {str(e)}"
 
 
 
@@ -1000,679 +700,42 @@ def apple_deep_docs_search(tool, args):
         return f"Error in Deep Docs call: {str(e)}"
 
 
+# ---------------------------------------------------------------------------
+# Tool handlers (extracted to tool_handlers.py)
+# ---------------------------------------------------------------------------
+import tool_handlers
+
+tool_handlers.configure(
+    config=config,
+    colors=COLORS,
+    print_colored_fn=print_colored,
+    logger_inst=logger,
+    temp_tracker={'add': _add_temp_file, 'remove': _remove_temp_file, 'cleanup': _cleanup_old_temp_files},
+    external_handlers={
+        'save_memory': save_memory,
+        'web_search': web_search,
+        'handle_cupertino_search': handle_cupertino_search,
+        'handle_apple_deep_docs': handle_apple_deep_docs,
+        'ingest_pdf': ingest_pdf,
+        'ingest_url_content': ingest_url_content,
+    },
+    rich_console=rich_console if RICH_AVAILABLE else None,
+    permission_mode=config.PERMISSION_MODE,
+    verbose_mode=config.VERBOSE_MODE,
+)
+
+from tool_handlers import (
+    parse_command_safely, expand_paths_in_args, is_command_allowed,
+    chunk_large_output, get_chunk_for_display, execute_remote_command,
+    read_file_content, write_file_content, edit_file_content,
+    list_directory, glob_files, grep_search, ingest_pdf_content,
+    process_remote_commands, extract_fallback_commands,
+    undo_last_checkpoint,
+)
+
 # Global queue for interrupted multi-agent chains
 PENDING_TASKS = []
 
-
-
-def read_file_content(path):
-    """Read content of a local file safely"""
-    try:
-        # Expand user path
-        full_path = os.path.expanduser(path)
-        if not os.path.exists(full_path):
-            return f"Error: File not found: {path}"
-            
-        # Basic security check - prevent reading outside of home/project if needed
-        # For now, we trust the agent as it's running locally under user permissions
-        
-        with open(full_path, 'r', encoding='utf-8', errors='replace') as f:
-            content = f.read()
-            
-        size = len(content)
-        if size > 100000:
-            return f"Error: File too large ({size} bytes). Use head/tail via shell or read specific lines."
-
-        output = f"File: {path}\nContent:\n{content}"
-        if len(output) > config.CHUNK_THRESHOLD:
-            return get_chunk_for_display(output, log_path=full_path)
-        return output
-    except Exception as e:
-        return f"Error reading file: {str(e)}"
-
-
-def write_file_content(payload):
-    """Write content to a local file safely.
-
-    Payload format: first line is the path, rest is the content.
-    Example:
-        /path/to/file.txt
-        content goes here
-        multiple lines ok
-    """
-    try:
-        lines = payload.split('\n', 1)
-        if len(lines) < 2:
-            return "Error: WRITE_FILE requires path on first line and content on subsequent lines"
-
-        path = lines[0].strip()
-        content = lines[1] if len(lines) > 1 else ""
-
-        if not path:
-            return "Error: No file path provided"
-
-        # Expand user path
-        full_path = os.path.expanduser(path)
-
-        # Create parent directories if they don't exist
-        parent_dir = os.path.dirname(full_path)
-        if parent_dir and not os.path.exists(parent_dir):
-            os.makedirs(parent_dir, exist_ok=True)
-            logger.info(f"Created directory: {parent_dir}")
-
-        # Security check - log what we're doing
-        logger.info(f"Writing file: {full_path} ({len(content)} bytes)")
-
-        # Prompt for confirmation unless ALLOW_ALL is set
-        print_colored(f"\nAgent wants to write file: {full_path}", COLORS['WARNING'])
-        print_colored(f"   Content size: {len(content)} bytes", COLORS['WARNING'])
-
-        # Show preview of content (first few lines)
-        preview_lines = content.split('\n')[:5]
-        preview = '\n'.join(preview_lines)
-        total_lines = content.count('\n') + 1
-        if len(preview_lines) < total_lines:
-            preview += f"\n... ({total_lines} total lines)"
-        print_colored(f"   Preview:\n{preview[:500]}", COLORS['CYAN'])
-
-        if config.ALLOW_ALL:
-            print_colored(f"   Auto-approved (ALLOW_ALL mode enabled)", COLORS['GREEN'])
-            logger.info(f"Auto-approving file write due to ALLOW_ALL setting: {full_path}")
-            choice = 'y'
-        else:
-            try:
-                choice = input(f"{COLORS['BOLD']}Allow write? [y/N] > {COLORS['ENDC']}")
-            except (EOFError, KeyboardInterrupt):
-                logger.info(f"File write cancelled by user: {full_path}")
-                return "User cancelled file write."
-
-            if choice.lower() != 'y':
-                logger.info(f"File write denied by user: {full_path}")
-                return "User denied file write."
-
-        # Write the file
-        with open(full_path, 'w', encoding='utf-8') as f:
-            f.write(content)
-
-        logger.info(f"File written successfully: {full_path}")
-        return f"Successfully wrote {len(content)} bytes to {path}"
-
-    except PermissionError as e:
-        return f"Error: Permission denied writing to {path}: {str(e)}"
-    except Exception as e:
-        logger.error(f"Error writing file {path}: {str(e)}")
-        return f"Error writing file: {str(e)}"
-
-
-def _normalize_git_style_markers(text):
-    """Convert git-style SEARCH/REPLACE markers to <<<OLD>>>/<<<NEW>>> format.
-
-    Qwen models sometimes emit Aider/Cursor-style edit blocks from training data:
-        <<<<<<< SEARCH
-        old text
-        =======
-        new text
-        >>>>>>> REPLACE
-    This normalizes them so edit_file_content can parse them.
-    """
-    # <<<<<<< SEARCH\n  ->  <<<OLD>>>\n  (preserve the newline after the marker)
-    text = re.sub(r'<{1,7}\s*SEARCH\s*>{0,7}\s*\n', '<<<OLD>>>\n', text)
-    # =======  (separator between old and new)  ->  <<<NEW>>>
-    text = re.sub(r'\n={3,}\s*\n', '\n<<<NEW>>>\n', text)
-    # >>>>>>> REPLACE  ->  remove (it's just a closing marker)
-    text = re.sub(r'\n>{1,7}\s*REPLACE\s*>{0,7}', '', text)
-    return text
-
-
-def edit_file_content(payload):
-    """Edit a file by replacing specific text (search and replace).
-
-    Payload format:
-        /path/to/file
-        <<<OLD>>>
-        text to find (exact match)
-        <<<NEW>>>
-        replacement text
-
-    Supports multiple replacements in one call by repeating <<<OLD>>>...<<<NEW>>> blocks.
-    Also handles git-style <<<<<<< SEARCH / ======= / >>>>>>> REPLACE markers.
-    """
-    try:
-        # Normalize git-style markers before parsing
-        payload = _normalize_git_style_markers(payload)
-
-        lines = payload.split('\n', 1)
-        if len(lines) < 2:
-            return "Error: EDIT_FILE requires path on first line and OLD/NEW blocks"
-
-        path = lines[0].strip()
-        edit_content = lines[1] if len(lines) > 1 else ""
-
-        if not path:
-            return "Error: No file path provided"
-
-        full_path = os.path.expanduser(path)
-
-        if not os.path.exists(full_path):
-            return f"Error: File not found: {path}"
-
-        # Read current file content
-        with open(full_path, 'r', encoding='utf-8', errors='replace') as f:
-            content = f.read()
-
-        original_content = content
-
-        # Parse OLD/NEW blocks
-        # Pattern: <<<OLD>>>\n...\n<<<NEW>>>\n...
-        edit_pattern = r'<<<OLD>>>\n(.*?)\n<<<NEW>>>\n(.*?)(?=\n<<<OLD>>>|$)'
-        matches = list(re.finditer(edit_pattern, edit_content, re.DOTALL))
-
-        if not matches:
-            # Try alternate format without trailing newline requirement
-            edit_pattern = r'<<<OLD>>>(.*?)<<<NEW>>>(.*?)(?=<<<OLD>>>|$)'
-            matches = list(re.finditer(edit_pattern, edit_content, re.DOTALL))
-
-        if not matches:
-            return "Error: No valid <<<OLD>>>...<<<NEW>>> blocks found. Format:\n<<<OLD>>>\nold text\n<<<NEW>>>\nnew text"
-
-        replacements_made = 0
-        for match in matches:
-            old_text = match.group(1).strip('\n')
-            new_text = match.group(2).strip('\n')
-
-            if old_text not in content:
-                logger.warning(f"EDIT_FILE: old_text not found in {path}: {old_text[:100]}...")
-                return f"Error: Text to replace not found in file. Searched for:\n{old_text[:200]}"
-
-            # Count occurrences
-            occurrences = content.count(old_text)
-            if occurrences > 1:
-                logger.warning(f"EDIT_FILE: Multiple occurrences ({occurrences}) of old_text in {path}")
-                # Still proceed but warn
-                print_colored(f"   Warning: Found {occurrences} occurrences, replacing all", COLORS['WARNING'])
-
-            content = content.replace(old_text, new_text)
-            replacements_made += occurrences
-
-        if content == original_content:
-            return "Error: No changes made - old text may not match exactly"
-
-        # Show diff preview
-        print_colored(f"\nAgent wants to edit file: {full_path}", COLORS['WARNING'])
-        print_colored(f"   Replacements: {replacements_made}", COLORS['CYAN'])
-
-        # Show brief diff
-        old_lines = original_content.split('\n')
-        new_lines = content.split('\n')
-        print_colored(f"   Lines: {len(old_lines)} -> {len(new_lines)}", COLORS['CYAN'])
-
-        if config.ALLOW_ALL:
-            print_colored(f"   Auto-approved (ALLOW_ALL mode enabled)", COLORS['GREEN'])
-            logger.info(f"Auto-approving file edit due to ALLOW_ALL setting: {full_path}")
-            choice = 'y'
-        else:
-            try:
-                choice = input(f"{COLORS['BOLD']}Allow edit? [y/N] > {COLORS['ENDC']}")
-            except (EOFError, KeyboardInterrupt):
-                logger.info(f"File edit cancelled by user: {full_path}")
-                return "User cancelled file edit."
-
-            if choice.lower() != 'y':
-                logger.info(f"File edit denied by user: {full_path}")
-                return "User denied file edit."
-
-        # Write the edited content
-        with open(full_path, 'w', encoding='utf-8') as f:
-            f.write(content)
-
-        logger.info(f"File edited successfully: {full_path} ({replacements_made} replacements)")
-        return f"Successfully edited {path}: {replacements_made} replacement(s) made"
-
-    except Exception as e:
-        logger.error(f"Error editing file {path}: {str(e)}")
-        return f"Error editing file: {str(e)}"
-
-
-def list_directory(path):
-    """List contents of a directory with file info.
-
-    Returns structured listing with file types, sizes, and modification times.
-    """
-    try:
-        full_path = os.path.expanduser(path.strip()) if path else os.getcwd()
-
-        if not os.path.exists(full_path):
-            return f"Error: Directory not found: {path}"
-
-        if not os.path.isdir(full_path):
-            return f"Error: Not a directory: {path}"
-
-        entries = []
-        try:
-            items = sorted(os.listdir(full_path))
-        except PermissionError:
-            return f"Error: Permission denied reading directory: {path}"
-
-        for item in items:
-            item_path = os.path.join(full_path, item)
-            try:
-                stat = os.stat(item_path)
-                is_dir = os.path.isdir(item_path)
-                size = stat.st_size if not is_dir else 0
-                mtime = datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d %H:%M')
-
-                if is_dir:
-                    entries.append(f"  {item}/")
-                else:
-                    # Human-readable size
-                    if size < 1024:
-                        size_str = f"{size}B"
-                    elif size < 1024 * 1024:
-                        size_str = f"{size // 1024}K"
-                    else:
-                        size_str = f"{size // (1024 * 1024)}M"
-                    entries.append(f"  {item:<40} {size_str:>8}  {mtime}")
-            except (OSError, PermissionError):
-                entries.append(f"  {item} (inaccessible)")
-
-        result = f"Directory: {full_path}\n"
-        result += f"Total: {len(items)} items\n\n"
-        result += "\n".join(entries) if entries else "(empty)"
-
-        return result
-
-    except Exception as e:
-        logger.error(f"Error listing directory {path}: {str(e)}")
-        return f"Error listing directory: {str(e)}"
-
-
-def glob_files(pattern):
-    """Find files matching a glob pattern.
-
-    Supports patterns like:
-        *.swift           - Swift files in current dir
-        **/*.swift        - Swift files recursively
-        src/**/*.py       - Python files under src/
-        /absolute/path/*  - Files in absolute path
-    """
-    import glob as glob_module
-
-    try:
-        pattern = pattern.strip()
-        if not pattern:
-            return "Error: No glob pattern provided"
-
-        # If pattern doesn't start with / or ., assume current directory
-        if not pattern.startswith('/') and not pattern.startswith('.'):
-            # Check if it's a relative path or just a pattern
-            if '/' not in pattern or pattern.startswith('**'):
-                pattern = os.path.join(os.getcwd(), pattern)
-
-        # Expand user home if present
-        pattern = os.path.expanduser(pattern)
-
-        # Use recursive glob
-        matches = sorted(glob_module.glob(pattern, recursive=True))
-
-        if not matches:
-            return f"No files found matching: {pattern}"
-
-        # Limit output to prevent overwhelming responses
-        max_results = 200
-        truncated = len(matches) > max_results
-
-        result_lines = [f"Found {len(matches)} file(s) matching: {pattern}"]
-        if truncated:
-            result_lines.append(f"(showing first {max_results})")
-        result_lines.append("")
-
-        for match in matches[:max_results]:
-            # Show relative path if possible
-            try:
-                rel_path = os.path.relpath(match)
-                if not rel_path.startswith('..'):
-                    result_lines.append(f"  {rel_path}")
-                else:
-                    result_lines.append(f"  {match}")
-            except ValueError:
-                result_lines.append(f"  {match}")
-
-        if truncated:
-            result_lines.append(f"\n... and {len(matches) - max_results} more")
-
-        return "\n".join(result_lines)
-
-    except Exception as e:
-        logger.error(f"Error in glob {pattern}: {str(e)}")
-        return f"Error in glob: {str(e)}"
-
-
-def ingest_pdf_content(payload):
-    """Ingest a PDF file into memory. Can handle both local client files and server files.
-
-    Payload format:
-        /path/to/document.pdf       - Path to PDF file (on client or server)
-        local:/path/to/document.pdf - Explicitly indicates client-side file to upload first
-
-    Examples:
-        /home/user/docs/manual.pdf
-        local:/Users/me/Documents/report.pdf
-    """
-    try:
-        import base64
-        path = payload.strip()
-        if not path:
-            return "Error: No PDF path provided"
-
-        # Check if this is a local file that needs to be uploaded (requires local: prefix)
-        if path.startswith('local:'):
-            local_path = path[6:]  # Remove 'local:' prefix
-
-            # Expand user path if needed
-            local_path = os.path.expanduser(local_path)
-
-            # Check if file exists locally
-            if not os.path.exists(local_path):
-                return f"Error: Local file not found: {local_path}"
-
-            # Read the file content
-            with open(local_path, 'rb') as f:
-                file_content = f.read()
-
-            # Encode as base64
-            encoded_content = base64.b64encode(file_content).decode('utf-8')
-
-            # Upload the file to the server
-            upload_payload = {
-                "filename": os.path.basename(local_path),
-                "content": encoded_content
-            }
-
-            upload_url = f"http://{config.LINUX_SERVER_IP}:5000/v1/files/upload"
-            print_colored(f"Uploading {local_path} to server...", COLORS['CYAN'])
-
-            response = requests.post(upload_url, json=upload_payload, timeout=config.LONG_REQUEST_TIMEOUT)
-            if response.status_code != 200:
-                return f"Error uploading file: {response.text}"
-            
-            upload_result = response.json()
-            server_path = upload_result.get("path", "")
-            
-            if not server_path:
-                return "Error: Upload succeeded but no path returned"
-            
-            print_colored(f"File uploaded to server: {server_path}", COLORS['GREEN'])
-            
-            # Now ingest the uploaded file
-            result = ingest_pdf(server_path)
-            return result
-        else:
-            # This is a server-side file path - ingest directly
-            result = ingest_pdf(path)
-            return result
-    except Exception as e:
-        logger.error(f"Error ingesting PDF {path}: {str(e)}")
-        return f"Error ingesting PDF: {str(e)}"
-
-
-def grep_search(payload):
-    """Search for pattern in files.
-
-    Payload format (one of):
-        pattern                     - Search pattern in current directory
-        pattern|path                - Search pattern in specific path
-        pattern|path|options        - With options like -i (case insensitive), -n (line numbers)
-
-    Examples:
-        TODO                        - Find TODO in current dir
-        def.*init|*.py              - Find 'def.*init' in Python files
-        import|src/|i               - Case-insensitive search for 'import' in src/
-    """
-    try:
-        parts = payload.strip().split('|')
-        pattern = parts[0].strip() if parts else ""
-        path = parts[1].strip() if len(parts) > 1 else "."
-        options = parts[2].strip().lower() if len(parts) > 2 else ""
-
-        if not pattern:
-            return "Error: No search pattern provided"
-
-        # Expand path
-        search_path = os.path.expanduser(path)
-        if not os.path.exists(search_path):
-            return f"Error: Path not found: {path}"
-
-        # Build regex flags
-        flags = re.MULTILINE
-        if 'i' in options:
-            flags |= re.IGNORECASE
-
-        try:
-            regex = re.compile(pattern, flags)
-        except re.error as e:
-            return f"Error: Invalid regex pattern: {e}"
-
-        results = []
-        files_searched = 0
-        files_matched = 0
-        max_results = 100
-        max_files = 500
-
-        # Determine files to search
-        if os.path.isfile(search_path):
-            files_to_search = [search_path]
-        else:
-            # Walk directory
-            files_to_search = []
-            for root, dirs, files in os.walk(search_path):
-                # Skip hidden and common non-code directories
-                dirs[:] = [d for d in dirs if not d.startswith('.') and d not in
-                          ['node_modules', '__pycache__', 'venv', 'env', '.git', 'build', 'dist', 'DerivedData']]
-
-                for filename in files:
-                    if filename.startswith('.'):
-                        continue
-                    files_to_search.append(os.path.join(root, filename))
-
-                    if len(files_to_search) >= max_files:
-                        break
-                if len(files_to_search) >= max_files:
-                    break
-
-        for filepath in files_to_search:
-            files_searched += 1
-            try:
-                # Skip very large files to avoid memory issues
-                if os.path.getsize(filepath) > 5_000_000:
-                    continue
-                with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-                    content = f.read()
-
-                matches = list(regex.finditer(content))
-                if matches:
-                    files_matched += 1
-                    lines = content.split('\n')
-
-                    # Get relative path
-                    try:
-                        rel_path = os.path.relpath(filepath)
-                    except ValueError:
-                        rel_path = filepath
-
-                    for match in matches[:10]:  # Limit matches per file
-                        if len(results) >= max_results:
-                            break
-
-                        # Find line number
-                        line_num = content[:match.start()].count('\n') + 1
-                        line_content = lines[line_num - 1] if line_num <= len(lines) else ""
-
-                        # Truncate long lines
-                        if len(line_content) > 200:
-                            line_content = line_content[:200] + "..."
-
-                        results.append(f"{rel_path}:{line_num}: {line_content.strip()}")
-
-                    if len(results) >= max_results:
-                        break
-
-            except (IOError, OSError, UnicodeDecodeError):
-                continue  # Skip unreadable/binary files
-
-        # Build result
-        header = f"Search: '{pattern}' in {path}\n"
-        header += f"Files searched: {files_searched}, Files matched: {files_matched}\n"
-
-        if not results:
-            return header + "\nNo matches found."
-
-        truncated = len(results) >= max_results
-        if truncated:
-            header += f"Showing first {max_results} results:\n"
-
-        return header + "\n" + "\n".join(results)
-
-    except Exception as e:
-        logger.error(f"Error in grep search: {str(e)}")
-        return f"Error in search: {str(e)}"
-
-
-def _normalize_standalone_search_replace(text):
-    """Convert standalone git-style SEARCH/REPLACE blocks into <<<EDIT_FILE>>> blocks.
-
-    Catches the case where the model emits a bare search/replace block without
-    wrapping it in <<<EDIT_FILE>>>:
-        /path/to/file
-        <<<<<<< SEARCH
-        old text
-        =======
-        new text
-        >>>>>>> REPLACE
-
-    Converts to:
-        <<<EDIT_FILE>>>/path/to/file
-        <<<OLD>>>
-        old text
-        <<<NEW>>>
-        new text
-    """
-    # Match: filepath line, then <<<<<<< SEARCH block(s)
-    # The filepath is on the line before <<<<<<< SEARCH
-    pattern = (
-        r'^([^\n<>]+?)\s*\n'                  # filepath (line without angle brackets)
-        r'<{1,7}\s*SEARCH\s*>{0,7}\s*\n'      # <<<<<<< SEARCH
-        r'(.*?)'                                # old text (multi-line, lazy)
-        r'\n={3,}\s*\n'                         # =======
-        r'(.*?)'                                # new text (multi-line, lazy)
-        r'\n>{1,7}\s*REPLACE\s*>{0,7}'         # >>>>>>> REPLACE
-    )
-    def _replace(m):
-        path = m.group(1).strip()
-        old = m.group(2)
-        new = m.group(3)
-        return f'<<<EDIT_FILE>>>{path}\n<<<OLD>>>\n{old}\n<<<NEW>>>\n{new}\n'
-
-    return re.sub(pattern, _replace, text, flags=re.DOTALL | re.MULTILINE)
-
-
-def process_remote_commands(response_text: str) -> Optional[str]:
-    """Process ALL remote command markers in agent response.
-
-    Finds and executes every tool marker in the response, in order of appearance.
-    Returns aggregated output from all commands, or None if no markers found.
-    """
-    # Pre-process: convert standalone git-style SEARCH/REPLACE into EDIT_FILE blocks
-    response_text = _normalize_standalone_search_replace(response_text)
-
-    # Dispatch table: opening tag name -> handler
-    command_handlers = {
-        'REMOTE_EXEC':    lambda arg: execute_remote_command(arg.strip()),
-        'READ_FILE':      lambda arg: read_file_content(arg.strip()),
-        'WRITE_FILE':     lambda arg: write_file_content(arg),
-        'EDIT_FILE':      lambda arg: edit_file_content(arg),
-        'LIST_DIR':       lambda arg: list_directory(arg),
-        'GLOB':           lambda arg: glob_files(arg),
-        'GREP':           lambda arg: grep_search(arg),
-        'SAVE_MEMORY':    lambda arg: save_memory(arg.strip()),
-        'WEB_SEARCH':     lambda arg: web_search(arg.strip()),
-        'CUPERTINO':      lambda arg: handle_cupertino_search(arg.strip()),
-        'APPLE_DEEP_DOCS': lambda arg: handle_apple_deep_docs(arg.strip()),
-        'INGEST_PDF':     lambda arg: ingest_pdf_content(arg),
-        'DEEP_INGEST':    lambda arg: ingest_url_content(arg.strip()),
-    }
-
-    # Build regex from known tags so internal markers (<<<OLD>>>, <<<NEW>>>) are not
-    # mistaken for command boundaries.  Each command block runs from its opening tag
-    # to the next known opening tag (or end of string).  No closing tags required.
-    #
-    # Accept 1-3 opening AND closing angle brackets to tolerate Qwen3 models
-    # that generate various bracket styles:
-    #   <<<TAG>>>  — standard triple-bracket format
-    #   <TAG>>>    — after <tool_call> special token (single open, triple close)
-    #   <TAG>      — XML-style (single open, single close; seen with EDIT_FILE)
-    _TAG_NAMES = '|'.join(command_handlers.keys())
-    _COMMAND_RE = rf'<{{1,3}}({_TAG_NAMES})>{{1,3}}\s*(.*?)(?=<{{1,3}}(?:{_TAG_NAMES})>{{1,3}}|\Z)'
-
-    all_matches = []
-    for match in re.finditer(_COMMAND_RE, response_text, re.DOTALL | re.IGNORECASE):
-        tag = match.group(1).upper()
-        content = match.group(2).strip()
-        if content:  # skip empty blocks (e.g. stale closing tags parsed as openers)
-            all_matches.append((match.start(), match, command_handlers[tag]))
-
-    if not all_matches:
-        return None
-
-    # Execute all commands and aggregate results
-    results = []
-    total_len = 0
-    GLOBAL_MAX_LEN = 40000 # ~10k tokens global cap for tool outputs in one turn
-
-    for i, (_, match, handler) in enumerate(all_matches):
-        if total_len > GLOBAL_MAX_LEN:
-            results.append(f"\n... [OMITTED {len(all_matches) - i} ADDITIONAL COMMANDS TO PREVENT CONTEXT OVERFLOW] ...")
-            break
-
-        arg = match.group(2)
-        # Strip closing tags the model generates (e.g. </REMOTE_EXEC>, </list_dir>).
-        # These get captured as part of the content and corrupt shell commands
-        # (the shell interprets </TAG> as input redirection < /TAG>).
-        arg = re.sub(r'</\w+>\s*$', '', arg)
-        try:
-            result = handler(arg)
-            if result:
-                res_str = f"[Command {i+1}] {result}"
-                results.append(res_str)
-                total_len += len(res_str)
-        except Exception as e:
-            err_str = f"[Command {i+1}] Error: {str(e)}"
-            results.append(err_str)
-            total_len += len(err_str)
-
-    return "\n\n".join(results) if results else None
-
-
-def extract_fallback_commands(response_text: str) -> List[str]:
-    """Extract shell commands from markdown code blocks when <<<REMOTE_EXEC>>> markers are missing.
-
-    Catches the common failure mode where the model writes a correct command
-    inside a fenced code block instead of using the marker protocol.
-    Only extracts blocks explicitly tagged as shell languages (bash/shell/sh/zsh).
-    Plain or non-shell code blocks (python, swift, etc.) are ignored to prevent
-    catastrophic misexecution of code snippets as shell commands.
-    """
-    commands = []
-
-    # REQUIRE a shell language hint — the ? was removed to prevent matching
-    # python/swift/unlabeled blocks which caused catastrophic misexecution.
-    # Allow matching to end-of-string (```|\Z) for unclosed code blocks —
-    # the model sometimes emits a stop token before closing backticks.
-    for m in re.finditer(r'```(?:bash|shell|sh|zsh)\s*\n(.+?)(?:```|\Z)', response_text, re.DOTALL):
-        block = m.group(1).strip()
-        if block:
-            commands.append(block)
-
-    return commands
 
 
 def _trim_history_for_context(history):
@@ -1825,53 +888,63 @@ def get_completion(history, model, agent_theme):
                 print_colored(f"\nError: {error_text}", COLORS['FAIL'])
                 return None, None
 
-            for line in response.iter_lines():
-                # TTFT deadline: if we haven't received a first token yet,
-                # check if we've exceeded the timeout.  The server is likely
-                # stuck tokenizing an oversized prompt.
-                if not first_token_time and (time.time() - start_time) > TTFT_TIMEOUT:
-                    stop_progress.set()
-                    response.close()
-                    if _try_trim_and_retry():
-                        server_error_occurred = True
-                        break
-                    print_colored(f"\n[Client] TTFT timeout ({TTFT_TIMEOUT}s) — server not responding.", COLORS['FAIL'])
-                    return None, None
+            try:
+                for line in response.iter_lines():
+                    # TTFT deadline: if we haven't received a first token yet,
+                    # check if we've exceeded the timeout.  The server is likely
+                    # stuck tokenizing an oversized prompt.
+                    if not first_token_time and (time.time() - start_time) > TTFT_TIMEOUT:
+                        stop_progress.set()
+                        response.close()
+                        if _try_trim_and_retry():
+                            server_error_occurred = True
+                            break
+                        print_colored(f"\n[Client] TTFT timeout ({TTFT_TIMEOUT}s) — server not responding.", COLORS['FAIL'])
+                        return None, None
 
-                if line:
-                    line = line.decode('utf-8')
-                    if line.startswith("data: "):
-                        data_str = line[6:]
-                        if data_str == "[DONE]": break
-                        try:
-                            data = json.loads(data_str)
-                            if "choices" in data and len(data["choices"]) > 0:
-                                choice = data["choices"][0]
-                                delta = choice.get("delta", {})
-                                content = delta.get("content", "")
-                                if content:
-                                    if not first_token_time:
-                                        first_token_time = time.time()
-                                        stop_progress.set()
-                                    print(content, end="", flush=True)
-                                    full_response += content
-                                    chunk_count += 1
-                                # Capture finish_reason from the final chunk
-                                if choice.get("finish_reason"):
-                                    finish_reason = choice["finish_reason"]
-                            elif "error" in data:
-                                stop_progress.set()
-                                error_msg = data['error'].get('message', 'Unknown error')
-                                if _is_context_error(error_msg) and _try_trim_and_retry():
-                                    server_error_occurred = True
+                    if line:
+                        line = line.decode('utf-8')
+                        if line.startswith("data: "):
+                            data_str = line[6:]
+                            if data_str == "[DONE]": break
+                            try:
+                                data = json.loads(data_str)
+                                if "choices" in data and len(data["choices"]) > 0:
+                                    choice = data["choices"][0]
+                                    delta = choice.get("delta", {})
+                                    content = delta.get("content", "")
+                                    if content:
+                                        if not first_token_time:
+                                            first_token_time = time.time()
+                                            stop_progress.set()
+                                        print(content, end="", flush=True)
+                                        full_response += content
+                                        chunk_count += 1
+                                    # Capture finish_reason from the final chunk
+                                    if choice.get("finish_reason"):
+                                        finish_reason = choice["finish_reason"]
+                                elif "error" in data:
+                                    stop_progress.set()
+                                    error_msg = data['error'].get('message', 'Unknown error')
+                                    if _is_context_error(error_msg) and _try_trim_and_retry():
+                                        server_error_occurred = True
+                                        break
+                                    print_colored(f"\nServer Error: {error_msg}", COLORS['FAIL'])
+                                    finish_reason = "error"
                                     break
-                                print_colored(f"\nServer Error: {error_msg}", COLORS['FAIL'])
-                                finish_reason = "error"
-                                break
-                        except json.JSONDecodeError:
-                            pass  # Malformed SSE chunk — skip
-                        except Exception as e:
-                            logger.debug("Error parsing stream chunk: %s", e)
+                            except Exception: pass
+            except KeyboardInterrupt:
+                stop_progress.set()
+                try:
+                    response.close()
+                except Exception:
+                    pass
+                if full_response:
+                    print_colored("\n[Interrupted] Keeping partial response.", COLORS['WARNING'])
+                    finish_reason = "interrupted"
+                    break
+                else:
+                    return None, None
 
             if server_error_occurred and context_retries <= MAX_CONTEXT_RETRIES:
                  server_error_occurred = False; full_response = ""; chunk_count = 0
@@ -1932,7 +1005,17 @@ def handle_user_command(user_input, history, model, agent_theme):
         print(f"  /resume              - Resume interrupted multi-agent tasks")
         print(f"  /history             - Show recent command history")
         print(f"  /history clear       - Clear command history")
-        
+
+        print_colored(f"\n{COLORS['BOLD']}SESSION & DISPLAY:{COLORS['ENDC']}", COLORS['BLUE'])
+        print(f"  /permissions         - Cycle permission mode (default -> acceptEdits -> yolo)")
+        print(f"  /verbose             - Toggle verbose/compact tool output display")
+        print(f"  /context             - Show context window usage (tokens, budget)")
+        print(f"  /compact             - Manually compress conversation history")
+        print(f"  /undo                - Revert the last file modification")
+        print(f"  /rename <name>       - Name or rename the current session")
+        print(f"  \\ + Enter            - Multiline input (backslash continuation)")
+        print(f"  Ctrl+C               - Interrupt generation (keeps partial response)")
+
         print_colored(f"\n{COLORS['BOLD']}DOCUMENTATION TOOLS:{COLORS['ENDC']}", COLORS['BLUE'])
         print(f"  /cupertino <query>   - Search local Apple documentation on macOS")
         print(f"                         Example: /cupertino MTLMeshRenderPipelineDescriptor")
@@ -2125,6 +1208,87 @@ def handle_user_command(user_input, history, model, agent_theme):
         # Return False so the main loop picks up the /resume and processes tasks
         return False, model
 
+    # Permission mode toggle
+    if user_input.lower() == '/permissions':
+        modes = ['default', 'acceptEdits', 'yolo']
+        labels = {
+            'default': 'Prompt for all operations',
+            'acceptEdits': 'Auto-approve file ops, prompt for shell commands',
+            'yolo': 'Auto-approve everything (dangerous!)',
+        }
+        current_idx = modes.index(config.PERMISSION_MODE) if config.PERMISSION_MODE in modes else 0
+        config.PERMISSION_MODE = modes[(current_idx + 1) % len(modes)]
+        config.ALLOW_ALL = config.PERMISSION_MODE == 'yolo'
+        tool_handlers.set_permission_mode(config.PERMISSION_MODE)
+        color = COLORS['FAIL'] if config.PERMISSION_MODE == 'yolo' else COLORS['GREEN']
+        print_colored(f"Permission mode: {config.PERMISSION_MODE} — {labels[config.PERMISSION_MODE]}", color)
+        return True, model
+
+    # Verbose/compact toggle
+    if user_input.lower() == '/verbose':
+        config.VERBOSE_MODE = not config.VERBOSE_MODE
+        tool_handlers.set_verbose_mode(config.VERBOSE_MODE)
+        mode_str = "verbose (full tool output)" if config.VERBOSE_MODE else "compact (one-line summaries)"
+        print_colored(f"Display mode: {mode_str}", COLORS['GREEN'])
+        return True, model
+
+    # Context usage
+    if user_input.lower() == '/context':
+        total_chars = sum(len(m.get("content", "")) for m in history)
+        est_tokens = total_chars // 4
+        msg_count = len(history)
+        budget = HISTORY_CHAR_BUDGET
+        pct = (total_chars / budget) * 100 if budget > 0 else 0
+        bar_len = 30
+        filled = int(bar_len * pct / 100)
+        bar = f"[{'#' * filled}{'.' * (bar_len - filled)}]"
+        color = COLORS['FAIL'] if pct > 80 else COLORS['WARNING'] if pct > 50 else COLORS['GREEN']
+        print_colored(f"\nContext Usage:", COLORS['HEADER'])
+        print_colored(f"  Messages:  {msg_count}", COLORS['CYAN'])
+        print_colored(f"  Chars:     {total_chars:,} / {budget:,}", COLORS['CYAN'])
+        print_colored(f"  Est tokens: ~{est_tokens:,}", COLORS['CYAN'])
+        print_colored(f"  Budget:    {bar} {pct:.1f}%", color)
+        return True, model
+
+    # Manual context compression
+    if user_input.lower() == '/compact':
+        before_count = len(history)
+        before_chars = sum(len(m.get("content", "")) for m in history)
+        system_msgs = [m for m in history if m['role'] == 'system']
+        non_system = [m for m in history if m['role'] != 'system']
+        if len(non_system) <= 12:
+            print_colored("History is already compact.", COLORS['GREEN'])
+            return True, model
+        keep_start = non_system[:4]
+        keep_end = non_system[-8:]
+        compressed_count = len(non_system) - 12
+        summary_msg = {"role": "system", "content": f"[{compressed_count} earlier messages compressed to save context]"}
+        history[:] = system_msgs + keep_start + [summary_msg] + keep_end
+        after_chars = sum(len(m.get("content", "")) for m in history)
+        saved = before_chars - after_chars
+        print_colored(f"Compacted: {before_count} -> {len(history)} messages, freed ~{saved // 4:,} tokens", COLORS['GREEN'])
+        save_chat_history(history, model)
+        return True, model
+
+    # Undo last file modification
+    if user_input.lower() == '/undo':
+        result = undo_last_checkpoint()
+        color = COLORS['GREEN'] if 'Restored' in result else COLORS['WARNING']
+        print_colored(result, color)
+        return True, model
+
+    # Session rename
+    if user_input.lower().startswith('/rename '):
+        new_name = user_input.split(' ', 1)[1].strip()
+        if not new_name:
+            print_colored("Usage: /rename <session_name>", COLORS['FAIL'])
+            return True, model
+        config.SESSION_NAME = new_name
+        set_terminal_title(f"Qwen - {new_name}")
+        save_chat_history(history, model)
+        print_colored(f"Session renamed to: {new_name}", COLORS['GREEN'])
+        return True, model
+
     return False, model
 
 
@@ -2221,6 +1385,12 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                     task_aborted = True
                     break
 
+                # ── Handle interrupted responses (Ctrl+C) ──
+                if finish_reason == "interrupted":
+                    history.append({"role": "assistant", "content": response_text})
+                    save_chat_history(history, model)
+                    break
+
                 # ── Handle truncated responses (finish_reason == "length") ──
                 # Automatically request continuation so the agent can finish.
                 # We track partial segments so we can append them to history
@@ -2270,12 +1440,8 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                 # If we aggregated, we already put segments in history, 
                 # but the final tool processing should use the full combined text.
                 if continuation_count > 0:
-                    # Update response_text to the full aggregated version for tool parsing.
-                    # Also append the final aggregated response to history so subsequent
-                    # turns see a single coherent assistant message instead of fragments.
+                    # Update response_text to the full aggregated version for tool parsing
                     response_text = aggregated_response
-                    history.append({"role": "assistant", "content": aggregated_response})
-                    save_chat_history(history, model)
                 else:
                     history.append({"role": "assistant", "content": response_text})
                     save_chat_history(history, model)
@@ -2373,16 +1539,26 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
         
     return model
 
-def chat(model="implementer"):
+def chat(model="implementer", session_name=None):
     """Main interactive chat loop"""
+    # Apply session name
+    if session_name:
+        config.SESSION_NAME = session_name
+        # Use a session-specific history file
+        safe_name = re.sub(r'[^\w\-]', '_', session_name)
+        config.CHAT_HISTORY_FILE = os.path.expanduser(f"~/.qwen_chat_history_{safe_name}.json")
+
     # Initialize readline for command history and editing
     setup_readline()
-    
+
     # Load available models from server
     fetch_available_models()
 
     print_colored(f"\nQwen Remote CLI (Connected to {config.LINUX_SERVER_IP})", COLORS['HEADER'])
-    set_terminal_title("Qwen - Idle")
+    title = f"Qwen - {config.SESSION_NAME}" if config.SESSION_NAME else "Qwen - Idle"
+    set_terminal_title(title)
+    if config.SESSION_NAME:
+        print_colored(f"Session: {config.SESSION_NAME}", COLORS['CYAN'])
     
     # Get initial theme
     if model not in AGENT_THEMES:
@@ -2404,26 +1580,20 @@ def chat(model="implementer"):
     print_colored(f"Agent: {model} {agent_theme['icon']}", COLORS['WARNING'])
     print_colored(f"({agent_theme['desc']})", COLORS['BLUE'])
 
-    print_colored("\nSecurity Settings:", COLORS['HEADER'])
+    perm_labels = {
+        'default': 'Prompt for all operations',
+        'acceptEdits': 'Auto-approve file ops, prompt for shell',
+        'yolo': 'Auto-approve ALL (dangerous!)',
+    }
+    perm_color = COLORS['FAIL'] if config.PERMISSION_MODE == 'yolo' else COLORS['GREEN']
+    print_colored(f"\nPermissions: {config.PERMISSION_MODE} — {perm_labels.get(config.PERMISSION_MODE, '?')}", perm_color)
     if config.ALLOW_SHELL_MODE:
-        print_colored("  Shell mode: ENABLED (allows pipes, redirects, etc.)", COLORS['WARNING'])
-    else:
-        print_colored("  Shell mode: DISABLED (safer, no shell injection)", COLORS['GREEN'])
+        print_colored("  Shell mode: ENABLED", COLORS['WARNING'])
+    print_colored(f"  Display: {'verbose' if config.VERBOSE_MODE else 'compact'} | Multiline: \\ + Enter", COLORS['BLUE'])
 
-    if config.COMMAND_WHITELIST:
-        print_colored(f"  Whitelist: {len(config.COMMAND_WHITELIST)} commands allowed", COLORS['GREEN'])
-        print_colored(f"    {', '.join(config.COMMAND_WHITELIST[:5])}{'...' if len(config.COMMAND_WHITELIST) > 5 else ''}", COLORS['CYAN'])
-    else:
-        print_colored("  Whitelist: DISABLED (all commands allowed)", COLORS['WARNING'])
-
-    if config.ALLOW_ALL:
-        print_colored("  Command approval: AUTO-APPROVE ALL (⚠️  NO PROMPTS - DANGEROUS!)", COLORS['FAIL'])
-    else:
-        print_colored("  Command approval: Manual (will prompt for each command)", COLORS['GREEN'])
-
-    print_colored("\nCommands: /help, /exit, /model <name>, /clear, /resume, /history, /cupertino <query>, /apple <tool> <args>, /ingest <path>, /scrape", COLORS['BLUE'])
+    print_colored("\nCommands: /help /exit /model /clear /resume /permissions /verbose /context /compact /undo /rename", COLORS['BLUE'])
     if READLINE_AVAILABLE:
-        print_colored("Use ↑/↓ arrows to navigate history. History saved to ~/.qwen_client_history\n", COLORS['BLUE'])
+        print_colored("Use arrow keys for history. Ctrl+C to interrupt generation.\n", COLORS['BLUE'])
     else:
         print_colored("(Install readline for command history support)\n", COLORS['WARNING'])
 
@@ -2460,6 +1630,13 @@ def chat(model="implementer"):
             # Pass the prompt directly to input() so readline handles it correctly
             try:
                 user_input = input(full_prompt)
+                # Multiline input: backslash + Enter continues on next line
+                while user_input.endswith('\\'):
+                    user_input = user_input[:-1] + '\n'
+                    try:
+                        user_input += input('... ')
+                    except EOFError:
+                        break
                 # Add user input to readline history (for up/down arrow navigation)
                 if user_input.strip():
                     add_to_history(user_input)
@@ -2527,7 +1704,14 @@ def chat(model="implementer"):
                 agent_theme = AGENT_THEMES[model]
 
         except KeyboardInterrupt:
-            break
+            # First Ctrl+C at prompt: warn. Second exits.
+            print_colored("\n(Press Ctrl+C again to exit, or type /exit)", COLORS['WARNING'])
+            try:
+                # Wait briefly for a second Ctrl+C
+                time.sleep(0.3)
+            except KeyboardInterrupt:
+                break
+            continue
 
     print_colored("\nGoodbye!", COLORS['HEADER'])
 
@@ -2535,10 +1719,11 @@ def chat(model="implementer"):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Qwen Remote Client")
     parser.add_argument("--model", type=str, default="implementer", help="Agent model to use")
+    parser.add_argument("--name", type=str, default=None, help="Name this session")
     args = parser.parse_args()
-    
+
     try:
-        chat(args.model)
+        chat(args.model, session_name=args.name)
     except Exception as e:
         print_colored(f"\nCRITICAL CLIENT ERROR: {e}", COLORS['FAIL'])
         import traceback

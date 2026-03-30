@@ -10,6 +10,10 @@ import time
 import uuid
 import subprocess
 import logging
+import gc
+import hmac
+import re
+import asyncio
 from datetime import datetime
 from typing import Dict, List, Optional, Any, Literal, Iterator
 from threading import Lock, Thread
@@ -18,7 +22,6 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request, Header, Depends
 from fastapi.responses import JSONResponse, StreamingResponse
 import signal
-import hmac
 import requests as http_requests
 import llama_cpp
 from llama_cpp import Llama
@@ -155,23 +158,33 @@ class IngestRequest(BaseModel):
 # ============================================================================
 
 def _create_model_config(path_env, path_default, n_gpu_layers, n_ctx=32768, n_batch=2048, backend='llama_cpp',
-                         server_extra_args=None, logit_bias=None):
-    """Helper function to create standardized model configurations"""
+                         server_extra_args=None, logit_bias=None, yarn=False, type_k=8, type_v=8):
+    """Helper function to create standardized model configurations.
+
+    Args:
+        yarn: If True, include YaRN RoPE scaling parameters. Only needed for models
+              using extended context via YaRN (e.g. 480B Ultra with 2x scaling).
+        type_k: GGML type for KV cache keys (8=Q8_0, 2=Q4_0). Default Q8_0.
+        type_v: GGML type for KV cache values (8=Q8_0, 2=Q4_0). Default Q8_0.
+    """
     config = {
         'path': os.getenv(path_env, path_default),
         'n_gpu_layers': n_gpu_layers,
         'n_ctx': n_ctx,
         'n_batch': n_batch,
-        'rope_scaling_type': 2,
-        'rope_freq_scale': 1.0,
-        'yarn_ext_factor': -1.0,
-        'yarn_attn_factor': 1.0,
-        'yarn_beta_fast': 32.0,
-        'yarn_beta_slow': 1.0,
-        'yarn_orig_ctx': 32768,
-        'type_k': 8, 'type_v': 8, 'offload_kqv': True,
+        'type_k': type_k, 'type_v': type_v, 'offload_kqv': True,
         'backend': backend,
     }
+    if yarn:
+        config.update({
+            'rope_scaling_type': 2,
+            'rope_freq_scale': 1.0,
+            'yarn_ext_factor': -1.0,
+            'yarn_attn_factor': 1.0,
+            'yarn_beta_fast': 32.0,
+            'yarn_beta_slow': 1.0,
+            'yarn_orig_ctx': 32768,
+        })
     if server_extra_args is not None:
         config['server_extra_args'] = server_extra_args
     if logit_bias is not None:
@@ -221,7 +234,10 @@ class Config:
         "<<<WEB_SEARCH>>>query                             — web search",
         "<<<CUPERTINO>>>query                              — Apple docs (local MCP)",
         '<<<APPLE_DEEP_DOCS>>>{"tool":"NAME","arguments":{}}  — Apple docs (server MCP)',
-        "<<<INGEST_PDF>>>path                              — ingest a PDF file into memory (supports local: prefix for client files)"
+        "<<<INGEST_PDF>>>path                              — ingest a PDF file into memory (supports local: prefix for client files)",
+        "<<<SCRATCHPAD>>>                                  — update your working memory (FACTS, OPEN_QUESTIONS, DEAD_ENDS)",
+        "<<<PLAN>>>                                        — create/update your retrieval plan (GOAL, STEPS with [x]/[ ], CURRENT)",
+        "<<<CONFIDENCE>>>N                                 — report confidence 0-100 in your current information",
     ]
 
     # ── Combined tools ──
@@ -388,22 +404,46 @@ CONTEXT MANAGEMENT — your context window is limited. Work efficiently:
 - After reading a file, save key findings with <<<SAVE_MEMORY>>> before moving on.
   This lets you drop the raw content from context while retaining what matters.
 - Prefer <<<GREP>>> over <<<READ_FILE>>> when you only need to find specific content.
+
+WORKING MEMORY — track your progress across tool calls:
+<<<SCRATCHPAD>>>
+FACTS:
+- list key findings here
+OPEN_QUESTIONS:
+- what you still need to find
+DEAD_ENDS:
+- approaches that didn't work
+
+<<<PLAN>>>
+GOAL: What you're trying to accomplish
+STEPS:
+1. [ ] First step
+2. [ ] Second step
+CURRENT: 1
+
+<<<CONFIDENCE>>>N
+Report your confidence (0-100) that you have enough information to answer.
+Update these after each retrieval step. They help you stay organized and efficient.
 """ + MACOS_TOOLKIT
 
     # ── Shared model configs ──
     # Turbo: Optimized for speed and 80k context on RTX 5080 (Success Formula)
+    # Q4_0 KV cache halves cache VRAM vs Q8_0, enabling 34 GPU layers (up from 32)
+    # ngl=34: 15,108 MiB / 1,195 MiB free | ngl=35: 813 MiB free (tight) | ngl=36: OOM
     _CODER_30B_TURBO = _create_model_config(
         'MODEL_PATH_30B_TURBO',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
-        32, 81920, 2048
+        34, 81920, 2048, type_k=2, type_v=2
     )
 
     # FAST: Lightweight Q4_K_M for quick implementation tasks (256k native context, moderate GPU)
     # Alternative to the 80B Next model when speed matters more than quality
+    # Q4_0 KV cache is REQUIRED — Q8_0 OOMs at ngl≥22 with 262K context
+    # ngl=26: 14,888 MiB / 1,415 MiB free | ngl=27: 937 MiB free (tight) | ngl=28: OOM
     _CODER_30B_FAST = _create_model_config(
         'MODEL_PATH_30B_FAST',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
-        22, 262144, 1024
+        26, 262144, 1024, type_k=2, type_v=2
     )
 
     # NEXT: Qwen3-Coder-Next-Q8_0 (80B MoE with 3B active params)
@@ -437,7 +477,7 @@ CONTEXT MANAGEMENT — your context window is limited. Work efficiently:
     _QWEN_480B_ULTRA = _create_model_config(
         'MODEL_PATH_480B_ULTRA',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/Qwen3-Coder-480B-A35B-Instruct-UD-Q2_K_XL-00001-of-00004.gguf',
-        4, 65536, 1024
+        4, 65536, 1024, yarn=True
     )
 
     # MINIMAX: MiniMax M2.5 (230B MoE, 10B active params)
@@ -448,6 +488,69 @@ CONTEXT MANAGEMENT — your context window is limited. Work efficiently:
         4, 32768, 4096, backend='llama_server',
         server_extra_args=['--jinja', '--reasoning-format', 'none'],
         logit_bias=[[200052, -100.0], [200053, -100.0]],
+    )
+
+    # ── Qwen3.5 family ──
+
+    # Qwen3.5-35B-A3B Q4_K_M — successor to Coder-30B, same 3B active MoE
+    # 22 GB model. Qwen3.5 arch unsupported by llama-cpp-python 0.3.16 — needs llama_server.
+    # 131K native context. Q4_0 cache at 82K ctx.
+    # ngl=26: 14,691 MiB / 1,612 MiB free | ngl=28: 593 MiB free (too tight)
+    _QWEN35_35B = _create_model_config(
+        'MODEL_PATH_QWEN35_35B',
+        '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3.5-35B-A3B-GGUF/Qwen3.5-35B-A3B-Q4_K_M.gguf',
+        26, 81920, 2048, backend='llama_server',
+        server_extra_args=['--jinja', '--reasoning-format', 'none'],
+        type_k=2, type_v=2,
+    )
+
+    # Qwen3.5-122B-A10B Q4_K_M — mid-tier MoE (10B active, 76.5 GB, 3 shards)
+    # Strong agentic/function-calling (72.2 BFCL-V4). Mostly CPU, limited GPU layers.
+    # Qwen3.5 arch unsupported by llama-cpp-python 0.3.16 — needs llama_server.
+    # 131K native context, using 65K to leave headroom.
+    # ngl=4: 6,984 MiB free | ngl=8: 2,798 MiB free | ngl=9: 1,297 MiB free (~1,507 MiB/layer)
+    _QWEN35_122B = _create_model_config(
+        'MODEL_PATH_QWEN35_122B',
+        '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3.5-122B-A10B-GGUF/Q4_K_M/Qwen3.5-122B-A10B-Q4_K_M-00001-of-00003.gguf',
+        9, 65536, 1024, backend='llama_server',
+        server_extra_args=['--jinja', '--reasoning-format', 'none'],
+    )
+
+    # Qwen3.5-397B-A17B IQ1_M — flagship (17B active, ~100 GB, 4 shards, 60 layers)
+    # Successor to 480B Coder as premium architect. 32K context (IQ1_M too
+    # aggressive for extended context, same lesson as 480B Lite).
+    # Qwen3.5 arch unsupported by llama-cpp-python 0.3.16 — needs llama_server.
+    # ngl=4: 8,395 MiB free | ngl=8: 1,647 MiB free (~1,687 MiB/layer, 60 layers total)
+    _QWEN35_397B = _create_model_config(
+        'MODEL_PATH_QWEN35_397B',
+        '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3.5-397B-A17B-GGUF/UD-IQ1_M/Qwen3.5-397B-A17B-UD-IQ1_M-00001-of-00004.gguf',
+        8, 32768, 1024, backend='llama_server',
+        server_extra_args=['--jinja', '--reasoning-format', 'none'],
+    )
+
+    # ── Non-Qwen models ──
+
+    # Nemotron-3-Nano-30B-A3B Q4_K_M — NVIDIA hybrid Mamba-Transformer MoE
+    # 3.5B active, 24.6 GB. Needs llama_server (nemotron_h_moe arch not in llama-cpp-python).
+    # 32K native context. ~3.3x throughput vs Qwen3-30B on same hardware.
+    # ngl=28: 14,339 MiB / 1,964 MiB free | ngl=30: 1,084 MiB free | ngl=32: OOM
+    _NEMOTRON_NANO = _create_model_config(
+        'MODEL_PATH_NEMOTRON_NANO',
+        '/home/keith-merrill/.lmstudio/models/unsloth/Nemotron-3-Nano-30B-A3B-GGUF/Nemotron-3-Nano-30B-A3B-Q4_K_M.gguf',
+        28, 32768, 2048, backend='llama_server',
+        server_extra_args=['--jinja', '--reasoning-format', 'none'],
+    )
+
+    # GLM-4.7-Flash Q4_K_M — Zhipu AI 30B-A3B MoE, 18.3 GB
+    # Uses llama_server for proper glm4 template handling. 128K native context.
+    # Q4_0 cache at 82K ctx. Smallest model — can push most GPU layers.
+    # ngl=34: 14,491 MiB / 1,812 MiB free | ngl=36: 1,022 MiB free | ngl=38: OOM
+    _GLM47_FLASH = _create_model_config(
+        'MODEL_PATH_GLM47_FLASH',
+        '/home/keith-merrill/.lmstudio/models/unsloth/GLM-4.7-Flash-GGUF/GLM-4.7-Flash-Q4_K_M.gguf',
+        34, 81920, 2048, backend='llama_server',
+        server_extra_args=['--jinja', '--reasoning-format', 'none'],
+        type_k=2, type_v=2,
     )
 
     # ── Few-shot example injected for executor agents ──
@@ -467,6 +570,8 @@ CONTEXT MANAGEMENT — your context window is limited. Work efficiently:
         {"role": "assistant", "content": "<<<WRITE_FILE>>>/tmp/long_files.py\nimport subprocess, os\n\nresult = subprocess.run(['find', '.', '-name', '*.swift', '-type', 'f'], capture_output=True, text=True)\nfor path in sorted(result.stdout.strip().split('\\n')):\n    if path:\n        with open(path) as f:\n            count = sum(1 for _ in f)\n        if count > 500:\n            print(f'{count:>6} {path}')\n\n<<<REMOTE_EXEC>>>python3 /tmp/long_files.py"},
         {"role": "user", "content": "Resize all PNG images in assets/ to 512x512."},
         {"role": "assistant", "content": "Let me find the PNGs first:\n<<<GLOB>>>assets/**/*.png\n\nNow I'll resize them using macOS sips:\n<<<REMOTE_EXEC>>>for f in assets/*.png; do sips -z 512 512 \"$f\"; done"},
+        {"role": "user", "content": "Find and fix the bug causing 500 errors on the /api/chat endpoint."},
+        {"role": "assistant", "content": "<<<PLAN>>>\nGOAL: Find and fix 500 error on /api/chat\nSTEPS:\n1. [ ] Find the endpoint handler\n2. [ ] Trace the error path\n3. [ ] Identify the root cause\n4. [ ] Apply fix and verify\nCURRENT: 1\n\n<<<CONFIDENCE>>>10\n\nLet me start by finding the endpoint:\n<<<GREP>>>/api/chat|."},
     ]
 
     # ── Shared agent prompts ──
@@ -535,6 +640,38 @@ CONTEXT MANAGEMENT — your context window is limited. Work efficiently:
             _MINIMAX_M25,
             executor=True
         ),
+        # ── Qwen3.5 agents ──
+        'q35_implementer': _create_agent_config(
+            'Qwen3.5-35B-A3B Q4_K_M (successor to Coder-30B)',
+            _IMPLEMENTER_SYSTEM_PROMPT,
+            _QWEN35_35B,
+            executor=True
+        ),
+        'q35_architect': _create_agent_config(
+            'Qwen3.5-122B-A10B Mid-tier Architect (10B active, 65K ctx)',
+            _ARCHITECT_SYSTEM_PROMPT,
+            _QWEN35_122B,
+            executor=True
+        ),
+        'q35_ultra': _create_agent_config(
+            'Qwen3.5-397B-A17B Flagship Architect (17B active)',
+            _ARCHITECT_SYSTEM_PROMPT,
+            _QWEN35_397B,
+            executor=True
+        ),
+        # ── Non-Qwen agents ──
+        'nemotron': _create_agent_config(
+            'Nemotron-3-Nano 30B-A3B (3.5B active, Mamba hybrid, fast throughput)',
+            _IMPLEMENTER_SYSTEM_PROMPT,
+            _NEMOTRON_NANO,
+            executor=True
+        ),
+        'glm': _create_agent_config(
+            'GLM-4.7-Flash 30B-A3B (Zhipu AI, 3B active MoE)',
+            _IMPLEMENTER_SYSTEM_PROMPT,
+            _GLM47_FLASH,
+            executor=True
+        ),
     }
 
     @classmethod
@@ -557,7 +694,11 @@ CONTEXT MANAGEMENT — your context window is limited. Work efficiently:
 # ============================================================================
 
 async def verify_admin_key(x_admin_key: Optional[str] = Header(None)):
-    """Verify admin API key if ADMIN_API_KEY is configured"""
+    """Verify admin API key if ADMIN_API_KEY is configured.
+
+    Uses hmac.compare_digest for timing-safe comparison to prevent
+    key extraction via timing side-channel attacks.
+    """
     if Config.ADMIN_API_KEY:
         if not x_admin_key or not hmac.compare_digest(x_admin_key, Config.ADMIN_API_KEY):
             raise HTTPException(status_code=401, detail="Invalid or missing admin API key")
@@ -583,7 +724,6 @@ class ModelManager:
                 self._cached_model = None
                 self._cached_agent = None
 
-            import gc
             gc.collect()
             gc.collect()
 
@@ -599,7 +739,12 @@ class ModelManager:
             logger.info("Memory cleanup complete")
 
     def get_model(self, agent_name: str):
-        """Load the model for the specific agent (LRU-1 cache: reuse if same agent)"""
+        """Load the model for the specific agent (LRU-1 cache: reuse if same agent).
+
+        The entire load-or-reuse sequence is serialized under self.lock to prevent
+        two concurrent requests from loading different models simultaneously (OOM risk).
+        Health checks use is_loaded() which doesn't acquire the lock.
+        """
         if agent_name not in Config.AGENTS:
             raise ValueError(f"Unknown agent: {agent_name}")
 
@@ -621,10 +766,9 @@ class ModelManager:
                 del self._cached_model
                 self._cached_model = None
                 self._cached_agent = None
-                import gc; gc.collect(); gc.collect()
+                gc.collect(); gc.collect()
 
-            # Load the model fresh (inside lock to prevent concurrent loads;
-            # health checks use is_loaded() which doesn't acquire this lock)
+            # Load fresh — held under lock to prevent concurrent OOM
             logger.info("Loading model for %s: %s", agent_name, model_path)
             try:
                 model = Llama(
@@ -676,6 +820,12 @@ class LlamaServerManager:
     HEALTH_POLL_INTERVAL = 0.5
     HEALTH_TIMEOUT = 120  # seconds to wait for /health
 
+    # GGML type enum → llama-server --cache-type string
+    _CACHE_TYPE_NAMES = {
+        0: 'f32', 1: 'f16', 2: 'q4_0', 3: 'q4_1',
+        6: 'q5_0', 7: 'q5_1', 8: 'q8_0', 9: 'q8_1',
+    }
+
     def __init__(self):
         self.lock = Lock()
         self.process: Optional[subprocess.Popen] = None
@@ -693,6 +843,10 @@ class LlamaServerManager:
             raise FileNotFoundError(f"llama-server binary not found: {binary}")
 
         model_path = model_config['path']
+        # Map GGML type_k/type_v integers to llama-server flag strings
+        cache_k = self._CACHE_TYPE_NAMES.get(model_config.get('type_k', 8), 'q8_0')
+        cache_v = self._CACHE_TYPE_NAMES.get(model_config.get('type_v', 8), 'q8_0')
+
         cmd = [
             binary,
             '-m', model_path,
@@ -702,6 +856,8 @@ class LlamaServerManager:
             '-t', str(Config.DEFAULT_N_THREADS),
             '-tb', str(Config.DEFAULT_N_THREADS),
             '-fa', 'on',
+            '--cache-type-k', cache_k,
+            '--cache-type-v', cache_v,
             '--host', '127.0.0.1',
             '--port', str(self.LLAMA_SERVER_PORT),
             '-np', '1',
@@ -752,11 +908,11 @@ class LlamaServerManager:
             time.sleep(self.HEALTH_POLL_INTERVAL)
 
         # Timeout — kill the process
-        self.shutdown()
+        self._shutdown_unlocked()
         raise TimeoutError(f"llama-server did not become healthy within {self.HEALTH_TIMEOUT}s")
 
-    def shutdown(self):
-        """Stop the subprocess gracefully, then force-kill if needed."""
+    def _shutdown_unlocked(self):
+        """Internal: stop the subprocess. Caller must hold self.lock or ensure exclusivity."""
         if self.process is None:
             return
 
@@ -778,6 +934,11 @@ class LlamaServerManager:
             self.process = None
             self.current_model_path = None
 
+    def shutdown(self):
+        """Stop the subprocess gracefully, then force-kill if needed. Thread-safe."""
+        with self.lock:
+            self._shutdown_unlocked()
+
     def ensure_running(self, model_config: dict):
         """Ensure llama-server is running with the correct model. Handles model swaps."""
         with self.lock:
@@ -789,7 +950,7 @@ class LlamaServerManager:
                     return
                 # Different model — shut down first
                 logger.info("Model swap: shutting down llama-server for new model")
-                self.shutdown()
+                self._shutdown_unlocked()
 
             # Free VRAM from any llama_cpp model before starting
             model_manager.unload_model()
@@ -815,7 +976,7 @@ class LlamaServerManager:
                 idle = time.time() - self.last_request_time
                 if idle >= self.IDLE_TIMEOUT:
                     logger.info("llama-server idle for %.0fs, shutting down to free resources", idle)
-                    self.shutdown()
+                    self._shutdown_unlocked()
                     break
 
     def proxy_stream(self, messages: List[dict], system_prompt: str,
@@ -843,6 +1004,7 @@ class LlamaServerManager:
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
         finish_reason = None
         accumulated_text = []  # Diagnostic: capture full response
+        think_stripper = ThinkingStripper()
 
         try:
             with http_requests.post(url, json=payload, stream=True, timeout=600) as resp:
@@ -878,9 +1040,12 @@ class LlamaServerManager:
 
                         if content:
                             accumulated_text.append(content)
-                            self.last_request_time = time.time()  # Keep watchdog at bay during long streams
-                            out_chunk = build_stream_chunk(completion_id, model_id, content=content)
-                            yield f"data: {json.dumps(out_chunk)}\n\n"
+                            # Strip <think>...</think> blocks from streaming output
+                            filtered = think_stripper.feed(content)
+                            if filtered:
+                                self.last_request_time = time.time()  # Keep watchdog at bay during long streams
+                                out_chunk = build_stream_chunk(completion_id, model_id, content=filtered)
+                                yield f"data: {json.dumps(out_chunk)}\n\n"
                     except json.JSONDecodeError:
                         continue
 
@@ -890,6 +1055,12 @@ class LlamaServerManager:
             yield f"data: {json.dumps(error_chunk)}\n\n"
             yield "data: [DONE]\n\n"
             return
+
+        # Flush any remaining buffered content from the thinking stripper
+        remaining = think_stripper.flush()
+        if remaining:
+            out_chunk = build_stream_chunk(completion_id, model_id, content=remaining)
+            yield f"data: {json.dumps(out_chunk)}\n\n"
 
         # Log the full response for diagnostics (repr escapes newlines for single-line journald)
         full_text = ''.join(accumulated_text)
@@ -925,6 +1096,7 @@ class LlamaServerManager:
 
         result = resp.json()
         text = result["choices"][0]["message"]["content"]
+        text = strip_thinking(text)
         finish_reason = result["choices"][0].get("finish_reason", "stop")
         usage = result.get("usage", {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
 
@@ -946,8 +1118,85 @@ class LlamaServerManager:
 
 
 # ============================================================================
+# Thinking Tag Stripping
+# ============================================================================
+
+# Models with --reasoning-format none still emit thinking content in raw text.
+# Two patterns observed:
+#   1. Full block:  <think>reasoning...</think>actual response
+#   2. Orphan close: reasoning...</think>actual response  (Jinja consumed <think>)
+_THINK_FULL_RE = re.compile(r'<think>.*?</think>\s*', re.DOTALL)
+_THINK_ORPHAN_RE = re.compile(r'^.*?</think>\s*', re.DOTALL)
+
+
+def strip_thinking(text: str) -> str:
+    """Remove thinking content from completed text."""
+    text = _THINK_FULL_RE.sub('', text)
+    text = _THINK_ORPHAN_RE.sub('', text)
+    return text
+
+
+class ThinkingStripper:
+    """Streaming state machine that suppresses thinking content.
+
+    Handles two patterns:
+        1. <think>reasoning...</think>response  (full block)
+        2. reasoning...</think>response          (orphan — Jinja consumed <think>)
+
+    Buffers all tokens until </think> is found, then emits everything after it.
+    Thinking content can itself contain tool markers (<<<WRITE_FILE>>> etc.)
+    as the model reasons about tools, so we cannot use those as shortcuts.
+
+    If no </think> appears within MAX_BUFFER chars, assumes no thinking block
+    and flushes the buffer as real content.
+    """
+    BUFFERING = 0
+    PASSTHROUGH = 1
+
+    MAX_BUFFER = 8192  # chars — well beyond any realistic thinking block
+
+    def __init__(self):
+        self.state = self.BUFFERING
+        self.buffer = ''
+
+    def feed(self, token: str) -> str:
+        """Feed a token, return text to emit (empty string = suppress)."""
+        if self.state == self.PASSTHROUGH:
+            return token
+
+        self.buffer += token
+
+        # Check for </think> — everything before it (inclusive) is thinking
+        close_idx = self.buffer.find('</think>')
+        if close_idx != -1:
+            after = self.buffer[close_idx + len('</think>'):]
+            self.state = self.PASSTHROUGH
+            self.buffer = ''
+            return after.lstrip()
+
+        # Safety valve: if buffer grows too large without </think>,
+        # this response has no thinking block — flush as real content
+        if len(self.buffer) >= self.MAX_BUFFER:
+            self.state = self.PASSTHROUGH
+            result = self.buffer
+            self.buffer = ''
+            return result
+
+        return ''
+
+    def flush(self) -> str:
+        """Flush remaining buffer at end of stream."""
+        if self.buffer:
+            result = self.buffer
+            self.buffer = ''
+            self.state = self.PASSTHROUGH
+            return result
+        return ''
+
+
+# ============================================================================
 # Prompt Format Helpers
-# ============================================================================ 
+# ============================================================================
 
 CHATML_START = "<|im_start|>"
 CHATML_END = "<|im_end|>"
@@ -982,40 +1231,45 @@ def calculate_token_budget(model, messages: List, system_prompt: str, model_path
                            max_tokens: int, model_id: str) -> tuple:
     """Calculate token budget and build final prompt with budget guidance.
 
+    Uses 2 tokenizations instead of 3: tokenize the budget guidance template once
+    to estimate its overhead, then tokenize the final prompt once.
+
     Returns:
         tuple: (prompt, clamped_max_tokens, n_prompt, error_message)
                error_message is None on success, or a string describing the error
     """
     n_ctx = model.n_ctx()
 
-    # Estimate the token count for the budget guidance string itself
+    # Tokenize budget guidance template once to estimate its overhead
     budget_guidance_template = Config.TOKEN_BUDGET_GUIDANCE.format(available_tokens=99999)
     budget_guidance_tokens = len(model.tokenize(budget_guidance_template.encode("utf-8")))
 
-    # Tokenize the prompt ONCE without budget guidance
+    # Build the final prompt with a placeholder budget, tokenize once
+    # We use the estimated budget to format the guidance string, then measure the real total.
     preliminary_prompt = build_model_prompt(messages, system_prompt, model_path)
     n_preliminary = len(model.tokenize(preliminary_prompt.encode("utf-8")))
 
-    # Estimate final prompt size (preliminary + budget guidance overhead)
-    n_prompt_estimated = n_preliminary + budget_guidance_tokens
-    available = n_ctx - n_prompt_estimated
+    # Calculate available tokens accounting for budget guidance overhead
+    available = n_ctx - n_preliminary - budget_guidance_tokens
     if available < 1:
         error_msg = (f"Prompt ({n_preliminary} tokens) fills the entire context window ({n_ctx}). "
                      "Reduce conversation history and retry.")
         return None, 0, n_preliminary, error_msg
 
-    # Clamp to requested max_tokens
     clamped_max = min(max_tokens, available)
 
-    # Build the final prompt with budget guidance (skip second tokenization)
+    # Build the real prompt with actual budget number.
+    # The token count difference from changing "99999" to the real number is negligible
+    # (a few tokens at most), so we use the estimated n_prompt without re-tokenizing.
     budget_guidance = Config.TOKEN_BUDGET_GUIDANCE.format(available_tokens=clamped_max)
     augmented_system_prompt = f"{system_prompt}\n{budget_guidance}"
     prompt = build_model_prompt(messages, augmented_system_prompt, model_path)
+    n_prompt = n_preliminary + budget_guidance_tokens
 
     if clamped_max < max_tokens:
         logger.info(
             "Clamped max_tokens %d -> %d for %s (prompt~%d, n_ctx=%d)",
-            max_tokens, clamped_max, model_id, n_prompt_estimated, n_ctx
+            max_tokens, clamped_max, model_id, n_prompt, n_ctx
         )
 
     logger.info(
@@ -1023,7 +1277,7 @@ def calculate_token_budget(model, messages: List, system_prompt: str, model_path
         model_id, clamped_max
     )
 
-    return prompt, clamped_max, n_prompt_estimated, None
+    return prompt, clamped_max, n_prompt, None
 
 
 # ============================================================================
@@ -1078,7 +1332,6 @@ def build_stream_chunk(completion_id: str, model_id: str, content: Optional[str]
 
 model_manager = ModelManager()
 llama_server_manager = LlamaServerManager()
-_SERVER_START_TIME = int(time.time())
 memory_service = None
 web_search_service = None
 apple_deep_docs_service = None
@@ -1142,11 +1395,13 @@ _cors_origins_raw = os.getenv("CORS_ORIGINS", "localhost,127.0.0.1").split(",")
 _cors_origins = []
 for origin in _cors_origins_raw:
     origin = origin.strip()
+    if not origin:
+        continue
     if origin == "*":
         _cors_origins = ["*"]
         break
     # Ensure origins have a scheme — bare hostnames don't match in CORS
-    if origin and not origin.startswith("http"):
+    if not origin.startswith("http"):
         _cors_origins.append(f"http://{origin}")
     else:
         _cors_origins.append(origin)
@@ -1210,7 +1465,7 @@ async def list_models():
         models.append({
             "id": agent_id,
             "object": "model",
-            "created": _SERVER_START_TIME,
+            "created": int(time.time()),
             "owned_by": "qwen-multi-agent",
             "description": agent_config['description']
         })
@@ -1218,8 +1473,8 @@ async def list_models():
     return {"object": "list", "data": models}
 
 
-@app.post("/v1/memory")
-def save_memory(request: MemoryRequest):
+@app.post("/v1/memory", dependencies=[Depends(verify_admin_key)])
+def save_memory_endpoint(request: MemoryRequest):
     """Save a memory/fact to the long-term storage.
 
     If *source* is provided (e.g. a file path like "main.swift"), the text is
@@ -1246,8 +1501,8 @@ def save_memory(request: MemoryRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/v1/memory/search")
-def search_memory(request: SearchRequest):
+@app.post("/v1/memory/search", dependencies=[Depends(verify_admin_key)])
+def search_memory_endpoint(request: SearchRequest):
     """Search for relevant memories in the long-term storage"""
     if not memory_service:
         raise HTTPException(status_code=503, detail="Memory service not initialized")
@@ -1261,8 +1516,8 @@ def search_memory(request: SearchRequest):
 
 
 
-@app.post("/v1/tools/search")
-def web_search(request: SearchRequest):
+@app.post("/v1/tools/search", dependencies=[Depends(verify_admin_key)])
+def web_search_endpoint(request: SearchRequest):
     """Perform a web search using DuckDuckGo"""
     if not web_search_service:
         raise HTTPException(status_code=503, detail="Web search service not initialized")
@@ -1277,8 +1532,8 @@ class DeepDocRequest(BaseModel):
     arguments: Dict[str, Any]
 
 
-@app.post("/v1/tools/apple_deep_docs")
-def apple_deep_docs(request: DeepDocRequest):
+@app.post("/v1/tools/apple_deep_docs", dependencies=[Depends(verify_admin_key)])
+def apple_deep_docs_endpoint(request: DeepDocRequest):
     """Perform an Apple Documentation search using the server-side MCP"""
     if not apple_deep_docs_service:
         raise HTTPException(status_code=503, detail="Apple Deep Docs service not initialized")
@@ -1287,8 +1542,8 @@ def apple_deep_docs(request: DeepDocRequest):
     return {"result": result}
 
 
-@app.post("/v1/memory/ingest")
-def ingest_memory(request: IngestRequest):
+@app.post("/v1/memory/ingest", dependencies=[Depends(verify_admin_key)])
+def ingest_memory_endpoint(request: IngestRequest):
     """Ingest a local PDF file into long-term memory"""
     if not memory_service:
         raise HTTPException(status_code=503, detail="Memory service not initialized")
@@ -1327,41 +1582,39 @@ class FileUploadRequest(BaseModel):
     content: str  # Base64 encoded content
 
 
-MAX_UPLOAD_SIZE = 100 * 1024 * 1024  # 100 MB
-
-
-@app.post("/v1/files/upload")
-def upload_file(request: FileUploadRequest):
+@app.post("/v1/files/upload", dependencies=[Depends(verify_admin_key)])
+def upload_file_endpoint(request: FileUploadRequest):
     """Upload a file to the server's temporary directory"""
     try:
         import base64
         import tempfile
+
+        # Reject oversized uploads before decoding (100 MB base64 ≈ 75 MB file)
+        MAX_UPLOAD_B64_LEN = 100 * 1024 * 1024
+        if len(request.content) > MAX_UPLOAD_B64_LEN:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Upload too large ({len(request.content) // (1024*1024)} MB base64). Max: 100 MB"
+            )
 
         # Decode the base64 content
         try:
             file_content = base64.b64decode(request.content)
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Invalid base64 content: {str(e)}")
-
-        if len(file_content) > MAX_UPLOAD_SIZE:
-            raise HTTPException(
-                status_code=413,
-                detail=f"File too large ({len(file_content)} bytes, max {MAX_UPLOAD_SIZE})"
-            )
-
+        
         # Sanitize filename: strip directory components to prevent path traversal
         safe_filename = os.path.basename(request.filename)
         if not safe_filename:
             raise HTTPException(status_code=400, detail="Invalid filename")
 
-        # Use a unique temp path to avoid overwriting existing files
         temp_dir = tempfile.gettempdir()
-        fd, temp_path = tempfile.mkstemp(suffix=f"_{safe_filename}", dir=temp_dir)
-        try:
-            os.write(fd, file_content)
-        finally:
-            os.close(fd)
-
+        temp_path = os.path.join(temp_dir, safe_filename)
+        
+        # Write the file
+        with open(temp_path, 'wb') as f:
+            f.write(file_content)
+        
         logger.info(f"File uploaded successfully: {temp_path}")
         return {"status": "success", "path": temp_path, "size": len(file_content)}
     except HTTPException:
@@ -1371,8 +1624,8 @@ def upload_file(request: FileUploadRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/v1/chat/completions")
-def chat_completions(request: ChatCompletionRequest, raw_request: Request):
+@app.post("/v1/chat/completions", dependencies=[Depends(verify_admin_key)])
+async def chat_completions(request: ChatCompletionRequest, raw_request: Request):
     """Handle chat completion requests (OpenAI-compatible)"""
     try:
         # Validate model exists
@@ -1438,9 +1691,14 @@ def chat_completions(request: ChatCompletionRequest, raw_request: Request):
                     media_type="text/event-stream"
                 )
             else:
-                return llama_server_manager.proxy_sync(
-                    request.messages, augmented_system, request.model,
-                    clamped_max, request.temperature, model_config=model_config)
+                # Run blocking sync inference in thread pool to keep event loop responsive
+                loop = asyncio.get_event_loop()
+                return await loop.run_in_executor(
+                    None,
+                    lambda: llama_server_manager.proxy_sync(
+                        request.messages, augmented_system, request.model,
+                        clamped_max, request.temperature, model_config=model_config)
+                )
         else:
             # Standard llama_cpp path
             if request.stream:
@@ -1450,8 +1708,12 @@ def chat_completions(request: ChatCompletionRequest, raw_request: Request):
                     media_type="text/event-stream"
                 )
             else:
-                return sync_completion(request.messages, system_prompt, model_path, request.model,
-                                       request.max_tokens, request.temperature)
+                loop = asyncio.get_event_loop()
+                return await loop.run_in_executor(
+                    None,
+                    lambda: sync_completion(request.messages, system_prompt, model_path, request.model,
+                                            request.max_tokens, request.temperature)
+                )
 
     except HTTPException:
         raise
