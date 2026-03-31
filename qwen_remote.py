@@ -1459,10 +1459,11 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                 # ── Execute commands found in the response ──
                 tool_output = process_remote_commands(response_text)
 
-                if not tool_output and finish_reason == "stop":
+                if not tool_output and finish_reason == "stop" and not _DONE_PATTERNS.search(response_text):
                     # Fallback: model wrote commands in code blocks instead of markers.
                     # Only on clean completions — truncated/errored responses contain
                     # code examples that are NOT intended as executable commands.
+                    # Skip if the agent is clearly done (summary with example blocks).
                     fallback_cmds = extract_fallback_commands(response_text)
                     if fallback_cmds:
                         print_colored("\nAgent used code blocks instead of markers. Extracting commands...", COLORS['WARNING'])

@@ -192,7 +192,7 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                 # ── Execute commands found in the cleaned response ──
                 tool_output = _process_remote_commands(cleaned_response)
 
-                if not tool_output and finish_reason == "stop":
+                if not tool_output and finish_reason == "stop" and not _DONE_PATTERNS.search(cleaned_response):
                     fallback_cmds = _extract_fallback_commands(cleaned_response)
                     if fallback_cmds:
                         print_colored(
