@@ -158,7 +158,8 @@ class IngestRequest(BaseModel):
 # ============================================================================
 
 def _create_model_config(path_env, path_default, n_gpu_layers, n_ctx=32768, n_batch=2048, backend='llama_cpp',
-                         server_extra_args=None, logit_bias=None, yarn=False, type_k=8, type_v=8):
+                         server_extra_args=None, logit_bias=None, yarn=False, type_k=8, type_v=8,
+                         repeat_penalty=1.15, repeat_last_n=256):
     """Helper function to create standardized model configurations.
 
     Args:
@@ -166,6 +167,8 @@ def _create_model_config(path_env, path_default, n_gpu_layers, n_ctx=32768, n_ba
               using extended context via YaRN (e.g. 480B Ultra with 2x scaling).
         type_k: GGML type for KV cache keys (8=Q8_0, 2=Q4_0). Default Q8_0.
         type_v: GGML type for KV cache values (8=Q8_0, 2=Q4_0). Default Q8_0.
+        repeat_penalty: Penalizes repeated tokens (1.0=off). Lower values help code generation.
+        repeat_last_n: Window of recent tokens to apply repeat penalty to (256=windowed, -1=full context).
     """
     config = {
         'path': os.getenv(path_env, path_default),
@@ -174,6 +177,8 @@ def _create_model_config(path_env, path_default, n_gpu_layers, n_ctx=32768, n_ba
         'n_batch': n_batch,
         'type_k': type_k, 'type_v': type_v, 'offload_kqv': True,
         'backend': backend,
+        'repeat_penalty': repeat_penalty,
+        'repeat_last_n': repeat_last_n,
     }
     if yarn:
         config.update({
@@ -506,6 +511,7 @@ Update these after each retrieval step. They help you stay organized and efficie
         22, 131072, 2048, backend='llama_server',
         server_extra_args=['--jinja', '--reasoning-format', 'none'],
         type_k=2, type_v=2,
+        repeat_penalty=1.05,  # Lower penalty for code generation — 1.15 caused premature EOS on large files
     )
 
     # Qwen3.5-122B-A10B Q4_K_M — mid-tier MoE (10B active, 76.5 GB, 3 shards)
@@ -1025,7 +1031,8 @@ class LlamaServerManager:
             # No explicit stop sequences — llama-server's chat template handles
             # end-of-turn tokens (im_end, EOT, etc.) natively. Passing them here
             # causes premature stopping via double-matching.
-            "repeat_penalty": 1.15,
+            "repeat_penalty": (model_config or {}).get('repeat_penalty', 1.15),
+            "repeat_last_n": (model_config or {}).get('repeat_last_n', 256),
             # Ban model-specific native tool tokens to prevent format corruption.
             # Each model config specifies which tokens to ban via logit_bias.
             "logit_bias": (model_config or {}).get('logit_bias', []),
@@ -1117,7 +1124,8 @@ class LlamaServerManager:
             "max_tokens": max_tokens,
             "temperature": temperature,
             "stream": False,
-            "repeat_penalty": 1.15,
+            "repeat_penalty": (model_config or {}).get('repeat_penalty', 1.15),
+            "repeat_last_n": (model_config or {}).get('repeat_last_n', 256),
             "logit_bias": (model_config or {}).get('logit_bias', []),
         }
 
@@ -1246,14 +1254,19 @@ def build_model_prompt(messages: List[ChatMessage], system_prompt: str, model_pa
     return "".join(parts)
 
 
-def get_model_params(max_tokens: int, temperature: float, stream: bool = False) -> Dict[str, Any]:
-    """Get common model inference parameters"""
+def get_model_params(max_tokens: int, temperature: float, stream: bool = False,
+                     model_config: dict = None) -> Dict[str, Any]:
+    """Get common model inference parameters.
+
+    Note: repeat_last_n is NOT supported by llama-cpp-python's __call__ API,
+    so it's only passed in the llama_server proxy payloads (proxy_stream/proxy_sync).
+    """
     return {
         "max_tokens": max_tokens,
         "temperature": temperature,
         "stop": [CHATML_END, CHATML_START, "<|EOT|>", "<|endoftext|>"],
         "stream": stream,
-        "repeat_penalty": 1.15,
+        "repeat_penalty": (model_config or {}).get('repeat_penalty', 1.15),
         "echo": False
     }
 
@@ -1747,7 +1760,7 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
             if request.stream:
                 return StreamingResponse(
                     stream_completion(request.messages, system_prompt, model_path, request.model,
-                                      request.max_tokens, request.temperature),
+                                      request.max_tokens, request.temperature, model_config=model_config),
                     media_type="text/event-stream"
                 )
             else:
@@ -1755,7 +1768,7 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
                 return await loop.run_in_executor(
                     None,
                     lambda: sync_completion(request.messages, system_prompt, model_path, request.model,
-                                            request.max_tokens, request.temperature)
+                                            request.max_tokens, request.temperature, model_config=model_config)
                 )
 
     except HTTPException:
@@ -1769,7 +1782,8 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
 
 
 def sync_completion(messages: List[ChatMessage], system_prompt: str, model_path: str,
-                    model_id: str, max_tokens: int, temperature: float) -> Dict[str, Any]:
+                    model_id: str, max_tokens: int, temperature: float,
+                    model_config: dict = None) -> Dict[str, Any]:
     """Generate synchronous completion with token budget awareness"""
     with model_manager.inference_lock:
         model = model_manager.get_model(model_id)
@@ -1781,7 +1795,7 @@ def sync_completion(messages: List[ChatMessage], system_prompt: str, model_path:
         if error_msg:
             raise HTTPException(status_code=400, detail=error_msg)
 
-        params = get_model_params(clamped_max, temperature, stream=False)
+        params = get_model_params(clamped_max, temperature, stream=False, model_config=model_config)
         response = model(prompt, **params)
 
         text = response['choices'][0]['text'].strip()
@@ -1798,7 +1812,8 @@ STREAM_TTFT_TIMEOUT = 600  # seconds — abort if no token generated within 10 m
 
 
 def stream_completion(messages: List[ChatMessage], system_prompt: str, model_path: str,
-                      model_id: str, max_tokens: int, temperature: float) -> Iterator[str]:
+                      model_id: str, max_tokens: int, temperature: float,
+                      model_config: dict = None) -> Iterator[str]:
     """Generate streaming completion with token budget awareness.
 
     The inference_lock is held for the full duration of streaming intentionally.
@@ -1843,7 +1858,7 @@ def stream_completion(messages: List[ChatMessage], system_prompt: str, model_pat
                     yield f"data: {json.dumps(error_chunk)}\n\n"
                     return
 
-                params = get_model_params(clamped_max, temperature, stream=True)
+                params = get_model_params(clamped_max, temperature, stream=True, model_config=model_config)
                 token_count = 0
 
                 for output in model(prompt, **params):
