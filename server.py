@@ -429,13 +429,14 @@ Update these after each retrieval step. They help you stay organized and efficie
 """ + MACOS_TOOLKIT
 
     # ── Shared model configs ──
-    # Turbo: Optimized for speed and 80k context on RTX 5080 (Success Formula)
-    # Q4_0 KV cache halves cache VRAM vs Q8_0, enabling 34 GPU layers (up from 32)
-    # ngl=34: 15,108 MiB / 1,195 MiB free | ngl=35: 813 MiB free (tight) | ngl=36: OOM
+    # Turbo: Speed-optimized implementer on RTX 5080
+    # Q4_0 KV cache halves cache VRAM vs Q8_0. Bumped ctx 82K→131K (native max).
+    # ngl=34 at 82K: 1,195 MiB free. At 131K: need fewer layers.
+    # ngl=30 at 131K Q4_0: ~2 GB free (estimated, verify on load)
     _CODER_30B_TURBO = _create_model_config(
         'MODEL_PATH_30B_TURBO',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
-        34, 81920, 2048, type_k=2, type_v=2
+        30, 131072, 2048, type_k=2, type_v=2
     )
 
     # FAST: Lightweight Q4_K_M for quick implementation tasks (256k native context, moderate GPU)
@@ -459,12 +460,13 @@ Update these after each retrieval step. They help you stay organized and efficie
         logit_bias=[[151657, -100.0], [151658, -100.0]],
     )
 
-    # HD: High-precision Q8_0 with expanded context (49k) for review and Metal work
-    # Reduced GPU layers (16) to free VRAM for larger KV cache
+    # HD: High-precision Q8_0 weights with hybrid KV cache for reviews
+    # Bumped from 49K (Q8_0 cache) to 82K using Q4_0 values to free VRAM.
+    # Q8_0 keys preserve attention precision for code review accuracy.
     _CODER_30B_HD = _create_model_config(
         'MODEL_PATH_30B_HD',
         '/home/keith-merrill/.lmstudio/models/lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q8_0.gguf',
-        21, 49152, 2048
+        21, 81920, 2048, type_k=8, type_v=2
     )
 
     # Lite: Faster reasoning on system RAM (32k native context, no YaRN — IQ1_M too
@@ -496,12 +498,13 @@ Update these after each retrieval step. They help you stay organized and efficie
 
     # Qwen3.5-35B-A3B Q4_K_M — successor to Coder-30B, same 3B active MoE
     # 22 GB model. Qwen3.5 arch unsupported by llama-cpp-python 0.3.16 — needs llama_server.
-    # 131K native context. Q4_0 cache at 82K ctx.
-    # ngl=26: 14,691 MiB / 1,612 MiB free | ngl=28: 593 MiB free (too tight)
+    # 131K native context. Bumped from 82K to full 131K with Q4_0 KV cache.
+    # ngl=26 at 82K: 1,612 MiB free. At 131K: need fewer layers.
+    # ngl=22 at 131K Q4_0: ~2 GB free (estimated, verify on load)
     _QWEN35_35B = _create_model_config(
         'MODEL_PATH_QWEN35_35B',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3.5-35B-A3B-GGUF/Qwen3.5-35B-A3B-Q4_K_M.gguf',
-        26, 81920, 2048, backend='llama_server',
+        22, 131072, 2048, backend='llama_server',
         server_extra_args=['--jinja', '--reasoning-format', 'none'],
         type_k=2, type_v=2,
     )
@@ -519,17 +522,15 @@ Update these after each retrieval step. They help you stay organized and efficie
     )
 
     # Qwen3.5-397B-A17B IQ1_M — flagship (17B active, ~100 GB, 4 shards, 60 layers)
-    # Successor to 480B Coder as premium architect.
+    # Successor to 480B Coder as premium architect — DESIGN ROLE, not implementation.
     # Qwen3.5 arch unsupported by llama-cpp-python 0.3.16 — needs llama_server.
     # ngl=4: 8,395 MiB free | ngl=8: 1,647 MiB free (~1,687 MiB/layer, 60 layers total)
-    # 64K context with hybrid KV cache (Q8_0 keys / Q4_0 values) + ngl=4.
-    # Trades GPU layers for 2x context window. Keys stay full precision (more
-    # sensitive to quantization); only values use Q4_0. Prevents the
-    # history-prune→write-loop that occurs at 32K during long agentic tasks.
+    # ngl=7 + 64K hybrid KV cache (Q8_0 keys / Q4_0 values) balances TTFT speed
+    # with sufficient context for architectural analysis. ~3 GB headroom.
     _QWEN35_397B = _create_model_config(
         'MODEL_PATH_QWEN35_397B',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3.5-397B-A17B-GGUF/UD-IQ1_M/Qwen3.5-397B-A17B-UD-IQ1_M-00001-of-00004.gguf',
-        4, 65536, 1024, backend='llama_server',
+        7, 65536, 1024, backend='llama_server',
         server_extra_args=['--jinja', '--reasoning-format', 'none'],
         type_k=8, type_v=2,
     )
@@ -586,7 +587,31 @@ Update these after each retrieval step. They help you stay organized and efficie
     )
 
     _ARCHITECT_SYSTEM_PROMPT = (
-        f'You are a system architect. {EXECUTOR_PROMPT}\n\nDESIGN AND IMPLEMENTATION: You are expected to both design solutions and implement them using the tools available.\n\nEXECUTION ENVIRONMENT: You are running on a macOS environment with full access to development tools.\n- Use `<<<REMOTE_EXEC>>>` for ALL shell commands (including Xcode tools, Git, file operations).\n- Do NOT distinguish between "server" and "client". Everything runs locally.\n\nFILE MODIFICATION - CRITICAL:\n- Use `<<<WRITE_FILE>>>` for NEW files or complete rewrites\n- Use `<<<EDIT_FILE>>>` for targeted changes to EXISTING files (PREFERRED)\n- NEVER output code in markdown blocks - that does NOT save anything!\n\nEDIT_FILE FORMAT (use EXACTLY this format):\n<<<EDIT_FILE>>>/path/to/file\n<<<OLD>>>\nexact text to find\n<<<NEW>>>\nreplacement text\n\nWARNING: Do NOT use git-style markers like <<<<<<< SEARCH or ======= or >>>>>>> REPLACE. Those will NOT work. Use <<<OLD>>> and <<<NEW>>> only.\n\nDOCUMENTATION: You should create and maintain documentation:\n- Use `<<<WRITE_FILE>>>` to create new docs (README.md, ARCHITECTURE.md, DESIGN.md)\n- Use `<<<EDIT_FILE>>>` to update existing docs with targeted changes\n- Document system design decisions and rationale\n- Create diagrams using Mermaid or ASCII art in markdown\n- Write technical specs, ADRs (Architecture Decision Records), and migration guides\n\nGIT AWARENESS: Use Git via `<<<REMOTE_EXEC>>>` to understand code context:\n- `git log`, `git diff`, `git blame`, `git show`, `git status`\n\nXCODE DEVELOPMENT via `<<<REMOTE_EXEC>>>`:\n- Compile Swift: `swiftc file.swift -o output`\n- Build Xcode: `xcodebuild -project Foo.xcodeproj -scheme Foo build`\n- Use `simctl` for iOS simulators, `codesign` for signing\n\n{TOOL_REFERENCE}'
+        f'You are a system architect. {EXECUTOR_PROMPT}\n\n'
+        'ROLE: You DESIGN systems and PLAN implementations. You do NOT write large amounts '
+        'of code yourself. Your job is to:\n'
+        '1. Understand the codebase by reading files, searching, and exploring\n'
+        '2. Design the architecture, interfaces, and file structure\n'
+        '3. Write a clear, actionable implementation plan\n'
+        '4. Create small scaffolding files (configs, interfaces, stubs) if helpful\n'
+        '5. Delegate the bulk implementation to an implementer agent\n\n'
+        'WHAT YOU SHOULD DO:\n'
+        '- Use <<<GLOB>>>, <<<GREP>>>, <<<READ_FILE>>>, <<<LIST_DIR>>> extensively to understand the codebase\n'
+        '- Use <<<REMOTE_EXEC>>> to run git log, git diff, git blame for context\n'
+        '- Use <<<SAVE_MEMORY>>> to record key findings and design decisions\n'
+        '- Write short config files, interface definitions, or type stubs with <<<WRITE_FILE>>>\n'
+        '- Write documentation (README, ARCHITECTURE.md, ADRs) with <<<WRITE_FILE>>>\n'
+        '- Output a structured implementation plan as your final deliverable\n\n'
+        'WHAT YOU SHOULD NOT DO:\n'
+        '- Do NOT write large source files (>50 lines). Delegate to an implementer.\n'
+        '- Do NOT enter build/test/fix loops. That is implementer work.\n'
+        '- Do NOT rewrite files repeatedly. Write once or delegate.\n'
+        '- Do NOT run xcodebuild, compilers, or test suites. Leave verification to implementers.\n\n'
+        'EDIT_FILE FORMAT (for small targeted edits only):\n'
+        '<<<EDIT_FILE>>>path\n<<<OLD>>>\nexact text to find\n<<<NEW>>>\nreplacement text\n\n'
+        'WARNING: Do NOT use git-style markers like <<<<<<< SEARCH or ======= or >>>>>>> REPLACE. '
+        'Use <<<OLD>>> and <<<NEW>>> only.\n\n'
+        f'{TOOL_REFERENCE}'
     )
 
     # ── Agent definitions ──
