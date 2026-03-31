@@ -524,7 +524,7 @@ Update these after each retrieval step. They help you stay organized and efficie
     # Successor to 480B Coder as premium architect — DESIGN ROLE, not implementation.
     # Qwen3.5 arch unsupported by llama-cpp-python 0.3.16 — needs llama_server.
     # ~1,687 MiB/layer, 60 layers total. Hybrid KV cache (Q8_0 keys / Q4_0 values).
-    # ngl=7 at 65K: 2,992 MiB free | ngl=8 at 96K: testing (measured 2026-03-30)
+    # ngl=7 at 65K: 2,992 MiB free | ngl=8 at 96K: 1,557 MiB free (measured 2026-03-30)
     _QWEN35_397B = _create_model_config(
         'MODEL_PATH_QWEN35_397B',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3.5-397B-A17B-GGUF/UD-IQ1_M/Qwen3.5-397B-A17B-UD-IQ1_M-00001-of-00004.gguf',
