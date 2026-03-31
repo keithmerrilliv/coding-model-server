@@ -431,8 +431,7 @@ Update these after each retrieval step. They help you stay organized and efficie
     # ── Shared model configs ──
     # Turbo: Speed-optimized implementer on RTX 5080
     # Q4_0 KV cache halves cache VRAM vs Q8_0. Bumped ctx 82K→131K (native max).
-    # ngl=34 at 82K: 1,195 MiB free. At 131K: need fewer layers.
-    # ngl=30 at 131K Q4_0: ~2 GB free (estimated, verify on load)
+    # ngl=30 at 131K Q4_0: 1,475 MiB free (measured 2026-03-30)
     _CODER_30B_TURBO = _create_model_config(
         'MODEL_PATH_30B_TURBO',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
@@ -442,7 +441,7 @@ Update these after each retrieval step. They help you stay organized and efficie
     # FAST: Lightweight Q4_K_M for quick implementation tasks (256k native context, moderate GPU)
     # Alternative to the 80B Next model when speed matters more than quality
     # Q4_0 KV cache is REQUIRED — Q8_0 OOMs at ngl≥22 with 262K context
-    # ngl=26: 14,888 MiB / 1,415 MiB free | ngl=27: 937 MiB free (tight) | ngl=28: OOM
+    # ngl=26: 883 MiB free (measured 2026-03-30) | ngl=27: tight | ngl=28: OOM
     _CODER_30B_FAST = _create_model_config(
         'MODEL_PATH_30B_FAST',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
@@ -513,7 +512,7 @@ Update these after each retrieval step. They help you stay organized and efficie
     # Strong agentic/function-calling (72.2 BFCL-V4). Mostly CPU, limited GPU layers.
     # Qwen3.5 arch unsupported by llama-cpp-python 0.3.16 — needs llama_server.
     # 131K native context, using 65K to leave headroom.
-    # ngl=4: 6,984 MiB free | ngl=8: 2,798 MiB free | ngl=9: 1,297 MiB free (~1,507 MiB/layer)
+    # ngl=9 at 65K: 1,209 MiB free (measured 2026-03-30, ~1,507 MiB/layer)
     _QWEN35_122B = _create_model_config(
         'MODEL_PATH_QWEN35_122B',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3.5-122B-A10B-GGUF/Q4_K_M/Qwen3.5-122B-A10B-Q4_K_M-00001-of-00003.gguf',
@@ -524,13 +523,12 @@ Update these after each retrieval step. They help you stay organized and efficie
     # Qwen3.5-397B-A17B IQ1_M — flagship (17B active, ~100 GB, 4 shards, 60 layers)
     # Successor to 480B Coder as premium architect — DESIGN ROLE, not implementation.
     # Qwen3.5 arch unsupported by llama-cpp-python 0.3.16 — needs llama_server.
-    # ngl=4: 8,395 MiB free | ngl=8: 1,647 MiB free (~1,687 MiB/layer, 60 layers total)
-    # ngl=7 + 64K hybrid KV cache (Q8_0 keys / Q4_0 values) balances TTFT speed
-    # with sufficient context for architectural analysis. ~3 GB headroom.
+    # ~1,687 MiB/layer, 60 layers total. Hybrid KV cache (Q8_0 keys / Q4_0 values).
+    # ngl=7 at 65K: 2,992 MiB free | ngl=8 at 96K: testing (measured 2026-03-30)
     _QWEN35_397B = _create_model_config(
         'MODEL_PATH_QWEN35_397B',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3.5-397B-A17B-GGUF/UD-IQ1_M/Qwen3.5-397B-A17B-UD-IQ1_M-00001-of-00004.gguf',
-        7, 65536, 1024, backend='llama_server',
+        8, 98304, 1024, backend='llama_server',
         server_extra_args=['--jinja', '--reasoning-format', 'none'],
         type_k=8, type_v=2,
     )
@@ -551,7 +549,7 @@ Update these after each retrieval step. They help you stay organized and efficie
     # GLM-4.7-Flash Q4_K_M — Zhipu AI 30B-A3B MoE, 18.3 GB
     # Uses llama_server for proper glm4 template handling. 128K native context.
     # Q4_0 cache at 82K ctx. Smallest model — can push most GPU layers.
-    # ngl=34: 14,491 MiB / 1,812 MiB free | ngl=36: 1,022 MiB free | ngl=38: OOM
+    # ngl=34 at 82K Q4_0: 884 MiB free (measured 2026-03-30) | ngl=36: tight | ngl=38: OOM
     _GLM47_FLASH = _create_model_config(
         'MODEL_PATH_GLM47_FLASH',
         '/home/keith-merrill/.lmstudio/models/unsloth/GLM-4.7-Flash-GGUF/GLM-4.7-Flash-Q4_K_M.gguf',
