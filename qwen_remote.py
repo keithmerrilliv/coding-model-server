@@ -730,7 +730,7 @@ from tool_handlers import (
     read_file_content, write_file_content, edit_file_content,
     list_directory, glob_files, grep_search, ingest_pdf_content,
     process_remote_commands, extract_fallback_commands,
-    undo_last_checkpoint,
+    undo_last_checkpoint, reset_write_counts,
 )
 
 # Global queue for interrupted multi-agent chains
@@ -1374,6 +1374,9 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
             # Append user prompt to history
             history.append({"role": "user", "content": task_content})
             save_chat_history(history, model)
+
+            # Reset per-task state
+            reset_write_counts()
 
             # Inner loop: keep sending tool output back until the agent
             # produces a response with no actionable commands.

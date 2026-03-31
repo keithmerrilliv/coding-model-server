@@ -519,15 +519,19 @@ Update these after each retrieval step. They help you stay organized and efficie
     )
 
     # Qwen3.5-397B-A17B IQ1_M — flagship (17B active, ~100 GB, 4 shards, 60 layers)
-    # Successor to 480B Coder as premium architect. 32K context (IQ1_M too
-    # aggressive for extended context, same lesson as 480B Lite).
+    # Successor to 480B Coder as premium architect.
     # Qwen3.5 arch unsupported by llama-cpp-python 0.3.16 — needs llama_server.
     # ngl=4: 8,395 MiB free | ngl=8: 1,647 MiB free (~1,687 MiB/layer, 60 layers total)
+    # 64K context with hybrid KV cache (Q8_0 keys / Q4_0 values) + ngl=4.
+    # Trades GPU layers for 2x context window. Keys stay full precision (more
+    # sensitive to quantization); only values use Q4_0. Prevents the
+    # history-prune→write-loop that occurs at 32K during long agentic tasks.
     _QWEN35_397B = _create_model_config(
         'MODEL_PATH_QWEN35_397B',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3.5-397B-A17B-GGUF/UD-IQ1_M/Qwen3.5-397B-A17B-UD-IQ1_M-00001-of-00004.gguf',
-        8, 32768, 1024, backend='llama_server',
+        4, 65536, 1024, backend='llama_server',
         server_extra_args=['--jinja', '--reasoning-format', 'none'],
+        type_k=8, type_v=2,
     )
 
     # ── Non-Qwen models ──

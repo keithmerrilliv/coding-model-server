@@ -46,6 +46,15 @@ _CHECKPOINT_DIR = os.path.expanduser("~/.qwen_checkpoints")
 _checkpoint_stack = []  # List of (original_path, checkpoint_path, timestamp)
 _MAX_CHECKPOINTS = 20
 
+# Write-loop detection: {normalized_path: write_count}
+_write_counts = {}
+_MAX_WRITES_PER_FILE = 3
+
+
+def reset_write_counts():
+    """Clear per-file write counters between tasks."""
+    _write_counts.clear()
+
 
 def configure(config, colors, print_colored_fn, logger_inst, temp_tracker, external_handlers, **kwargs):
     """Initialize module-level references needed by all handler functions.
@@ -579,6 +588,17 @@ def write_file_content(payload):
 
         # Expand user path
         full_path = os.path.expanduser(path)
+        norm_path = os.path.normpath(full_path)
+
+        # Write-loop detection: prevent agent from rewriting the same file endlessly
+        _write_counts[norm_path] = _write_counts.get(norm_path, 0) + 1
+        if _write_counts[norm_path] > _MAX_WRITES_PER_FILE:
+            msg = (f"WRITE_FILE refused: '{os.path.basename(path)}' has been written "
+                   f"{_write_counts[norm_path] - 1} times already this session. "
+                   f"This looks like a loop. Move on to the next task.")
+            _logger.warning(msg)
+            _print_colored(f"\n[Loop detected] {msg}", _colors['FAIL'])
+            return msg
 
         # Create parent directories if they don't exist
         parent_dir = os.path.dirname(full_path)

@@ -8,6 +8,7 @@ from qwen_client.models import AGENT_THEMES
 from qwen_client.history import save_chat_history
 from qwen_client.completion import get_completion
 from qwen_client.agentic.context import AgenticContext
+from tool_handlers import reset_write_counts
 
 # Lazy-bound references set by main.py after tool_handlers.configure()
 _process_remote_commands = None
@@ -100,7 +101,8 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                 model = task_agent
                 agent_theme = AGENT_THEMES[model]
 
-            # ── Agentic context for this task ──
+            # ── Reset per-task state ──
+            reset_write_counts()
             agentic_ctx = AgenticContext(task_content)
             print_colored(
                 f"  Query type: {agentic_ctx.query_type.value} "
