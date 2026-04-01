@@ -181,6 +181,47 @@ def _should_auto_approve(tool_name):
     return False  # 'default' — prompt for everything
 
 
+# ---------------------------------------------------------------------------
+# Content sanitizer — single boundary between model output and disk writes
+# ---------------------------------------------------------------------------
+
+# Patterns compiled once, applied to every file write and edit replacement.
+_SANITIZE_PATTERNS = [
+    # Git conflict / Aider / Cursor edit markers
+    (re.compile(r'^\s*<{1,7}\s*SEARCH\s*>{0,7}\s*$', re.MULTILINE), ''),
+    (re.compile(r'^\s*>{1,7}\s*REPLACE\s*>{0,7}\s*$', re.MULTILINE), ''),
+    (re.compile(r'^\s*<{7}(?:\s+\S+)?\s*$', re.MULTILINE), ''),  # <<<<<<< or <<<<<<< HEAD
+    (re.compile(r'^\s*={7}\s*$', re.MULTILINE), ''),               # =======
+    (re.compile(r'^\s*>{7}(?:\s+\S+)?\s*$', re.MULTILINE), ''),   # >>>>>>> or >>>>>>> branch
+    # Agentic markers that escaped process_response stripping
+    (re.compile(r'<{1,3}CONFIDENCE>{1,3}\s*\d+'), ''),
+    (re.compile(r'<{1,3}SCRATCHPAD>{1,3}.*?(?=<{1,3}\w+>{1,3}|\Z)', re.DOTALL), ''),
+    (re.compile(r'<{1,3}PLAN>{1,3}.*?(?=<{1,3}\w+>{1,3}|\Z)', re.DOTALL), ''),
+    # Qwen special tokens
+    (re.compile(r'</?tool_call\s*>'), ''),
+    (re.compile(r'<REACT>.*?</REACT>\s*', re.DOTALL), ''),
+    # Common LLM stop tokens that leak into content
+    (re.compile(r'<\|im_end\|>'), ''),
+    (re.compile(r'<\|endoftext\|>'), ''),
+    (re.compile(r'</s>\s*$'), ''),
+    # Our own tool markers that should never appear inside file content
+    (re.compile(r'<{1,3}(?:REMOTE_EXEC|SAVE_MEMORY|WEB_SEARCH|CUPERTINO|APPLE_DEEP_DOCS|INGEST_PDF|DEEP_INGEST)>{1,3}'), ''),
+]
+
+
+def _sanitize_generated_content(content: str) -> str:
+    """Remove LLM generation artifacts from content before writing to disk.
+
+    This is the single sanitization boundary between model output and the
+    filesystem. All file writes (WRITE_FILE, EDIT_FILE) pass through here.
+    """
+    for pattern, replacement in _SANITIZE_PATTERNS:
+        content = pattern.sub(replacement, content)
+    # Collapse runs of 3+ blank lines left by stripped blocks
+    content = re.sub(r'\n{3,}', '\n\n', content)
+    return content
+
+
 def _display_diff(old_text, new_text, filepath):
     """Display a colored unified diff. Uses rich if available, else ANSI."""
     diff_lines = list(difflib.unified_diff(
@@ -668,15 +709,7 @@ def write_file_content(payload):
             return "Error: WRITE_FILE requires path on first line and content on subsequent lines"
 
         path = lines[0].strip()
-        content = lines[1] if len(lines) > 1 else ""
-
-        # Strip stray git-style / Aider-style edit markers that leak into file
-        # content when the model mixes edit protocol inside a WRITE_FILE block.
-        content = re.sub(r'^\s*<{1,7}\s*SEARCH\s*>{0,7}\s*$', '', content, flags=re.MULTILINE)
-        content = re.sub(r'^\s*>{1,7}\s*REPLACE\s*>{0,7}\s*$', '', content, flags=re.MULTILINE)
-        content = re.sub(r'^\s*>{7}\s*$', '', content, flags=re.MULTILINE)   # bare >>>>>>>
-        content = re.sub(r'^\s*<{7}\s*$', '', content, flags=re.MULTILINE)   # bare <<<<<<<
-        content = re.sub(r'^\s*={7}\s*$', '', content, flags=re.MULTILINE)   # bare =======
+        content = _sanitize_generated_content(lines[1] if len(lines) > 1 else "")
 
         if not path:
             return "Error: No file path provided"
@@ -856,7 +889,7 @@ def edit_file_content(payload):
         replacements_made = 0
         for match in matches:
             old_text = match.group(1).strip('\n')
-            new_text = match.group(2).strip('\n')
+            new_text = _sanitize_generated_content(match.group(2).strip('\n'))
 
             if old_text not in content:
                 _logger.warning("EDIT_FILE: old_text not found in %s: %s...", path, old_text[:100])
