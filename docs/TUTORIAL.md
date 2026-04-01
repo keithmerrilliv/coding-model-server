@@ -251,6 +251,7 @@ _EXAMPLE_70B = _create_model_config(
     # backend='llama_server',  # Uncomment if arch not in llama-cpp-python
     # server_extra_args=['--jinja', '--reasoning-format', 'none'],
     type_k=8, type_v=8,  # Q8_0 cache, or use 2 for Q4_0 if VRAM-tight
+    # cpu_moe=True,      # For MoE models on llama_server: huge VRAM savings
 )
 ```
 
@@ -289,7 +290,24 @@ After adding the model, iterate on `n_gpu_layers`:
 5. If VRAM is tight, switch KV cache to Q4_0: `type_k=2, type_v=2`
 6. If still tight, reduce `n_ctx`
 
-### 4.6 Handling Unsupported Architectures
+### 4.6 MoE Models: The `--cpu-moe` Advantage
+
+For MoE (Mixture of Experts) models on the `llama_server` backend, `cpu_moe=True` is transformative. MoE models have two weight categories per layer:
+
+- **Attention weights**: Small (~20-100 MiB/layer), needed for every token
+- **Expert weights**: Large (~1,500-1,700 MiB/layer), sparsely activated
+
+Without `--cpu-moe`, both go to GPU together, severely limiting ngl. With `--cpu-moe`, expert weights stay on CPU and only attention goes to GPU. This enables near-max GPU offload:
+
+| Example | Without --cpu-moe | With --cpu-moe |
+|---------|------------------|----------------|
+| Coder-Next 80B | ngl=8, ~1.2 GB free | ngl=48, ~8 GB free |
+| Nemotron 30B | ngl=28, ~2 GB free | ngl=52, 1M context, ~6.5 GB free |
+| MiniMax 230B | ngl=6, ~6 GB free | ngl=62, 98K context, ~4.9 GB free |
+
+After enabling `--cpu-moe`, use the freed VRAM for more context (`n_ctx`) rather than leaving it idle. Mamba-hybrid models like Nemotron are especially efficient because most layers don't need KV cache at all.
+
+### 4.7 Handling Unsupported Architectures
 
 If `llama-cpp-python` errors on model load ("unknown architecture"), use the subprocess backend:
 
@@ -305,7 +323,7 @@ _MY_MODEL = _create_model_config(
 
 The `tools/llama-server` binary must be present with its shared libraries.
 
-### 4.7 Banning Native Tool Tokens
+### 4.8 Banning Native Tool Tokens
 
 Some models generate native `<tool_call>` tokens that interfere with the custom marker format. Use `logit_bias` to ban them:
 
@@ -346,13 +364,19 @@ curl -s http://localhost:5000/health
 
 ### 5.3 Updating llama-cpp-python
 
+Pre-built CUDA wheels may not match your CUDA toolkit version. Build from source:
+
 ```bash
 source venv/bin/activate
-pip install --upgrade llama-cpp-python
-# For CUDA: pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124
+CMAKE_ARGS="-DGGML_CUDA=on" pip install llama-cpp-python==X.Y.Z --no-binary llama-cpp-python --no-cache-dir
 ```
 
-After upgrading, models that previously needed `llama_server` backend may work with `llama_cpp` if architecture support was added.
+Verify CUDA loaded after install:
+```bash
+python3 -c "import llama_cpp, os; libs=os.listdir(os.path.join(os.path.dirname(llama_cpp.__file__),'lib')); print('CUDA' if any('cuda' in l for l in libs) else 'CPU only')"
+```
+
+After upgrading, models that previously needed `llama_server` backend may work with `llama_cpp` if architecture support was added (e.g., Qwen3.5 support added in 0.3.17).
 
 ### 5.4 Database Maintenance
 

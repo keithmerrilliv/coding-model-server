@@ -54,22 +54,23 @@ journalctl -u qwen-server -f   # View logs
 
 Each agent maps to a model configuration and system prompt. Switch with `/model <name>` or `@agent_name message`.
 
-| Agent | Role | Model | Active/Total | Context |
-|-------|------|-------|--------------|---------|
-| `implementer` | Code implementation | Coder-Next Q8_0 | 3B/80B | 256K |
-| `fast_implementer` | Fast implementation | Coder-30B Q4_K_M | 3B/30B | 256K |
-| `debugger` | Debugging | Coder-30B Q4_K_M | 3B/30B | 131K |
-| `reviewer` | Code review | Coder-30B Q8_0 | 3B/30B | 65K |
-| `architect` | System design | Coder-480B Q2_K_XL | 35B/480B | 64K |
-| `lite_architect` | Lite design | Coder-480B IQ1_M | 35B/480B | 32K |
-| `metal_implementer` | GPU/Metal shaders | Coder-Next Q8_0 | 3B/80B | 256K |
-| `q35_implementer` | Implementation | Qwen3.5-35B Q4_K_M | 3B/35B | 131K |
-| `q35_architect` | Mid-tier design | Qwen3.5-122B Q4_K_M | 10B/122B | 65K |
-| `q35_ultra` | Flagship design | Qwen3.5-397B IQ1_M | 17B/397B | 96K |
-| `m25_implementer` | Implementation | MiniMax M2.5 Q4_K_M | 10B/230B | 65K |
-| `m25_architect` | Architecture | MiniMax M2.5 Q4_K_M | 10B/230B | 65K |
-| `nemotron` | Fast implementation | Nemotron-3-Nano Q4_K_M | 3.5B/30B | 32K |
-| `glm` | Implementation | GLM-4.7-Flash Q4_K_M | 3B/30B | 82K |
+| Agent | Role | Model | Active/Total | Context | ngl | Backend |
+|-------|------|-------|--------------|---------|-----|---------|
+| `implementer` | Default implementation | Qwen3.5-35B Q4_K_M | 3B/35B | 262K | 22 | in-process |
+| `deep_implementer` | Deep reasoning | Coder-Next Q8_0 | 3B/80B | 256K | 48 | subprocess |
+| `fast_implementer` | Fast implementation | Coder-30B Q4_K_M | 3B/30B | 256K | 26 | in-process |
+| `debugger` | Debugging | Coder-30B Q4_K_M | 3B/30B | 131K | 30 | in-process |
+| `reviewer` | Code review | Coder-30B Q8_0 | 3B/30B | 65K | 21 | in-process |
+| `architect` | System design | Coder-480B Q2_K_XL | 35B/480B | 64K | 4 | in-process |
+| `lite_architect` | Lite design | Coder-480B IQ1_M | 35B/480B | 32K | 4 | in-process |
+| `q35_architect` | Mid-tier design | Qwen3.5-122B Q4_K_M | 10B/122B | 65K | 9 | in-process |
+| `q35_ultra` | Flagship design | Qwen3.5-397B IQ1_M | 17B/397B | 96K | 8 | in-process |
+| `m25_implementer` | Implementation | MiniMax M2.5 Q4_K_M | 10B/230B | 98K | 62 | subprocess |
+| `m25_architect` | Architecture | MiniMax M2.5 Q4_K_M | 10B/230B | 98K | 62 | subprocess |
+| `nemotron` | Fastest implementation | Nemotron-3-Nano Q4_K_M | 3.5B/30B | **1M** | 52 | subprocess |
+| `glm` | Implementation | GLM-4.7-Flash Q4_K_M | 3B/30B | 262K | 47 | subprocess |
+
+Subprocess models use `--cpu-moe` to keep MoE expert weights on CPU, enabling near-max GPU layer offload for attention. Nemotron's Mamba-hybrid architecture (only 6/52 layers need KV cache) allows a full 1M native context on RTX 5080.
 
 ## Client Commands
 

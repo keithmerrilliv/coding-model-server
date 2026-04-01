@@ -38,11 +38,13 @@ _MY_MODEL = _create_model_config(
     n_gpu_layers,                    # Layers offloaded to GPU
     n_ctx=32768,                     # Context window size
     n_batch=2048,                    # Prompt processing batch size
+    n_ubatch=512,                    # Physical micro-batch size for prefill
     backend='llama_cpp',             # 'llama_cpp' or 'llama_server'
     type_k=8,                        # KV cache key type: 8=Q8_0, 2=Q4_0
     type_v=8,                        # KV cache value type: 8=Q8_0, 2=Q4_0
     repeat_penalty=1.15,             # Repetition penalty (lower = more code-friendly)
     repeat_last_n=256,               # Penalty window (tokens)
+    cpu_moe=False,                   # Keep MoE expert weights on CPU (llama_server only)
     server_extra_args=None,          # Extra llama-server flags (list of strings)
     logit_bias=None,                 # Token bans: [[token_id, -100.0], ...]
     yarn=False,                      # Enable YaRN RoPE scaling for extended context
@@ -51,13 +53,22 @@ _MY_MODEL = _create_model_config(
 
 ### Backend Selection
 
-- **`llama_cpp`**: In-process via llama-cpp-python. Use for models with supported architectures.
+- **`llama_cpp`**: In-process via llama-cpp-python (0.3.19+). Use for models with supported architectures including Qwen3, Qwen3.5, and Coder families.
 - **`llama_server`**: Subprocess on port 8081 via `tools/llama-server`. Required for:
-  - Qwen3.5 family (unsupported by llama-cpp-python 0.3.16)
   - Nemotron (nemotron_h_moe architecture)
   - MiniMax M2.5 (native Jinja template needed)
   - GLM-4.7-Flash (glm4 template)
+  - Coder-Next (qwen3next architecture)
   - Any model needing `--jinja` or `--chat-template` flags
+
+### MoE CPU Offload (`cpu_moe`)
+
+For MoE models on the `llama_server` backend, `cpu_moe=True` passes `--cpu-moe` to keep expert weights on CPU while putting attention layers on GPU. This dramatically reduces per-layer VRAM cost, enabling near-max GPU offload:
+
+- Without `--cpu-moe`: each GPU layer includes attention + expert weights (~1,500-1,700 MiB/layer)
+- With `--cpu-moe`: each GPU layer is attention only (~20-100 MiB/layer)
+
+This is why Nemotron can run at ngl=52/52 with 1M context on an RTX 5080.
 
 ### KV Cache Quantization
 
