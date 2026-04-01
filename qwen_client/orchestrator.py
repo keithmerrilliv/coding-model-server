@@ -146,8 +146,10 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
             max_continuations = 5
             turn_count = 0
             consecutive_errors = 0
+            recent_response_hashes = []  # Response-level loop detection
             MAX_TURNS_PER_TASK = 50
             MAX_CONSECUTIVE_ERRORS = 3
+            MAX_IDENTICAL_RESPONSES = 3
 
             while True:
                 # ── Safety cap: absolute turn limit ──
@@ -235,6 +237,35 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                 else:
                     history.append({"role": "assistant", "content": response_text})
                     save_chat_history(history, model)
+
+                # ── Response-level loop detection ──
+                # Catches loops where the model generates the same response repeatedly,
+                # including when it bypasses WRITE_FILE loop detection via REMOTE_EXEC.
+                resp_hash = hash(response_text.strip())
+                recent_response_hashes.append(resp_hash)
+                if len(recent_response_hashes) > MAX_IDENTICAL_RESPONSES + 2:
+                    recent_response_hashes = recent_response_hashes[-(MAX_IDENTICAL_RESPONSES + 2):]
+                identical_count = recent_response_hashes.count(resp_hash)
+                if identical_count >= MAX_IDENTICAL_RESPONSES:
+                    print_colored(
+                        f"\n[Loop detected] Agent generated the same response {identical_count} times. "
+                        "Breaking loop and forcing synthesis.",
+                        COLORS['FAIL']
+                    )
+                    history.append({
+                        "role": "user",
+                        "content": (
+                            "LOOP DETECTED: You have generated the same response multiple times. "
+                            "This approach is not working. STOP retrying the same action. "
+                            "Summarize what you accomplished so far and what is blocking you."
+                        ),
+                    })
+                    save_chat_history(history, model)
+                    synth_text, _ = get_completion(history, model, agent_theme)
+                    if synth_text:
+                        history.append({"role": "assistant", "content": synth_text})
+                        save_chat_history(history, model)
+                    break
 
                 # ── Process agentic markers (strip before tool parsing) ──
                 cleaned_response = agentic_ctx.process_response(response_text)
