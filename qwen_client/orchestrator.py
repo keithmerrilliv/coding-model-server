@@ -230,10 +230,20 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                     aggregated_response += cont_text
 
                 if task_aborted:
+                    # Clean up fragmented history from failed continuations
+                    if continuation_count > 0:
+                        del history[-(continuation_count * 2):]
+                        history.append({"role": "assistant", "content": aggregated_response})
+                        save_chat_history(history, model)
                     break
 
                 if continuation_count > 0:
                     response_text = aggregated_response
+                    # Replace fragmented history entries (partial + continuation prompts)
+                    # with the single coherent aggregated response.
+                    del history[-(continuation_count * 2):]
+                    history.append({"role": "assistant", "content": aggregated_response})
+                    save_chat_history(history, model)
                 else:
                     history.append({"role": "assistant", "content": response_text})
                     save_chat_history(history, model)

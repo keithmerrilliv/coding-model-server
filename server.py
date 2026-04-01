@@ -1888,6 +1888,7 @@ def stream_completion(messages: List[ChatMessage], system_prompt: str, model_pat
                         }
                     }
                     yield f"data: {json.dumps(error_chunk)}\n\n"
+                    yield "data: [DONE]\n\n"
                     return
 
                 if error_msg:
@@ -1898,6 +1899,7 @@ def stream_completion(messages: List[ChatMessage], system_prompt: str, model_pat
                         }
                     }
                     yield f"data: {json.dumps(error_chunk)}\n\n"
+                    yield "data: [DONE]\n\n"
                     return
 
                 # Emit progress event so client can display prompt size during prefill
@@ -1924,6 +1926,7 @@ def stream_completion(messages: List[ChatMessage], system_prompt: str, model_pat
                             }
                         }
                         yield f"data: {json.dumps(error_chunk)}\n\n"
+                        yield "data: [DONE]\n\n"
                         return
 
                     if 'choices' in output and len(output['choices']) > 0:
@@ -1958,6 +1961,7 @@ def stream_completion(messages: List[ChatMessage], system_prompt: str, model_pat
         logger.error("Error in stream_completion: %s", e, exc_info=True)
         error_chunk = {"error": {"message": str(e), "type": "server_error"}}
         yield f"data: {json.dumps(error_chunk)}\n\n"
+        yield "data: [DONE]\n\n"
 
 
 if __name__ == "__main__":

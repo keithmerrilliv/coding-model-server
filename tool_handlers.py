@@ -540,11 +540,22 @@ def execute_remote_command(command, chunk_output=True):
 
     _logger.info("Executing command: %s", command)
 
-    # Detect shell-based file writes that bypass WRITE_FILE loop detection.
+    # Detect and block shell-based file writes that bypass WRITE_FILE loop detection.
     # Agents use 'python3 -c "open(...).write()"' or heredocs to circumvent.
-    if re.search(r"open\s*\(.+['\"]w['\"]|>\s*\S+\.(?:swift|py|md|yml|json|txt|h|m|metal)\b|cat\s*<<", command):
+    _shell_write_match = re.search(
+        r"open\s*\(.+['\"]w['\"]|>\s*\S+\.(?:swift|py|md|yml|json|txt|h|m|metal)\b|cat\s*<<",
+        command
+    )
+    if _shell_write_match:
+        _write_counts['__shell_writes__'] = _write_counts.get('__shell_writes__', 0) + 1
+        if _write_counts['__shell_writes__'] > _MAX_WRITES_PER_FILE:
+            msg = (f"Shell file write blocked: {_write_counts['__shell_writes__'] - 1} "
+                   f"shell writes already this session. Use <<<WRITE_FILE>>> instead.")
+            _logger.warning(msg)
+            _print_colored(f"\n[Loop detected] {msg}", _colors['FAIL'])
+            return None
         _print_colored(f"\nAgent is writing files via shell instead of <<<WRITE_FILE>>>.", _colors['WARNING'])
-        _print_colored(f"   This bypasses diff preview and loop detection.", _colors['WARNING'])
+        _print_colored(f"   This bypasses diff preview and loop detection. ({_write_counts['__shell_writes__']}/{_MAX_WRITES_PER_FILE})", _colors['WARNING'])
 
     _print_colored(f"\nAgent wants to run command: {command}", _colors['WARNING'])
 
@@ -1309,6 +1320,8 @@ def process_remote_commands(response_text: str) -> Optional[str]:
         arg = re.sub(r'</\w+>\s*$', '', arg)
         try:
             result = handler(arg)
+            if result is None:
+                continue  # Handler silently refused (e.g., write-loop detection)
             if result:
                 # In compact mode, show one-liner to user but keep full result for history
                 if not _verbose_mode:

@@ -1446,10 +1446,15 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                     aggregated_response += cont_text
 
                 if task_aborted:
+                    # Clean up fragmented history from failed continuations
+                    if continuation_count > 0:
+                        del history[-(continuation_count * 2):]
+                        history.append({"role": "assistant", "content": aggregated_response})
+                        save_chat_history(history, model)
                     break
 
                 # Append the (possibly merged) assistant response to history
-                # If we aggregated, we already put segments in history, 
+                # If we aggregated, we already put segments in history,
                 # but the final tool processing should use the full combined text.
                 if continuation_count > 0:
                     # Update response_text to the full aggregated version for tool parsing
