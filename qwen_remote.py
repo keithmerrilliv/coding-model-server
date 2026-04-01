@@ -189,14 +189,20 @@ def _load_fallback_themes():
     global AGENT_THEMES
     AGENT_THEMES.clear()
     defaults = {
-        "implementer": "Code Agent (Offline)",
-        "fast_implementer": "Fast Code Agent (Offline)",
-        "architect": "System Design (Offline)",
-        "reviewer": "Code Review (Offline)",
-        "debugger": "Debugging (Offline)",
-        "metal_implementer": "Metal & Graphics (Offline)",
-        "m25_implementer": "MiniMax M2.5 Implementer (Offline)",
-        "m25_architect": "MiniMax M2.5 Architect (Offline)"
+        "implementer": "Implementer — Coder-Next (offline)",
+        "fast_implementer": "Implementer — Coder-30B Fast (offline)",
+        "architect": "Architect — Coder-480B Ultra (offline)",
+        "reviewer": "Reviewer — Coder-30B HD (offline)",
+        "debugger": "Debugger — Coder-30B Turbo (offline)",
+        "metal_implementer": "Metal Engineer — Coder-Next (offline)",
+        "lite_architect": "Architect — Coder-480B Lite (offline)",
+        "m25_implementer": "Implementer — MiniMax M2.5 (offline)",
+        "m25_architect": "Architect — MiniMax M2.5 (offline)",
+        "q35_implementer": "Implementer — Qwen3.5-35B (offline)",
+        "q35_architect": "Architect — Qwen3.5-122B (offline)",
+        "q35_ultra": "Architect — Qwen3.5-397B Flagship (offline)",
+        "nemotron": "Implementer — Nemotron-3-Nano (offline)",
+        "glm": "Implementer — GLM-4.7-Flash (offline)",
     }
     for mid, desc in defaults.items():
         style = THEME_STYLES.get(mid, THEME_STYLES["default"])
