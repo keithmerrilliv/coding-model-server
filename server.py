@@ -1007,7 +1007,12 @@ class LlamaServerManager:
 
             # Free VRAM from any llama_cpp model before starting
             model_manager.unload_model()
-            self.start(model_config)
+            try:
+                self.start(model_config)
+            except Exception as e:
+                logger.error("Failed to start llama-server for %s: %s", model_path, e)
+                self.current_model_path = None
+                raise
 
     def _start_watchdog(self):
         """Start the idle watchdog thread."""
@@ -1250,10 +1255,20 @@ class ThinkingStripper:
         return ''
 
     def flush(self) -> str:
-        """Flush remaining buffer at end of stream."""
+        """Flush remaining buffer at end of stream.
+
+        If still in BUFFERING state (no </think> was seen), the buffer likely
+        contains thinking content from an unclosed <think> block.  Strip it
+        rather than leaking it to the client.
+        """
         if self.buffer:
             result = self.buffer
             self.buffer = ''
+            if self.state == self.BUFFERING:
+                # Never saw </think> — assume entire buffer is thinking
+                logger.warning("ThinkingStripper: flushing %d chars of unclosed thinking content", len(result))
+                self.state = self.PASSTHROUGH
+                return ''
             self.state = self.PASSTHROUGH
             return result
         return ''
