@@ -272,7 +272,7 @@ def handle_user_command(user_input, history, model, agent_theme):
     if user_input.lower() == '/compact':
         from qwen_client.compaction import compact_conversation
         before_chars = sum(len(m.get("content", "")) for m in history)
-        success, message = compact_conversation(history, model, reason="manual")
+        success, message = compact_conversation(history, model, agent_theme, reason="manual")
         if success:
             after_chars = sum(len(m.get("content", "")) for m in history)
             freed = before_chars - after_chars

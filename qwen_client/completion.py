@@ -2,12 +2,15 @@
 import sys
 import json
 import time
+import logging
 import threading
 
 import requests
 import urllib3
 
 from qwen_client.config import config, COLORS, print_colored
+
+logger = logging.getLogger(__name__)
 
 
 def wait_for_server():
@@ -250,8 +253,10 @@ def get_completion(history, model, agent_theme, agentic_context=None):
                                     print_colored(f"\nServer Error: {error_msg}", COLORS['FAIL'])
                                     finish_reason = "error"
                                     break
-                            except Exception:
-                                pass
+                            except json.JSONDecodeError:
+                                pass  # Malformed SSE chunk — skip
+                            except Exception as e:
+                                logger.debug("SSE parse error: %s", e)
             except KeyboardInterrupt:
                 stop_progress.set()
                 try:
