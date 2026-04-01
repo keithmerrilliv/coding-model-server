@@ -505,6 +505,7 @@ Update these after each retrieval step. They help you stay organized and efficie
     # 62 attention layers total. With --cpu-moe, targeting ngl=62 (all layers).
     # KV at 65K Q4_0: 4,392 MiB (62 GPU layers). 7,188 MiB free at ngl=62.
     # Bumping to 98K Q4_0: ~6,588 MiB KV → ~1 GB free. Tight but fits.
+    # Q5_0 cache OOM at ngl=62 (10 GB compute buffer). Staying at Q4_0.
     _MINIMAX_M25 = _create_model_config(
         'MODEL_PATH_MINIMAX_M25',
         '/home/keith-merrill/.lmstudio/models/unsloth/MiniMax-M2.5-GGUF/Q4_K_M/MiniMax-M2.5-Q4_K_M-00001-of-00004.gguf',
@@ -576,12 +577,12 @@ Update these after each retrieval step. They help you stay organized and efficie
     # 47 attention layers total. With --cpu-moe, targeting ngl=47 (all layers).
     # KV at 82K Q4_0: 1,164 MiB (47 GPU layers). 12,228 MiB free at ngl=47.
     # Bumping to 262K Q4_0: ~3,713 MiB KV → ~8.5 GB free. Fits easily.
+    # KV cache upgraded Q4_0→Q8_0 (9 GB free at Q4_0 — plenty for 2x cache size)
     _GLM47_FLASH = _create_model_config(
         'MODEL_PATH_GLM47_FLASH',
         '/home/keith-merrill/.lmstudio/models/unsloth/GLM-4.7-Flash-GGUF/GLM-4.7-Flash-Q4_K_M.gguf',
         47, 262144, 2048, backend='llama_server',
         server_extra_args=['--jinja', '--reasoning-format', 'none'],
-        type_k=2, type_v=2,
         cpu_moe=True,
     )
 
