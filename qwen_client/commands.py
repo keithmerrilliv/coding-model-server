@@ -302,7 +302,10 @@ def handle_user_command(user_input, history, model, agent_theme):
         config.CHAT_HISTORY_FILE = new_file
         if os.path.exists(old_file) and old_file != new_file:
             import shutil
-            shutil.move(old_file, new_file)
+            try:
+                shutil.move(old_file, new_file)
+            except Exception as e:
+                print_colored(f"Warning: Could not migrate session file: {e}", COLORS['WARNING'])
         set_terminal_title(f"Qwen - {new_name}")
         save_chat_history(history, model)
         print_colored(f"Session renamed to: {new_name} ({new_file})", COLORS['GREEN'])

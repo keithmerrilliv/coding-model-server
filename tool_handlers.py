@@ -66,9 +66,14 @@ PROTECTED_FILES = [
 def _is_protected_path(filepath):
     """Check if a path is protected. Returns (is_protected, reason)."""
     norm = os.path.normpath(os.path.expanduser(filepath))
+    # Check directory components
+    parts = norm.split(os.sep)
     for pdir in PROTECTED_PATHS:
         pdir_clean = pdir.rstrip('/')
-        if f'/{pdir_clean}/' in norm + '/' or norm.startswith(os.path.normpath(pdir_clean)):
+        if pdir_clean in parts:
+            return True, f"inside protected directory '{pdir}'"
+        # Absolute path prefix (e.g., /etc/)
+        if pdir_clean.startswith('/') and norm.startswith(os.path.normpath(pdir_clean)):
             return True, f"inside protected directory '{pdir}'"
     basename = os.path.basename(norm)
     for pfile in PROTECTED_FILES:
@@ -79,7 +84,8 @@ def _is_protected_path(filepath):
 
 # Shell patterns that get extra warnings even in yolo mode
 DANGEROUS_PATTERNS = [
-    (re.compile(r'\brm\s+-[a-zA-Z]*r[a-zA-Z]*f\b|\brm\s+-[a-zA-Z]*f[a-zA-Z]*r\b'), "recursive force delete"),
+    # rm with recursive flag (with or without -f)
+    (re.compile(r'\brm\s+(-[a-zA-Z]*r|-R|--recursive)\b'), "recursive delete"),
     (re.compile(r'\bsudo\b'), "elevated privileges"),
     (re.compile(r'\bchmod\s+[0-7]*777\b'), "world-writable permissions"),
     (re.compile(r'\bchown\b'), "ownership change"),
@@ -98,10 +104,11 @@ def _check_dangerous_command(command):
     return False, ""
 
 
-# Operations that are always denied — no prompt, no override
+# Operations that are always denied — no prompt, no override.
+# No $ anchor — catches compound commands like "rm -rf / && echo done".
 DENY_RULES = [
-    (re.compile(r'\brm\s+-[a-zA-Z]*r[a-zA-Z]*\s+/\s*$'), "recursive delete of root"),
-    (re.compile(r'\brm\s+-[a-zA-Z]*r[a-zA-Z]*\s+/home\s*$'), "recursive delete of /home"),
+    (re.compile(r'\brm\s+-[a-zA-Z]*r[a-zA-Z]*\s+/\s*(?:[;&|]|$)'), "recursive delete of root"),
+    (re.compile(r'\brm\s+-[a-zA-Z]*r[a-zA-Z]*\s+/home\s*(?:[;&|]|$)'), "recursive delete of /home"),
     (re.compile(r':\(\)\s*\{\s*:\|:&\s*\};\s*:'), "fork bomb"),
 ]
 
@@ -221,7 +228,7 @@ def _create_checkpoint(filepath):
             os.remove(old_path)
         except OSError:
             pass
-    _logger.info(f"Checkpoint created: {checkpoint_path}")
+    _logger.info("Checkpoint created: %s", checkpoint_path)
 
 
 def undo_last_checkpoint():
@@ -684,7 +691,7 @@ def write_file_content(payload):
         parent_dir = os.path.dirname(full_path)
         if parent_dir and not os.path.exists(parent_dir):
             os.makedirs(parent_dir, exist_ok=True)
-            _logger.info(f"Created directory: {parent_dir}")
+            _logger.info("Created directory: %s", parent_dir)
 
         # Protected path check — always prompts regardless of permission mode
         protected, protect_reason = _is_protected_path(full_path)
@@ -700,7 +707,7 @@ def write_file_content(payload):
                 _logger.info("Write to protected path denied: %s — %s", full_path, protect_reason)
                 return f"Denied: {protect_reason}"
 
-        _logger.info(f"Writing file: {full_path} ({len(content)} bytes)")
+        _logger.info("Writing file: %s (%s bytes)", full_path, len(content))
 
         # Show diff if overwriting existing file, else preview
         _print_colored(f"\nAgent wants to write file: {full_path}", _colors['WARNING'])
@@ -724,17 +731,17 @@ def write_file_content(payload):
 
         if _should_auto_approve('WRITE_FILE'):
             _print_colored(f"   Auto-approved ({_permission_mode} mode)", _colors['GREEN'])
-            _logger.info(f"Auto-approving file write ({_permission_mode} mode): {full_path}")
+            _logger.info("Auto-approving file write (%s mode): %s", _permission_mode, full_path)
             choice = 'y'
         else:
             try:
                 choice = input(f"{_colors['BOLD']}Allow write? [y/N] > {_colors['ENDC']}")
             except (EOFError, KeyboardInterrupt):
-                _logger.info(f"File write cancelled by user: {full_path}")
+                _logger.info("File write cancelled by user: %s", full_path)
                 return "User cancelled file write."
 
             if choice.lower() != 'y':
-                _logger.info(f"File write denied by user: {full_path}")
+                _logger.info("File write denied by user: %s", full_path)
                 return "User denied file write."
 
         # Checkpoint before overwriting
@@ -744,13 +751,13 @@ def write_file_content(payload):
         with open(full_path, 'w', encoding='utf-8') as f:
             f.write(content)
 
-        _logger.info(f"File written successfully: {full_path}")
+        _logger.info("File written successfully: %s", full_path)
         return f"Successfully wrote {len(content)} bytes to {path}"
 
     except PermissionError as e:
         return f"Error: Permission denied writing to {path}: {str(e)}"
     except Exception as e:
-        _logger.error(f"Error writing file {path}: {str(e)}")
+        _logger.error("Error writing file %s: %s", path, str(e))
         return f"Error writing file: {str(e)}"
 
 
@@ -844,13 +851,13 @@ def edit_file_content(payload):
             new_text = match.group(2).strip('\n')
 
             if old_text not in content:
-                _logger.warning(f"EDIT_FILE: old_text not found in {path}: {old_text[:100]}...")
+                _logger.warning("EDIT_FILE: old_text not found in %s: %s...", path, old_text[:100])
                 return f"Error: Text to replace not found in file. Searched for:\n{old_text[:200]}"
 
             # Count occurrences
             occurrences = content.count(old_text)
             if occurrences > 1:
-                _logger.warning(f"EDIT_FILE: Multiple occurrences ({occurrences}) of old_text in {path}")
+                _logger.warning("EDIT_FILE: Multiple occurrences (%s) of old_text in %s", occurrences, path)
                 # Still proceed but warn
                 _print_colored(f"   Warning: Found {occurrences} occurrences, replacing all", _colors['WARNING'])
 
@@ -870,17 +877,17 @@ def edit_file_content(payload):
 
         if _should_auto_approve('EDIT_FILE'):
             _print_colored(f"   Auto-approved ({_permission_mode} mode)", _colors['GREEN'])
-            _logger.info(f"Auto-approving file edit ({_permission_mode} mode): {full_path}")
+            _logger.info("Auto-approving file edit (%s mode): %s", _permission_mode, full_path)
             choice = 'y'
         else:
             try:
                 choice = input(f"{_colors['BOLD']}Allow edit? [y/N] > {_colors['ENDC']}")
             except (EOFError, KeyboardInterrupt):
-                _logger.info(f"File edit cancelled by user: {full_path}")
+                _logger.info("File edit cancelled by user: %s", full_path)
                 return "User cancelled file edit."
 
             if choice.lower() != 'y':
-                _logger.info(f"File edit denied by user: {full_path}")
+                _logger.info("File edit denied by user: %s", full_path)
                 return "User denied file edit."
 
         # Checkpoint before editing
@@ -890,11 +897,11 @@ def edit_file_content(payload):
         with open(full_path, 'w', encoding='utf-8') as f:
             f.write(content)
 
-        _logger.info(f"File edited successfully: {full_path} ({replacements_made} replacements)")
+        _logger.info("File edited successfully: %s (%s replacements)", full_path, replacements_made)
         return f"Successfully edited {path}: {replacements_made} replacement(s) made"
 
     except Exception as e:
-        _logger.error(f"Error editing file {path}: {str(e)}")
+        _logger.error("Error editing file %s: %s", path, str(e))
         return f"Error editing file: {str(e)}"
 
 
@@ -947,7 +954,7 @@ def list_directory(path):
         return result
 
     except Exception as e:
-        _logger.error(f"Error listing directory {path}: {str(e)}")
+        _logger.error("Error listing directory %s: %s", path, str(e))
         return f"Error listing directory: {str(e)}"
 
 
@@ -1006,7 +1013,7 @@ def glob_files(pattern):
         return "\n".join(result_lines)
 
     except Exception as e:
-        _logger.error(f"Error in glob {pattern}: {str(e)}")
+        _logger.error("Error in glob %s: %s", pattern, str(e))
         return f"Error in glob: {str(e)}"
 
 
@@ -1128,7 +1135,7 @@ def grep_search(payload):
         return header + "\n" + "\n".join(results)
 
     except Exception as e:
-        _logger.error(f"Error in grep search: {str(e)}")
+        _logger.error("Error in grep search: %s", str(e))
         return f"Error in search: {str(e)}"
 
 
@@ -1345,5 +1352,5 @@ def ingest_pdf_content(payload):
             result = _external_handlers['ingest_pdf'](path)
             return result
     except Exception as e:
-        _logger.error(f"Error ingesting PDF {path}: {str(e)}")
+        _logger.error("Error ingesting PDF %s: %s", path, str(e))
         return f"Error ingesting PDF: {str(e)}"

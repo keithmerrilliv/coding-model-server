@@ -35,15 +35,21 @@ def migrate_legacy_sessions():
     if os.path.exists(legacy_default):
         new_path = session_path("default")
         if not os.path.exists(new_path):
-            shutil.move(legacy_default, new_path)
-            migrated += 1
+            try:
+                shutil.move(legacy_default, new_path)
+                migrated += 1
+            except Exception as e:
+                print_colored(f"Warning: Could not migrate default session: {e}", COLORS['WARNING'])
     # Named sessions
     for legacy in glob.glob(os.path.expanduser("~/.qwen_chat_history_*.json")):
         name = os.path.basename(legacy).replace(".qwen_chat_history_", "").replace(".json", "")
         new_path = session_path(name)
         if not os.path.exists(new_path):
-            shutil.move(legacy, new_path)
-            migrated += 1
+            try:
+                shutil.move(legacy, new_path)
+                migrated += 1
+            except Exception as e:
+                print_colored(f"Warning: Could not migrate session {name}: {e}", COLORS['WARNING'])
     if migrated:
         print_colored(f"Migrated {migrated} session(s) to {config.SESSION_DIR}/", COLORS['CYAN'])
 

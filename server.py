@@ -1424,7 +1424,7 @@ async def lifespan(app: FastAPI):
         memory_service = MemoryService()
         logger.info("Memory Service initialized successfully")
     except Exception as e:
-        logger.error(f"Failed to initialize memory service: {e}")
+        logger.error("Failed to initialize memory service: %s", e)
         memory_service = None
 
     # Initialize Web Search Service
@@ -1433,7 +1433,7 @@ async def lifespan(app: FastAPI):
         web_search_service = WebSearchService()
         logger.info("Web Search Service initialized successfully")
     except Exception as e:
-        logger.error(f"Failed to initialize web search service: {e}")
+        logger.error("Failed to initialize web search service: %s", e)
         web_search_service = None
 
     # Initialize Apple Deep Docs Service
@@ -1446,7 +1446,7 @@ async def lifespan(app: FastAPI):
         else:
             logger.error("Apple Deep Docs Service failed to start")
     except Exception as e:
-        logger.error(f"Failed to initialize Apple Deep Docs Service: {e}")
+        logger.error("Failed to initialize Apple Deep Docs Service: %s", e)
         apple_deep_docs_service = None
 
     yield
@@ -1571,7 +1571,7 @@ def save_memory_endpoint(request: MemoryRequest):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error saving memory: {e}")
+        logger.error("Error saving memory: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1585,7 +1585,7 @@ def search_memory_endpoint(request: SearchRequest):
         results = memory_service.search_memory(request.query)
         return {"results": results}
     except Exception as e:
-        logger.error(f"Error searching memory: {e}")
+        logger.error("Error searching memory: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1691,12 +1691,12 @@ def upload_file_endpoint(request: FileUploadRequest):
         finally:
             os.close(fd)
 
-        logger.info(f"File uploaded successfully: {temp_path}")
+        logger.info("File uploaded successfully: %s", temp_path)
         return {"status": "success", "path": temp_path, "size": len(file_content)}
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error uploading file: {e}")
+        logger.error("Error uploading file: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1729,15 +1729,15 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
                 try:
                     context = await asyncio.wait_for(
                         asyncio.to_thread(memory_service.get_context_string, last_user_msg),
-                        timeout=0.5
+                        timeout=2.0
                     )
                     if context:
-                        logger.info(f"Injecting memory context for query: {last_user_msg[:50]}...")
+                        logger.info("Injecting memory context for query: %s...", last_user_msg[:50])
                         system_prompt = f"{system_prompt}\n\n{context}"
                 except asyncio.TimeoutError:
-                    logger.warning("Memory retrieval timed out (>500ms), skipping RAG context")
+                    logger.warning("Memory retrieval timed out (>2s), skipping RAG context")
                 except Exception as e:
-                    logger.error(f"Memory retrieval failed: {e}")
+                    logger.error("Memory retrieval failed: %s", e)
 
         model_config = agent_config['model_config']
         model_path = model_config['path']

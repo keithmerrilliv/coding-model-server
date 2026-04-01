@@ -147,6 +147,11 @@ def compact_conversation(history, model, agent_theme=None, keep_recent=4, reason
         if not summary_text or len(summary_text) < 50:
             return False, "Model produced an empty or too-short summary."
 
+        # Validate summary has at least some expected structure
+        expected_sections = ["TASK", "COMPLETED", "CURRENT_STATE", "KEY_FILES"]
+        if not any(s in summary_text.upper() for s in expected_sections):
+            logger.warning("Compaction summary missing expected sections, using anyway")
+
         # Replace history in place
         summary_msg = {
             "role": "user",
