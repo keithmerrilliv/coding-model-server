@@ -621,6 +621,18 @@ Update these after each retrieval step. They help you stay organized and efficie
         f'{TOOL_REFERENCE}'
     )
 
+    # MiniMax M2.5 generates garbled Unicode (triple-encoded U+FFFD from training
+    # data corruption). Force ASCII-only diagrams to prevent hallucinated mojibake.
+    _MINIMAX_UNICODE_GUARD = (
+        '\n\nCRITICAL — FORMATTING RULE: NEVER use Unicode box-drawing characters '
+        '(├, └, │, ─, etc.) or Unicode symbols in your output. They WILL render as '
+        'garbled text. Use ONLY plain ASCII for diagrams and trees:\n'
+        '  +-- for branches\n'
+        '  |   for vertical lines\n'
+        '  `-- for last items\n'
+        'For architecture diagrams, prefer Mermaid syntax in code blocks.\n'
+    )
+
     # ── Agent definitions ──
     # 'executor': True means few-shot + fallback extraction are enabled.
     AGENTS = {
@@ -668,13 +680,13 @@ Update these after each retrieval step. They help you stay organized and efficie
         ),
         'm25_implementer': _create_agent_config(
             'Implementer — MiniMax M2.5 Q4_K_M (10B/230B MoE, 65K ctx)',
-            _IMPLEMENTER_SYSTEM_PROMPT,
+            _IMPLEMENTER_SYSTEM_PROMPT + _MINIMAX_UNICODE_GUARD,
             _MINIMAX_M25,
             executor=True
         ),
         'm25_architect': _create_agent_config(
             'Architect — MiniMax M2.5 Q4_K_M (10B/230B MoE, 65K ctx)',
-            _ARCHITECT_SYSTEM_PROMPT,
+            _ARCHITECT_SYSTEM_PROMPT + _MINIMAX_UNICODE_GUARD,
             _MINIMAX_M25,
             executor=True
         ),
