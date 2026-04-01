@@ -1190,12 +1190,14 @@ class LlamaServerManager:
 #   2. Orphan close: reasoning...</think>actual response  (Jinja consumed <think>)
 _THINK_FULL_RE = re.compile(r'<think>.*?</think>\s*', re.DOTALL)
 _THINK_ORPHAN_RE = re.compile(r'^.*?</think>\s*', re.DOTALL)
+_REACT_RE = re.compile(r'<REACT>.*?</REACT>\s*', re.DOTALL)
 
 
 def strip_thinking(text: str) -> str:
-    """Remove thinking content from completed text."""
+    """Remove thinking/reasoning content from completed text."""
     text = _THINK_FULL_RE.sub('', text)
     text = _THINK_ORPHAN_RE.sub('', text)
+    text = _REACT_RE.sub('', text)  # Qwen3.5 reasoning blocks
     return text
 
 

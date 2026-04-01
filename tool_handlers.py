@@ -1183,6 +1183,12 @@ def process_remote_commands(response_text: str) -> Optional[str]:
     Finds and executes every tool marker in the response, in order of appearance.
     Returns aggregated output from all commands, or None if no markers found.
     """
+    # Pre-process: strip Qwen3.5 native formatting that breaks marker parsing.
+    # <tool_call> special token turns <<<TAG>>> into <tool_call>TAG>>> — strip it.
+    response_text = re.sub(r'</?tool_call\s*>', '', response_text)
+    # <REACT>Thought:...</REACT> reasoning blocks are noise — strip them.
+    response_text = re.sub(r'<REACT>.*?</REACT>', '', response_text, flags=re.DOTALL)
+
     # Pre-process: convert standalone git-style SEARCH/REPLACE into EDIT_FILE blocks
     response_text = _normalize_standalone_search_replace(response_text)
 
