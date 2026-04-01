@@ -559,12 +559,12 @@ Update these after each retrieval step. They help you stay organized and efficie
     # 32K native context. ~3.3x throughput vs Qwen3-30B on same hardware.
     # ngl=28 (no --cpu-moe): 1,964 MiB free | ngl=28 (--cpu-moe): 12,840 MiB free
     # 52 attention layers total. With --cpu-moe, targeting ngl=52 (all layers).
-    # KV at 32K Q8_0: 102 MiB (52 GPU layers). 12,278 MiB free at ngl=52.
-    # Bumping to 131K Q8_0: ~408 MiB KV → ~12 GB free. Plenty of room.
+    # Mamba-hybrid: only 6/52 layers use KV cache (rest are recurrent — no KV needed).
+    # KV at 1M Q8_0: ~3,264 MiB → ~8.6 GB free. Full 1M native context fits easily.
     _NEMOTRON_NANO = _create_model_config(
         'MODEL_PATH_NEMOTRON_NANO',
         '/home/keith-merrill/.lmstudio/models/unsloth/Nemotron-3-Nano-30B-A3B-GGUF/Nemotron-3-Nano-30B-A3B-Q4_K_M.gguf',
-        52, 131072, 2048, backend='llama_server',
+        52, 1048576, 2048, backend='llama_server',
         server_extra_args=['--jinja', '--reasoning-format', 'none'],
         cpu_moe=True,
     )
@@ -723,7 +723,7 @@ Update these after each retrieval step. They help you stay organized and efficie
         ),
         # ── Non-Qwen agents ──
         'nemotron': _create_agent_config(
-            'Implementer — Nemotron-3-Nano Q4_K_M (3.5B/30B Mamba-MoE, 131K ctx, ngl=52, fastest)',
+            'Implementer — Nemotron-3-Nano Q4_K_M (3.5B/30B Mamba-MoE, 1M ctx, ngl=52, fastest)',
             _IMPLEMENTER_SYSTEM_PROMPT,
             _NEMOTRON_NANO,
             executor=True
