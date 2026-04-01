@@ -194,7 +194,7 @@ _SANITIZE_PATTERNS = [
     (re.compile(r'^\s*={7}\s*$', re.MULTILINE), ''),               # =======
     (re.compile(r'^\s*>{7}(?:\s+\S+)?\s*$', re.MULTILINE), ''),   # >>>>>>> or >>>>>>> branch
     # Agentic markers that escaped process_response stripping
-    (re.compile(r'<{1,3}CONFIDENCE>{1,3}\s*\d+'), ''),
+    (re.compile(r'<{0,3}/?CONFIDEN\w*>{0,3}\s*\d*'), ''),
     (re.compile(r'<{1,3}SCRATCHPAD>{1,3}.*?(?=<{1,3}\w+>{1,3}|\Z)', re.DOTALL), ''),
     (re.compile(r'<{1,3}PLAN>{1,3}.*?(?=<{1,3}\w+>{1,3}|\Z)', re.DOTALL), ''),
     # Qwen special tokens
@@ -1259,7 +1259,7 @@ def process_remote_commands(response_text: str) -> Optional[str]:
     response_text = re.sub(
         r'<{1,3}PLAN>{1,3}\s*.*?(?=<{1,3}\w+>{1,3}|\Z)', '', response_text, flags=re.DOTALL
     )
-    response_text = re.sub(r'<{1,3}CONFIDENCE>{1,3}\s*\d+', '', response_text)
+    response_text = re.sub(r'<{0,3}/?CONFIDEN\w*>{0,3}\s*\d*', '', response_text)
 
     # Pre-process: convert standalone git-style SEARCH/REPLACE into EDIT_FILE blocks
     response_text = _normalize_standalone_search_replace(response_text)

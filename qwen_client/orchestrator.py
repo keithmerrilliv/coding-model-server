@@ -388,7 +388,9 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                     not agentic_ctx.plan.is_empty
                     and any(not s["done"] for s in agentic_ctx.plan.steps)
                 )
-                if not cleaned_response.strip() and has_pending_steps:
+                # Strip residual XML-like tags that aren't tool commands or real prose
+                _substantive = re.sub(r'</?[A-Z_]+\w*>\s*\d*', '', cleaned_response).strip()
+                if not _substantive and has_pending_steps:
                     print_colored(
                         "\n[Thinking turn] Agent updated plan/scratchpad. Nudging to continue...",
                         COLORS['CYAN']

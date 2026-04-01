@@ -28,7 +28,7 @@ _PLAN_STRIP_RE = re.compile(
     re.DOTALL
 )
 _CONFIDENCE_STRIP_RE = re.compile(
-    r'<{1,3}CONFIDENCE>{1,3}\s*\d+'
+    r'<{0,3}/?CONFIDEN\w*>{0,3}\s*\d*'
 )
 
 
