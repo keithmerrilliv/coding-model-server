@@ -625,87 +625,87 @@ Update these after each retrieval step. They help you stay organized and efficie
     # 'executor': True means few-shot + fallback extraction are enabled.
     AGENTS = {
         'implementer': _create_agent_config(
-            'Qwen3-Coder-Next Q8_0 (80B MoE)',
+            'Implementer — Coder-Next Q8_0 (3B/80B MoE, 256K ctx, smartest)',
             _IMPLEMENTER_SYSTEM_PROMPT,
             _CODER_NEXT_Q8,
             executor=True
         ),
         'fast_implementer': _create_agent_config(
-            'Qwen3-Coder-30B Q4_K_M Fast (256k native context)',
+            'Implementer — Coder-30B Q4_K_M (3B/30B MoE, 256K ctx, fast)',
             _IMPLEMENTER_SYSTEM_PROMPT,
             _CODER_30B_FAST,
             executor=True
         ),
         'architect': _create_agent_config(
-            'System architecture agent (Ultra Reasoning)',
+            'Architect — Coder-480B Q2_K_XL (35B/480B MoE, 64K ctx, ultra reasoning)',
             _ARCHITECT_SYSTEM_PROMPT,
             _QWEN_480B_ULTRA,
             executor=True
         ),
         'reviewer': _create_agent_config(
-            'Code review agent Q8_0 (49k context, High Precision)',
+            'Reviewer — Coder-30B Q8_0 (3B/30B MoE, 82K ctx, high precision)',
             f'You are a code reviewer. {EXECUTOR_PROMPT}\n\nIdentify issues and suggest improvements. You are encouraged to provide detailed advice and recommendations.\n\nCOMPREHENSIVE ANALYSIS: When performing code reviews, leverage multiple tools to understand the codebase thoroughly:\n\nGIT AWARENESS: Use Git via `<<<REMOTE_EXEC>>>` to understand code context:\n- `git log`, `git diff`, `git blame`, `git show`, `git status`\n\nFILE NAVIGATION: Use `<<<GLOB>>>` and `<<<GREP>>>` to find and search files.\n\nDOCUMENTATION - You can and should write/update documentation:\n- Use `<<<WRITE_FILE>>>` for NEW documentation files\n- Use `<<<EDIT_FILE>>>` for targeted updates to EXISTING docs (PREFERRED)\n\nEDIT_FILE FORMAT (use EXACTLY this format):\n<<<EDIT_FILE>>>/path/to/file\n<<<OLD>>>\nexact text to find\n<<<NEW>>>\nreplacement text\n\nWARNING: Do NOT use git-style markers like <<<<<<< SEARCH or ======= or >>>>>>> REPLACE. Use <<<OLD>>> and <<<NEW>>> only.\n\nAlways gather comprehensive context before providing your review.\n{GIT_TOOL_REFERENCE}',
             _CODER_30B_HD,
             executor=True
         ),
         'debugger': _create_agent_config(
-            'Qwen3-Coder-30B-A3B Turbo',
+            'Debugger — Coder-30B Q4_K_M (3B/30B MoE, 131K ctx, turbo)',
             f'You are a debugger. {EXECUTOR_PROMPT}\n\nDEBUGGING WORKFLOW:\n- Use `<<<READ_FILE>>>` to examine source code\n- Use `<<<REMOTE_EXEC>>>` to run tests, check logs, execute debuggers\n- Use `<<<WRITE_FILE>>>` to apply fixes to source files\n- After fixing, use `<<<REMOTE_EXEC>>>` to verify the fix works (compile, run tests)\n\n{TOOL_REFERENCE}',
             _CODER_30B_TURBO,
             executor=True
         ),
         'metal_implementer': _create_agent_config(
-            'Metal Engineer Next Q8_0 (256k context)',
+            'Metal Engineer — Coder-Next Q8_0 (3B/80B MoE, 256K ctx, GPU/shaders)',
             f'You are a Metal 4 graphics engineer (compute kernels, mesh shaders, ray tracing, argument buffers). {EXECUTOR_PROMPT}\n\nEXECUTION ENVIRONMENT: You are running on a macOS environment with full access to Metal tools.\n- Use `<<<REMOTE_EXEC>>>` for ALL shell commands.\n- Do NOT distinguish between "server" and "client". Everything runs locally.\n\nFILE WRITING - CRITICAL: When implementing code, you MUST write files to disk:\n- Use `<<<WRITE_FILE>>>` to create or update source files (.metal, .swift, .h, etc.)\n- NEVER just output code in markdown blocks - that does NOT save the file!\n- After writing, use `<<<REMOTE_EXEC>>>` to compile and verify the code works.\n\nMETAL DEVELOPMENT:\n- Write Metal shaders using `<<<WRITE_FILE>>>` to .metal files\n- Compile Metal shaders: `xcrun -sdk macosx metal -c shader.metal -o shader.air`\n- Create Metal library: `xcrun -sdk macosx metallib shader.air -o shader.metallib`\n- Validate shaders: `xcrun metal-compiler shader.metal`\n- Use `<<<REMOTE_EXEC>>>` for compilation and validation\n\n{TOOL_REFERENCE}',
             _CODER_NEXT_Q8,
             executor=True
         ),
         'lite_architect': _create_agent_config(
-            'System architecture agent (Lite Reasoning)',
+            'Architect — Coder-480B IQ1_M (35B/480B MoE, 32K ctx, lite reasoning)',
             f'You are a system architect. {EXECUTOR_PROMPT}\n\nFILE WRITING: Use `<<<WRITE_FILE>>>` to create or update source files. After writing, use `<<<REMOTE_EXEC>>>` to compile and verify.\n\n{TOOL_REFERENCE}',
             _QWEN_480B_LITE,
             executor=True
         ),
         'm25_implementer': _create_agent_config(
-            'MiniMax M2.5 Q4_K_M (230B MoE, 10B active)',
+            'Implementer — MiniMax M2.5 Q4_K_M (10B/230B MoE, 65K ctx)',
             _IMPLEMENTER_SYSTEM_PROMPT,
             _MINIMAX_M25,
             executor=True
         ),
         'm25_architect': _create_agent_config(
-            'MiniMax M2.5 Architect (230B MoE, 10B active)',
+            'Architect — MiniMax M2.5 Q4_K_M (10B/230B MoE, 65K ctx)',
             _ARCHITECT_SYSTEM_PROMPT,
             _MINIMAX_M25,
             executor=True
         ),
         # ── Qwen3.5 agents ──
         'q35_implementer': _create_agent_config(
-            'Qwen3.5-35B-A3B Q4_K_M (successor to Coder-30B)',
+            'Implementer — Qwen3.5-35B Q4_K_M (3B/35B MoE, 131K ctx)',
             _IMPLEMENTER_SYSTEM_PROMPT,
             _QWEN35_35B,
             executor=True
         ),
         'q35_architect': _create_agent_config(
-            'Qwen3.5-122B-A10B Mid-tier Architect (10B active, 65K ctx)',
+            'Architect — Qwen3.5-122B Q4_K_M (10B/122B MoE, 65K ctx, mid-tier)',
             _ARCHITECT_SYSTEM_PROMPT,
             _QWEN35_122B,
             executor=True
         ),
         'q35_ultra': _create_agent_config(
-            'Qwen3.5-397B-A17B Flagship Architect (17B active)',
+            'Architect — Qwen3.5-397B IQ1_M (17B/397B MoE, 96K ctx, flagship)',
             _ARCHITECT_SYSTEM_PROMPT,
             _QWEN35_397B,
             executor=True
         ),
         # ── Non-Qwen agents ──
         'nemotron': _create_agent_config(
-            'Nemotron-3-Nano 30B-A3B (3.5B active, Mamba hybrid, fast throughput)',
+            'Implementer — Nemotron-3-Nano Q4_K_M (3.5B/30B Mamba-MoE, 32K ctx, fastest)',
             _IMPLEMENTER_SYSTEM_PROMPT,
             _NEMOTRON_NANO,
             executor=True
         ),
         'glm': _create_agent_config(
-            'GLM-4.7-Flash 30B-A3B (Zhipu AI, 3B active MoE)',
+            'Implementer — GLM-4.7-Flash Q4_K_M (3B/30B MoE, 82K ctx, Zhipu AI)',
             _IMPLEMENTER_SYSTEM_PROMPT,
             _GLM47_FLASH,
             executor=True
