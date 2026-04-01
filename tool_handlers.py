@@ -1189,6 +1189,17 @@ def process_remote_commands(response_text: str) -> Optional[str]:
     # <REACT>Thought:...</REACT> reasoning blocks are noise — strip them.
     response_text = re.sub(r'<REACT>.*?</REACT>', '', response_text, flags=re.DOTALL)
 
+    # Strip agentic markers (SCRATCHPAD, PLAN, CONFIDENCE) so they don't leak
+    # into file content. These aren't tool commands but the command regex doesn't
+    # know about them, so <<<CONFIDENCE>>>95 ends up inside WRITE_FILE payloads.
+    response_text = re.sub(
+        r'<{1,3}SCRATCHPAD>{1,3}\s*.*?(?=<{1,3}\w+>{1,3}|\Z)', '', response_text, flags=re.DOTALL
+    )
+    response_text = re.sub(
+        r'<{1,3}PLAN>{1,3}\s*.*?(?=<{1,3}\w+>{1,3}|\Z)', '', response_text, flags=re.DOTALL
+    )
+    response_text = re.sub(r'<{1,3}CONFIDENCE>{1,3}\s*\d+', '', response_text)
+
     # Pre-process: convert standalone git-style SEARCH/REPLACE into EDIT_FILE blocks
     response_text = _normalize_standalone_search_replace(response_text)
 
