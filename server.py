@@ -462,10 +462,12 @@ Update these after each retrieval step. They help you stay organized and efficie
     # NEXT: Qwen3-Coder-Next-Q8_0 (80B MoE with 3B active params)
     # Very smart but runs mostly on system RAM (slow). Native 256k context enabled.
     # Uses llama-server subprocess backend (qwen3next arch not supported by llama-cpp-python 0.3.16)
+    # ngl=8 at 262K (no --cpu-moe): 1,200 MiB free | ngl=8 (--cpu-moe): 12,564 MiB free
+    # 48 attention layers total. With --cpu-moe, targeting ngl=48 (all layers).
     _CODER_NEXT_Q8 = _create_model_config(
         'MODEL_PATH_NEXT_Q8',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-Next-GGUF/Q8_0/Qwen3-Coder-Next-Q8_0-00001-of-00003.gguf',
-        8, 262144, 1024, backend='llama_server',
+        48, 262144, 1024, backend='llama_server',
         server_extra_args=['--chat-template', 'chatml'],
         logit_bias=[[151657, -100.0], [151658, -100.0]],
         cpu_moe=True,
@@ -499,10 +501,14 @@ Update these after each retrieval step. They help you stay organized and efficie
     # Uses llama-server subprocess backend with native Jinja template
     # ngl=4 at 32K Q8_0: 6,207 MiB free (measured 2026-03-30)
     # ngl=6 at 65K Q4_0: testing (est. ~2,500 MiB free)
+    # ngl=6 (no --cpu-moe): 6,207 MiB free | ngl=6 (--cpu-moe): 12,665 MiB free
+    # 62 attention layers total. With --cpu-moe, targeting ngl=62 (all layers).
+    # KV at 65K Q4_0: 4,392 MiB (62 GPU layers). 7,188 MiB free at ngl=62.
+    # Bumping to 98K Q4_0: ~6,588 MiB KV → ~1 GB free. Tight but fits.
     _MINIMAX_M25 = _create_model_config(
         'MODEL_PATH_MINIMAX_M25',
         '/home/keith-merrill/.lmstudio/models/unsloth/MiniMax-M2.5-GGUF/Q4_K_M/MiniMax-M2.5-Q4_K_M-00001-of-00004.gguf',
-        6, 65536, 4096, backend='llama_server',
+        62, 98304, 4096, backend='llama_server',
         server_extra_args=['--jinja', '--reasoning-format', 'none'],
         logit_bias=[[200052, -100.0], [200053, -100.0]],
         type_k=2, type_v=2,
@@ -551,11 +557,14 @@ Update these after each retrieval step. They help you stay organized and efficie
     # Nemotron-3-Nano-30B-A3B Q4_K_M — NVIDIA hybrid Mamba-Transformer MoE
     # 3.5B active, 24.6 GB. Needs llama_server (nemotron_h_moe arch not in llama-cpp-python).
     # 32K native context. ~3.3x throughput vs Qwen3-30B on same hardware.
-    # ngl=28: 14,339 MiB / 1,964 MiB free | ngl=30: 1,084 MiB free | ngl=32: OOM
+    # ngl=28 (no --cpu-moe): 1,964 MiB free | ngl=28 (--cpu-moe): 12,840 MiB free
+    # 52 attention layers total. With --cpu-moe, targeting ngl=52 (all layers).
+    # KV at 32K Q8_0: 102 MiB (52 GPU layers). 12,278 MiB free at ngl=52.
+    # Bumping to 131K Q8_0: ~408 MiB KV → ~12 GB free. Plenty of room.
     _NEMOTRON_NANO = _create_model_config(
         'MODEL_PATH_NEMOTRON_NANO',
         '/home/keith-merrill/.lmstudio/models/unsloth/Nemotron-3-Nano-30B-A3B-GGUF/Nemotron-3-Nano-30B-A3B-Q4_K_M.gguf',
-        28, 32768, 2048, backend='llama_server',
+        52, 131072, 2048, backend='llama_server',
         server_extra_args=['--jinja', '--reasoning-format', 'none'],
         cpu_moe=True,
     )
@@ -563,11 +572,14 @@ Update these after each retrieval step. They help you stay organized and efficie
     # GLM-4.7-Flash Q4_K_M — Zhipu AI 30B-A3B MoE, 18.3 GB
     # Uses llama_server for proper glm4 template handling. 128K native context.
     # Q4_0 cache at 82K ctx. Smallest model — can push most GPU layers.
-    # ngl=34 at 82K Q4_0: 884 MiB free (measured 2026-03-30) | ngl=36: tight | ngl=38: OOM
+    # ngl=34 (no --cpu-moe): 884 MiB free | ngl=34 (--cpu-moe): 12,652 MiB free
+    # 47 attention layers total. With --cpu-moe, targeting ngl=47 (all layers).
+    # KV at 82K Q4_0: 1,164 MiB (47 GPU layers). 12,228 MiB free at ngl=47.
+    # Bumping to 262K Q4_0: ~3,713 MiB KV → ~8.5 GB free. Fits easily.
     _GLM47_FLASH = _create_model_config(
         'MODEL_PATH_GLM47_FLASH',
         '/home/keith-merrill/.lmstudio/models/unsloth/GLM-4.7-Flash-GGUF/GLM-4.7-Flash-Q4_K_M.gguf',
-        34, 81920, 2048, backend='llama_server',
+        47, 262144, 2048, backend='llama_server',
         server_extra_args=['--jinja', '--reasoning-format', 'none'],
         type_k=2, type_v=2,
         cpu_moe=True,
@@ -649,7 +661,7 @@ Update these after each retrieval step. They help you stay organized and efficie
             executor=True
         ),
         'deep_implementer': _create_agent_config(
-            'Implementer — Coder-Next Q8_0 (3B/80B MoE, 256K ctx, ngl=8, deep reasoning)',
+            'Implementer — Coder-Next Q8_0 (3B/80B MoE, 256K ctx, ngl=48, deep reasoning)',
             _IMPLEMENTER_SYSTEM_PROMPT,
             _CODER_NEXT_Q8,
             executor=True
@@ -685,13 +697,13 @@ Update these after each retrieval step. They help you stay organized and efficie
             executor=True
         ),
         'm25_implementer': _create_agent_config(
-            'Implementer — MiniMax M2.5 Q4_K_M (10B/230B MoE, 65K ctx, ngl=6)',
+            'Implementer — MiniMax M2.5 Q4_K_M (10B/230B MoE, 98K ctx, ngl=62)',
             _IMPLEMENTER_SYSTEM_PROMPT + _MINIMAX_UNICODE_GUARD,
             _MINIMAX_M25,
             executor=True
         ),
         'm25_architect': _create_agent_config(
-            'Architect — MiniMax M2.5 Q4_K_M (10B/230B MoE, 65K ctx, ngl=6)',
+            'Architect — MiniMax M2.5 Q4_K_M (10B/230B MoE, 98K ctx, ngl=62)',
             _ARCHITECT_SYSTEM_PROMPT + _MINIMAX_UNICODE_GUARD,
             _MINIMAX_M25,
             executor=True
@@ -711,13 +723,13 @@ Update these after each retrieval step. They help you stay organized and efficie
         ),
         # ── Non-Qwen agents ──
         'nemotron': _create_agent_config(
-            'Implementer — Nemotron-3-Nano Q4_K_M (3.5B/30B Mamba-MoE, 32K ctx, ngl=28, fastest)',
+            'Implementer — Nemotron-3-Nano Q4_K_M (3.5B/30B Mamba-MoE, 131K ctx, ngl=52, fastest)',
             _IMPLEMENTER_SYSTEM_PROMPT,
             _NEMOTRON_NANO,
             executor=True
         ),
         'glm': _create_agent_config(
-            'Implementer — GLM-4.7-Flash Q4_K_M (3B/30B MoE, 82K ctx, ngl=34, Zhipu AI)',
+            'Implementer — GLM-4.7-Flash Q4_K_M (3B/30B MoE, 262K ctx, ngl=47, Zhipu AI)',
             _IMPLEMENTER_SYSTEM_PROMPT,
             _GLM47_FLASH,
             executor=True
