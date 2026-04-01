@@ -1257,18 +1257,15 @@ class ThinkingStripper:
     def flush(self) -> str:
         """Flush remaining buffer at end of stream.
 
-        If still in BUFFERING state (no </think> was seen), the buffer likely
-        contains thinking content from an unclosed <think> block.  Strip it
-        rather than leaking it to the client.
+        If still in BUFFERING state, no </think> was ever seen.  This means
+        either: (a) the model doesn't use thinking tags (common — e.g. chatml
+        models), so the buffer is the entire valid response, or (b) an orphaned
+        <think> block was never closed (rare).  We return the buffer in both
+        cases — discarding it would drop valid tool calls for non-thinking models.
         """
         if self.buffer:
             result = self.buffer
             self.buffer = ''
-            if self.state == self.BUFFERING:
-                # Never saw </think> — assume entire buffer is thinking
-                logger.warning("ThinkingStripper: flushing %d chars of unclosed thinking content", len(result))
-                self.state = self.PASSTHROUGH
-                return ''
             self.state = self.PASSTHROUGH
             return result
         return ''
