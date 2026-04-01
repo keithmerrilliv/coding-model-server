@@ -36,16 +36,15 @@ def _load_fallback_themes():
     global AGENT_THEMES
     AGENT_THEMES.clear()
     defaults = {
-        "implementer": "Implementer — Coder-Next (offline)",
+        "implementer": "Implementer — Qwen3.5-35B (offline)",
+        "deep_implementer": "Implementer — Coder-Next Deep (offline)",
         "fast_implementer": "Implementer — Coder-30B Fast (offline)",
         "architect": "Architect — Coder-480B Ultra (offline)",
         "reviewer": "Reviewer — Coder-30B HD (offline)",
         "debugger": "Debugger — Coder-30B Turbo (offline)",
-        "metal_implementer": "Metal Engineer — Coder-Next (offline)",
         "lite_architect": "Architect — Coder-480B Lite (offline)",
         "m25_implementer": "Implementer — MiniMax M2.5 (offline)",
         "m25_architect": "Architect — MiniMax M2.5 (offline)",
-        "q35_implementer": "Implementer — Qwen3.5-35B (offline)",
         "q35_architect": "Architect — Qwen3.5-122B (offline)",
         "q35_ultra": "Architect — Qwen3.5-397B Flagship (offline)",
         "nemotron": "Implementer — Nemotron-3-Nano (offline)",

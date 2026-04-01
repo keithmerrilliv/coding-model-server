@@ -95,14 +95,13 @@ PROMPT_COLORS = {k: f"\001{v}\002" for k, v in COLORS.items()}
 
 THEME_STYLES = {
     "implementer":       {"color": COLORS['GREEN'],   "icon": "\U0001f4bb", "prompt": "Implementer"},
-    "fast_implementer":  {"color": COLORS['GREEN'],   "icon": "\u23e9",     "prompt": "Fast Implementer"},
+    "deep_implementer":  {"color": COLORS['GREEN'],   "icon": "\U0001f9e0", "prompt": "Deep Impl"},
+    "fast_implementer":  {"color": COLORS['GREEN'],   "icon": "\u23e9",     "prompt": "Fast Impl"},
     "architect":         {"color": COLORS['HEADER'],  "icon": "\U0001f3d7\ufe0f", "prompt": "Architect"},
     "reviewer":          {"color": COLORS['CYAN'],    "icon": "\U0001f50d", "prompt": "Reviewer"},
     "debugger":          {"color": COLORS['FAIL'],    "icon": "\U0001f41e", "prompt": "Debugger"},
-    "metal_implementer": {"color": COLORS['BLUE'],    "icon": "\U0001f918", "prompt": "Metal"},
     "m25_implementer":   {"color": COLORS['GREEN'],   "icon": "\U0001f319", "prompt": "M2.5 Impl"},
     "m25_architect":     {"color": COLORS['HEADER'],  "icon": "\U0001f319", "prompt": "M2.5 Arch"},
-    "q35_implementer":   {"color": COLORS['GREEN'],   "icon": "\u2728",     "prompt": "Q3.5 Impl"},
     "q35_architect":     {"color": COLORS['HEADER'],  "icon": "\U0001f3af", "prompt": "Q3.5 Arch"},
     "q35_ultra":         {"color": COLORS['HEADER'],  "icon": "\U0001f451", "prompt": "Q3.5 Ultra"},
     "nemotron":          {"color": COLORS['GREEN'],   "icon": "\u26a1",     "prompt": "Nemotron"},

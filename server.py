@@ -159,7 +159,7 @@ class IngestRequest(BaseModel):
 
 def _create_model_config(path_env, path_default, n_gpu_layers, n_ctx=32768, n_batch=2048, backend='llama_cpp',
                          server_extra_args=None, logit_bias=None, yarn=False, type_k=8, type_v=8,
-                         repeat_penalty=1.15, repeat_last_n=256):
+                         repeat_penalty=1.15, repeat_last_n=256, cpu_moe=False, n_ubatch=512):
     """Helper function to create standardized model configurations.
 
     Args:
@@ -169,16 +169,20 @@ def _create_model_config(path_env, path_default, n_gpu_layers, n_ctx=32768, n_ba
         type_v: GGML type for KV cache values (8=Q8_0, 2=Q4_0). Default Q8_0.
         repeat_penalty: Penalizes repeated tokens (1.0=off). Lower values help code generation.
         repeat_last_n: Window of recent tokens to apply repeat penalty to (256=windowed, -1=full context).
+        cpu_moe: Keep MoE expert weights on CPU (llama_server only). Allows more attention layers on GPU.
+        n_ubatch: Physical micro-batch size for prompt processing (default 512).
     """
     config = {
         'path': os.getenv(path_env, path_default),
         'n_gpu_layers': n_gpu_layers,
         'n_ctx': n_ctx,
         'n_batch': n_batch,
+        'n_ubatch': n_ubatch,
         'type_k': type_k, 'type_v': type_v, 'offload_kqv': True,
         'backend': backend,
         'repeat_penalty': repeat_penalty,
         'repeat_last_n': repeat_last_n,
+        'cpu_moe': cpu_moe,
     }
     if yarn:
         config.update({
@@ -464,6 +468,7 @@ Update these after each retrieval step. They help you stay organized and efficie
         8, 262144, 1024, backend='llama_server',
         server_extra_args=['--chat-template', 'chatml'],
         logit_bias=[[151657, -100.0], [151658, -100.0]],
+        cpu_moe=True,
     )
 
     # HD: High-precision Q8_0 weights with Q4_0 KV cache for reviews
@@ -501,18 +506,19 @@ Update these after each retrieval step. They help you stay organized and efficie
         server_extra_args=['--jinja', '--reasoning-format', 'none'],
         logit_bias=[[200052, -100.0], [200053, -100.0]],
         type_k=2, type_v=2,
+        cpu_moe=True,
     )
 
     # ── Qwen3.5 family ──
 
     # Qwen3.5-35B-A3B Q4_K_M — successor to Coder-30B, same 3B active MoE
     # 22 GB model. Qwen3.5 arch supported since llama-cpp-python 0.3.17 (in-process).
-    # 131K native context with Q4_0 KV cache.
-    # ngl=22 at 131K Q4_0: 2,875 MiB free (measured 2026-04-01). Bumped to ngl=24.
+    # 262K native context with Q4_0 KV cache. Reduced ngl from 24 to 22 for 262K headroom.
+    # ngl=24 at 131K: 1,619 MiB free | ngl=22 at 262K: testing (measured 2026-04-01)
     _QWEN35_35B = _create_model_config(
         'MODEL_PATH_QWEN35_35B',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3.5-35B-A3B-GGUF/Qwen3.5-35B-A3B-Q4_K_M.gguf',
-        24, 131072, 2048,
+        22, 262144, 1024,
         type_k=2, type_v=2,
         repeat_penalty=1.05,  # Lower penalty for code generation — 1.15 caused premature EOS on large files
     )
@@ -551,6 +557,7 @@ Update these after each retrieval step. They help you stay organized and efficie
         '/home/keith-merrill/.lmstudio/models/unsloth/Nemotron-3-Nano-30B-A3B-GGUF/Nemotron-3-Nano-30B-A3B-Q4_K_M.gguf',
         28, 32768, 2048, backend='llama_server',
         server_extra_args=['--jinja', '--reasoning-format', 'none'],
+        cpu_moe=True,
     )
 
     # GLM-4.7-Flash Q4_K_M — Zhipu AI 30B-A3B MoE, 18.3 GB
@@ -563,6 +570,7 @@ Update these after each retrieval step. They help you stay organized and efficie
         34, 81920, 2048, backend='llama_server',
         server_extra_args=['--jinja', '--reasoning-format', 'none'],
         type_k=2, type_v=2,
+        cpu_moe=True,
     )
 
     # ── Few-shot example injected for executor agents ──
@@ -635,87 +643,81 @@ Update these after each retrieval step. They help you stay organized and efficie
     # 'executor': True means few-shot + fallback extraction are enabled.
     AGENTS = {
         'implementer': _create_agent_config(
-            'Implementer — Coder-Next Q8_0 (3B/80B MoE, 256K ctx, smartest)',
+            'Implementer — Qwen3.5-35B Q4_K_M (3B/35B MoE, 262K ctx, ngl=22, default)',
+            _IMPLEMENTER_SYSTEM_PROMPT,
+            _QWEN35_35B,
+            executor=True
+        ),
+        'deep_implementer': _create_agent_config(
+            'Implementer — Coder-Next Q8_0 (3B/80B MoE, 256K ctx, ngl=8, deep reasoning)',
             _IMPLEMENTER_SYSTEM_PROMPT,
             _CODER_NEXT_Q8,
             executor=True
         ),
         'fast_implementer': _create_agent_config(
-            'Implementer — Coder-30B Q4_K_M (3B/30B MoE, 256K ctx, fast)',
+            'Implementer — Coder-30B Q4_K_M (3B/30B MoE, 256K ctx, ngl=26, fast)',
             _IMPLEMENTER_SYSTEM_PROMPT,
             _CODER_30B_FAST,
             executor=True
         ),
         'architect': _create_agent_config(
-            'Architect — Coder-480B Q2_K_XL (35B/480B MoE, 64K ctx, ultra reasoning)',
+            'Architect — Coder-480B Q2_K_XL (35B/480B MoE, 64K ctx, ngl=4, ultra reasoning)',
             _ARCHITECT_SYSTEM_PROMPT,
             _QWEN_480B_ULTRA,
             executor=True
         ),
         'reviewer': _create_agent_config(
-            'Reviewer — Coder-30B Q8_0 (3B/30B MoE, 65K ctx, high precision)',
+            'Reviewer — Coder-30B Q8_0 (3B/30B MoE, 65K ctx, ngl=21, high precision)',
             f'You are a code reviewer. {EXECUTOR_PROMPT}\n\nIdentify issues and suggest improvements. You are encouraged to provide detailed advice and recommendations.\n\nCOMPREHENSIVE ANALYSIS: When performing code reviews, leverage multiple tools to understand the codebase thoroughly:\n\nGIT AWARENESS: Use Git via `<<<REMOTE_EXEC>>>` to understand code context:\n- `git log`, `git diff`, `git blame`, `git show`, `git status`\n\nFILE NAVIGATION: Use `<<<GLOB>>>` and `<<<GREP>>>` to find and search files.\n\nDOCUMENTATION - You can and should write/update documentation:\n- Use `<<<WRITE_FILE>>>` for NEW documentation files\n- Use `<<<EDIT_FILE>>>` for targeted updates to EXISTING docs (PREFERRED)\n\nEDIT_FILE FORMAT (use EXACTLY this format):\n<<<EDIT_FILE>>>/path/to/file\n<<<OLD>>>\nexact text to find\n<<<NEW>>>\nreplacement text\n\nWARNING: Do NOT use git-style markers like <<<<<<< SEARCH or ======= or >>>>>>> REPLACE. Use <<<OLD>>> and <<<NEW>>> only.\n\nAlways gather comprehensive context before providing your review.\n{GIT_TOOL_REFERENCE}',
             _CODER_30B_HD,
             executor=True
         ),
         'debugger': _create_agent_config(
-            'Debugger — Coder-30B Q4_K_M (3B/30B MoE, 131K ctx, turbo)',
+            'Debugger — Coder-30B Q4_K_M (3B/30B MoE, 131K ctx, ngl=30, turbo)',
             f'You are a debugger. {EXECUTOR_PROMPT}\n\nDEBUGGING WORKFLOW:\n- Use `<<<READ_FILE>>>` to examine source code\n- Use `<<<REMOTE_EXEC>>>` to run tests, check logs, execute debuggers\n- Use `<<<WRITE_FILE>>>` to apply fixes to source files\n- After fixing, use `<<<REMOTE_EXEC>>>` to verify the fix works (compile, run tests)\n\n{TOOL_REFERENCE}',
             _CODER_30B_TURBO,
             executor=True
         ),
-        'metal_implementer': _create_agent_config(
-            'Metal Engineer — Coder-Next Q8_0 (3B/80B MoE, 256K ctx, GPU/shaders)',
-            f'You are a Metal 4 graphics engineer (compute kernels, mesh shaders, ray tracing, argument buffers). {EXECUTOR_PROMPT}\n\nEXECUTION ENVIRONMENT: You are running on a macOS environment with full access to Metal tools.\n- Use `<<<REMOTE_EXEC>>>` for ALL shell commands.\n- Do NOT distinguish between "server" and "client". Everything runs locally.\n\nFILE WRITING - CRITICAL: When implementing code, you MUST write files to disk:\n- Use `<<<WRITE_FILE>>>` to create or update source files (.metal, .swift, .h, etc.)\n- NEVER just output code in markdown blocks - that does NOT save the file!\n- After writing, use `<<<REMOTE_EXEC>>>` to compile and verify the code works.\n\nMETAL DEVELOPMENT:\n- Write Metal shaders using `<<<WRITE_FILE>>>` to .metal files\n- Compile Metal shaders: `xcrun -sdk macosx metal -c shader.metal -o shader.air`\n- Create Metal library: `xcrun -sdk macosx metallib shader.air -o shader.metallib`\n- Validate shaders: `xcrun metal-compiler shader.metal`\n- Use `<<<REMOTE_EXEC>>>` for compilation and validation\n\n{TOOL_REFERENCE}',
-            _CODER_NEXT_Q8,
-            executor=True
-        ),
         'lite_architect': _create_agent_config(
-            'Architect — Coder-480B IQ1_M (35B/480B MoE, 32K ctx, lite reasoning)',
+            'Architect — Coder-480B IQ1_M (35B/480B MoE, 32K ctx, ngl=4, lite reasoning)',
             f'You are a system architect. {EXECUTOR_PROMPT}\n\nFILE WRITING: Use `<<<WRITE_FILE>>>` to create or update source files. After writing, use `<<<REMOTE_EXEC>>>` to compile and verify.\n\n{TOOL_REFERENCE}',
             _QWEN_480B_LITE,
             executor=True
         ),
         'm25_implementer': _create_agent_config(
-            'Implementer — MiniMax M2.5 Q4_K_M (10B/230B MoE, 65K ctx)',
+            'Implementer — MiniMax M2.5 Q4_K_M (10B/230B MoE, 65K ctx, ngl=6)',
             _IMPLEMENTER_SYSTEM_PROMPT + _MINIMAX_UNICODE_GUARD,
             _MINIMAX_M25,
             executor=True
         ),
         'm25_architect': _create_agent_config(
-            'Architect — MiniMax M2.5 Q4_K_M (10B/230B MoE, 65K ctx)',
+            'Architect — MiniMax M2.5 Q4_K_M (10B/230B MoE, 65K ctx, ngl=6)',
             _ARCHITECT_SYSTEM_PROMPT + _MINIMAX_UNICODE_GUARD,
             _MINIMAX_M25,
             executor=True
         ),
         # ── Qwen3.5 agents ──
-        'q35_implementer': _create_agent_config(
-            'Implementer — Qwen3.5-35B Q4_K_M (3B/35B MoE, 131K ctx)',
-            _IMPLEMENTER_SYSTEM_PROMPT,
-            _QWEN35_35B,
-            executor=True
-        ),
         'q35_architect': _create_agent_config(
-            'Architect — Qwen3.5-122B Q4_K_M (10B/122B MoE, 65K ctx, mid-tier)',
+            'Architect — Qwen3.5-122B Q4_K_M (10B/122B MoE, 65K ctx, ngl=9, mid-tier)',
             _ARCHITECT_SYSTEM_PROMPT,
             _QWEN35_122B,
             executor=True
         ),
         'q35_ultra': _create_agent_config(
-            'Architect — Qwen3.5-397B IQ1_M (17B/397B MoE, 96K ctx, flagship)',
+            'Architect — Qwen3.5-397B IQ1_M (17B/397B MoE, 96K ctx, ngl=8, flagship)',
             _ARCHITECT_SYSTEM_PROMPT,
             _QWEN35_397B,
             executor=True
         ),
         # ── Non-Qwen agents ──
         'nemotron': _create_agent_config(
-            'Implementer — Nemotron-3-Nano Q4_K_M (3.5B/30B Mamba-MoE, 32K ctx, fastest)',
+            'Implementer — Nemotron-3-Nano Q4_K_M (3.5B/30B Mamba-MoE, 32K ctx, ngl=28, fastest)',
             _IMPLEMENTER_SYSTEM_PROMPT,
             _NEMOTRON_NANO,
             executor=True
         ),
         'glm': _create_agent_config(
-            'Implementer — GLM-4.7-Flash Q4_K_M (3B/30B MoE, 82K ctx, Zhipu AI)',
+            'Implementer — GLM-4.7-Flash Q4_K_M (3B/30B MoE, 82K ctx, ngl=34, Zhipu AI)',
             _IMPLEMENTER_SYSTEM_PROMPT,
             _GLM47_FLASH,
             executor=True
@@ -901,16 +903,22 @@ class LlamaServerManager:
             '-ngl', str(model_config.get('n_gpu_layers', 0)),
             '-c', str(model_config.get('n_ctx', 32768)),
             '-b', str(model_config.get('n_batch', 2048)),
+            '-ub', str(model_config.get('n_ubatch', 512)),
             '-t', str(Config.DEFAULT_N_THREADS),
             '-tb', str(Config.DEFAULT_N_THREADS_BATCH),
-            '-fa', 'on',
+            '-fa', 'auto',
             '--mmap',
             '--cache-type-k', cache_k,
             '--cache-type-v', cache_v,
             '--host', '127.0.0.1',
             '--port', str(self.LLAMA_SERVER_PORT),
             '-np', '1',
+            '--lookup-cache-dynamic', '/tmp/llama-lookup-cache.bin',
         ]
+
+        # MoE models: keep expert weights on CPU, put more attention layers on GPU
+        if model_config.get('cpu_moe'):
+            cmd.append('--cpu-moe')
 
         # Add model-specific server args (chat template, jinja, etc.)
         extra_args = model_config.get('server_extra_args', ['--chat-template', 'chatml'])
