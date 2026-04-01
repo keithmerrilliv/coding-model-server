@@ -1,94 +1,125 @@
-# Qwen Multi-Agent Server Configuration
+# Configuration Reference
 
 ## Environment Variables
 
-The server uses several environment variables for configuration. Copy `.env.example` to `.env` and customize as needed:
+Set in `.env` (loaded by startup scripts) or export in your shell.
 
-### Server Configuration
-- `QWEN_SERVER_IP` - IP address of the Qwen server (default: 127.0.0.1)
-- `QWEN_SERVER_PORT` - Port of the Qwen server (default: 5000)
+### Server
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | `5000` | Server listen port |
+| `HOST` | `0.0.0.0` | Server bind address |
+| `ADMIN_API_KEY` | *(empty)* | API key for authentication (empty = disabled) |
 
-### Model Configuration
-- `MODEL_PATH` - Path to the model file
-- `MODEL_N_CTX` - Context length (default: 4096)
-- `MODEL_N_THREADS` - Number of CPU threads to use (0 = auto-detect)
-- `MODEL_N_BATCH` - Batch size for processing
-- `MODEL_FLASH_ATTENTION` - Enable flash attention (true/false)
-- `MODEL_USE_MMAP` - Use memory mapping (true/false)
-- `MODEL_USE_MLOCK` - Lock model in RAM (true/false)
+### Model Defaults
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MODEL_N_THREADS` | `24` | CPU threads for token generation (physical cores) |
+| `MODEL_N_THREADS_BATCH` | `32` | CPU threads for prompt prefill (all threads incl. HT) |
+| `MODEL_N_BATCH` | `2048` | Batch size for prompt processing |
+| `MODEL_CONTEXT_SIZE` | `524288` | Default context size (overridden per-model) |
 
-### Security Settings
-- `ALLOW_SHELL_MODE` - Enable shell features (true/false)
-- `COMMAND_WHITELIST` - Comma-separated list of allowed commands
+### Client
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `QWEN_SERVER_IP` | `192.168.50.101` | Server IP address |
+| `PERMISSION_MODE` | `default` | `default` / `acceptEdits` / `yolo` |
+| `ALLOW_SHELL_MODE` | `true` | Allow pipes, redirects, and shell features |
+| `COMMAND_WHITELIST` | *(none)* | CSV of allowed commands (empty = all allowed) |
 
-### Scraping Configuration
-- `APPLE_DEEP_DOCS_PATH` - Path to Apple Deep Docs MCP server
-- `QWEN_SERVER_IP` - IP address for memory ingestion (when scraping)
-- `QWEN_SERVER_PORT` - Port for memory ingestion (when scraping)
+## Per-Model Configuration
 
-## Apple Documentation Scraper
+Each model is defined via `_create_model_config()` in `server.py`:
 
-The system includes a comprehensive Apple documentation scraping feature:
+```python
+_MY_MODEL = _create_model_config(
+    'MODEL_PATH_ENV_VAR',           # Env var to override path
+    '/path/to/model.gguf',          # Default model path
+    n_gpu_layers,                    # Layers offloaded to GPU
+    n_ctx=32768,                     # Context window size
+    n_batch=2048,                    # Prompt processing batch size
+    backend='llama_cpp',             # 'llama_cpp' or 'llama_server'
+    type_k=8,                        # KV cache key type: 8=Q8_0, 2=Q4_0
+    type_v=8,                        # KV cache value type: 8=Q8_0, 2=Q4_0
+    repeat_penalty=1.15,             # Repetition penalty (lower = more code-friendly)
+    repeat_last_n=256,               # Penalty window (tokens)
+    server_extra_args=None,          # Extra llama-server flags (list of strings)
+    logit_bias=None,                 # Token bans: [[token_id, -100.0], ...]
+    yarn=False,                      # Enable YaRN RoPE scaling for extended context
+)
+```
 
-### Prerequisites
-- Cupertino tool installed
-- Xcode (for local documentation access with Apple Deep Docs)
+### Backend Selection
 
-### Usage
-- Run `cd scraping && python main.py <framework_name>` to scrape documentation
-- Output is stored in `scraping/output/<framework_name>/`
-- Scraped data is automatically ingested into the RAG database
+- **`llama_cpp`**: In-process via llama-cpp-python. Use for models with supported architectures.
+- **`llama_server`**: Subprocess on port 8081 via `tools/llama-server`. Required for:
+  - Qwen3.5 family (unsupported by llama-cpp-python 0.3.16)
+  - Nemotron (nemotron_h_moe architecture)
+  - MiniMax M2.5 (native Jinja template needed)
+  - GLM-4.7-Flash (glm4 template)
+  - Any model needing `--jinja` or `--chat-template` flags
 
-### Supported Frameworks
-- Any Apple framework (Metal, UIKit, AVFoundation, CoreData, Photos, etc.)
-- Dynamic class pattern generation for framework-specific APIs
-- Comprehensive search for guides, samples, and resources
+### KV Cache Quantization
 
-### MCP Server Integration
-- Integrates with Apple Deep Docs MCP server for deeper documentation access
-- Falls back to Cupertino when MCP server is unavailable
-- Access to hidden Xcode documentation, Swift Evolution proposals, and more
+Controls VRAM usage for the attention cache:
 
-## Memory Service
+| Type | Value | VRAM per token per layer | Use when |
+|------|-------|--------------------------|----------|
+| Q8_0 | `8` | ~1 byte | Plenty of VRAM, best quality |
+| Q4_0 | `2` | ~0.5 bytes | VRAM-constrained, 2x context for same VRAM |
 
-The memory service stores information for RAG (Retrieval Augmented Generation):
+Hybrid configs (Q8_0 keys + Q4_0 values) preserve attention precision while saving VRAM.
 
-- Stores scraped documentation from the Apple documentation scraper
-- Maintains conversation history
-- Provides context for AI responses
-- Connects to the configured server endpoint for ingestion
+### VRAM Budget Guidelines
 
-## Web Search Service
+For an RTX 5080 (16,303 MiB):
 
-Provides web search capabilities:
+- Leave at least **800 MiB free** for compute buffers and system overhead
+- Each GPU layer costs model-dependent VRAM (check comments in model configs)
+- KV cache scales linearly with `n_ctx` and `n_gpu_layers`
+- Use `nvidia-smi` after loading to verify actual usage
+- **Never enable `use_mlock=True`** — causes CUDA OOM during model swaps
 
-- DDG Search integration via ddgs
-- Used for external information retrieval
-- Configured through environment variables
+### Repeat Penalty Tuning
 
-## Client Configuration
+| Setting | Value | Effect |
+|---------|-------|--------|
+| `repeat_penalty=1.15` | Default | Good for chat, can cause premature EOS on long code |
+| `repeat_penalty=1.05` | Code-friendly | Better for large file writes, less repetition suppression |
+| `repeat_last_n=256` | Default | Windowed penalty, prevents full-context penalty stacking |
+| `repeat_last_n=-1` | Full context | Penalizes all prior tokens (can hurt long code output) |
 
-The client supports various commands and features:
+## System Tuning (Optional)
 
-- `/scrape <framework>` - Scrape documentation for a specific Apple framework
-- `/cupertino <query>` - Search Apple documentation (macOS only)
-- `/ingest <path>` - Ingest PDF files into memory (supports server files or local: prefix for client files)
-- `/model <name>` - Switch between different agent models
+For optimal inference performance on dedicated hardware:
 
-### PDF Ingestion
+| Setting | Method | Effect |
+|---------|--------|--------|
+| CPU governor: `performance` | systemd service | Prevents CPU frequency scaling |
+| GPU persistence mode | `nvidia-smi -pm 1` | Faster model loading |
+| THP: `always` | sysctl | Better memory access patterns |
+| Swappiness: `10` | sysctl | Keeps model weights in RAM |
+| RAM: XMP/EXPO enabled | BIOS | Full memory bandwidth |
 
-The system supports ingesting PDF documents for enhanced AI knowledge and RAG (Retrieval Augmented Generation):
+## Session Storage
 
-**Using the slash command:**
-- `/ingest /path/to/server/file.pdf` - Ingest a PDF file that exists on the server
-- `/ingest local:/path/to/client/file.pdf` - Ingest a PDF file from your local client machine
+Sessions are stored in `~/.qwen_sessions/`:
 
-**Using the tool in agent responses:**
-- `<<<INGEST_PDF>>>/path/to/server/file.pdf` - Ingest a server-side PDF
-- `<<<INGEST_PDF>>>local:/path/to/client/file.pdf` - Ingest a client-side PDF (automatically uploads to server first)
+```
+~/.qwen_sessions/
+├── default.json              # Default unnamed session
+├── my_project.json           # Named session
+└── metal_renderer.json       # Another named session
+```
 
-When using the `local:` prefix, the system will:
-1. Read the PDF file from your client machine
-2. Securely upload it to the server
-3. Ingest the uploaded file into the memory service
-4. Make the content available for RAG queries
+Each file contains:
+```json
+{
+  "messages": [...],
+  "last_agent": "implementer",
+  "session_name": "my-project",
+  "timestamp": "2026-03-31T20:00:00"
+}
+```
+
+Legacy sessions (`~/.qwen_chat_history*.json`) are auto-migrated on first startup.

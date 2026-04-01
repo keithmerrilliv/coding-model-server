@@ -1,195 +1,185 @@
-# qwen-server
+# Qwen Multi-Agent Server
 
-Qwen Multi-Agent Server with Remote Client
+A local LLM inference server with a multi-agent CLI client. The server provides an OpenAI-compatible API backed by llama.cpp, supporting multiple model configurations with automatic VRAM management. The client is an agentic coding assistant that can execute shell commands, read/write files, search codebases, and manage long-running tasks.
 
-## Server Setup
+## Architecture
 
-### Installation
+```
+Client (macOS/Linux)                    Server (Linux + GPU)
+┌──────────────────┐                   ┌──────────────────────────┐
+│ qwen_client/     │  HTTP/SSE         │ server.py (FastAPI)      │
+│  orchestrator.py │◄─────────────────►│  ├─ llama_cpp backend    │
+│  completion.py   │  /v1/chat/        │  │   (in-process)        │
+│  tool_handlers   │  completions      │  ├─ llama_server backend │
+│  compaction.py   │                   │  │   (subprocess :8081)   │
+│  commands.py     │                   │  ├─ memory_service.py    │
+│  history.py      │                   │  │   (ChromaDB + RAG)    │
+└──────────────────┘                   │  └─ web_search_service   │
+                                       └──────────────────────────┘
+```
 
-1. Clone the repository
-2. Run the setup script:
-   ```bash
-   ./setup.sh
-   ```
-3. Configure environment variables in `.env` (copy from `.env.example`)
+**Dual backend**: Models using architectures supported by llama-cpp-python run in-process (`llama_cpp`). Models needing native Jinja templates or unsupported architectures (Qwen3.5, Nemotron, MiniMax, GLM) use a `llama-server` subprocess.
 
-### Starting the Server
+**VRAM coordination**: Only one model is loaded at a time. Mutual exclusion between backends ensures the GPU is freed before loading a different model.
+
+**On-demand loading**: Models load when first requested and unload when idle (10-min watchdog for subprocess backend) or when a different model is requested.
+
+## Quick Start
+
+### Server (Linux with NVIDIA GPU)
 
 ```bash
-./start.sh
+git clone <repo-url> && cd qwen-server
+./setup.sh                  # Creates venv, installs dependencies
+cp .env.example .env        # Configure IP, ports, model paths
+./start.sh                  # Starts on port 5000
 ```
 
-The server will start on port 5000 by default.
-
-## Apple Documentation Scraper
-
-The system includes a comprehensive Apple documentation scraping feature that can:
-
-- Scrape documentation for any Apple framework (Metal, UIKit, AVFoundation, CoreData, Photos, etc.)
-- Integrate with Cupertino and Apple Deep Docs MCP servers for comprehensive documentation access
-- Ingest scraped data into the RAG database for enhanced AI knowledge
-- Support environment-based configuration for server connections
-- Generate structured output for each framework
-
-For detailed information about the scraping system, see [scraping/README.md](scraping/README.md).
-
-## High-Fidelity Documentation Ingestion
-
-The system supports deep ingestion of technical documentation into the RAG database, moving beyond simple search snippets to full-text technical memory.
-
-### Local Xcode Documentation Sync
-Sync your local Apple documentation (Metal, RealityKit, etc.) from Xcode installations directly to the RAG server:
+Or as a systemd service:
 ```bash
-# On the macOS machine:
-./venv/bin/python scraping/ingest_xcode_docs.py
+sudo systemctl enable qwen-server
+sudo systemctl start qwen-server
+journalctl -u qwen-server -f   # View logs
 ```
 
-### Targeted Web Scraping
-Ingest the latest Metal 4 and RealityKit 4 documentation from the web:
+### Client (macOS or Linux)
+
 ```bash
-# On the macOS machine:
-pip install beautifulsoup4
-./venv/bin/python scraping/scrape_apple_deep.py
+./start-client.sh                        # Default agent (implementer)
+./start-client.sh --model architect      # Specific agent
+./start-client.sh --name my-project      # Named session
 ```
 
-### Deep Ingestion Tool (Agent-Accessible)
-Agents can now fetch and ingest the full content of any technical URL:
-- `<<<DEEP_INGEST>>>url<<<DEEP_INGEST>>>` - Fetches the URL, strips HTML noise, and stores the full text in memory.
+## Agents
 
-## Client Usage
+Each agent maps to a model configuration and system prompt. Switch with `/model <name>` or `@agent_name message`.
 
-### Starting the Client
+| Agent | Role | Model | Active/Total | Context |
+|-------|------|-------|--------------|---------|
+| `implementer` | Code implementation | Coder-Next Q8_0 | 3B/80B | 256K |
+| `fast_implementer` | Fast implementation | Coder-30B Q4_K_M | 3B/30B | 256K |
+| `debugger` | Debugging | Coder-30B Q4_K_M | 3B/30B | 131K |
+| `reviewer` | Code review | Coder-30B Q8_0 | 3B/30B | 65K |
+| `architect` | System design | Coder-480B Q2_K_XL | 35B/480B | 64K |
+| `lite_architect` | Lite design | Coder-480B IQ1_M | 35B/480B | 32K |
+| `metal_implementer` | GPU/Metal shaders | Coder-Next Q8_0 | 3B/80B | 256K |
+| `q35_implementer` | Implementation | Qwen3.5-35B Q4_K_M | 3B/35B | 131K |
+| `q35_architect` | Mid-tier design | Qwen3.5-122B Q4_K_M | 10B/122B | 65K |
+| `q35_ultra` | Flagship design | Qwen3.5-397B IQ1_M | 17B/397B | 96K |
+| `m25_implementer` | Implementation | MiniMax M2.5 Q4_K_M | 10B/230B | 65K |
+| `m25_architect` | Architecture | MiniMax M2.5 Q4_K_M | 10B/230B | 65K |
+| `nemotron` | Fast implementation | Nemotron-3-Nano Q4_K_M | 3.5B/30B | 32K |
+| `glm` | Implementation | GLM-4.7-Flash Q4_K_M | 3B/30B | 82K |
 
-The client automatically detects your operating system and uses the appropriate Python environment:
+## Client Commands
 
-**Cross-platform (recommended):**
-```bash
-./start-client.sh
+### General
+| Command | Description |
+|---------|-------------|
+| `/help` | Show all commands and available agents |
+| `/exit`, `/quit` | Exit the CLI |
+| `/model <name>` | Switch agent |
+| `/clear` | Clear conversation history |
+| `/resume` | Resume interrupted multi-agent tasks |
+| `@agent msg` | Switch agent and send message in one go |
+
+### Session Management
+| Command | Description |
+|---------|-------------|
+| `/sessions` | List all saved sessions with metadata |
+| `/session <name>` | Switch to an existing session |
+| `/session new <name>` | Create and switch to a new session |
+| `/rename <name>` | Rename current session (migrates file) |
+| `/context` | Show context window usage |
+| `/compact` | Model-generated conversation summary |
+
+### Security
+| Command | Description |
+|---------|-------------|
+| `/permissions` | Cycle permission mode (default/acceptEdits/yolo) |
+| `/undo` | Revert the last file modification |
+
+### Tools
+| Command | Description |
+|---------|-------------|
+| `/ingest <path>` | Ingest a PDF into RAG memory |
+| `/cupertino <query>` | Search Apple docs (macOS) |
+| `/apple <tool> <args>` | Apple Deep Docs MCP |
+
+## Tool System
+
+Agents execute tools by emitting markers in their responses:
+
+| Marker | Purpose |
+|--------|---------|
+| `<<<REMOTE_EXEC>>>command` | Execute shell command |
+| `<<<READ_FILE>>>path` | Read file contents |
+| `<<<WRITE_FILE>>>path\ncontent` | Write file |
+| `<<<EDIT_FILE>>>path\n<<<OLD>>>\ntext\n<<<NEW>>>\ntext` | Edit file (search/replace) |
+| `<<<LIST_DIR>>>path` | List directory |
+| `<<<GLOB>>>pattern` | Find files by pattern |
+| `<<<GREP>>>pattern\|path\|options` | Search file contents |
+| `<<<SAVE_MEMORY>>>fact` | Save to RAG memory |
+| `<<<WEB_SEARCH>>>query` | Web search |
+
+### Permission Modes
+
+- **default**: Prompts for approval on every operation
+- **acceptEdits**: Auto-approves file operations, prompts for shell commands
+- **yolo**: Auto-approves everything (dangerous commands still prompt)
+
+### Safety Features
+
+- **Protected paths**: `.git/`, `.ssh/`, `.env`, etc. always require confirmation
+- **Dangerous command detection**: `rm -rf`, `sudo`, `chmod 777`, `git push --force` prompt even in yolo mode
+- **Deny rules**: `rm -rf /`, fork bombs unconditionally blocked
+- **Write-loop detection**: Blocks after 3 writes to the same file per task
+- **Response-level loop detection**: Breaks after 3 identical responses
+- **Checkpoint/undo**: File modifications backed up for `/undo`
+
+## Context Management
+
+Three-tier automatic context management:
+
+1. **Microcompaction** (60K chars): Old tool outputs replaced with one-line summaries
+2. **Model-generated compaction** (120K chars): LLM summarizes conversation into structured 9-section format
+3. **Hard trim** (150K chars): Drops oldest 25% of messages as last resort
+
+Manual compaction available via `/compact`.
+
+## API
+
+The server exposes an OpenAI-compatible API:
+
+- `GET /health` — Health check
+- `GET /v1/models` — List available agents
+- `POST /v1/chat/completions` — Chat completion (streaming/non-streaming)
+- `POST /v1/memory` — Save to RAG memory
+- `POST /v1/memory/search` — Search RAG memory
+- `POST /v1/memory/ingest` — Ingest PDF into memory
+- `POST /v1/files/upload` — Upload file to server
+
+## Project Structure
+
 ```
-
-**With specific agent model:**
-```bash
-./start-client.sh --model implementer
+qwen-server/
+├── server.py              # FastAPI server, model configs, inference
+├── client.py              # Client entry point
+├── qwen_remote.py         # Legacy monolithic client (still functional)
+├── tool_handlers.py       # Tool execution, permissions, file ops
+├── memory_service.py      # ChromaDB RAG service
+├── web_search_service.py  # DuckDuckGo web search
+├── qwen_client/           # Modular client package
+│   ├── main.py            #   Chat loop, startup
+│   ├── orchestrator.py    #   Agent loop, tool dispatch
+│   ├── completion.py      #   SSE streaming, retries
+│   ├── compaction.py      #   Context compaction
+│   ├── commands.py        #   Slash command handlers
+│   ├── history.py         #   Session persistence
+│   ├── config.py          #   Configuration, constants
+│   ├── models.py          #   Agent theme management
+│   └── agentic/           #   RAG: scratchpad, planner, budget
+├── tools/                 # llama-server binary + shared libs
+├── scraping/              # Apple documentation scraper
+└── docs/                  # Additional documentation
 ```
-
-**Direct Python (if environment already activated):**
-```bash
-python3 qwen_remote.py
-```
-
-### Environment Detection
-
-- **macOS**: Uses `myenv/bin/activate`
-- **Linux**: Uses `venv/bin/activate`
-
-### Client Commands
-
-- `/exit` or `/quit` - Exit the client
-- `/model <name>` - Switch to a different agent model
-- `/resume` - Resume interrupted multi-agent tasks (e.g., after a tool execution break)
-- `/history` - Show command history
-- `/cupertino <query>` - Search Apple documentation (macOS only)
-- `/scrape <framework>` - Scrape documentation for a specific Apple framework
-- `/ingest <path>` - Ingest a PDF file into memory (supports server files or local: prefix for client files)
-
-### PDF Ingestion Feature
-
-The system supports ingesting PDF documents for enhanced AI knowledge and RAG (Retrieval Augmented Generation):
-
-**Using the slash command:**
-- `/ingest /path/to/server/file.pdf` - Ingest a PDF file that exists on the server
-- `/ingest local:/path/to/client/file.pdf` - Ingest a PDF file from your local client machine
-
-**Using the tool in agent responses:**
-- `<<<INGEST_PDF>>>/path/to/server/file.pdf` - Ingest a server-side PDF
-- `<<<INGEST_PDF>>>local:/path/to/client/file.pdf` - Ingest a client-side PDF (automatically uploads to server first)
-
-When using the `local:` prefix, the system will:
-1. Read the PDF file from your client machine
-2. Securely upload it to the server
-3. Ingest the uploaded file into the memory service
-4. Make the content available for RAG queries
-
-### Security Settings
-
-Configure via environment variables:
-
-- `ALLOW_SHELL_MODE=true` - Enable shell features (pipes, redirects, etc.)
-- `COMMAND_WHITELIST=ls,pwd,cat` - Comma-separated list of allowed commands
-
-### Performance Optimization Settings
-
-You can optimize inference speed by adjusting these environment variables in your `.env` file:
-
-- `MODEL_N_THREADS=0` - Number of CPU threads to use (0 = auto-detect CPU cores)
-- `MODEL_N_BATCH=512` - Batch size for processing (higher = faster but more memory)
-- `MODEL_FLASH_ATTENTION=true` - Enable flash attention for faster processing (if supported)
-- `MODEL_USE_MMAP=true` - Use memory mapping for faster model loading
-- `MODEL_USE_MLOCK=true` - Lock model in RAM to prevent swapping to disk
-- `MODEL_N_CTX_BATCH=2048` - Number of tokens to process at once (higher = faster but more memory)
-
-### Advanced Model Configuration
-
-You can configure advanced parameters in `server.py` to control memory usage and context length.
-
-**KV Cache Offloading (RAM vs VRAM):**
-By default, the Key-Value (KV) cache is offloaded to VRAM for speed. To save VRAM (at the cost of speed), you can move it to system RAM:
-
-```python
-            'model_config': {
-                # ...
-                'offload_kqv': False,   # False = Store KV cache in RAM, True = VRAM (default)
-            }
-```
-
-**KV Cache Quantization:**
-By default, the KV cache now uses the model's standard precision (usually F16). If you are constrained by RAM or VRAM, you can enable 8-bit quantization:
-
-```python
-            'model_config': {
-                # ...
-                'type_k': 8,  # 8 = GGML_TYPE_Q8_0
-                'type_v': 8,  # 8 = GGML_TYPE_Q8_0
-            }
-```
-
-**Extending Context Length (YaRN):**
-You can extend the model's context length beyond its training limit using YaRN (Yet another RoPE extensioN).
-
-```python
-        'implementer': {
-            'description': 'Code implementation agent',
-            # ...
-            'model_config': {
-                'path': '/path/to/model.gguf',
-                'n_ctx': 65536,         # Desired context length
-                'offload_kqv': True,    # Set to False if you run out of VRAM
-
-                # YaRN Configuration
-                'rope_scaling_type': 2, # 2 = YaRN
-                'yarn_ext_factor': -1.0,# -1 = Auto-detect based on n_ctx / train_ctx
-                'yarn_attn_factor': 1.0,
-                'yarn_beta_fast': 32.0,
-                'yarn_beta_slow': 1.0,
-                'yarn_orig_ctx': 32768  # Original training context of the model
-            }
-        },
-```
-
-### Remote Command Execution
-
-The agent can request to execute commands on your local machine. You will be prompted to approve each command before execution.
-
-**Async commands** (background jobs):
-- Agent uses `<<<REMOTE_EXEC_ASYNC>>>command<<<REMOTE_EXEC_ASYNC>>>`
-- Returns a job ID for tracking
-- Check status: `<<<REMOTE_CHECK_STATUS>>>job_id<<<REMOTE_CHECK_STATUS>>>`
-- Get output: `<<<REMOTE_GET_OUTPUT>>>job_id<<<REMOTE_GET_OUTPUT>>>`
-
-**Sync commands** (immediate):
-- Agent uses `<<<REMOTE_EXEC>>>command<<<REMOTE_EXEC>>>`
-- Runs with 30-second timeout
-
-**File Reading** (safe, fast):
-- Agent uses `<<<READ_FILE>>>path<<<READ_FILE>>>`
-- Reads file content without using shell commands (Architect safe)

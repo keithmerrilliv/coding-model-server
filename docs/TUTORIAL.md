@@ -1,0 +1,379 @@
+# Tutorial: Setting Up and Using the Qwen Multi-Agent Server
+
+This guide walks through setting up a local LLM inference server with a multi-agent coding assistant client. By the end, you'll have a system where AI agents can read files, execute commands, write code, and search documentation — all running on your own hardware.
+
+## Prerequisites
+
+**Server machine (Linux):**
+- NVIDIA GPU with at least 8 GB VRAM (16 GB recommended)
+- 64 GB+ system RAM (192 GB for large models like 397B/480B)
+- NVIDIA drivers + CUDA toolkit installed
+- Python 3.10+
+
+**Client machine (macOS or Linux):**
+- Python 3.10+
+- Network access to the server
+
+## Part 1: Server Setup
+
+### 1.1 Clone and Install
+
+```bash
+git clone <repo-url> qwen-server
+cd qwen-server
+./setup.sh
+```
+
+This creates a Python venv, installs dependencies (FastAPI, llama-cpp-python, ChromaDB, sentence-transformers), and sets up the directory structure.
+
+### 1.2 Download Models
+
+Models are GGUF files from HuggingFace. Download them to any directory and reference the paths in `server.py`. A good starting point is a single small model:
+
+```bash
+# Example: download Qwen3-Coder-30B (3B active MoE, ~22 GB)
+pip install huggingface-hub
+huggingface-cli download unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF \
+  Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf \
+  --local-dir ~/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF
+```
+
+Set `HF_TOKEN` in your environment for authenticated downloads (unauthenticated is rate-limited).
+
+### 1.3 Configure Your First Model
+
+Open `server.py` and find the `Config` class. Add a model config:
+
+```python
+_MY_MODEL = _create_model_config(
+    'MODEL_PATH_MY_MODEL',                    # Env var to override path
+    '/path/to/Qwen3-Coder-30B-Q4_K_M.gguf',  # Default path
+    20,       # n_gpu_layers — start low, increase until ~1 GB VRAM free
+    32768,    # n_ctx — context window (32K is a safe start)
+    2048,     # n_batch — prompt processing batch size
+)
+```
+
+Then add an agent that uses it:
+
+```python
+AGENTS = {
+    'implementer': _create_agent_config(
+        'Implementer — My Model (description)',
+        _IMPLEMENTER_SYSTEM_PROMPT,
+        _MY_MODEL,
+        executor=True   # Enables tool execution
+    ),
+}
+```
+
+### 1.4 Finding the Right GPU Layer Count
+
+The most important tuning parameter is `n_gpu_layers`. More layers on GPU = faster inference but more VRAM.
+
+1. Start with a low value (e.g., 4)
+2. Start the server: `./start.sh`
+3. Send a test request and check VRAM: `nvidia-smi`
+4. If you have > 2 GB free, increase layers
+5. Repeat until ~1 GB free remains
+
+```bash
+# Quick test after starting server:
+curl -s http://localhost:5000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"implementer","messages":[{"role":"user","content":"Hello"}],"max_tokens":50}'
+```
+
+### 1.5 Configure Environment
+
+```bash
+cp .env.example .env
+# Edit .env:
+#   PORT=5000
+#   HOST=0.0.0.0
+```
+
+### 1.6 Start as a Service (Recommended)
+
+Create `/etc/systemd/system/qwen-server.service`:
+
+```ini
+[Unit]
+Description=Qwen Multi-Agent Server (FastAPI)
+After=network.target
+
+[Service]
+Type=simple
+User=your-username
+WorkingDirectory=/path/to/qwen-server
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/path/to/qwen-server/venv/bin/python server.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable qwen-server
+sudo systemctl start qwen-server
+journalctl -u qwen-server -f  # View logs
+```
+
+## Part 2: Client Setup
+
+### 2.1 Configure the Client
+
+Edit `qwen_client/config.py` or set the environment variable:
+
+```bash
+export QWEN_SERVER_IP=192.168.1.100  # Your server's IP
+```
+
+### 2.2 Start the Client
+
+```bash
+./start-client.sh
+```
+
+You'll see the available agents, permission mode, and a prompt. Type a message to start interacting.
+
+### 2.3 Basic Usage
+
+```
+You (implementer) > Write a Python function to sort a list of dicts by a key
+
+# The agent will:
+# 1. Generate code
+# 2. Write it to a file via <<<WRITE_FILE>>>
+# 3. Run it via <<<REMOTE_EXEC>>> to verify
+# 4. Report results
+
+You (implementer) > @architect Design a REST API for a todo app
+
+# Switches to architect agent and sends the message
+```
+
+### 2.4 Multi-Agent Workflows
+
+```
+You (implementer) > @architect Design a URL shortener then @implementer build it
+
+# Architect designs, then implementer receives the design and codes it
+```
+
+### 2.5 Session Management
+
+```
+/session new my-project       # Create named session
+/sessions                     # List all sessions
+/session other-project        # Switch to another session
+/rename better-name           # Rename current session
+```
+
+Sessions persist across restarts. Each session has independent history and tracks the last-used agent.
+
+## Part 3: Understanding the System
+
+### 3.1 How a Request Flows
+
+1. **Client** sends user message via SSE streaming POST to `/v1/chat/completions`
+2. **Server** selects the model backend (llama_cpp or llama_server)
+3. **Server** injects RAG context from ChromaDB if relevant memories exist
+4. **Server** calculates token budget and injects guidance into system prompt
+5. **Server** streams tokens back as SSE events (including a progress event for prefill)
+6. **Client** displays tokens in real-time, processes any tool markers
+7. **Client** executes tools (with permission checks) and sends output back
+8. **Client** loops until agent produces a response with no tool calls
+
+### 3.2 The Agent Loop
+
+The orchestrator (`qwen_client/orchestrator.py`) runs this cycle:
+
+```
+get_completion() → process tools → append output → get_completion() → ...
+```
+
+Safety mechanisms prevent infinite loops:
+- **Budget system**: Per-query iteration limits based on query classification
+- **Turn cap**: Absolute 50-turn limit per task
+- **Response-level loop detection**: Breaks after 3 identical responses
+- **Write-loop detection**: Blocks after 3 writes to the same file
+- **Stall detection**: Nudges agent if it summarizes instead of acting
+
+### 3.3 Context Management
+
+Long conversations are managed through three tiers:
+
+| Threshold | Action | Cost |
+|-----------|--------|------|
+| 60K chars | Microcompact old tool outputs | None (string ops) |
+| 120K chars | Model-generated conversation summary | 1 LLM call |
+| 150K chars | Hard trim (drop oldest 25%) | None (data loss) |
+
+The `/compact` command triggers model-generated compaction manually.
+
+### 3.4 The RAG Memory System
+
+The server runs a ChromaDB vector database with SentenceTransformer embeddings (`all-MiniLM-L6-v2`). Agents can save facts and the system auto-retrieves relevant context for each query.
+
+- **Save**: `<<<SAVE_MEMORY>>>` marker or `/ingest` command
+- **Retrieve**: Automatic — top-K similar documents injected into system prompt
+- **Storage**: `qwen_memory_db/` directory (SQLite + HNSW index)
+
+## Part 4: Adding New Models
+
+### 4.1 Choose a Model
+
+Find GGUF models on HuggingFace. Key factors:
+- **Active parameters**: How much compute per token (e.g., 3B active in a 30B MoE)
+- **Total size**: How much RAM/VRAM needed
+- **Quantization**: Q4_K_M (good balance), Q8_0 (higher quality), IQ1_M (extreme compression)
+- **Context window**: Training context size (n_ctx_train)
+- **Architecture**: Check if llama-cpp-python supports it (if not, use llama_server backend)
+
+### 4.2 Add the Model Config
+
+In `server.py`, add a new model config:
+
+```python
+# New model: Example-70B Q4_K_M
+# Download size: ~40 GB. MoE with 7B active params.
+# Test ngl values to find optimal GPU layer count.
+_EXAMPLE_70B = _create_model_config(
+    'MODEL_PATH_EXAMPLE_70B',
+    '/path/to/Example-70B-Q4_K_M.gguf',
+    n_gpu_layers=10,     # Start here, increase until ~1 GB VRAM free
+    n_ctx=32768,         # Start conservative, increase if VRAM allows
+    n_batch=2048,
+    # backend='llama_server',  # Uncomment if arch not in llama-cpp-python
+    # server_extra_args=['--jinja', '--reasoning-format', 'none'],
+    type_k=8, type_v=8,  # Q8_0 cache, or use 2 for Q4_0 if VRAM-tight
+)
+```
+
+### 4.3 Add the Agent
+
+```python
+AGENTS = {
+    # ... existing agents ...
+    'example': _create_agent_config(
+        'Implementer — Example-70B Q4_K_M (7B/70B MoE, 32K ctx)',
+        _IMPLEMENTER_SYSTEM_PROMPT,   # Or _ARCHITECT_SYSTEM_PROMPT for design-only
+        _EXAMPLE_70B,
+        executor=True
+    ),
+}
+```
+
+### 4.4 Add the Theme (Client)
+
+In `qwen_client/config.py`, add to `THEME_STYLES`:
+
+```python
+"example": {"color": COLORS["CYAN"], "icon": "\U0001f4a1", "prompt": "Example"},
+```
+
+And in `qwen_client/models.py`, add to the fallback defaults.
+
+### 4.5 Tuning VRAM
+
+After adding the model, iterate on `n_gpu_layers`:
+
+1. Set a low value, restart server, load the model
+2. Check `nvidia-smi` — note free VRAM
+3. Calculate VRAM per layer: `(total_used - baseline) / n_gpu_layers`
+4. Increase layers until ~1 GB remains free
+5. If VRAM is tight, switch KV cache to Q4_0: `type_k=2, type_v=2`
+6. If still tight, reduce `n_ctx`
+
+### 4.6 Handling Unsupported Architectures
+
+If `llama-cpp-python` errors on model load ("unknown architecture"), use the subprocess backend:
+
+```python
+_MY_MODEL = _create_model_config(
+    'MODEL_PATH',
+    '/path/to/model.gguf',
+    10, 32768, 2048,
+    backend='llama_server',
+    server_extra_args=['--jinja', '--reasoning-format', 'none'],
+)
+```
+
+The `tools/llama-server` binary must be present with its shared libraries.
+
+### 4.7 Banning Native Tool Tokens
+
+Some models generate native `<tool_call>` tokens that interfere with the custom marker format. Use `logit_bias` to ban them:
+
+1. Find the token IDs using the llama-server `/tokenize` endpoint
+2. Add them to the model config:
+
+```python
+logit_bias=[[TOKEN_ID, -100.0], [OTHER_TOKEN_ID, -100.0]]
+```
+
+## Part 5: Maintenance
+
+### 5.1 Monitoring
+
+```bash
+# Server logs
+journalctl -u qwen-server -f
+
+# VRAM usage
+nvidia-smi
+
+# RAG database size
+du -sh qwen_memory_db/
+
+# Active model
+curl -s http://localhost:5000/health
+```
+
+### 5.2 Common Issues
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| "Failed to create llama_context" | VRAM OOM | Reduce `n_gpu_layers` or `n_ctx` |
+| Model generates `<tool_call>` | Native tokens not banned | Add `logit_bias` for the token IDs |
+| Agent loops on same file | Write-loop or response-loop | Check logs; reduce `repeat_penalty` for the model |
+| Slow TTFT | Long prompt + SWA model | Use `/compact` to reduce context |
+| "Memory retrieval timed out" | Large ChromaDB | Increase timeout in server.py or prune old memories |
+
+### 5.3 Updating llama-cpp-python
+
+```bash
+source venv/bin/activate
+pip install --upgrade llama-cpp-python
+# For CUDA: pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124
+```
+
+After upgrading, models that previously needed `llama_server` backend may work with `llama_cpp` if architecture support was added.
+
+### 5.4 Database Maintenance
+
+```bash
+# Check document count
+source venv/bin/activate
+python3 -c "
+import chromadb
+c = chromadb.PersistentClient(path='qwen_memory_db')
+for col in c.list_collections():
+    print(f'{col.name}: {col.count():,} documents')
+"
+
+# Reclaim disk space (run when server is stopped)
+sqlite3 qwen_memory_db/chroma.sqlite3 "VACUUM;"
+```
+
+### 5.5 Backup
+
+Back up these directories:
+- `qwen_memory_db/` — RAG vector database
+- `~/.qwen_sessions/` — Chat session history
+- `~/.qwen_checkpoints/` — File modification undo history
+- `.env` — Configuration
