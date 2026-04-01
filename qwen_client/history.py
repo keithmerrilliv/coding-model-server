@@ -1,6 +1,9 @@
 """Chat history persistence — save, load, prune, compress."""
 import os
+import re
+import glob
 import json
+import shutil
 from datetime import datetime
 
 from qwen_client.config import config, COLORS, print_colored
@@ -8,9 +11,81 @@ from qwen_client.config import config, COLORS, print_colored
 _INTERNAL_KEYS = {"auto_send", "_retried", "_retried_prompt"}
 
 
+# ---------------------------------------------------------------------------
+# Session directory helpers
+# ---------------------------------------------------------------------------
+
+def ensure_session_dir():
+    """Create session directory if it doesn't exist."""
+    os.makedirs(config.SESSION_DIR, exist_ok=True)
+
+
+def session_path(name):
+    """Get file path for a named session."""
+    safe_name = re.sub(r'[^\w\-]', '_', name) if name else "default"
+    return os.path.join(config.SESSION_DIR, f"{safe_name}.json")
+
+
+def migrate_legacy_sessions():
+    """One-time migration from flat files in ~/ to ~/.qwen_sessions/."""
+    ensure_session_dir()
+    migrated = 0
+    # Default session
+    legacy_default = os.path.expanduser("~/.qwen_chat_history.json")
+    if os.path.exists(legacy_default):
+        new_path = session_path("default")
+        if not os.path.exists(new_path):
+            shutil.move(legacy_default, new_path)
+            migrated += 1
+    # Named sessions
+    for legacy in glob.glob(os.path.expanduser("~/.qwen_chat_history_*.json")):
+        name = os.path.basename(legacy).replace(".qwen_chat_history_", "").replace(".json", "")
+        new_path = session_path(name)
+        if not os.path.exists(new_path):
+            shutil.move(legacy, new_path)
+            migrated += 1
+    if migrated:
+        print_colored(f"Migrated {migrated} session(s) to {config.SESSION_DIR}/", COLORS['CYAN'])
+
+
+def list_sessions():
+    """List all saved sessions with metadata."""
+    ensure_session_dir()
+    sessions = []
+    for filepath in sorted(glob.glob(os.path.join(config.SESSION_DIR, "*.json"))):
+        try:
+            with open(filepath, 'r') as f:
+                data = json.load(f)
+            name = data.get("session_name") or os.path.splitext(os.path.basename(filepath))[0]
+            sessions.append({
+                "name": name,
+                "file": filepath,
+                "messages": len(data.get("messages", [])),
+                "timestamp": data.get("timestamp", "unknown"),
+                "last_agent": data.get("last_agent", "unknown"),
+            })
+        except Exception:
+            continue
+    return sessions
+
+
+def load_chat_history_from_file(filepath):
+    """Load history from a specific file. Returns (history, last_agent)."""
+    try:
+        with open(filepath, 'r') as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return data, "implementer"
+        return data.get("messages", []), data.get("last_agent", "implementer")
+    except Exception as e:
+        print_colored(f"Warning: Failed to load session: {e}", COLORS['WARNING'])
+        return [], "implementer"
+
+
 def save_chat_history(history, current_agent="implementer"):
     """Save full chat history and metadata to file, stripping internal keys."""
     try:
+        ensure_session_dir()
         pruned_history = _prune_history(history)
         cleaned = []
         for msg in pruned_history:

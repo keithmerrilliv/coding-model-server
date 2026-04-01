@@ -36,10 +36,11 @@ class Config:
 
     # Session settings
     SESSION_NAME = None
+    SESSION_DIR = os.path.expanduser("~/.qwen_sessions")
 
     # Temporary file settings
     HISTORY_FILE = os.path.expanduser("~/.qwen_client_history")
-    CHAT_HISTORY_FILE = os.path.expanduser("~/.qwen_chat_history.json")
+    CHAT_HISTORY_FILE = os.path.join(SESSION_DIR, "default.json")
     HISTORY_MAX_LENGTH = 1000
 
     # Chunking settings

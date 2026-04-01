@@ -50,6 +50,68 @@ _MAX_CHECKPOINTS = 20
 _write_counts = {}
 _MAX_WRITES_PER_FILE = 3
 
+# ---------------------------------------------------------------------------
+# Safety: protected paths, dangerous commands, deny rules
+# ---------------------------------------------------------------------------
+
+# Paths that require explicit user confirmation regardless of permission mode
+PROTECTED_PATHS = [
+    '.git/', '.ssh/', '.gnupg/', '/etc/', '/usr/', '/bin/', '/sbin/',
+]
+PROTECTED_FILES = [
+    '.env', '.bashrc', '.zshrc', '.profile', '.bash_profile',
+    'id_rsa', 'id_ed25519', 'authorized_keys', 'known_hosts',
+]
+
+def _is_protected_path(filepath):
+    """Check if a path is protected. Returns (is_protected, reason)."""
+    norm = os.path.normpath(os.path.expanduser(filepath))
+    for pdir in PROTECTED_PATHS:
+        pdir_clean = pdir.rstrip('/')
+        if f'/{pdir_clean}/' in norm + '/' or norm.startswith(os.path.normpath(pdir_clean)):
+            return True, f"inside protected directory '{pdir}'"
+    basename = os.path.basename(norm)
+    for pfile in PROTECTED_FILES:
+        if basename == pfile:
+            return True, f"matches protected file '{pfile}'"
+    return False, ""
+
+
+# Shell patterns that get extra warnings even in yolo mode
+DANGEROUS_PATTERNS = [
+    (re.compile(r'\brm\s+-[a-zA-Z]*r[a-zA-Z]*f\b|\brm\s+-[a-zA-Z]*f[a-zA-Z]*r\b'), "recursive force delete"),
+    (re.compile(r'\bsudo\b'), "elevated privileges"),
+    (re.compile(r'\bchmod\s+[0-7]*777\b'), "world-writable permissions"),
+    (re.compile(r'\bchown\b'), "ownership change"),
+    (re.compile(r'\bmkfs\b'), "filesystem format"),
+    (re.compile(r'\bdd\s+'), "raw disk write"),
+    (re.compile(r'>\s*/dev/'), "writing to device"),
+    (re.compile(r'\bgit\s+push\s+.*--force\b'), "force push"),
+    (re.compile(r'\bgit\s+reset\s+--hard\b'), "destructive git reset"),
+]
+
+def _check_dangerous_command(command):
+    """Check if a command matches known dangerous patterns. Returns (is_dangerous, reason)."""
+    for pattern, description in DANGEROUS_PATTERNS:
+        if pattern.search(command):
+            return True, description
+    return False, ""
+
+
+# Operations that are always denied — no prompt, no override
+DENY_RULES = [
+    (re.compile(r'\brm\s+-[a-zA-Z]*r[a-zA-Z]*\s+/\s*$'), "recursive delete of root"),
+    (re.compile(r'\brm\s+-[a-zA-Z]*r[a-zA-Z]*\s+/home\s*$'), "recursive delete of /home"),
+    (re.compile(r':\(\)\s*\{\s*:\|:&\s*\};\s*:'), "fork bomb"),
+]
+
+def _check_deny_rules(command):
+    """Check if a command is unconditionally denied. Returns (denied, reason)."""
+    for pattern, description in DENY_RULES:
+        if pattern.search(command):
+            return True, description
+    return False, ""
+
 
 def reset_write_counts():
     """Clear per-file write counters between tasks."""
@@ -431,6 +493,13 @@ def execute_remote_command(command, chunk_output=True):
     _logger.info("Executing command: %s", command)
     _print_colored(f"\nAgent wants to run command: {command}", _colors['WARNING'])
 
+    # Deny rules — unconditionally blocked, no prompt
+    denied, deny_reason = _check_deny_rules(command)
+    if denied:
+        _print_colored(f"   DENIED: {deny_reason} — this operation is blocked.", _colors['FAIL'])
+        _logger.warning("Command denied by deny rule: %s — %s", command[:100], deny_reason)
+        return f"Command denied: {deny_reason}. This operation is not allowed."
+
     if _config.ALLOW_SHELL_MODE:
         _print_colored(f"   Shell mode enabled (less safe)", _colors['WARNING'])
     else:
@@ -454,7 +523,18 @@ def execute_remote_command(command, chunk_output=True):
         _logger.error("Unexpected error during command validation: %s - %s", command, str(e), exc_info=True)
         return f"Command validation failed with unexpected error: {str(e)}"
 
-    if _should_auto_approve('REMOTE_EXEC'):
+    # Dangerous command detection — prompts even in yolo mode
+    is_dangerous, danger_reason = _check_dangerous_command(command)
+    if is_dangerous:
+        _print_colored(f"   DANGEROUS: {danger_reason}", _colors['FAIL'])
+        try:
+            choice = input(f"{_colors['BOLD']}Allow DANGEROUS command? [y/N] > {_colors['ENDC']}")
+        except (EOFError, KeyboardInterrupt):
+            return "User cancelled dangerous command."
+        if choice.lower() != 'y':
+            _logger.info("Dangerous command denied by user: %s — %s", command[:100], danger_reason)
+            return f"User denied dangerous command ({danger_reason})."
+    elif _should_auto_approve('REMOTE_EXEC'):
         _print_colored(f"   Auto-approved ({_permission_mode} mode)", _colors['GREEN'])
         _logger.info("Auto-approving command (%s mode): %s", _permission_mode, command)
         choice = 'y'
@@ -606,7 +686,20 @@ def write_file_content(payload):
             os.makedirs(parent_dir, exist_ok=True)
             _logger.info(f"Created directory: {parent_dir}")
 
-        # Security check - log what we're doing
+        # Protected path check — always prompts regardless of permission mode
+        protected, protect_reason = _is_protected_path(full_path)
+        if protected:
+            _print_colored(f"\nAgent wants to write file: {full_path}", _colors['FAIL'])
+            _print_colored(f"   WARNING: {protect_reason}", _colors['FAIL'])
+            _print_colored(f"   Protected path — requires explicit approval.", _colors['FAIL'])
+            try:
+                choice = input(f"{_colors['BOLD']}Allow write to PROTECTED path? [y/N] > {_colors['ENDC']}")
+            except (EOFError, KeyboardInterrupt):
+                return "User cancelled write to protected path."
+            if choice.lower() != 'y':
+                _logger.info("Write to protected path denied: %s — %s", full_path, protect_reason)
+                return f"Denied: {protect_reason}"
+
         _logger.info(f"Writing file: {full_path} ({len(content)} bytes)")
 
         # Show diff if overwriting existing file, else preview
@@ -712,6 +805,19 @@ def edit_file_content(payload):
 
         if not os.path.exists(full_path):
             return f"Error: File not found: {path}"
+
+        # Protected path check
+        protected, protect_reason = _is_protected_path(full_path)
+        if protected:
+            _print_colored(f"\nAgent wants to edit file: {full_path}", _colors['FAIL'])
+            _print_colored(f"   WARNING: {protect_reason}", _colors['FAIL'])
+            try:
+                choice = input(f"{_colors['BOLD']}Allow edit of PROTECTED path? [y/N] > {_colors['ENDC']}")
+            except (EOFError, KeyboardInterrupt):
+                return "User cancelled edit of protected path."
+            if choice.lower() != 'y':
+                _logger.info("Edit of protected path denied: %s — %s", full_path, protect_reason)
+                return f"Denied: {protect_reason}"
 
         # Read current file content
         with open(full_path, 'r', encoding='utf-8', errors='replace') as f:

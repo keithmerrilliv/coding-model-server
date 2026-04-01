@@ -1,4 +1,5 @@
 """Slash-command dispatcher for the interactive CLI."""
+import os
 import json
 
 from qwen_client.config import config, COLORS, PROMPT_COLORS, HISTORY_CHAR_BUDGET, print_colored
@@ -43,7 +44,10 @@ def handle_user_command(user_input, history, model, agent_theme):
         print(f"  /context             - Show context window usage (tokens, budget)")
         print(f"  /compact             - Manually compress conversation history")
         print(f"  /undo                - Revert the last file modification")
-        print(f"  /rename <name>       - Name or rename the current session")
+        print(f"  /rename <name>       - Rename the current session (migrates file)")
+        print(f"  /sessions            - List all saved sessions")
+        print(f"  /session <name>      - Switch to a named session")
+        print(f"  /session new <name>  - Create and switch to a new session")
         print(f"  \\ + Enter            - Multiline input (backslash continuation)")
         print(f"  Ctrl+C               - Interrupt generation (keeps partial response)")
 
@@ -266,22 +270,16 @@ def handle_user_command(user_input, history, model, agent_theme):
 
     # ── Manual compaction ─────────────────────────────────────────────────
     if user_input.lower() == '/compact':
-        before_count = len(history)
+        from qwen_client.compaction import compact_conversation
         before_chars = sum(len(m.get("content", "")) for m in history)
-        system_msgs = [m for m in history if m['role'] == 'system']
-        non_system = [m for m in history if m['role'] != 'system']
-        if len(non_system) <= 12:
-            print_colored("History is already compact.", COLORS['GREEN'])
-            return True, model
-        keep_start = non_system[:4]
-        keep_end = non_system[-8:]
-        compressed_count = len(non_system) - 12
-        summary_msg = {"role": "system", "content": f"[{compressed_count} earlier messages compressed to save context]"}
-        history[:] = system_msgs + keep_start + [summary_msg] + keep_end
-        after_chars = sum(len(m.get("content", "")) for m in history)
-        saved = before_chars - after_chars
-        print_colored(f"Compacted: {before_count} -> {len(history)} messages, freed ~{saved // 4:,} tokens", COLORS['GREEN'])
-        save_chat_history(history, model)
+        success, message = compact_conversation(history, model, reason="manual")
+        if success:
+            after_chars = sum(len(m.get("content", "")) for m in history)
+            freed = before_chars - after_chars
+            print_colored(f"Compacted: {message} Freed ~{freed // 4:,} tokens.", COLORS['GREEN'])
+            save_chat_history(history, model)
+        else:
+            print_colored(message, COLORS['WARNING'])
         return True, model
 
     # ── Undo ──────────────────────────────────────────────────────────────
@@ -293,14 +291,76 @@ def handle_user_command(user_input, history, model, agent_theme):
 
     # ── Session rename ────────────────────────────────────────────────────
     if user_input.lower().startswith('/rename '):
+        from qwen_client.history import session_path
         new_name = user_input.split(' ', 1)[1].strip()
         if not new_name:
             print_colored("Usage: /rename <session_name>", COLORS['FAIL'])
             return True, model
+        old_file = config.CHAT_HISTORY_FILE
         config.SESSION_NAME = new_name
+        new_file = session_path(new_name)
+        config.CHAT_HISTORY_FILE = new_file
+        if os.path.exists(old_file) and old_file != new_file:
+            import shutil
+            shutil.move(old_file, new_file)
         set_terminal_title(f"Qwen - {new_name}")
         save_chat_history(history, model)
-        print_colored(f"Session renamed to: {new_name}", COLORS['GREEN'])
+        print_colored(f"Session renamed to: {new_name} ({new_file})", COLORS['GREEN'])
+        return True, model
+
+    # ── Session listing ───────────────────────────────────────────────────
+    if user_input.lower() == '/sessions':
+        from qwen_client.history import list_sessions
+        sessions = list_sessions()
+        if not sessions:
+            print_colored("No saved sessions found.", COLORS['WARNING'])
+        else:
+            print_colored(f"\n--- Saved Sessions ({len(sessions)}) ---", COLORS['HEADER'])
+            for s in sessions:
+                current = config.SESSION_NAME or "default"
+                marker = " <-- current" if s['name'] == current else ""
+                ts = s['timestamp'][:19] if len(s['timestamp']) > 19 else s['timestamp']
+                print_colored(
+                    f"  {s['name']:<20} {s['messages']:>3} msgs  {s['last_agent']:<16} {ts}{marker}",
+                    COLORS['CYAN']
+                )
+            print_colored("Use '/session <name>' to switch, '/session new <name>' to create.", COLORS['BLUE'])
+        return True, model
+
+    # ── Session switching ─────────────────────────────────────────────────
+    if user_input.lower().startswith('/session '):
+        from qwen_client.history import session_path, load_chat_history_from_file
+        parts = user_input.split(None, 2)
+        action = parts[1].strip() if len(parts) > 1 else ""
+
+        if action == 'new':
+            name = parts[2].strip() if len(parts) > 2 else None
+            if not name:
+                print_colored("Usage: /session new <name>", COLORS['FAIL'])
+                return True, model
+            save_chat_history(history, model)
+            config.SESSION_NAME = name
+            config.CHAT_HISTORY_FILE = session_path(name)
+            history.clear()
+            save_chat_history(history, model)
+            set_terminal_title(f"Qwen - {name}")
+            print_colored(f"Created and switched to new session: {name}", COLORS['GREEN'])
+            return True, model
+
+        # Switch to existing session
+        name = action
+        target_file = session_path(name)
+        if not os.path.exists(target_file):
+            print_colored(f"Session '{name}' not found. Use '/session new {name}' to create.", COLORS['FAIL'])
+            return True, model
+        save_chat_history(history, model)
+        config.SESSION_NAME = name
+        config.CHAT_HISTORY_FILE = target_file
+        loaded_history, loaded_agent = load_chat_history_from_file(target_file)
+        history[:] = loaded_history
+        model = loaded_agent
+        set_terminal_title(f"Qwen - {name}")
+        print_colored(f"Switched to session: {name} ({len(history)} messages, agent: {model})", COLORS['GREEN'])
         return True, model
 
     # ── Not a command — fall through to normal processing ─────────────────

@@ -7,6 +7,7 @@ from qwen_client.display import set_terminal_title, send_macos_notification
 from qwen_client.models import AGENT_THEMES
 from qwen_client.history import save_chat_history
 from qwen_client.completion import get_completion
+from qwen_client.compaction import microcompact, compact_conversation
 from qwen_client.agentic.context import AgenticContext
 from tool_handlers import reset_write_counts
 
@@ -67,13 +68,39 @@ def _looks_like_stall(response_text: str) -> bool:
     return False
 
 
-def _check_history_budget(history):
-    """Proactively trim history if total size approaches context limit."""
+def _check_history_budget(history, model="implementer", agent_theme=None):
+    """Proactively manage history size with tiered compaction.
+
+    Tier 1 (60K chars):  Microcompact old tool outputs (no model call).
+    Tier 2 (120K chars): Model-generated conversation summary.
+    Tier 3 (150K chars): Hard trim as last resort (drops oldest 25%).
+    """
     from qwen_client.completion import _trim_history_for_context
+    from qwen_client.compaction import microcompact, compact_conversation
+
     total_chars = sum(len(m.get("content", "")) for m in history)
+
+    # Tier 1: cheap microcompaction of old tool outputs
+    if total_chars > 60000:
+        microcompact(history)
+        total_chars = sum(len(m.get("content", "")) for m in history)
+
+    # Tier 2: model-generated summary (before the hard trim threshold)
+    if total_chars > 120000:
+        print_colored(
+            f"\n[Client] Context at {total_chars // 1000}K chars. Running auto-compaction...",
+            COLORS['WARNING']
+        )
+        success, msg = compact_conversation(history, model, agent_theme, reason="auto")
+        if success:
+            total_chars = sum(len(m.get("content", "")) for m in history)
+            print_colored(f"  {msg} Now at {total_chars // 1000}K chars.", COLORS['GREEN'])
+            return
+
+    # Tier 3: hard trim as last resort
     if total_chars > HISTORY_CHAR_BUDGET:
         print_colored(
-            f"\n[Client] History size ({total_chars // 1000}k chars) exceeds budget. Trimming...",
+            f"\n[Client] History size ({total_chars // 1000}K chars) exceeds budget. Trimming...",
             COLORS['WARNING']
         )
         _trim_history_for_context(history)
@@ -117,9 +144,31 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
             task_commands_executed = False
             nudge_count = 0
             max_continuations = 5
+            turn_count = 0
+            consecutive_errors = 0
+            MAX_TURNS_PER_TASK = 50
+            MAX_CONSECUTIVE_ERRORS = 3
 
             while True:
-                _check_history_budget(history)
+                # ── Safety cap: absolute turn limit ──
+                turn_count += 1
+                if turn_count > MAX_TURNS_PER_TASK:
+                    print_colored(
+                        f"\n[Safety] Task reached {MAX_TURNS_PER_TASK} turns. Forcing completion.",
+                        COLORS['FAIL']
+                    )
+                    history.append({
+                        "role": "user",
+                        "content": "TURN LIMIT REACHED. Provide your final answer now based on everything gathered so far.",
+                    })
+                    save_chat_history(history, model)
+                    synth_text, _ = get_completion(history, model, agent_theme)
+                    if synth_text:
+                        history.append({"role": "assistant", "content": synth_text})
+                        save_chat_history(history, model)
+                    break
+
+                _check_history_budget(history, model, agent_theme)
 
                 # ── Inject agentic context before completion ──
                 injection = agentic_ctx.get_pre_completion_injection()
@@ -128,8 +177,21 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                     history, model, agent_theme, agentic_context=injection
                 )
                 if response_text is None:
+                    consecutive_errors += 1
+                    if consecutive_errors < MAX_CONSECUTIVE_ERRORS:
+                        # Staged recovery: microcompact → full compact → abort
+                        if consecutive_errors == 1:
+                            print_colored("\n[Recovery] Completion failed. Trying microcompaction...", COLORS['WARNING'])
+                            microcompact(history)
+                            continue
+                        else:
+                            print_colored("\n[Recovery] Still failing. Trying full compaction...", COLORS['WARNING'])
+                            compact_conversation(history, model, agent_theme, reason="error_recovery")
+                            continue
+                    print_colored(f"\n[Recovery] {MAX_CONSECUTIVE_ERRORS} consecutive failures. Aborting task.", COLORS['FAIL'])
                     task_aborted = True
                     break
+                consecutive_errors = 0  # reset on success
 
                 # ── Handle interrupted responses (Ctrl+C) ──
                 if finish_reason == "interrupted":
@@ -281,6 +343,11 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                     continue
 
                 # Agent is genuinely done
+                if agentic_ctx.budget.current > 0:
+                    print_colored(
+                        f"  [Task complete after {agentic_ctx.budget.current} tool iterations, {turn_count} turns]",
+                        COLORS['GREEN']
+                    )
                 break
 
             if task_aborted:

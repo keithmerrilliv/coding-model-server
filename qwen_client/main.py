@@ -9,7 +9,7 @@ import atexit
 from qwen_client.config import config, COLORS, print_colored
 from qwen_client.display import set_terminal_title
 from qwen_client.models import AGENT_THEMES, fetch_available_models
-from qwen_client.history import save_chat_history, load_chat_history
+from qwen_client.history import save_chat_history, load_chat_history, migrate_legacy_sessions, session_path
 from qwen_client.readline_mgr import READLINE_AVAILABLE, setup_readline, add_to_history
 from qwen_client.temp_manager import _add_temp_file, _remove_temp_file, _cleanup_old_temp_files
 from qwen_client.services import (
@@ -85,10 +85,11 @@ def _configure_tool_handlers():
 
 def chat(model="implementer", session_name=None):
     """Main interactive chat loop."""
+    migrate_legacy_sessions()
+
     if session_name:
         config.SESSION_NAME = session_name
-        safe_name = re.sub(r'[^\w\-]', '_', session_name)
-        config.CHAT_HISTORY_FILE = os.path.expanduser(f"~/.qwen_chat_history_{safe_name}.json")
+        config.CHAT_HISTORY_FILE = session_path(session_name)
 
     setup_readline()
     _configure_tool_handlers()
