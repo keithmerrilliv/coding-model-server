@@ -342,6 +342,30 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                     save_chat_history(history, model)
                     continue
 
+                # ── Thinking turn: response was only agentic markers with pending plan ──
+                has_pending_steps = (
+                    not agentic_ctx.plan.is_empty
+                    and any(not s["done"] for s in agentic_ctx.plan.steps)
+                )
+                if not cleaned_response.strip() and has_pending_steps:
+                    print_colored(
+                        "\n[Thinking turn] Agent updated plan/scratchpad. Nudging to continue...",
+                        COLORS['CYAN']
+                    )
+                    next_step = next(
+                        (s["text"] for s in agentic_ctx.plan.steps if not s["done"]),
+                        "the next step"
+                    )
+                    history.append({
+                        "role": "user",
+                        "content": (
+                            f"Good — your plan and scratchpad are updated. Now proceed with: {next_step}\n"
+                            "Use your tools to execute this step."
+                        ),
+                    })
+                    save_chat_history(history, model)
+                    continue
+
                 # Agent is genuinely done
                 if agentic_ctx.budget.current > 0:
                     print_colored(
