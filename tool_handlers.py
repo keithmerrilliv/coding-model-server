@@ -91,7 +91,7 @@ DANGEROUS_PATTERNS = [
     (re.compile(r'\bchown\b'), "ownership change"),
     (re.compile(r'\bmkfs\b'), "filesystem format"),
     (re.compile(r'\bdd\s+'), "raw disk write"),
-    (re.compile(r'>\s*/dev/'), "writing to device"),
+    (re.compile(r'>\s*/dev/(?!null)'), "writing to device"),  # exclude /dev/null
     (re.compile(r'\bgit\s+push\s+.*--force\b'), "force push"),
     (re.compile(r'\bgit\s+reset\s+--hard\b'), "destructive git reset"),
 ]
