@@ -539,6 +539,13 @@ def execute_remote_command(command, chunk_output=True):
         return "Error: Invalid command - command must be a non-empty string"
 
     _logger.info("Executing command: %s", command)
+
+    # Detect shell-based file writes that bypass WRITE_FILE loop detection.
+    # Agents use 'python3 -c "open(...).write()"' or heredocs to circumvent.
+    if re.search(r"open\s*\(.+['\"]w['\"]|>\s*\S+\.(?:swift|py|md|yml|json|txt|h|m|metal)\b|cat\s*<<", command):
+        _print_colored(f"\nAgent is writing files via shell instead of <<<WRITE_FILE>>>.", _colors['WARNING'])
+        _print_colored(f"   This bypasses diff preview and loop detection.", _colors['WARNING'])
+
     _print_colored(f"\nAgent wants to run command: {command}", _colors['WARNING'])
 
     # Deny rules — unconditionally blocked, no prompt
@@ -726,7 +733,9 @@ def write_file_content(payload):
                    f"This looks like a loop. Move on to the next task.")
             _logger.warning(msg)
             _print_colored(f"\n[Loop detected] {msg}", _colors['FAIL'])
-            return msg
+            # Return None — NOT a refusal message. Returning a message causes the
+            # orchestrator to treat it as tool output and continue the loop forever.
+            return None
 
         # Create parent directories if they don't exist
         parent_dir = os.path.dirname(full_path)
