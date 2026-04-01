@@ -506,41 +506,37 @@ Update these after each retrieval step. They help you stay organized and efficie
     # ── Qwen3.5 family ──
 
     # Qwen3.5-35B-A3B Q4_K_M — successor to Coder-30B, same 3B active MoE
-    # 22 GB model. Qwen3.5 arch unsupported by llama-cpp-python 0.3.16 — needs llama_server.
-    # 131K native context. Bumped from 82K to full 131K with Q4_0 KV cache.
-    # ngl=26 at 82K: 1,612 MiB free. At 131K: need fewer layers.
-    # ngl=22 at 131K Q4_0: ~2 GB free (estimated, verify on load)
+    # 22 GB model. Qwen3.5 arch supported since llama-cpp-python 0.3.17 (in-process).
+    # 131K native context with Q4_0 KV cache.
+    # ngl=22 at 131K Q4_0: 2,875 MiB free (measured 2026-04-01). Bumped to ngl=24.
     _QWEN35_35B = _create_model_config(
         'MODEL_PATH_QWEN35_35B',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3.5-35B-A3B-GGUF/Qwen3.5-35B-A3B-Q4_K_M.gguf',
-        22, 131072, 2048, backend='llama_server',
-        server_extra_args=['--jinja', '--reasoning-format', 'none'],
+        24, 131072, 2048,
         type_k=2, type_v=2,
         repeat_penalty=1.05,  # Lower penalty for code generation — 1.15 caused premature EOS on large files
     )
 
     # Qwen3.5-122B-A10B Q4_K_M — mid-tier MoE (10B active, 76.5 GB, 3 shards)
     # Strong agentic/function-calling (72.2 BFCL-V4). Mostly CPU, limited GPU layers.
-    # Qwen3.5 arch unsupported by llama-cpp-python 0.3.16 — needs llama_server.
+    # Qwen3.5 arch supported since llama-cpp-python 0.3.17 (in-process).
     # 131K native context, using 65K to leave headroom.
     # ngl=9 at 65K: 1,209 MiB free (measured 2026-03-30, ~1,507 MiB/layer)
     _QWEN35_122B = _create_model_config(
         'MODEL_PATH_QWEN35_122B',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3.5-122B-A10B-GGUF/Q4_K_M/Qwen3.5-122B-A10B-Q4_K_M-00001-of-00003.gguf',
-        9, 65536, 1024, backend='llama_server',
-        server_extra_args=['--jinja', '--reasoning-format', 'none'],
+        9, 65536, 1024,
     )
 
     # Qwen3.5-397B-A17B IQ1_M — flagship (17B active, ~100 GB, 4 shards, 60 layers)
     # Successor to 480B Coder as premium architect — DESIGN ROLE, not implementation.
-    # Qwen3.5 arch unsupported by llama-cpp-python 0.3.16 — needs llama_server.
+    # Qwen3.5 arch supported since llama-cpp-python 0.3.17 (in-process).
     # ~1,687 MiB/layer, 60 layers total. Hybrid KV cache (Q8_0 keys / Q4_0 values).
     # ngl=7 at 65K: 2,992 MiB free | ngl=8 at 96K: 1,557 MiB free (measured 2026-03-30)
     _QWEN35_397B = _create_model_config(
         'MODEL_PATH_QWEN35_397B',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3.5-397B-A17B-GGUF/UD-IQ1_M/Qwen3.5-397B-A17B-UD-IQ1_M-00001-of-00004.gguf',
-        8, 98304, 1024, backend='llama_server',
-        server_extra_args=['--jinja', '--reasoning-format', 'none'],
+        8, 98304, 1024,
         type_k=8, type_v=2,
     )
 
@@ -1190,11 +1186,13 @@ class LlamaServerManager:
 # ============================================================================
 
 # Models with --reasoning-format none still emit thinking content in raw text.
-# Two patterns observed:
-#   1. Full block:  <think>reasoning...</think>actual response
-#   2. Orphan close: reasoning...</think>actual response  (Jinja consumed <think>)
+# Three patterns observed:
+#   1. Full block:    <think>reasoning...</think>actual response
+#   2. Orphan close:  reasoning...</think>actual response  (Jinja consumed <think>)
+#   3. Unclosed open: <think>reasoning...  (truncated by max_tokens, no </think>)
 _THINK_FULL_RE = re.compile(r'<think>.*?</think>\s*', re.DOTALL)
 _THINK_ORPHAN_RE = re.compile(r'^.*?</think>\s*', re.DOTALL)
+_THINK_UNCLOSED_RE = re.compile(r'<think>(?:(?!</think>).)*$', re.DOTALL)
 _REACT_RE = re.compile(r'<REACT>.*?</REACT>\s*', re.DOTALL)
 
 
@@ -1202,6 +1200,7 @@ def strip_thinking(text: str) -> str:
     """Remove thinking/reasoning content from completed text."""
     text = _THINK_FULL_RE.sub('', text)
     text = _THINK_ORPHAN_RE.sub('', text)
+    text = _THINK_UNCLOSED_RE.sub('', text)  # Truncated thinking (hit max_tokens)
     text = _REACT_RE.sub('', text)  # Qwen3.5 reasoning blocks
     return text
 
@@ -1837,7 +1836,7 @@ def sync_completion(messages: List[ChatMessage], system_prompt: str, model_path:
         params = get_model_params(clamped_max, temperature, stream=False, model_config=model_config)
         response = model(prompt, **params)
 
-        text = response['choices'][0]['text'].strip()
+        text = strip_thinking(response['choices'][0]['text'].strip())
 
         finish_reason = response['choices'][0].get('finish_reason', 'stop')
         if not finish_reason:
@@ -1907,6 +1906,7 @@ def stream_completion(messages: List[ChatMessage], system_prompt: str, model_pat
 
                 params = get_model_params(clamped_max, temperature, stream=True, model_config=model_config)
                 token_count = 0
+                think_stripper = ThinkingStripper()
 
                 for output in model(prompt, **params):
                     # TTFT timeout: abort if stuck in prefill
@@ -1930,12 +1930,21 @@ def stream_completion(messages: List[ChatMessage], system_prompt: str, model_pat
                         choice = output['choices'][0]
                         token = choice.get('text', '')
                         if token:
-                            token_count += 1
-                            chunk = build_stream_chunk(completion_id, model_id, content=token)
-                            yield f"data: {json.dumps(chunk)}\n\n"
+                            filtered = think_stripper.feed(token)
+                            if filtered:
+                                token_count += 1
+                                chunk = build_stream_chunk(completion_id, model_id, content=filtered)
+                                yield f"data: {json.dumps(chunk)}\n\n"
                         # Capture finish_reason from the last chunk llama-cpp emits
                         if choice.get('finish_reason'):
                             finish_reason = choice['finish_reason']
+
+                # Flush any remaining buffered content from the thinking stripper
+                remaining = think_stripper.flush()
+                if remaining:
+                    token_count += 1
+                    chunk = build_stream_chunk(completion_id, model_id, content=remaining)
+                    yield f"data: {json.dumps(chunk)}\n\n"
 
                 # If llama-cpp didn't set a finish_reason but we hit the token limit,
                 # infer "length" so the client knows the response was truncated
