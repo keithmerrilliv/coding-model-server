@@ -466,13 +466,13 @@ Update these after each retrieval step. They help you stay organized and efficie
         logit_bias=[[151657, -100.0], [151658, -100.0]],
     )
 
-    # HD: High-precision Q8_0 weights with hybrid KV cache for reviews
-    # Bumped from 49K (Q8_0 cache) to 82K using Q4_0 values to free VRAM.
-    # Q8_0 keys preserve attention precision for code review accuracy.
+    # HD: High-precision Q8_0 weights with Q4_0 KV cache for reviews
+    # Q8_0 weights are ~2x Q4_K_M per layer — ngl=21 + 82K ctx OOMs.
+    # Reduced to 65K ctx to fit. Q4_0 KV cache keeps VRAM manageable.
     _CODER_30B_HD = _create_model_config(
         'MODEL_PATH_30B_HD',
         '/home/keith-merrill/.lmstudio/models/lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q8_0.gguf',
-        21, 81920, 2048, type_k=8, type_v=2
+        21, 65536, 2048, type_k=2, type_v=2
     )
 
     # Lite: Faster reasoning on system RAM (32k native context, no YaRN — IQ1_M too
@@ -657,7 +657,7 @@ Update these after each retrieval step. They help you stay organized and efficie
             executor=True
         ),
         'reviewer': _create_agent_config(
-            'Reviewer — Coder-30B Q8_0 (3B/30B MoE, 82K ctx, high precision)',
+            'Reviewer — Coder-30B Q8_0 (3B/30B MoE, 65K ctx, high precision)',
             f'You are a code reviewer. {EXECUTOR_PROMPT}\n\nIdentify issues and suggest improvements. You are encouraged to provide detailed advice and recommendations.\n\nCOMPREHENSIVE ANALYSIS: When performing code reviews, leverage multiple tools to understand the codebase thoroughly:\n\nGIT AWARENESS: Use Git via `<<<REMOTE_EXEC>>>` to understand code context:\n- `git log`, `git diff`, `git blame`, `git show`, `git status`\n\nFILE NAVIGATION: Use `<<<GLOB>>>` and `<<<GREP>>>` to find and search files.\n\nDOCUMENTATION - You can and should write/update documentation:\n- Use `<<<WRITE_FILE>>>` for NEW documentation files\n- Use `<<<EDIT_FILE>>>` for targeted updates to EXISTING docs (PREFERRED)\n\nEDIT_FILE FORMAT (use EXACTLY this format):\n<<<EDIT_FILE>>>/path/to/file\n<<<OLD>>>\nexact text to find\n<<<NEW>>>\nreplacement text\n\nWARNING: Do NOT use git-style markers like <<<<<<< SEARCH or ======= or >>>>>>> REPLACE. Use <<<OLD>>> and <<<NEW>>> only.\n\nAlways gather comprehensive context before providing your review.\n{GIT_TOOL_REFERENCE}',
             _CODER_30B_HD,
             executor=True
