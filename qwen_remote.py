@@ -1530,6 +1530,31 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                     save_chat_history(history, model)
                     continue  # loop back for the agent's next response
 
+                # ── Thinking turn: response was only agentic markers with pending plan ──
+                # Parse plan directly from response — legacy client has no AgenticContext
+                _has_pending = bool(re.search(r'^\s*\d+\.\s*\[ \]', response_text, re.MULTILINE))
+                # Strip all known agentic content to check if anything substantive remains
+                _stripped = re.sub(r'<{1,3}/?(?:SCRATCHPAD|PLAN|CONFIDEN\w*|REACT|tool_call)\w*>{0,3}', '', response_text)
+                _stripped = re.sub(r'(?:GOAL|STEPS|CURRENT|CONFIDENCE|FACTS|OPEN_QUESTIONS|DEAD_ENDS)\s*:.*', '', _stripped)
+                _stripped = re.sub(r'^\s*\d+\.\s*\[[ xX]\].*$', '', _stripped, flags=re.MULTILINE)
+                _stripped = re.sub(r'</?[A-Z_]+\w*>\s*\d*', '', _stripped)
+                _stripped = re.sub(r'^\s*-\s+.*$', '', _stripped, flags=re.MULTILINE)  # bullet points
+                _stripped = _stripped.strip()
+                if not _stripped and _has_pending:
+                    print_colored(
+                        "\n[Thinking turn] Agent updated plan/scratchpad. Nudging to continue...",
+                        COLORS['CYAN']
+                    )
+                    history.append({
+                        "role": "user",
+                        "content": (
+                            "Your plan and scratchpad are updated. Now execute the next unchecked step. "
+                            "Use your tools (<<<WRITE_FILE>>>, <<<EDIT_FILE>>>, <<<REMOTE_EXEC>>>) to act."
+                        ),
+                    })
+                    save_chat_history(history, model)
+                    continue
+
                 # Agent is genuinely done with this task
                 break
 
