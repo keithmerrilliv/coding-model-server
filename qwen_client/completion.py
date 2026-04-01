@@ -134,6 +134,7 @@ def get_completion(history, model, agent_theme, agentic_context=None):
     first_token_time = None
     chunk_count = 0
     stop_progress = threading.Event()
+    progress_info = {}  # Populated by server's progress SSE event
 
     def show_progress():
         last_heartbeat = time.time()
@@ -146,10 +147,17 @@ def get_completion(history, model, agent_theme, agentic_context=None):
                     last_heartbeat = now
                 except Exception:
                     pass
-            sys.stdout.write(f"\r{COLORS['BLUE']}Waiting for {model}... ({elapsed:.1f}s){COLORS['ENDC']}")
+            if progress_info:
+                prompt_k = progress_info['prompt_tokens'] / 1000
+                ctx_k = progress_info['n_ctx'] / 1000
+                sys.stdout.write(
+                    f"\r{COLORS['BLUE']}Prefill: {prompt_k:.1f}K / {ctx_k:.0f}K tokens — "
+                    f"{model} ({elapsed:.1f}s){COLORS['ENDC']}")
+            else:
+                sys.stdout.write(f"\r{COLORS['BLUE']}Waiting for {model}... ({elapsed:.1f}s){COLORS['ENDC']}")
             sys.stdout.flush()
             time.sleep(0.1)
-        sys.stdout.write("\r" + " " * 50 + "\r")
+        sys.stdout.write("\r" + " " * 70 + "\r")
         sys.stdout.flush()
 
     progress_thread = threading.Thread(target=show_progress, daemon=True)
@@ -217,6 +225,9 @@ def get_completion(history, model, agent_theme, agentic_context=None):
                                 break
                             try:
                                 data = json.loads(data_str)
+                                if data.get("type") == "progress":
+                                    progress_info.update(data)
+                                    continue
                                 if "choices" in data and len(data["choices"]) > 0:
                                     choice = data["choices"][0]
                                     delta = choice.get("delta", {})

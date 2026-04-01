@@ -488,14 +488,17 @@ Update these after each retrieval step. They help you stay organized and efficie
         4, 65536, 1024, yarn=True
     )
 
-    # MINIMAX: MiniMax M2.5 (230B MoE, 10B active params)
+    # MINIMAX: MiniMax M2.5 (230B MoE, 10B active params, 62 layers, ~1,760 MiB/layer)
     # Uses llama-server subprocess backend with native Jinja template
+    # ngl=4 at 32K Q8_0: 6,207 MiB free (measured 2026-03-30)
+    # ngl=6 at 65K Q4_0: testing (est. ~2,500 MiB free)
     _MINIMAX_M25 = _create_model_config(
         'MODEL_PATH_MINIMAX_M25',
         '/home/keith-merrill/.lmstudio/models/unsloth/MiniMax-M2.5-GGUF/Q4_K_M/MiniMax-M2.5-Q4_K_M-00001-of-00004.gguf',
-        4, 32768, 4096, backend='llama_server',
+        6, 65536, 4096, backend='llama_server',
         server_extra_args=['--jinja', '--reasoning-format', 'none'],
         logit_bias=[[200052, -100.0], [200053, -100.0]],
+        type_k=2, type_v=2,
     )
 
     # ── Qwen3.5 family ──
@@ -1017,9 +1020,16 @@ class LlamaServerManager:
 
     def proxy_stream(self, messages: List[dict], system_prompt: str,
                      model_id: str, max_tokens: int, temperature: float,
-                     model_config: dict = None) -> Iterator[str]:
+                     model_config: dict = None,
+                     est_prompt_tokens: int = 0) -> Iterator[str]:
         """Stream a chat completion via the llama-server subprocess."""
         self.last_request_time = time.time()
+
+        # Emit progress event so client can display prompt size during prefill
+        n_ctx = (model_config or {}).get('n_ctx', 32768)
+        progress_event = {"type": "progress", "stage": "prefill",
+                          "prompt_tokens": est_prompt_tokens, "n_ctx": n_ctx}
+        yield f"data: {json.dumps(progress_event)}\n\n"
 
         openai_messages = self._build_openai_messages(messages, system_prompt)
         url = f"http://127.0.0.1:{self.LLAMA_SERVER_PORT}/v1/chat/completions"
@@ -1743,7 +1753,8 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
                 return StreamingResponse(
                     llama_server_manager.proxy_stream(
                         request.messages, augmented_system, request.model,
-                        clamped_max, request.temperature, model_config=model_config),
+                        clamped_max, request.temperature, model_config=model_config,
+                        est_prompt_tokens=est_prompt_tokens),
                     media_type="text/event-stream"
                 )
             else:
@@ -1857,6 +1868,12 @@ def stream_completion(messages: List[ChatMessage], system_prompt: str, model_pat
                     }
                     yield f"data: {json.dumps(error_chunk)}\n\n"
                     return
+
+                # Emit progress event so client can display prompt size during prefill
+                n_ctx = model.n_ctx()
+                progress_event = {"type": "progress", "stage": "prefill",
+                                  "prompt_tokens": n_prompt, "n_ctx": n_ctx}
+                yield f"data: {json.dumps(progress_event)}\n\n"
 
                 params = get_model_params(clamped_max, temperature, stream=True, model_config=model_config)
                 token_count = 0
