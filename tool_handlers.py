@@ -670,6 +670,14 @@ def write_file_content(payload):
         path = lines[0].strip()
         content = lines[1] if len(lines) > 1 else ""
 
+        # Strip stray git-style / Aider-style edit markers that leak into file
+        # content when the model mixes edit protocol inside a WRITE_FILE block.
+        content = re.sub(r'^\s*<{1,7}\s*SEARCH\s*>{0,7}\s*$', '', content, flags=re.MULTILINE)
+        content = re.sub(r'^\s*>{1,7}\s*REPLACE\s*>{0,7}\s*$', '', content, flags=re.MULTILINE)
+        content = re.sub(r'^\s*>{7}\s*$', '', content, flags=re.MULTILINE)   # bare >>>>>>>
+        content = re.sub(r'^\s*<{7}\s*$', '', content, flags=re.MULTILINE)   # bare <<<<<<<
+        content = re.sub(r'^\s*={7}\s*$', '', content, flags=re.MULTILINE)   # bare =======
+
         if not path:
             return "Error: No file path provided"
 
