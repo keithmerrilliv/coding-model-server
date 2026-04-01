@@ -549,11 +549,15 @@ def execute_remote_command(command, chunk_output=True):
     if _shell_write_match:
         _write_counts['__shell_writes__'] = _write_counts.get('__shell_writes__', 0) + 1
         if _write_counts['__shell_writes__'] > _MAX_WRITES_PER_FILE:
-            msg = (f"Shell file write blocked: {_write_counts['__shell_writes__'] - 1} "
-                   f"shell writes already this session. Use <<<WRITE_FILE>>> instead.")
+            over = _write_counts['__shell_writes__'] - _MAX_WRITES_PER_FILE
+            msg = (f"Shell file write BLOCKED ({_write_counts['__shell_writes__'] - 1} attempts). "
+                   f"Do NOT use python open(), cat <<, sed -i, or > to write files. "
+                   f"You MUST use <<<WRITE_FILE>>>path\\ncontent or <<<EDIT_FILE>>> instead.")
             _logger.warning(msg)
-            _print_colored(f"\n[Loop detected] {msg}", _colors['FAIL'])
-            return None
+            _print_colored(f"\n[Shell write blocked] {msg}", _colors['FAIL'])
+            if over > 2:
+                return None  # Hard stop — agent won't learn, break the loop
+            return msg  # Return feedback so agent learns to switch approach
         _print_colored(f"\nAgent is writing files via shell instead of <<<WRITE_FILE>>>.", _colors['WARNING'])
         _print_colored(f"   This bypasses diff preview and loop detection. ({_write_counts['__shell_writes__']}/{_MAX_WRITES_PER_FILE})", _colors['WARNING'])
 
