@@ -47,7 +47,7 @@ def _load_fallback_themes():
         "m25_architect": "Architect — MiniMax M2.5 (offline)",
         "q35_architect": "Architect — Qwen3.5-122B (offline)",
         "q35_ultra": "Architect — Qwen3.5-397B Flagship (offline)",
-        "nemotron": "Implementer — Nemotron-3-Nano (offline)",
+        "nemotron": "Brainstorm — Nemotron-3-Nano (offline)",
         "glm": "Implementer — GLM-4.7-Flash (offline)",
     }
     for mid, desc in defaults.items():

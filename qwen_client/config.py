@@ -104,7 +104,7 @@ THEME_STYLES = {
     "m25_architect":     {"color": COLORS['HEADER'],  "icon": "\U0001f319", "prompt": "M2.5 Arch"},
     "q35_architect":     {"color": COLORS['HEADER'],  "icon": "\U0001f3af", "prompt": "Q3.5 Arch"},
     "q35_ultra":         {"color": COLORS['HEADER'],  "icon": "\U0001f451", "prompt": "Q3.5 Ultra"},
-    "nemotron":          {"color": COLORS['GREEN'],   "icon": "\u26a1",     "prompt": "Nemotron"},
+    "nemotron":          {"color": COLORS['WARNING'], "icon": "\u26a1",     "prompt": "Brainstorm"},
     "glm":               {"color": COLORS['GREEN'],   "icon": "\U0001f30a", "prompt": "GLM"},
     "default":           {"color": COLORS['WARNING'], "icon": "\U0001f916", "prompt": "Agent"},
 }

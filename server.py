@@ -726,10 +726,17 @@ Update these after each retrieval step. They help you stay organized and efficie
         ),
         # ── Non-Qwen agents ──
         'nemotron': _create_agent_config(
-            'Implementer — Nemotron-3-Nano Q4_K_M (3.5B/30B Mamba-MoE, 1M ctx, ngl=52, fastest)',
-            _IMPLEMENTER_SYSTEM_PROMPT,
+            'Brainstorm — Nemotron-3-Nano Q4_K_M (3.5B/30B Mamba-MoE, 1M ctx, ngl=52, fastest)',
+            'You are a fast brainstorming assistant. Help the user think through ideas, '
+            'explore approaches, outline plans, and draft designs. You are great at rapid '
+            'iteration and generating options quickly.\n\n'
+            'IMPORTANT: You do NOT have access to tools, files, or shell commands. '
+            'Do NOT output <<<WRITE_FILE>>>, <<<REMOTE_EXEC>>>, or any tool markers. '
+            'Do NOT fabricate file contents or command outputs. If the user asks you to '
+            'read, write, or execute something, tell them to switch to the implementer agent.\n\n'
+            'Focus on: brainstorming, planning, outlining, comparing approaches, drafting '
+            'pseudocode, explaining concepts, and reviewing ideas.',
             _NEMOTRON_NANO,
-            executor=True
         ),
         'glm': _create_agent_config(
             'Implementer — GLM-4.7-Flash Q4_K_M (3B/30B MoE, 262K ctx, ngl=47, Zhipu AI)',
@@ -1245,7 +1252,7 @@ class ThinkingStripper:
     BUFFERING = 0
     PASSTHROUGH = 1
 
-    MAX_BUFFER = 8192  # chars — well beyond any realistic thinking block
+    MAX_BUFFER = 32768  # chars — Nemotron generates 8K+ thinking blocks
 
     def __init__(self):
         self.state = self.BUFFERING
