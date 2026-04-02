@@ -510,7 +510,7 @@ Update these after each retrieval step. They help you stay organized and efficie
     _MINIMAX_M25 = _create_model_config(
         'MODEL_PATH_MINIMAX_M25',
         '/home/keith-merrill/.lmstudio/models/unsloth/MiniMax-M2.5-GGUF/Q4_K_M/MiniMax-M2.5-Q4_K_M-00001-of-00004.gguf',
-        62, 98304, 4096, backend='llama_server', n_ubatch=2048,
+        62, 118784, 4096, backend='llama_server', n_ubatch=4096,
         server_extra_args=['--jinja', '--reasoning-format', 'none'],
         logit_bias=[[200052, -100.0], [200053, -100.0]],
         type_k=2, type_v=2,
@@ -700,13 +700,13 @@ Update these after each retrieval step. They help you stay organized and efficie
             executor=True
         ),
         'm25_implementer': _create_agent_config(
-            'Implementer — MiniMax M2.5 Q4_K_M (10B/230B MoE, 98K ctx, ngl=62)',
+            'Implementer — MiniMax M2.5 Q4_K_M (10B/230B MoE, 116K ctx, ngl=62)',
             _IMPLEMENTER_SYSTEM_PROMPT + _MINIMAX_UNICODE_GUARD,
             _MINIMAX_M25,
             executor=True
         ),
         'm25_architect': _create_agent_config(
-            'Architect — MiniMax M2.5 Q4_K_M (10B/230B MoE, 98K ctx, ngl=62)',
+            'Architect — MiniMax M2.5 Q4_K_M (10B/230B MoE, 116K ctx, ngl=62)',
             _ARCHITECT_SYSTEM_PROMPT + _MINIMAX_UNICODE_GUARD,
             _MINIMAX_M25,
             executor=True
