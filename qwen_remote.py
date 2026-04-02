@@ -1533,6 +1533,8 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                 # ── Thinking turn: response was only agentic markers with pending plan ──
                 # Parse plan directly from response — legacy client has no AgenticContext
                 _has_pending = bool(re.search(r'^\s*\d+\.\s*\[ \]', response_text, re.MULTILINE))
+                # Also treat a GOAL: line without steps as an active plan
+                _has_active_plan = bool(re.search(r'^\s*GOAL\s*:', response_text, re.MULTILINE))
                 # Strip all known agentic content to check if anything substantive remains
                 _stripped = re.sub(r'<{1,3}/?(?:SCRATCHPAD|PLAN|CONFIDEN\w*|REACT|tool_call)\w*>{0,3}', '', response_text)
                 _stripped = re.sub(r'(?:GOAL|STEPS|CURRENT|CONFIDENCE|FACTS|OPEN_QUESTIONS|DEAD_ENDS)\s*:.*', '', _stripped)
@@ -1540,7 +1542,7 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                 _stripped = re.sub(r'</?[A-Z_]+\w*>\s*\d*', '', _stripped)
                 _stripped = re.sub(r'^\s*-\s+.*$', '', _stripped, flags=re.MULTILINE)  # bullet points
                 _stripped = _stripped.strip()
-                if not _stripped and _has_pending:
+                if not _stripped and (_has_pending or _has_active_plan):
                     print_colored(
                         "\n[Thinking turn] Agent updated plan/scratchpad. Nudging to continue...",
                         COLORS['CYAN']
