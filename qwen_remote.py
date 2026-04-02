@@ -1389,8 +1389,10 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
             task_aborted = False
             task_commands_executed = False # Track if any commands were run for this task
             nudge_count = 0  # Track how many times we've nudged a stalling agent
+            turn_count = 0
             max_continuations = 5  # safety cap for truncation retries
             while True:
+                turn_count += 1
                 _check_history_budget(history)
                 response_text, finish_reason = get_completion(history, model, agent_theme)
                 if response_text is None:
@@ -1509,7 +1511,7 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                 # No commands found — check if the agent is stalling
                 # If it was previously executing tools and now produced a
                 # plan/summary without acting, nudge it to continue.
-                if (task_commands_executed
+                if ((task_commands_executed or turn_count <= 2)
                         and nudge_count < MAX_STALL_NUDGES
                         and _looks_like_stall(response_text)):
                     nudge_count += 1

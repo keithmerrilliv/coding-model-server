@@ -372,9 +372,12 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                     continue
 
                 # ── Stall detection ──
-                if (task_commands_executed
+                # Nudge if: (a) agent previously executed tools but now stalled, OR
+                # (b) first few turns and agent is planning without acting.
+                _is_stalling = _looks_like_stall(cleaned_response)
+                if ((task_commands_executed or turn_count <= 2)
                         and nudge_count < MAX_STALL_NUDGES
-                        and _looks_like_stall(cleaned_response)):
+                        and _is_stalling):
                     nudge_count += 1
                     print_colored(
                         f"\n[Nudge {nudge_count}/{MAX_STALL_NUDGES}] "
