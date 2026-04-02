@@ -461,16 +461,16 @@ Update these after each retrieval step. They help you stay organized and efficie
 
     # NEXT: Qwen3-Coder-Next-Q8_0 (80B MoE with 3B active params)
     # Very smart but runs mostly on system RAM (slow). Native 256k context enabled.
-    # Uses llama-server subprocess backend (qwen3next arch not supported by llama-cpp-python 0.3.16)
-    # ngl=8 at 262K (no --cpu-moe): 1,200 MiB free | ngl=8 (--cpu-moe): 12,564 MiB free
-    # 48 attention layers total. With --cpu-moe, targeting ngl=48 (all layers).
+    # ngl=48 (--cpu-moe): 8,304 MiB free. All 48 attention layers on GPU.
+    # --swa-full enables prompt cache reuse (avoids full re-prefill each turn).
+    # n_batch/n_ubatch=4096 for faster prefill (8 GB headroom supports large batches).
     _CODER_NEXT_Q8 = _create_model_config(
         'MODEL_PATH_NEXT_Q8',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-Next-GGUF/Q8_0/Qwen3-Coder-Next-Q8_0-00001-of-00003.gguf',
-        48, 262144, 1024, backend='llama_server',
-        server_extra_args=['--chat-template', 'chatml'],
+        48, 262144, 4096, backend='llama_server',
+        server_extra_args=['--chat-template', 'chatml', '--swa-full'],
         logit_bias=[[151657, -100.0], [151658, -100.0]],
-        cpu_moe=True,
+        cpu_moe=True, n_ubatch=4096,
     )
 
     # HD: High-precision Q8_0 weights with Q4_0 KV cache for reviews
