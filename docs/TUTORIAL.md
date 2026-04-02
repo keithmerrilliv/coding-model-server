@@ -177,18 +177,142 @@ Sessions persist across restarts. Each session has independent history and track
 
 ## Part 3: Understanding the System
 
-### 3.1 How a Request Flows
+### 3.1 Anatomy of a Request: From Prompt to Output
 
-1. **Client** sends user message via SSE streaming POST to `/v1/chat/completions`
-2. **Server** selects the model backend (llama_cpp or llama_server)
-3. **Server** injects RAG context from ChromaDB if relevant memories exist
-4. **Server** calculates token budget and injects guidance into system prompt
-5. **Server** streams tokens back as SSE events (including a progress event for prefill)
-6. **Client** displays tokens in real-time, processes any tool markers
-7. **Client** executes tools (with permission checks) and sends output back
-8. **Client** loops until agent produces a response with no tool calls
+This section traces the complete lifecycle of a single user message through every component, explaining what happens at each stage and why.
 
-### 3.2 The Agent Loop
+#### Stage 1: User Input (Client)
+
+When you type a message and press Enter, the client:
+
+1. **Classifies the query** — The agentic context system (`qwen_client/agentic/context.py`) determines if your query is simple, medium, or complex. This sets the tool-use budget (how many iterations the agent gets before being forced to synthesize).
+2. **Appends to history** — Your message is added to the in-memory conversation history.
+3. **Checks history budget** — If history exceeds 60K chars, old tool outputs are microcompacted. At 120K chars, the model generates a conversation summary. At 150K, the oldest 25% is dropped.
+4. **Sanitizes history** — Internal flags (`auto_send`, `_retried`) are stripped. Empty messages and invalid roles are filtered. Old messages are compressed (head + tail only for tool outputs > 500 chars).
+5. **Injects agentic context** — The scratchpad, retrieval plan, budget warnings, and confidence gate are appended as an additional user message visible only to the model (not persisted).
+
+#### Stage 2: HTTP Request (Network)
+
+The client sends a streaming POST to `http://<server>:5000/v1/chat/completions`:
+
+```json
+{
+  "model": "implementer",
+  "messages": [{"role": "user", "content": "..."}],
+  "stream": true,
+  "max_tokens": 30000
+}
+```
+
+This is the OpenAI-compatible chat completions API. The server authenticates via `ADMIN_API_KEY` if configured.
+
+#### Stage 3: Server-Side Processing
+
+The FastAPI server (`server.py`) receives the request and:
+
+1. **Resolves the agent** — Looks up the model config (path, ngl, n_ctx, backend, etc.) from the `AGENTS` dict.
+2. **Injects few-shot examples** — For short conversations (≤4 messages), format examples are prepended so the model learns the tool marker syntax from "conversation" rather than instructions alone.
+3. **RAG context retrieval** — The last user message is embedded via SentenceTransformer (`all-MiniLM-L6-v2`) and queried against ChromaDB (842K+ documents). Relevant memories are injected into the system prompt. This runs async with a 2-second timeout.
+4. **Token budget calculation** — The server estimates how many tokens the prompt will consume and how many remain for the response. This budget number is injected into the system prompt so the model knows how much space it has.
+
+#### Stage 4: Model Loading (Server)
+
+If the requested model isn't already cached:
+
+1. **Backend coordination** — The server ensures mutual exclusion between the `llama_cpp` (in-process) and `llama_server` (subprocess) backends. If the other backend has a model loaded, it's unloaded first to free VRAM.
+2. **VRAM cleanup** — `gc.collect()` + `torch.cuda.empty_cache()` releases GPU memory.
+3. **Model loading** — For `llama_cpp`: the GGUF file is memory-mapped and GPU layers are offloaded. For `llama_server`: a subprocess is spawned with the configured flags (`-ngl`, `-c`, `-fa`, `--cpu-moe`, etc.) and the server polls `/health` until ready.
+4. **LRU-1 cache** — Only one model is cached at a time. Loading a different model evicts the previous one.
+
+#### Stage 5: Prefill (GPU + CPU)
+
+This is where the prompt is processed — the most compute-intensive phase:
+
+1. **Tokenization** — The text prompt is converted to token IDs using the model's tokenizer (part of the GGUF file).
+2. **Prompt processing (prefill)** — Every token in the prompt must pass through ALL model layers sequentially. For a 15K-token prompt on Coder-Next (48 layers), this means 720K layer-evaluations. Each layer involves:
+   - **Attention**: Query/Key/Value projections, attention scores, softmax, value aggregation. This runs on GPU (fast) for offloaded layers, or CPU (slow) for the rest.
+   - **MoE routing** (for MoE models): A gating network selects which expert(s) to activate. With `--cpu-moe`, expert weights stay on CPU even for GPU layers — only attention runs on GPU.
+   - **Feed-forward/Expert**: The selected expert processes the hidden state. With `--cpu-moe`, this is memory-bandwidth-bound (DDR5-5600 speed).
+3. **KV cache population** — As each token is processed, its Key and Value vectors are stored in the KV cache for future attention. Cache type (Q4_0, Q5_0, Q8_0) determines precision and VRAM cost.
+4. **Batch processing** — Tokens are processed in micro-batches (`n_ubatch`). Larger batches = fewer GPU kernel launches = faster prefill. This is why bumping ubatch from 512 to 4096 gave 4.6x prefill speedup on Coder-Next.
+5. **Progress event** — The server emits an SSE progress event with prompt token count so the client can display "Prefill: 16.7K / 262K tokens".
+
+**Performance**: Prefill speed ranges from 63 tok/s (MiniMax 230B, mostly CPU) to 1,067 tok/s (GLM 30B, all attention on GPU with ubatch=2048).
+
+#### Stage 6: Token Generation (Autoregressive Decoding)
+
+After prefill, the model generates one token at a time:
+
+1. **Forward pass** — The last token's hidden state passes through all layers, producing logits (probability scores) for every token in the vocabulary (~150K tokens).
+2. **Sampling** — Parameters control token selection:
+   - **Temperature**: Randomness (0.0 = greedy, 1.0 = creative)
+   - **Top-p / Top-k**: Filters unlikely tokens
+   - **Repeat penalty**: Penalizes tokens that appeared recently (window of `repeat_last_n` tokens). Lower values (1.05) help code generation; higher values (1.15) reduce repetition in chat.
+   - **Logit bias**: Hard bans on specific tokens (e.g., banning `<tool_call>` token IDs to prevent native format interference).
+3. **KV cache append** — The new token's K/V vectors are added to the cache. The next token can attend to all previous tokens without recomputing them — this is why generation is fast (only 1 token processed per step vs all tokens during prefill).
+4. **Stop detection** — Generation ends when the model emits an end-of-sequence token (`<|im_end|>` for ChatML) or hits `max_tokens`.
+
+**Performance**: Generation speed is typically 9-25 tok/s depending on model size and GPU offload. This is bottlenecked by memory bandwidth (reading model weights for each token).
+
+#### Stage 7: Streaming to Client (SSE)
+
+Each generated token is immediately sent to the client:
+
+1. **Thinking tag stripping** — For models that produce `<think>...</think>` reasoning blocks, the `ThinkingStripper` buffers tokens until `</think>` is seen, then emits only the content after it. The thinking is never shown to the user.
+2. **SSE formatting** — Each token is wrapped in an OpenAI-compatible chunk: `data: {"choices":[{"delta":{"content":"token"}}]}\n\n`
+3. **Client display** — The client prints each token immediately (`flush=True`), giving the appearance of real-time typing.
+4. **Final chunk** — When generation ends, a chunk with `finish_reason` ("stop" or "length") is sent, followed by `data: [DONE]`.
+
+#### Stage 8: Tool Extraction and Execution (Client)
+
+After the full response is received:
+
+1. **Pre-processing** — Strip `<tool_call>` artifacts, `<REACT>` blocks, agentic markers (SCRATCHPAD, PLAN, CONFIDENCE). Normalize git-style SEARCH/REPLACE to standard format.
+2. **Regex extraction** — A regex matches `<{1,3}(TAG_NAME)>{1,3}` patterns (accepts 1-3 brackets to tolerate model variations). Content between tags is captured.
+3. **Dispatch** — Each extracted tag maps to a handler: `REMOTE_EXEC` → shell execution, `WRITE_FILE` → file creation, `EDIT_FILE` → search/replace, etc.
+4. **Permission checking** — Before execution:
+   - Deny rules checked first (unconditional blocks: `rm -rf /`, fork bombs)
+   - Dangerous commands detected (prompts even in yolo mode: `sudo`, `rm -rf`, `chmod 777`)
+   - Protected paths checked (always prompts: `.git/`, `.ssh/`, `.env`)
+   - Permission mode applied (`default` → prompt, `acceptEdits` → auto file ops, `yolo` → auto all)
+5. **Execution** — Tool runs with timeout, output captured. File modifications create checkpoints for `/undo`.
+6. **Output aggregation** — Results from all tools are combined (40KB cap per turn to prevent context overflow).
+
+#### Stage 9: Agent Loop (Client)
+
+If tools were executed, the cycle repeats:
+
+1. **Tool output appended** — Added as a user message: `"Tool output:\n{results}"`
+2. **Budget incremented** — The agentic context tracks iteration count.
+3. **Loop detection** — Response hash compared to recent responses. If 3 identical responses detected, the loop is broken.
+4. **Back to Stage 1** — `get_completion()` is called again with the updated history.
+
+The loop continues until:
+- The model produces a response with no tool markers (task complete)
+- Budget is exhausted (forced synthesis)
+- Turn cap reached (50 turns)
+- Loop detected (3 identical responses)
+- User interrupts (Ctrl+C)
+
+#### Stage 10: Session Persistence
+
+After each agent response:
+- **History saved** — Full conversation written to `~/.qwen_sessions/<name>.json`
+- **Pruning** — If history exceeds 100 messages, first 10 + last 90 are kept
+- **Stats displayed** — TTFT, total duration, token throughput shown to user
+
+### 3.2 Performance Bottlenecks at Each Stage
+
+| Stage | Bottleneck | What helps |
+|-------|-----------|------------|
+| Prefill | Memory bandwidth (reading weights) | Higher `n_ubatch`, more GPU layers, `--cpu-moe` |
+| Generation | Memory bandwidth (1 token at a time) | More GPU layers, faster RAM (DDR5-5600) |
+| Model loading | Disk I/O + VRAM allocation | `--mmap` (already enabled), SSD storage |
+| RAG retrieval | Embedding + vector search | Timeout (2s), smaller DB, faster CPU |
+| Tool execution | Shell command runtime | Not tunable (depends on the command) |
+| Context management | Compaction model call | Happens infrequently, acceptable |
+
+### 3.3 The Agent Loop
 
 The orchestrator (`qwen_client/orchestrator.py`) runs this cycle:
 
@@ -203,7 +327,7 @@ Safety mechanisms prevent infinite loops:
 - **Write-loop detection**: Blocks after 3 writes to the same file
 - **Stall detection**: Nudges agent if it summarizes instead of acting
 
-### 3.3 Context Management
+### 3.4 Context Management
 
 Long conversations are managed through three tiers:
 
@@ -215,7 +339,7 @@ Long conversations are managed through three tiers:
 
 The `/compact` command triggers model-generated compaction manually.
 
-### 3.4 The RAG Memory System
+### 3.5 The RAG Memory System
 
 The server runs a ChromaDB vector database with SentenceTransformer embeddings (`all-MiniLM-L6-v2`). Agents can save facts and the system auto-retrieves relevant context for each query.
 
