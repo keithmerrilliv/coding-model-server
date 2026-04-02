@@ -544,14 +544,15 @@ Update these after each retrieval step. They help you stay organized and efficie
 
     # Qwen3.5-397B-A17B IQ1_M — flagship (17B active, ~100 GB, 4 shards, 60 layers)
     # Successor to 480B Coder as premium architect — DESIGN ROLE, not implementation.
-    # Qwen3.5 arch supported since llama-cpp-python 0.3.17 (in-process).
-    # ~1,687 MiB/layer, 60 layers total. Hybrid KV cache (Q8_0 keys / Q4_0 values).
-    # ngl=7 at 65K: 2,992 MiB free | ngl=8 at 96K: 1,557 MiB free (measured 2026-03-30)
+    # Moved to llama_server with --cpu-moe: expert weights on CPU, attention on GPU.
+    # ngl=8 in-process: ~5 min/turn (prefill-bound). With --cpu-moe, targeting ngl=60 (all layers).
     _QWEN35_397B = _create_model_config(
         'MODEL_PATH_QWEN35_397B',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3.5-397B-A17B-GGUF/UD-IQ1_M/Qwen3.5-397B-A17B-UD-IQ1_M-00001-of-00004.gguf',
-        8, 98304, 1024,
+        61, 98304, 2048, backend='llama_server',
+        server_extra_args=['--jinja', '--reasoning-format', 'none', '-fa', 'on'],
         type_k=8, type_v=2,
+        cpu_moe=True, n_ubatch=2048,
     )
 
     # ── Non-Qwen models ──
@@ -719,7 +720,7 @@ Update these after each retrieval step. They help you stay organized and efficie
             executor=True
         ),
         'q35_ultra': _create_agent_config(
-            'Architect — Qwen3.5-397B IQ1_M (17B/397B MoE, 96K ctx, ngl=8, flagship)',
+            'Architect — Qwen3.5-397B IQ1_M (17B/397B MoE, 96K ctx, ngl=60, flagship)',
             _ARCHITECT_SYSTEM_PROMPT,
             _QWEN35_397B,
             executor=True
