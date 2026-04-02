@@ -549,10 +549,10 @@ Update these after each retrieval step. They help you stay organized and efficie
     _QWEN35_397B = _create_model_config(
         'MODEL_PATH_QWEN35_397B',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3.5-397B-A17B-GGUF/UD-IQ1_M/Qwen3.5-397B-A17B-UD-IQ1_M-00001-of-00004.gguf',
-        61, 98304, 2048, backend='llama_server',
+        61, 98304, 4096, backend='llama_server',
         server_extra_args=['--jinja', '--reasoning-format', 'none', '-fa', 'on'],
         type_k=8, type_v=2,
-        cpu_moe=True, n_ubatch=2048,
+        cpu_moe=True, n_ubatch=4096,
     )
 
     # ── Non-Qwen models ──
