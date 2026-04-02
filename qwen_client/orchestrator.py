@@ -325,28 +325,38 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                 if tool_output:
                     agentic_ctx.budget.increment()
 
-                    # ── Budget exhaustion: force synthesis ──
+                    # ── Budget exhaustion ──
                     if agentic_ctx.should_force_synthesis():
-                        print_colored(
-                            f"\n[Budget exhausted: {agentic_ctx.budget.current}/"
-                            f"{agentic_ctx.budget.max_iterations} iterations]",
-                            COLORS['WARNING']
-                        )
-                        history.append({
-                            "role": "user",
-                            "content": (
-                                f"Tool output:\n{tool_output}\n\n"
-                                "RETRIEVAL BUDGET EXHAUSTED. Synthesize your final answer "
-                                "now from all information gathered."
-                            ),
-                        })
-                        save_chat_history(history, model)
-                        # One final completion for synthesis, then done
-                        synth_text, _ = get_completion(history, model, agent_theme)
-                        if synth_text:
-                            history.append({"role": "assistant", "content": synth_text})
+                        if agentic_ctx.query_type.value == "IMPLEMENT":
+                            # Implementation tasks: warn but keep going — each iteration
+                            # is productive work, not speculative retrieval.
+                            # MAX_TURNS_PER_TASK is the real safety cap.
+                            print_colored(
+                                f"\n[Budget soft limit: {agentic_ctx.budget.current}/"
+                                f"{agentic_ctx.budget.max_iterations} iterations — continuing implementation]",
+                                COLORS['WARNING']
+                            )
+                        else:
+                            # Retrieval/explain tasks: force synthesis
+                            print_colored(
+                                f"\n[Budget exhausted: {agentic_ctx.budget.current}/"
+                                f"{agentic_ctx.budget.max_iterations} iterations]",
+                                COLORS['WARNING']
+                            )
+                            history.append({
+                                "role": "user",
+                                "content": (
+                                    f"Tool output:\n{tool_output}\n\n"
+                                    "RETRIEVAL BUDGET EXHAUSTED. Synthesize your final answer "
+                                    "now from all information gathered."
+                                ),
+                            })
                             save_chat_history(history, model)
-                        break
+                            synth_text, _ = get_completion(history, model, agent_theme)
+                            if synth_text:
+                                history.append({"role": "assistant", "content": synth_text})
+                                save_chat_history(history, model)
+                            break
 
                     task_commands_executed = True
                     nudge_count = 0

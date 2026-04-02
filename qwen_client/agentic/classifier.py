@@ -18,12 +18,12 @@ class QueryType(Enum):
 
 # Budget limits per query type (max tool iterations)
 QUERY_BUDGETS = {
-    QueryType.LOCATE: 5,
-    QueryType.EXPLAIN: 15,
-    QueryType.DEBUG: 25,
-    QueryType.IMPLEMENT: 40,
-    QueryType.REFACTOR: 25,
-    QueryType.GENERAL: 20,
+    QueryType.LOCATE: 8,
+    QueryType.EXPLAIN: 20,
+    QueryType.DEBUG: 30,
+    QueryType.IMPLEMENT: 80,   # Implementation tasks need many productive iterations
+    QueryType.REFACTOR: 40,
+    QueryType.GENERAL: 25,
 }
 
 # Priority-ordered patterns — first match wins
