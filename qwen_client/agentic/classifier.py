@@ -20,10 +20,10 @@ class QueryType(Enum):
 QUERY_BUDGETS = {
     QueryType.LOCATE: 5,
     QueryType.EXPLAIN: 15,
-    QueryType.DEBUG: 20,
-    QueryType.IMPLEMENT: 25,
-    QueryType.REFACTOR: 20,
-    QueryType.GENERAL: 15,
+    QueryType.DEBUG: 25,
+    QueryType.IMPLEMENT: 40,
+    QueryType.REFACTOR: 25,
+    QueryType.GENERAL: 20,
 }
 
 # Priority-ordered patterns — first match wins
@@ -41,9 +41,11 @@ _PATTERNS = [
         re.IGNORECASE
     )),
     (QueryType.IMPLEMENT, re.compile(
-        r'(?:build\b|create\b|implement\b|write\s+(?:a\s+)?(?:function|class|module|script|test)'
+        r'(?:build\b|create\b|implement\w*\b|write\s+(?:a\s+)?(?:function|class|module|script|test)'
         r'|add\s+(?:a\s+)?(?:feature|support|endpoint|handler|command|tool)'
-        r'|make\s+(?:a\s+)?(?:function|class|script|tool)\s+that)',
+        r'|make\s+(?:a\s+)?(?:function|class|script|tool)\s+that'
+        r'|continue\s+(?:implement|build|work)'
+        r'|finish\s+(?:implement|build|the\s+work|the\s+remaining))',
         re.IGNORECASE
     )),
     (QueryType.REFACTOR, re.compile(
