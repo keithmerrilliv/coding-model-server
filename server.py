@@ -506,10 +506,11 @@ Update these after each retrieval step. They help you stay organized and efficie
     # KV at 65K Q4_0: 4,392 MiB (62 GPU layers). 7,188 MiB free at ngl=62.
     # Bumping to 98K Q4_0: ~6,588 MiB KV → ~1 GB free. Tight but fits.
     # Q5_0 cache OOM at ngl=62 (10 GB compute buffer). Staying at Q4_0.
+    # MiniMax has less headroom (4.8 GB) — use 2048 ubatch (conservative)
     _MINIMAX_M25 = _create_model_config(
         'MODEL_PATH_MINIMAX_M25',
         '/home/keith-merrill/.lmstudio/models/unsloth/MiniMax-M2.5-GGUF/Q4_K_M/MiniMax-M2.5-Q4_K_M-00001-of-00004.gguf',
-        62, 98304, 4096, backend='llama_server',
+        62, 98304, 4096, backend='llama_server', n_ubatch=2048,
         server_extra_args=['--jinja', '--reasoning-format', 'none'],
         logit_bias=[[200052, -100.0], [200053, -100.0]],
         type_k=2, type_v=2,
@@ -565,9 +566,9 @@ Update these after each retrieval step. They help you stay organized and efficie
     _NEMOTRON_NANO = _create_model_config(
         'MODEL_PATH_NEMOTRON_NANO',
         '/home/keith-merrill/.lmstudio/models/unsloth/Nemotron-3-Nano-30B-A3B-GGUF/Nemotron-3-Nano-30B-A3B-Q4_K_M.gguf',
-        52, 1048576, 2048, backend='llama_server',
+        52, 1048576, 1024, backend='llama_server',
         server_extra_args=['--jinja', '--reasoning-format', 'none'],
-        cpu_moe=True,
+        cpu_moe=True, n_ubatch=1024,
     )
 
     # GLM-4.7-Flash Q4_K_M — Zhipu AI 30B-A3B MoE, 18.3 GB
@@ -583,6 +584,7 @@ Update these after each retrieval step. They help you stay organized and efficie
         '/home/keith-merrill/.lmstudio/models/unsloth/GLM-4.7-Flash-GGUF/GLM-4.7-Flash-Q4_K_M.gguf',
         47, 262144, 2048, backend='llama_server',
         server_extra_args=['--jinja', '--reasoning-format', 'none'],
+        n_ubatch=2048,
         cpu_moe=True,
     )
 
