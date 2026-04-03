@@ -57,6 +57,7 @@ def handle_user_command(user_input, history, model, agent_theme):
         print(f"  /apple <tool> <args> - Search Apple Deep Docs on the Linux server")
         print(f"                         Example: /apple search_swift_evolution {{\"feature\": \"actors\"}}")
         print(f"  /ingest <path>       - Ingest a PDF into memory (supports server files or local: prefix for client files)")
+        print(f"  /ingest-code <dir>   - Ingest a codebase directory with AST-aware chunking")
         print(f"                         Examples: /ingest /home/user/Metal4_Specs.pdf")
         print(f"                                   /ingest local:/Users/me/Reports/annual.pdf")
         print(f"  /scrape [framework]  - Run the documentation scraper (default: Metal)")
@@ -73,6 +74,19 @@ def handle_user_command(user_input, history, model, agent_theme):
         for name, theme in AGENT_THEMES.items():
             print(f"  {name.ljust(18)} - {theme['desc']}")
         print_colored("----------------------------\n", COLORS['HEADER'])
+        return True, model
+
+    # ── Ingest codebase ────────────────────────────────────────────────────
+    if user_input.lower().startswith('/ingest-code '):
+        from qwen_client.services import ingest_codebase
+        parts = user_input.split(' ', 1)
+        if len(parts) < 2 or not parts[1].strip():
+            print_colored("Usage: /ingest-code <directory>", COLORS['FAIL'])
+            print_colored("  Ingests code files with AST-aware chunking into RAG memory.", COLORS['BLUE'])
+            return True, model
+        directory = parts[1].strip()
+        result = ingest_codebase(directory)
+        print_colored(f"\n{result}\n", COLORS['GREEN'])
         return True, model
 
     # ── Ingest PDF ────────────────────────────────────────────────────────

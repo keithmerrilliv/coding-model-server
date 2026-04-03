@@ -1,16 +1,44 @@
 """External service clients — memory, web search, PDF ingestion, Apple docs."""
+import os
 import json
 import subprocess
 import threading
 import select
 import atexit
 import logging
+from pathlib import Path
 
 import requests
 
 from qwen_client.config import config, COLORS, print_colored
 
 logger = logging.getLogger(__name__)
+
+# Extensions worth ingesting (code + docs). Matches CodeChunker's extension_map.
+CODE_EXTENSIONS = {
+    '.swift', '.metal', '.h', '.m', '.mm', '.cpp', '.cc', '.c',
+    '.py', '.js', '.ts', '.tsx', '.jsx',
+    '.go', '.rs', '.java', '.kt', '.cs', '.rb',
+    '.sh', '.bash', '.zsh',
+    '.md', '.markdown',
+}
+
+# Directories to skip during ingestion
+IGNORE_DIRS = {
+    '.git', '.svn', '.hg', '.idea', '.vscode', '.vs',
+    'build', 'Build', 'dist', 'DerivedData', 'cmake-build-debug',
+    'out', 'output', 'target', 'bin', 'obj',
+    '.xcodeproj', '.xcworkspace', '.xcassets', 'Pods', '.build',
+    'node_modules', 'vendor', 'Vendor',
+    'ThirdParty', 'thirdparty', 'third_party', 'third-party',
+    'External', 'external', 'extern', 'deps', 'Dependencies',
+    'venv', 'env', '.venv', '.env', 'myenv', '__pycache__',
+    'site-packages', '.tox', '.eggs',
+    'Intermediate', 'Saved', 'Binaries', 'Library', 'Temp',
+    '.cache', '.gradle', '.cargo',
+}
+
+MAX_FILE_SIZE = 100_000  # 100 KB — skip generated/minified files
 
 
 # ---------------------------------------------------------------------------
@@ -55,6 +83,83 @@ def save_memory(text):
             return f"Failed to save memory: {response.text}"
     except Exception as e:
         return f"Error saving memory: {str(e)}"
+
+
+def ingest_codebase(directory, extensions=None):
+    """Ingest a local codebase into the server's RAG database.
+
+    Walks the directory tree, reads code files, and sends each to the server
+    with the source path so the server's CodeChunker can apply tree-sitter
+    AST-aware chunking.
+
+    Args:
+        directory: Root directory to ingest.
+        extensions: Set of extensions to include (default: CODE_EXTENSIONS).
+
+    Returns:
+        Summary string with counts.
+    """
+    directory = os.path.expanduser(directory)
+    if not os.path.isdir(directory):
+        return f"Error: '{directory}' is not a directory."
+
+    exts = extensions or CODE_EXTENSIONS
+    files_sent = 0
+    files_skipped = 0
+    errors = 0
+
+    print_colored(f"Ingesting codebase: {directory}", COLORS['CYAN'])
+    print_colored(f"  Extensions: {', '.join(sorted(exts))}", COLORS['CYAN'])
+
+    for root, dirs, files in os.walk(directory):
+        # Prune ignored directories in-place
+        dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
+
+        for filename in files:
+            ext = os.path.splitext(filename)[1].lower()
+            if ext not in exts:
+                continue
+
+            filepath = os.path.join(root, filename)
+
+            # Skip large files
+            try:
+                if os.path.getsize(filepath) > MAX_FILE_SIZE:
+                    files_skipped += 1
+                    continue
+            except OSError:
+                continue
+
+            # Read and send
+            try:
+                with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+                    content = f.read()
+
+                if not content.strip():
+                    files_skipped += 1
+                    continue
+
+                # Send with source path — server uses CodeChunker for AST chunking
+                response = requests.post(
+                    config.MEMORY_API_URL,
+                    json={"text": content, "source": filepath},
+                    timeout=30,
+                )
+                if response.status_code == 200:
+                    files_sent += 1
+                    if files_sent % 50 == 0:
+                        print_colored(f"  Ingested {files_sent} files...", COLORS['CYAN'])
+                else:
+                    errors += 1
+                    logger.warning("Failed to ingest %s: %s", filepath, response.text[:100])
+
+            except Exception as e:
+                errors += 1
+                logger.warning("Error ingesting %s: %s", filepath, e)
+
+    msg = f"Ingested {files_sent} files ({files_skipped} skipped, {errors} errors) from {directory}"
+    print_colored(msg, COLORS['GREEN'])
+    return msg
 
 
 def ingest_pdf(path):
