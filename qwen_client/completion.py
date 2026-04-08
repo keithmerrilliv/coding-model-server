@@ -193,7 +193,7 @@ def get_completion(history, model, agent_theme, agentic_context=None):
 
     while True:
         try:
-            response = requests.post(config.API_URL, json=payload, stream=True, timeout=7200)
+            response = requests.post(config.API_URL, json=payload, headers=config.auth_headers, stream=True, timeout=7200)
 
             if response.status_code != 200:
                 stop_progress.set()

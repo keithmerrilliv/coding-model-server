@@ -17,6 +17,13 @@ class Config:
     MODELS_URL = f"http://{LINUX_SERVER_IP}:5000/v1/models"
     ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
 
+    @property
+    def auth_headers(self):
+        """Headers dict with X-Admin-Key if configured."""
+        if self.ADMIN_API_KEY:
+            return {"X-Admin-Key": self.ADMIN_API_KEY}
+        return {}
+
     # Command execution security settings
     ALLOW_SHELL_MODE = os.getenv('ALLOW_SHELL_MODE', 'true').lower() == 'true'
     COMMAND_WHITELIST = os.getenv('COMMAND_WHITELIST', '').split(',') if os.getenv('COMMAND_WHITELIST') else None

@@ -139,7 +139,7 @@ class ErrorResponse(BaseModel):
 
 class MemoryRequest(BaseModel):
     """Request to save a memory"""
-    text: str
+    text: str = Field(..., max_length=200_000)  # ~100KB, matches client file-size cap
     source: Optional[str] = None  # file path hint for language detection
 
 

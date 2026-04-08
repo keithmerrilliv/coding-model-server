@@ -1,3 +1,4 @@
+import hashlib
 import os
 import logging
 import uuid
@@ -73,22 +74,34 @@ class MemoryService:
             raise RuntimeError("Embedding model not initialized")
         return self._embedding_model.encode(text, show_progress_bar=False).tolist()
 
+    def _content_hash(self, text: str) -> str:
+        """MD5 hex digest of text, used for deduplication."""
+        return hashlib.md5(text.encode()).hexdigest()
+
     def add_memory(self, text: str, metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Add a new memory string to the database. Returns dict with status on success, error on failure."""
         if not text or not text.strip():
             return {"error": "Text cannot be empty"}
-            
+
         try:
+            # Dedup check: skip if identical content already stored
+            content_hash = self._content_hash(text)
+            existing = self._collection.get(where={"content_hash": content_hash}, limit=1)
+            if existing and existing["ids"]:
+                logger.info("Duplicate memory skipped (hash %s)", content_hash[:8])
+                return {"status": "duplicate", "id": existing["ids"][0]}
+
             timestamp = time.time()
             mem_id = f"mem_{int(timestamp)}_{uuid.uuid4().hex[:12]}"
-            
+
             embedding = self._get_embedding(text)
             
             # Default metadata
             meta = {
                 "timestamp": timestamp,
                 "date": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "source": "manual"
+                "source": "manual",
+                "content_hash": content_hash,
             }
             if metadata:
                 meta.update(metadata)

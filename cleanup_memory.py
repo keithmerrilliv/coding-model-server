@@ -45,12 +45,15 @@ def classify(text):
         r'^(?:Maybe user expects|Simpler:|Steps:\s*$)',
         r'audit_report_content\\n\$\(cat',
     ]
-    for pattern in thinking_patterns:
-        if re.search(pattern, stripped, re.IGNORECASE | re.MULTILINE):
-            # Only delete if it's mostly thinking, not mixed with facts
-            lines = [l for l in stripped.split('\n') if l.strip()]
-            if len(lines) < 4:
-                return "leaked_thinking"
+    lines = [l for l in stripped.split('\n') if l.strip()]
+    if lines:
+        matching_lines = sum(
+            1 for line in lines
+            if any(re.search(p, line.strip(), re.IGNORECASE) for p in thinking_patterns)
+        )
+        # Flag only if >50% of lines match thinking patterns
+        if matching_lines / len(lines) > 0.5:
+            return "leaked_thinking"
 
     return None
 

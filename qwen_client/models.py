@@ -11,7 +11,7 @@ def fetch_available_models():
     """Fetch available models from the server and populate AGENT_THEMES."""
     global AGENT_THEMES
     try:
-        response = requests.get(config.MODELS_URL, timeout=config.REQUEST_TIMEOUT)
+        response = requests.get(config.MODELS_URL, headers=config.auth_headers, timeout=config.REQUEST_TIMEOUT)
         if response.status_code == 200:
             data = response.json().get("data", [])
             AGENT_THEMES.clear()
