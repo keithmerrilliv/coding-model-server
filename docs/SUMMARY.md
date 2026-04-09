@@ -1,68 +1,104 @@
 # Work Summary: Qwen Multi-Agent Client & Server
 
 ## 1. Project Overview
-This project establishes a robust, local LLM infrastructure using the Qwen model series. It consists of a FastAPI-based server handling model inference and a Python-based CLI client for user interaction. The system is designed to leverage high-performance hardware (specifically optimizing for VRAM usage on consumer/prosumer GPUs) to run multiple specialized AI agents.
+This project is a local LLM inference server with a multi-agent CLI client. The server provides an OpenAI-compatible API backed by llama.cpp (both in-process and subprocess backends), with automatic VRAM management on an NVIDIA RTX 5080. The client is an agentic coding assistant with tool execution, RAG memory, session management, and a five-component agentic context system. The system runs 13 agent configurations spanning models from 30B to 480B parameters.
 
 ## 2. Key Features
-*   **Multi-Agent Architecture:** The system supports distinct agents with specialized roles:
-    *   `Implementer`: Optimized for code generation.
-    *   `Architect`: Uses a larger model (480B) for high-level system design.
-    *   `Reviewer`: Specialized for code analysis.
-    *   `Debugger`: Focused on error resolution.
-*   **Remote Command Execution:** The client allows agents to execute shell commands on the user's machine (with safety protocols like allow-lists and confirmation prompts).
-*   **Context Management:** Features long-term memory via vector storage and "smart reloading" to balance VRAM usage with response latency.
-*   **Cross-Platform Client:** The CLI client (`qwen_remote.py`) works on both Linux and macOS, handling environment differences automatically.
+*   **Multi-Agent Architecture:** 13 agents with specialized roles and model configurations:
+    *   `implementer` (Qwen3.5-35B, default), `deep_implementer` (Coder-Next 80B), `fast_implementer` (Coder-30B)
+    *   `debugger` (Coder-30B), `reviewer` (Coder-30B Q8_0)
+    *   `architect` (Coder-480B Q2_K_XL), `lite_architect` (Coder-480B IQ1_M), `q35_architect` (Qwen3.5-122B), `q35_ultra` (Qwen3.5-397B)
+    *   `m25_implementer` / `m25_architect` (MiniMax M2.5 230B)
+    *   `nemotron` (Nemotron-3-Nano, 1M native context), `glm` (GLM-4.7-Flash)
+*   **Dual Backend:** Models run either in-process via llama-cpp-python or as a llama-server subprocess. The subprocess backend enables `--cpu-moe` (MoE expert weights on CPU), native Jinja templates, and architectures not yet in llama-cpp-python.
+*   **Agentic RAG:** Client-side query classification, retrieval budget, scratchpad working memory, retrieval planning, and confidence gating — all operating without extra model calls. Server-side ChromaDB vector search with automatic system prompt injection.
+*   **Tool System:** Agents emit structured markers (`<<<REMOTE_EXEC>>>`, `<<<READ_FILE>>>`, `<<<WRITE_FILE>>>`, `<<<EDIT_FILE>>>`, `<<<GLOB>>>`, `<<<GREP>>>`, `<<<SAVE_MEMORY>>>`, `<<<WEB_SEARCH>>>`) processed by the client with three permission tiers and safety guards.
+*   **Context Management:** Three-tier automatic compaction (microcompaction at 60K chars, model-generated summary at 120K, hard trim at 150K). Manual `/compact` available.
+*   **Session Management:** Named sessions with persistent history, context tracking, and cross-session switching.
+*   **Modular Client:** Refactored from a monolithic script (`qwen_remote.py`) into a package (`qwen_client/`) with separate modules for orchestration, completion, compaction, commands, history, config, and the agentic layer.
 
 ## 3. Architecture & Technical Configuration
 *   **Server (`server.py`):**
-    *   Built with FastAPI for OpenAI-compatible endpoints.
-    *   Manages model loading/unloading to prevent Out-Of-Memory (OOM) errors, swapping models dynamically based on the requested agent.
-    *   Supports advanced `llama.cpp` parameters like YaRN scaling for extended context windows (up to 512k tokens).
-    *   Implements `StartLimitIntervalSec` and `StartLimitBurst` in systemd to prevent restart loops.
-*   **Client (`qwen_remote.py`):**
-    *   Interactive CLI with `readline` support for command history.
-    *   Supports async command execution for long-running tasks.
-    *   Includes "Smart Reloading" logic to keep models loaded during interactive sessions but reload them when switching contexts.
+    *   FastAPI with OpenAI-compatible endpoints (`/v1/chat/completions`, `/v1/models`, `/v1/memory`).
+    *   LRU-1 model cache: only one model loaded at a time, mutual exclusion between backends.
+    *   Per-model configs: `n_gpu_layers`, `n_ctx`, `n_batch`, `type_k`/`type_v` (KV cache quantization), `repeat_penalty`, `cpu_moe`, `backend` selection.
+    *   Subprocess backend manages a `llama-server` child process with health polling, watchdog timeout (10 min idle), and SSE stream proxying.
+    *   Token budget calculation injected into system prompt so models know remaining response space.
+    *   RAG context retrieval: SentenceTransformer embedding + ChromaDB cosine search, 2-second async timeout.
+*   **Client (`qwen_client/`):**
+    *   Interactive CLI with readline, persistent command history, and agent themes (colored prompts per agent).
+    *   Orchestrator loop: send completion → parse response → extract tool markers → execute tools → inject results → repeat until agent signals done or budget exhausted.
+    *   Agentic context system: classifier, budget, scratchpad, planner, confidence gate aggregated by `AgenticContext`.
+    *   Thinking-tag stripper for models that emit `<think>` blocks (Qwen3.5, etc.).
+    *   Few-shot example injection for short conversations to bootstrap tool marker syntax.
 
-## 4. Development Timeline (Jan 2026)
+## 4. Development Timeline
 
-### Phase 1: Foundation & Optimization (Jan 3 - Jan 5)
-*   **Initial Setup:** Established the FastAPI server and basic client connectivity.
-*   **VRAM Optimization:** Significant effort was put into tuning model parameters (`n_gpu_layers`, `n_batch`) to fit models within available VRAM.
-*   **Agent Specialization:** Introduced the concept of distinct models for different roles (e.g., using a smaller, faster model for implementation and a massive 480B model for architecture).
-*   **Context Expansion:** Increased context windows (up to 512k) and adjusted batch sizes to trade off speed for capacity.
+### Phase 1: Foundation & Optimization (Jan 3 – Jan 5, 2026)
+*   Established FastAPI server and basic client connectivity.
+*   VRAM optimization: tuned `n_gpu_layers`, `n_batch` to fit models within 16 GB RTX 5080.
+*   Introduced agent specialization (smaller fast model for implementation, 480B for architecture).
+*   Context expansion up to 512K with YaRN scaling.
 
-### Phase 2: Client Enhancements & Stability (Jan 24 - Jan 27)
-*   **History & Usability:** Added persistent chat history (`~/.qwen_chat_history.json`) and command history support.
-*   **Performance Tuning:** Refined server thread counts and added VRAM critical settings.
-*   **Bug Fixes:** Resolved issues with command history artifacts on macOS/Linux clients and fixed model paths (specifically correcting the `architect` model path).
-*   **Service Hardening:** Updated `qwen-server.service` with better timeout and restart policies to handle heavy model unloading gracefully.
-*   **Feature Additions:**
-    *   Added `@agent` syntax for quick agent switching.
-    *   Implemented persistent agent state (client remembers the last used agent).
-    *   Fixed readline artifacts for a cleaner UI.
+### Phase 2: Client Enhancements & Stability (Jan 24 – Jan 27)
+*   Persistent chat history and command history with readline.
+*   Service hardening via systemd (`StartLimitIntervalSec`, `StartLimitBurst`).
+*   `@agent` syntax for inline agent switching, persistent agent state across sessions.
 
-### Phase 3: Robustness & Capability Expansion (Jan 28 - Jan 29)
-*   **Architect Upgrade:** Switched Architect agent to `Qwen3-Coder-480B` (IQ1_M) loaded in RAM, providing massive reasoning capabilities. Introduced `<<<READ_FILE>>>` tool to allow safe, read-only code access without shell risks.
-*   **Robust Multi-Agent Workflow:**
-    *   Implemented a **Task Queue** (`PENDING_TASKS`) and `/resume` command to handle interrupted workflows (e.g., when a tool execution pauses a multi-agent chain).
-    *   Added chunking to tool outputs to prevent context overflow from large logs.
-*   **Reviewer Upgrade:** Upgraded Reviewer agent to use the 30B model (shared with Implementer) for deeper logic analysis.
-*   **Server Stability:**
-    *   Fixed event loop blocking in MCP tools (`apple_deep_docs`) by making endpoints synchronous.
-    *   Optimized `qwen_remote.py` prompt colors and interruption handling.
+### Phase 3: Robustness & Capability Expansion (Jan 28 – Jan 29)
+*   Architect upgraded to Qwen3-Coder-480B (IQ1_M) loaded in RAM.
+*   Task queue (`PENDING_TASKS`) and `/resume` for interrupted multi-agent workflows.
+*   Sequential tool call support: agents perform multi-step actions (search → read → plan) in a single turn.
+*   `<<<READ_FILE>>>` tool for safe read-only code access without shell risks.
 
-### Phase 4: Metal 4 Integration & 5080 Optimization (Jan 30 - Feb 1)
-*   **Hardware Optimization (RTX 5080):**
-    *   Standardized **Implementer/Debugger** on `Qwen3-Coder-30B-A3B` with **80k context** (81,920 tokens) and **32 GPU layers**. This specific configuration achieves ~94% VRAM utilization for maximum speed while maintaining stability.
-    *   Optimized **Architect** (480B) with 4 GPU layers and **Reviewer** (14B) with full GPU offload.
-*   **Metal 4 RAG & Agent:**
-    *   Ingested **871 chunks** of Metal 4 documentation (Feature Sets, Shading Language Spec) into the memory service.
-    *   Deployed specialized `metal_implementer` agent for graphics programming tasks.
-*   **Client Resilience:**
-    *   Upgraded `qwen_remote.py` to support **sequential tool calls**, allowing agents to perform multiple actions (e.g., search -> read -> plan) in a single turn.
-    *   Enhanced error handling for batch commands to prevent entire queues from failing due to single command errors.
-    *   Simplified protocol to raw `<<<REMOTE_EXEC>>>` tags for better reliability.
+### Phase 4: Metal 4 Integration & Hardware Tuning (Jan 30 – Feb 1)
+*   Ingested 871 chunks of Metal 4 documentation (Feature Sets, Shading Language Spec).
+*   Deployed `metal_implementer` agent for graphics programming.
+*   Standardized Implementer/Debugger on Coder-30B with 80K context and 32 GPU layers (~94% VRAM).
+
+### Phase 5: Client Modularization & Tool Refinement (Feb 1 – Feb 8)
+*   Apple documentation scraping pipeline (`/scrape` command) with auto-ingestion into ChromaDB.
+*   Apple Deep Docs MCP integration for live documentation queries.
+*   PDF ingestion endpoint (`/v1/memory/ingest`) and client-side `/ingest` command with file upload.
+*   Tree-sitter AST-aware code chunking (`CodeChunker`) supporting 25 languages, replacing naive character-split ingestion.
+*   Server-side chunked memory ingestion via `add_memory_chunked()`.
+*   Forced CPU for SentenceTransformer embeddings to avoid RTX 5080 sm_120 CUDA conflicts.
+*   Load-on-demand architecture: eliminated model caching, explicit load/unload per request.
+*   Token budget awareness: clamped `max_tokens` to remaining context budget to prevent truncation.
+
+### Phase 6: Subprocess Backend & New Models (Feb 6 – Feb 20)
+*   Integrated `llama-server` as a subprocess backend for models needing native Jinja templates or unsupported architectures.
+*   Added `deep_implementer` (Coder-Next Q8_0, 256K native context) and `fast_implementer` (Coder-30B Q4_K_M).
+*   MiniMax M2.5 230B support (`m25_implementer`, `m25_architect`) with per-model llama-server config.
+*   Split `requirements.txt` into server and client files.
+*   Fixed memory service 503 errors and continuation tag corruption.
+
+### Phase 7: Security Hardening & Major Refactor (Mar 9 – Mar 27)
+*   Comprehensive security audit: protected paths, dangerous command detection, deny rules, write-loop detection, response-level loop detection.
+*   Modularized client from monolithic `qwen_remote.py` into `qwen_client/` package (orchestrator, completion, compaction, commands, history, config, models).
+*   Added agentic RAG layer: query classifier, retrieval budget, scratchpad, planner, confidence gate.
+*   5 new model configs: Qwen3.5-35B/122B/397B, Nemotron-3-Nano, GLM-4.7-Flash.
+*   Q4_0 KV cache quantization option for VRAM-constrained models.
+*   10 Claude Code-inspired UX features for the client.
+
+### Phase 8: Performance, Stability & Flagship Models (Mar 28 – Apr 1)
+*   `--cpu-moe` optimization: MoE expert weights on CPU, enabling near-max GPU layer offload for attention layers. Unlocked 1M native context for Nemotron (Mamba-hybrid, only 6/52 layers need KV cache).
+*   Swapped default implementer to Qwen3.5-35B (262K context, in-process backend).
+*   Upgraded llama-cpp-python to 0.3.19, moved Qwen3.5 to in-process backend.
+*   Prefill optimization: `-ub 4096` + `--swa-full` for 4.6x faster Coder-Next prefill.
+*   q35_ultra moved to llama_server with `--cpu-moe`: 5 min → 26 sec per turn, then ubatch 4096 for 145 tok/s prefill.
+*   Three-tier context compaction system (microcompaction, model-generated summary, hard trim).
+*   Session management: named sessions, `/sessions`, `/session`, `/rename`, `/context`.
+*   ThinkingStripper fixes for Qwen3.5 `<think>` tags, non-thinking models, and unclosed tag leaks.
+*   Content sanitizer for all file writes (strips conflict markers, thinking tags).
+*   Comprehensive documentation rewrite: README, CONFIGURATION, and new 10-stage TUTORIAL.
+
+### Phase 9: RAG Database Overhaul (Apr 2 – Apr 3)
+*   Purged 757K low-quality bulk-ingested code entries from ChromaDB (842K → 85K documents, 3.8 GB → 2.2 GB).
+*   Added `cleanup_memory.py` to remove junk entries (PDF TOC noise, leaked thinking tokens).
+*   Added client-side `/ingest-code` command with AST-aware chunking via CodeChunker, replacing the old bulk ingestion script.
+*   Remaining corpus: ~75K agent memories, ~9K markdown docs, ~815 PDF chunks.
+*   See [RAG_UPDATES.md](RAG_UPDATES.md) for full technical details.
 
 ## 5. Current Status
-As of Feb 1, 2026, the project has reached a mature "v2.0" state. The multi-agent system efficiently utilizes the RTX 5080's 16GB VRAM to run a hybrid of massive (480B) and fast (30B) models. The addition of the `metal_implementer` and comprehensive documentation ingestion has transformed it into a capable graphics engineering assistant. The system is stable, self-correcting, and capable of complex, multi-step autonomous workflows.
+As of April 2026, the project runs 13 agent configurations across two backends on an RTX 5080. The default implementer is Qwen3.5-35B with 262K context. The flagship reasoning agent (q35_ultra, Qwen3.5-397B) achieves 26-second turn times via `--cpu-moe`. The RAG database holds ~85K high-quality documents after a major cleanup, with AST-aware ingestion available on demand. The client is a fully modular package with agentic context (query classification, budget enforcement, working memory, retrieval planning, confidence gating), three-tier context compaction, session management, and comprehensive safety guards.

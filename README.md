@@ -183,4 +183,5 @@ qwen-server/
 ├── tools/                 # llama-server binary + shared libs
 ├── scraping/              # Apple documentation scraper
 └── docs/                  # Additional documentation
+    └── RAG_UPDATES.md     #   RAG database & query strategy changes
 ```

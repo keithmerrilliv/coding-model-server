@@ -347,6 +347,8 @@ The server runs a ChromaDB vector database with SentenceTransformer embeddings (
 - **Retrieve**: Automatic — top-K similar documents injected into system prompt
 - **Storage**: `qwen_memory_db/` directory (SQLite + HNSW index)
 
+For details on the database cleanup (842K to 85K documents), AST-aware code chunking, and the agentic query layer (classifier, budget, scratchpad, planner, confidence gate), see [RAG_UPDATES.md](RAG_UPDATES.md).
+
 ## Part 4: Adding New Models
 
 ### 4.1 Choose a Model
