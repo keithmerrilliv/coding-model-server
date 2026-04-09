@@ -150,12 +150,12 @@ Manual compaction available via `/compact`.
 
 ## API
 
-The server exposes an OpenAI-compatible API:
+The server exposes an OpenAI-compatible API. When `ADMIN_API_KEY` is set, all endpoints require an `X-Admin-Key` header.
 
 - `GET /health` — Health check
 - `GET /v1/models` — List available agents
 - `POST /v1/chat/completions` — Chat completion (streaming/non-streaming)
-- `POST /v1/memory` — Save to RAG memory
+- `POST /v1/memory` — Save to RAG memory (200K char limit, content-hash dedup)
 - `POST /v1/memory/search` — Search RAG memory
 - `POST /v1/memory/ingest` — Ingest PDF into memory
 - `POST /v1/files/upload` — Upload file to server

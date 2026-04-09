@@ -191,6 +191,18 @@ The server (`server.py`) automatically injects RAG context into every completion
 
 This runs async with a **2-second hard timeout** to prevent stalls from large databases or slow CPU embedding. If the timeout fires, the completion proceeds without RAG context.
 
+### Authentication
+
+All client requests (completions, memory, search, ingestion, model listing) include an `X-Admin-Key` header when `ADMIN_API_KEY` is configured. This is handled centrally by `Config.auth_headers` (`qwen_client/config.py`).
+
+### Deduplication
+
+`add_memory()` computes an MD5 content hash before storing. If an identical document already exists in ChromaDB (matched via `content_hash` metadata), the duplicate is skipped and the existing ID is returned. This prevents the same fact or code chunk from accumulating multiple entries during re-ingestion.
+
+### Input validation
+
+The `POST /v1/memory` endpoint enforces a `max_length=200_000` character limit on the `text` field (~100 KB), matching the client-side file-size cap for `/ingest-code`.
+
 ### Configuration
 
 | Variable | Default | Description |
@@ -198,6 +210,7 @@ This runs async with a **2-second hard timeout** to prevent stalls from large da
 | `MEMORY_RELEVANCE_THRESHOLD` | 0.35 | Max cosine distance for inclusion |
 | `PDF_CHUNK_SIZE` | 1000 | Character chunk size for PDF ingestion |
 | `PDF_CHUNK_OVERLAP` | 200 | Overlap between PDF chunks |
+| `ADMIN_API_KEY` | (empty) | API key for `X-Admin-Key` authentication |
 
 ---
 
@@ -227,7 +240,7 @@ python3 rag_utils.py inspect <id>   # Full metadata for an entry
 
 `cleanup_memory.py` scans for and removes:
 - PDF table-of-contents noise (dotted leader lines)
-- Leaked model thinking tokens (`<think>`, `</think>`)
+- Leaked model thinking tokens — flagged when >50% of lines match thinking patterns (e.g., `<think>`, `Maybe user expects`, `Steps:`)
 - Empty or near-empty documents
 
 ### Reclaiming disk space

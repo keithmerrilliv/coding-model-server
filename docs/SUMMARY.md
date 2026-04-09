@@ -93,11 +93,12 @@ This project is a local LLM inference server with a multi-agent CLI client. The 
 *   Content sanitizer for all file writes (strips conflict markers, thinking tags).
 *   Comprehensive documentation rewrite: README, CONFIGURATION, and new 10-stage TUTORIAL.
 
-### Phase 9: RAG Database Overhaul (Apr 2 – Apr 3)
+### Phase 9: RAG Database Overhaul & Hardening (Apr 2 – Apr 8)
 *   Purged 757K low-quality bulk-ingested code entries from ChromaDB (842K → 85K documents, 3.8 GB → 2.2 GB).
-*   Added `cleanup_memory.py` to remove junk entries (PDF TOC noise, leaked thinking tokens).
+*   Added `cleanup_memory.py` to remove junk entries (PDF TOC noise, leaked thinking tokens with >50% line-match threshold).
 *   Added client-side `/ingest-code` command with AST-aware chunking via CodeChunker, replacing the old bulk ingestion script.
 *   Remaining corpus: ~75K agent memories, ~9K markdown docs, ~815 PDF chunks.
+*   Hardened RAG memory system: MD5 content-hash deduplication in `add_memory()`, `max_length=200_000` input validation on the memory endpoint, and `X-Admin-Key` authentication across all client API calls.
 *   See [RAG_UPDATES.md](RAG_UPDATES.md) for full technical details.
 
 ## 5. Current Status

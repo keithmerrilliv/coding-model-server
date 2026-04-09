@@ -343,9 +343,10 @@ The `/compact` command triggers model-generated compaction manually.
 
 The server runs a ChromaDB vector database with SentenceTransformer embeddings (`all-MiniLM-L6-v2`). Agents can save facts and the system auto-retrieves relevant context for each query.
 
-- **Save**: `<<<SAVE_MEMORY>>>` marker or `/ingest` command
+- **Save**: `<<<SAVE_MEMORY>>>` marker or `/ingest` command (content-hash dedup prevents duplicates)
 - **Retrieve**: Automatic — top-K similar documents injected into system prompt
 - **Storage**: `qwen_memory_db/` directory (SQLite + HNSW index)
+- **Auth**: All memory API calls use `X-Admin-Key` when `ADMIN_API_KEY` is configured
 
 For details on the database cleanup (842K to 85K documents), AST-aware code chunking, and the agentic query layer (classifier, budget, scratchpad, planner, confidence gate), see [RAG_UPDATES.md](RAG_UPDATES.md).
 
