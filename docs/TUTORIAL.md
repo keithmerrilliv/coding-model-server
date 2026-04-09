@@ -187,7 +187,7 @@ When you type a message and press Enter, the client:
 
 1. **Classifies the query** — The agentic context system (`qwen_client/agentic/context.py`) determines if your query is simple, medium, or complex. This sets the tool-use budget (how many iterations the agent gets before being forced to synthesize).
 2. **Appends to history** — Your message is added to the in-memory conversation history.
-3. **Checks history budget** — If history exceeds 60K chars, old tool outputs are microcompacted. At 120K chars, the model generates a conversation summary. At 150K, the oldest 25% is dropped.
+3. **Checks history budget** — Budget is measured on the compressed view (what actually gets sent). At 120K chars, the model generates a conversation summary. At 150K, the oldest 25% is dropped.
 4. **Sanitizes history** — Internal flags (`auto_send`, `_retried`) are stripped. Empty messages and invalid roles are filtered. Old messages are compressed (head + tail only for tool outputs > 500 chars).
 5. **Injects agentic context** — The scratchpad, retrieval plan, budget warnings, and confidence gate are appended as an additional user message visible only to the model (not persisted).
 
@@ -333,9 +333,10 @@ Long conversations are managed through three tiers:
 
 | Threshold | Action | Cost |
 |-----------|--------|------|
-| 60K chars | Microcompact old tool outputs | None (string ops) |
 | 120K chars | Model-generated conversation summary | 1 LLM call |
 | 150K chars | Hard trim (drop oldest 25%) | None (data loss) |
+
+Old tool outputs are compressed at send time (`_compress_history`) without modifying the in-memory history, preserving KV-cache prefix stability for llama-server models.
 
 The `/compact` command triggers model-generated compaction manually.
 

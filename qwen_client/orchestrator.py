@@ -7,7 +7,7 @@ from qwen_client.display import set_terminal_title, send_macos_notification
 from qwen_client.models import AGENT_THEMES
 from qwen_client.history import save_chat_history
 from qwen_client.completion import get_completion
-from qwen_client.compaction import microcompact, compact_conversation
+from qwen_client.compaction import compact_conversation
 from qwen_client.agentic.context import AgenticContext
 from tool_handlers import reset_write_counts
 
@@ -71,21 +71,23 @@ def _looks_like_stall(response_text: str) -> bool:
 def _check_history_budget(history, model="implementer", agent_theme=None):
     """Proactively manage history size with tiered compaction.
 
-    Tier 1 (60K chars):  Microcompact old tool outputs (no model call).
-    Tier 2 (120K chars): Model-generated conversation summary.
-    Tier 3 (150K chars): Hard trim as last resort (drops oldest 25%).
+    Budget is measured on the compressed view (_compress_history) — the same
+    form that actually gets sent to the model.  This avoids in-place history
+    mutation, which invalidates llama-server's KV-cache prefix and forces
+    full re-prefill (catastrophic for large CPU-bound models like 397B).
+
+    Tier 1 (120K chars): Model-generated conversation summary.
+    Tier 2 (150K chars): Hard trim as last resort (drops oldest 25%).
     """
-    from qwen_client.completion import _trim_history_for_context
-    from qwen_client.compaction import microcompact, compact_conversation
+    from qwen_client.completion import _trim_history_for_context, _compress_history
+    from qwen_client.compaction import compact_conversation
 
-    total_chars = sum(len(m.get("content", "")) for m in history)
+    # Measure on the compressed view — raw history is much larger but
+    # _compress_history truncates old messages at send time anyway.
+    compressed = _compress_history(history)
+    total_chars = sum(len(m.get("content", "")) for m in compressed)
 
-    # Tier 1: cheap microcompaction of old tool outputs
-    if total_chars > 60000:
-        microcompact(history)
-        total_chars = sum(len(m.get("content", "")) for m in history)
-
-    # Tier 2: model-generated summary (before the hard trim threshold)
+    # Tier 1: model-generated summary (before the hard trim threshold)
     if total_chars > 120000:
         print_colored(
             f"\n[Client] Context at {total_chars // 1000}K chars. Running auto-compaction...",
@@ -93,11 +95,12 @@ def _check_history_budget(history, model="implementer", agent_theme=None):
         )
         success, msg = compact_conversation(history, model, agent_theme, reason="auto")
         if success:
-            total_chars = sum(len(m.get("content", "")) for m in history)
+            compressed = _compress_history(history)
+            total_chars = sum(len(m.get("content", "")) for m in compressed)
             print_colored(f"  {msg} Now at {total_chars // 1000}K chars.", COLORS['GREEN'])
             return
 
-    # Tier 3: hard trim as last resort
+    # Tier 2: hard trim as last resort
     if total_chars > HISTORY_CHAR_BUDGET:
         print_colored(
             f"\n[Client] History size ({total_chars // 1000}K chars) exceeds budget. Trimming...",
@@ -181,15 +184,10 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                 if response_text is None:
                     consecutive_errors += 1
                     if consecutive_errors < MAX_CONSECUTIVE_ERRORS:
-                        # Staged recovery: microcompact → full compact → abort
-                        if consecutive_errors == 1:
-                            print_colored("\n[Recovery] Completion failed. Trying microcompaction...", COLORS['WARNING'])
-                            microcompact(history)
-                            continue
-                        else:
-                            print_colored("\n[Recovery] Still failing. Trying full compaction...", COLORS['WARNING'])
-                            compact_conversation(history, model, agent_theme, reason="error_recovery")
-                            continue
+                        # Recovery: full compaction → abort
+                        print_colored("\n[Recovery] Completion failed. Trying full compaction...", COLORS['WARNING'])
+                        compact_conversation(history, model, agent_theme, reason="error_recovery")
+                        continue
                     print_colored(f"\n[Recovery] {MAX_CONSECUTIVE_ERRORS} consecutive failures. Aborting task.", COLORS['FAIL'])
                     task_aborted = True
                     break

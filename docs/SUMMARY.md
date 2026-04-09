@@ -13,7 +13,7 @@ This project is a local LLM inference server with a multi-agent CLI client. The 
 *   **Dual Backend:** Models run either in-process via llama-cpp-python or as a llama-server subprocess. The subprocess backend enables `--cpu-moe` (MoE expert weights on CPU), native Jinja templates, and architectures not yet in llama-cpp-python.
 *   **Agentic RAG:** Client-side query classification, retrieval budget, scratchpad working memory, retrieval planning, and confidence gating — all operating without extra model calls. Server-side ChromaDB vector search with automatic system prompt injection.
 *   **Tool System:** Agents emit structured markers (`<<<REMOTE_EXEC>>>`, `<<<READ_FILE>>>`, `<<<WRITE_FILE>>>`, `<<<EDIT_FILE>>>`, `<<<GLOB>>>`, `<<<GREP>>>`, `<<<SAVE_MEMORY>>>`, `<<<WEB_SEARCH>>>`) processed by the client with three permission tiers and safety guards.
-*   **Context Management:** Three-tier automatic compaction (microcompaction at 60K chars, model-generated summary at 120K, hard trim at 150K). Manual `/compact` available.
+*   **Context Management:** Two-tier automatic compaction (model-generated summary at 120K chars, hard trim at 150K) with send-time compression preserving KV-cache stability. Manual `/compact` available.
 *   **Session Management:** Named sessions with persistent history, context tracking, and cross-session switching.
 *   **Modular Client:** Refactored from a monolithic script (`qwen_remote.py`) into a package (`qwen_client/`) with separate modules for orchestration, completion, compaction, commands, history, config, and the agentic layer.
 
@@ -87,7 +87,7 @@ This project is a local LLM inference server with a multi-agent CLI client. The 
 *   Upgraded llama-cpp-python to 0.3.19, moved Qwen3.5 to in-process backend.
 *   Prefill optimization: `-ub 4096` + `--swa-full` for 4.6x faster Coder-Next prefill.
 *   q35_ultra moved to llama_server with `--cpu-moe`: 5 min → 26 sec per turn, then ubatch 4096 for 145 tok/s prefill.
-*   Three-tier context compaction system (microcompaction, model-generated summary, hard trim).
+*   Two-tier context compaction system (model-generated summary, hard trim) with send-time compression for KV-cache stability.
 *   Session management: named sessions, `/sessions`, `/session`, `/rename`, `/context`.
 *   ThinkingStripper fixes for Qwen3.5 `<think>` tags, non-thinking models, and unclosed tag leaks.
 *   Content sanitizer for all file writes (strips conflict markers, thinking tags).
