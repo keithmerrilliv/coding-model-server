@@ -1,7 +1,7 @@
 # Qwen Multi-Agent Server
 
 # Model inference
-llama-cpp-python>=0.3.16
+llama-cpp-python>=0.3.20
 transformers>=5.1.0
 huggingface-hub>=1.4.0
 
