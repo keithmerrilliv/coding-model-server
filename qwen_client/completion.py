@@ -206,20 +206,35 @@ def get_completion(history, model, agent_theme, agentic_context=None):
                 print_colored(f"\nError: {error_text}", COLORS['FAIL'])
                 return None, None
 
+            # ── TTFT watchdog ──
+            # iter_lines() blocks during the entire prefill stage waiting for the
+            # next chunk from the server, so the in-loop TTFT check below is
+            # unreachable while the server is stalled.  This independent watchdog
+            # thread polls elapsed time and forcibly closes the response if the
+            # first content token doesn't arrive within TTFT_TIMEOUT seconds.
+            ttft_stalled = threading.Event()
+            req_start = start_time
+
+            def _ttft_watchdog(resp):
+                deadline = req_start + TTFT_TIMEOUT
+                while time.time() < deadline:
+                    if first_token_time is not None or stop_progress.is_set():
+                        return
+                    time.sleep(2)
+                if first_token_time is None and not stop_progress.is_set():
+                    ttft_stalled.set()
+                    try:
+                        resp.close()
+                    except Exception:
+                        pass
+
+            watchdog_thread = threading.Thread(
+                target=_ttft_watchdog, args=(response,), daemon=True
+            )
+            watchdog_thread.start()
+
             try:
                 for line in response.iter_lines():
-                    if not first_token_time and (time.time() - start_time) > TTFT_TIMEOUT:
-                        stop_progress.set()
-                        response.close()
-                        if _try_trim_and_retry():
-                            server_error_occurred = True
-                            break
-                        print_colored(
-                            f"\n[Client] TTFT timeout ({TTFT_TIMEOUT}s) — server not responding.",
-                            COLORS['FAIL']
-                        )
-                        return None, None
-
                     if line:
                         line = line.decode('utf-8')
                         if line.startswith("data: "):
@@ -269,6 +284,23 @@ def get_completion(history, model, agent_theme, agentic_context=None):
                     break
                 else:
                     return None, None
+            except (requests.exceptions.ChunkedEncodingError, urllib3.exceptions.ProtocolError):
+                # Watchdog killed the connection on TTFT timeout — abort cleanly
+                # rather than retrying (the underlying issue is server-side).
+                if ttft_stalled.is_set():
+                    stop_progress.set()
+                    elapsed = time.time() - start_time
+                    print_colored(
+                        f"\n[Client] TTFT exceeded {TTFT_TIMEOUT}s "
+                        f"(elapsed {elapsed:.0f}s) — server stalled in prefill.\n"
+                        "  Likely causes: memory pressure / swap thrashing, GPU thermal\n"
+                        "  throttling, or another process eating resources.\n"
+                        "  Check `top`, `free -h`, and `nvidia-smi` on the server.",
+                        COLORS['FAIL']
+                    )
+                    return None, None
+                # Real connection drop — bubble to outer handler which retries
+                raise
 
             if server_error_occurred and context_retries <= MAX_CONTEXT_RETRIES:
                 server_error_occurred = False
