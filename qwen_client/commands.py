@@ -71,8 +71,19 @@ def handle_user_command(user_input, history, model, agent_theme):
         print(f"                         Example: @architect Design X then @implementer build it.")
 
         print_colored(f"\n{COLORS['BOLD']}AVAILABLE AGENTS:{COLORS['ENDC']}", COLORS['BLUE'])
+        # Group agents by role parsed from description ("<Role> — <details>").
+        # Preserve insertion order both across groups and within each group.
+        groups = {}
         for name, theme in AGENT_THEMES.items():
-            print(f"  {name.ljust(18)} - {theme['desc']}")
+            desc = theme['desc']
+            role, _, detail = desc.partition(' — ')
+            if not detail:  # description without em-dash → ungrouped
+                role, detail = 'Other', desc
+            groups.setdefault(role, []).append((name, detail))
+        for role, agents in groups.items():
+            print_colored(f"  {role}:", COLORS['CYAN'])
+            for name, detail in agents:
+                print(f"    {name.ljust(18)} - {detail}")
         print_colored("----------------------------\n", COLORS['HEADER'])
         return True, model
 
