@@ -387,6 +387,27 @@ class Database:
             ).fetchall()
         return [_row_to_gate(r) for r in rows]
 
+    def list_gates_for_spec(self, spec_id: str,
+                            gate_type: Optional[GateType] = None) -> list[ReviewGate]:
+        """All gates for a spec in chronological order, open or closed.
+
+        Used by the planner re-run path to gather every clarification round
+        in the order it happened so the planner sees full context.
+        """
+        if gate_type is None:
+            rows = self._conn().execute(
+                "SELECT * FROM review_gates WHERE spec_id = ? "
+                "ORDER BY created_at",
+                (spec_id,),
+            ).fetchall()
+        else:
+            rows = self._conn().execute(
+                "SELECT * FROM review_gates WHERE spec_id = ? "
+                "AND gate_type = ? ORDER BY created_at",
+                (spec_id, gate_type.value),
+            ).fetchall()
+        return [_row_to_gate(r) for r in rows]
+
     def respond_to_gate(self, gate_id: str, decision: str,
                         notes: Optional[str] = None) -> ReviewGate:
         if decision not in ("approved", "rejected"):

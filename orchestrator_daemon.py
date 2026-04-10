@@ -1,23 +1,29 @@
 #!/usr/bin/env python3
-"""qwen-orchestrator daemon — Phase 1a skeleton.
+"""qwen-orchestrator daemon — Phase 1b.
 
 Long-running process that drives autonomous-mode specs through their state
-machine. Phase 1a behavior:
+machine.
 
-  1. Poll the qwen_autonomous task store every POLL_INTERVAL seconds.
-  2. For each spec in PENDING_PLAN status, run the trivial "echo planner":
-     wraps the markdown in a fake YAML and creates a plan_approval gate.
-     The real planner agent (calling the LLM via /v1/chat/completions)
-     lands in Phase 1b.
-  3. For each spec in PLAN_REVIEW status with an approved plan_approval
-     gate, transition to EXECUTING and stop (Phase 2 picks up here).
-  4. For each spec in PLAN_REVIEW with a rejected plan_approval gate,
-     transition back to PENDING_PLAN so the planner reruns. Reviewer notes
-     are surfaced in the next planner pass once 1b is wired up.
+State transitions handled here:
 
-This daemon must NOT block on the qwen-server FastAPI process — it talks to
-the same SQLite file directly. The HTTP API is purely for clients; the
-daemon is the executor. Do not mix the two.
+    PENDING_PLAN ──┬──> NEEDS_CLARIFICATION  (planner asked questions)
+                   ├──> PLAN_REVIEW           (planner produced YAML)
+                   └──> FAILED                (planner output unparseable)
+
+    NEEDS_CLARIFICATION ──┬──> PENDING_PLAN   (clarification gate approved
+                          │                    → re-run planner with answers)
+                          └──> CANCELLED       (clarification gate rejected)
+
+    PLAN_REVIEW ──┬──> EXECUTING               (plan approved — Phase 2 takes over)
+                  └──> PENDING_PLAN            (plan rejected → planner re-runs
+                                                with rejection notes as a
+                                                clarification round)
+
+    EXECUTING ──> [Phase 2]                    (no-op in 1b)
+
+The daemon talks to the qwen_autonomous SQLite store directly (it shares
+the file with qwen-server) and to the qwen-server inference HTTP API for
+calling the planner agent. It must NOT serve HTTP itself.
 """
 from __future__ import annotations
 
@@ -37,6 +43,12 @@ from qwen_autonomous import (
     SpecStatus,
 )
 from qwen_autonomous.models import ReviewGate, Spec
+from qwen_autonomous.planner import (
+    PlannerClarify,
+    PlannerError,
+    PlannerYaml,
+    call_planner,
+)
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
@@ -50,48 +62,71 @@ logging.basicConfig(
 logger = logging.getLogger("orchestrator")
 
 
-# ── Trivial echo planner (Phase 1a placeholder) ──────────────────────────────
-
-def _echo_plan_yaml(spec: Spec, markdown: str) -> str:
-    """Return a fake YAML plan that echoes the spec back.
-
-    Phase 1b replaces this with a real planner agent call. The shape of the
-    YAML returned here intentionally matches what the real planner will emit
-    so downstream code can be developed in parallel.
-    """
-    return (
-        f"# Auto-generated placeholder plan for {spec.id}\n"
-        f"# (real planner agent lands in Phase 1b)\n"
-        f"spec_id: {spec.id}\n"
-        f"title: {spec.title!r}\n"
-        f"phases:\n"
-        f"  - name: design\n"
-        f"    role: architect\n"
-        f"    description: Produce architecture from the spec.\n"
-        f"  - name: implement\n"
-        f"    role: implementer\n"
-        f"    description: Build the design.\n"
-        f"  - name: test\n"
-        f"    role: reviewer\n"
-        f"    description: Validate via tests.\n"
-        f"source_markdown_bytes: {len(markdown)}\n"
-    )
-
+# ── Gate prompt formatting ───────────────────────────────────────────────────
 
 def _format_plan_gate_prompt(spec: Spec, yaml_text: str) -> str:
     return (
         f"## Plan ready for review: {spec.title}\n\n"
         f"Spec ID: `{spec.id}`\n\n"
         f"The planner has produced the following plan. Approve to begin "
-        f"execution, or reject with notes to ask for changes.\n\n"
-        f"```yaml\n{yaml_text}```\n"
+        f"execution, or reject with notes to ask for changes (the planner "
+        f"will re-run with your notes).\n\n"
+        f"```yaml\n{yaml_text}\n```\n"
     )
+
+
+def _format_clarification_gate_prompt(spec: Spec, questions: list[str]) -> str:
+    """Markdown a human will see when reviewing a clarification gate.
+
+    The numbered questions inside the fenced code block are the canonical
+    form: ``_collect_clarification_rounds`` parses them back out on re-run.
+    """
+    qblock = "\n".join(f"{i+1}. {q}" for i, q in enumerate(questions))
+    return (
+        f"## Clarification needed: {spec.title}\n\n"
+        f"Spec ID: `{spec.id}`\n\n"
+        f"The planner needs more information before producing a plan. "
+        f"Approve this gate with `--notes` containing your answers (numbered "
+        f"or freeform — the planner will read them in context). Reject the "
+        f"gate to cancel the spec.\n\n"
+        f"### Questions\n\n"
+        f"```\n{qblock}\n```\n"
+    )
+
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+def _collect_clarification_rounds(db: Database, spec_id: str) -> list[tuple[str, str]]:
+    """Build the (questions, answers) round list for a planner re-run.
+
+    Walks every clarification gate for this spec in chronological order and
+    returns the ones that have a recorded answer. Pending gates are skipped
+    — they're what we'd be waiting on, so they cannot be a "previous round."
+    """
+    rounds: list[tuple[str, str]] = []
+    for gate in db.list_gates_for_spec(spec_id, GateType.CLARIFICATION):
+        if gate.reviewer_notes is None or gate.status != GateStatus.APPROVED:
+            continue
+        rounds.append((gate.prompt_md, gate.reviewer_notes))
+    return rounds
+
+
+def _latest_gate_of_type(db: Database, spec_id: str,
+                         gate_type: GateType) -> ReviewGate | None:
+    gates = db.list_gates_for_spec(spec_id, gate_type)
+    return gates[-1] if gates else None
 
 
 # ── State machine handlers ───────────────────────────────────────────────────
 
 def _process_pending_plan(db: Database, spec: Spec) -> None:
-    """Run the (fake) planner against a freshly submitted spec."""
+    """Run the planner agent against a spec in PENDING_PLAN state.
+
+    Three possible outcomes:
+      * PlannerYaml      → spec → PLAN_REVIEW + plan_approval gate
+      * PlannerClarify   → spec → NEEDS_CLARIFICATION + clarification gate
+      * PlannerError     → spec → FAILED with the parse error in the event log
+    """
     spec_dir = db.spec_dir(spec.id)
     md_path = spec_dir / spec.source_md_path
     if not md_path.exists():
@@ -101,71 +136,148 @@ def _process_pending_plan(db: Database, spec: Spec) -> None:
         return
 
     markdown = md_path.read_text()
-    logger.info("spec %s: running placeholder planner (%d bytes)",
-                spec.id, len(markdown))
+    rounds = _collect_clarification_rounds(db, spec.id)
+    logger.info("spec %s: running planner (md=%d bytes, rounds=%d)",
+                spec.id, len(markdown), len(rounds))
 
-    yaml_text = _echo_plan_yaml(spec, markdown)
+    try:
+        result = call_planner(markdown, clarifications=rounds)
+    except Exception as e:
+        logger.exception("spec %s: planner call failed", spec.id)
+        db.record_event(
+            EventKind.PLANNER_RAN,
+            spec_id=spec.id,
+            payload={"error": f"{type(e).__name__}: {e}"},
+        )
+        db.update_spec_status(spec.id, SpecStatus.FAILED)
+        return
+
+    db.record_event(
+        EventKind.PLANNER_RAN,
+        spec_id=spec.id,
+        payload={
+            "result_kind": type(result).__name__,
+            "rounds_provided": len(rounds),
+        },
+    )
+
+    if isinstance(result, PlannerYaml):
+        _accept_plan(db, spec, spec_dir, result)
+    elif isinstance(result, PlannerClarify):
+        _emit_clarification(db, spec, result)
+    else:
+        # PlannerError
+        logger.error("spec %s: planner output unparseable: %s",
+                     spec.id, result.reason)
+        db.record_event(
+            EventKind.PLANNER_RAN,
+            spec_id=spec.id,
+            payload={
+                "error": result.reason,
+                "raw_excerpt": result.raw_response[:500],
+            },
+        )
+        db.update_spec_status(spec.id, SpecStatus.FAILED)
+
+
+def _accept_plan(db: Database, spec: Spec, spec_dir, result: PlannerYaml) -> None:
+    """Persist a YAML plan to disk and create the plan_approval gate."""
+    yaml_text = result.yaml_text
     db.update_spec_status(
         spec.id,
         SpecStatus.PLAN_REVIEW,
         normalized_yaml=yaml_text,
     )
-
-    # Persist the YAML on disk too so artifacts/code paths line up later.
     yaml_path = spec_dir / "plan.yaml"
-    yaml_path.write_text(yaml_text)
+    yaml_path.write_text(yaml_text + "\n")
     db.create_artifact(
         spec_id=spec.id,
         kind=ArtifactKind.SPEC_YAML,
         path="plan.yaml",
     )
-
     db.create_gate(
         spec_id=spec.id,
         gate_type=GateType.PLAN_APPROVAL,
         prompt_md=_format_plan_gate_prompt(spec, yaml_text),
     )
-    db.record_event(
-        EventKind.PLANNER_RAN,
+    logger.info("spec %s: plan accepted (%d bytes), plan_approval gate created",
+                spec.id, len(yaml_text))
+
+
+def _emit_clarification(db: Database, spec: Spec,
+                        result: PlannerClarify) -> None:
+    """Create a clarification gate and park the spec until the human responds."""
+    db.update_spec_status(spec.id, SpecStatus.NEEDS_CLARIFICATION)
+    db.create_gate(
         spec_id=spec.id,
-        payload={"planner": "echo_placeholder", "yaml_bytes": len(yaml_text)},
+        gate_type=GateType.CLARIFICATION,
+        prompt_md=_format_clarification_gate_prompt(spec, result.questions),
     )
+    logger.info("spec %s: planner needs clarification (%d questions)",
+                spec.id, len(result.questions))
+
+
+def _process_needs_clarification(db: Database, spec: Spec) -> None:
+    """Check the latest clarification gate; if resolved, advance the spec.
+
+    Approved → return to PENDING_PLAN so the planner re-runs with the
+    answers in the next tick. Rejected → mark the spec CANCELLED.
+    """
+    gate = _latest_gate_of_type(db, spec.id, GateType.CLARIFICATION)
+    if gate is None:
+        logger.warning("spec %s: NEEDS_CLARIFICATION but no clarification "
+                       "gate exists; marking failed", spec.id)
+        db.update_spec_status(spec.id, SpecStatus.FAILED)
+        return
+
+    if gate.status == GateStatus.PENDING:
+        return  # waiting on the human
+
+    if gate.status == GateStatus.APPROVED:
+        if not gate.reviewer_notes:
+            logger.warning("spec %s: clarification approved with no notes; "
+                           "planner will re-run without new context", spec.id)
+        logger.info("spec %s: clarification answered, returning to "
+                    "PENDING_PLAN for replanning", spec.id)
+        db.update_spec_status(spec.id, SpecStatus.PENDING_PLAN)
+    elif gate.status == GateStatus.REJECTED:
+        logger.info("spec %s: clarification rejected, cancelling spec",
+                    spec.id)
+        db.update_spec_status(spec.id, SpecStatus.CANCELLED)
 
 
 def _process_plan_review(db: Database, spec: Spec) -> None:
     """Look for a resolved plan_approval gate and act on it."""
-    open_gates = db.list_open_gates(spec_id=spec.id)
-    plan_gates_open = [g for g in open_gates
-                       if g.gate_type == GateType.PLAN_APPROVAL]
-    if plan_gates_open:
-        return  # still waiting on the human
-
-    # Find the most recent plan_approval gate (open or closed). The simplest
-    # path is to scan recent events for the latest gate_responded matching
-    # this spec — Phase 1b will replace this with a proper query helper.
-    events = db.list_recent_events(spec_id=spec.id, limit=20)
-    latest_response: ReviewGate | None = None
-    for event in events:
-        if event.kind != EventKind.GATE_RESPONDED or event.gate_id is None:
-            continue
-        gate = db.get_gate(event.gate_id)
-        if gate and gate.gate_type == GateType.PLAN_APPROVAL:
-            latest_response = gate
-            break
-
-    if latest_response is None:
-        logger.warning("spec %s: in PLAN_REVIEW with no open or resolved "
-                       "plan_approval gate; not advancing", spec.id)
+    gate = _latest_gate_of_type(db, spec.id, GateType.PLAN_APPROVAL)
+    if gate is None:
+        logger.warning("spec %s: PLAN_REVIEW without a plan_approval gate; "
+                       "marking failed", spec.id)
+        db.update_spec_status(spec.id, SpecStatus.FAILED)
         return
 
-    if latest_response.status == GateStatus.APPROVED:
-        logger.info("spec %s: plan approved by reviewer, transitioning to "
-                    "EXECUTING (Phase 2 will take over)", spec.id)
+    if gate.status == GateStatus.PENDING:
+        return  # waiting on the human
+
+    if gate.status == GateStatus.APPROVED:
+        logger.info("spec %s: plan approved, transitioning to EXECUTING "
+                    "(Phase 2 will take over)", spec.id)
         db.update_spec_status(spec.id, SpecStatus.EXECUTING)
-    elif latest_response.status == GateStatus.REJECTED:
-        logger.info("spec %s: plan rejected, returning to PENDING_PLAN "
-                    "for replanning. notes=%r",
-                    spec.id, latest_response.reviewer_notes)
+    elif gate.status == GateStatus.REJECTED:
+        # The reviewer's rejection notes become a synthetic clarification
+        # round so the planner sees them on its next pass.
+        logger.info("spec %s: plan rejected, replanning with notes=%r",
+                    spec.id, gate.reviewer_notes)
+        if gate.reviewer_notes:
+            new_gate = db.create_gate(
+                spec_id=spec.id,
+                gate_type=GateType.CLARIFICATION,
+                prompt_md=("## Plan rejection feedback\n\n"
+                           "The reviewer rejected the previous plan with "
+                           "the following notes — treat them as new "
+                           "requirements and revise."),
+            )
+            db.respond_to_gate(new_gate.id, "approved",
+                               notes=gate.reviewer_notes)
         db.update_spec_status(spec.id, SpecStatus.PENDING_PLAN)
 
 
@@ -186,7 +298,20 @@ class _ShutdownFlag:
 
 
 def tick(db: Database) -> None:
-    """One pass over the spec table. Idempotent — safe to call any time."""
+    """One pass over the spec table. Idempotent — safe to call any time.
+
+    Order matters: clarification gates need to advance specs from
+    NEEDS_CLARIFICATION → PENDING_PLAN before the planner pass picks them
+    up in the same tick. Otherwise they'd wait an extra cycle for nothing.
+    """
+    needs_clar = db.list_specs(status=SpecStatus.NEEDS_CLARIFICATION)
+    for spec in needs_clar:
+        try:
+            _process_needs_clarification(db, spec)
+        except Exception:
+            logger.exception("spec %s: error during clarification pass",
+                             spec.id)
+
     pending = db.list_specs(status=SpecStatus.PENDING_PLAN)
     for spec in pending:
         try:
