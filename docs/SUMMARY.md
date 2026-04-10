@@ -86,7 +86,7 @@ This project is a local LLM inference server with a multi-agent CLI client. The 
 *   Swapped default implementer to Qwen3.5-35B (262K context, in-process backend).
 *   Upgraded llama-cpp-python to 0.3.19, moved Qwen3.5 to in-process backend.
 *   Prefill optimization: `-ub 4096` + `--swa-full` for 4.6x faster Coder-Next prefill.
-*   q35_ultra moved to llama_server with `--cpu-moe`: 5 min → 26 sec per turn, then ubatch 4096 for 145 tok/s prefill.
+*   q35_ultra moved to llama_server with `--cpu-moe`: 5 min → 26 sec per turn, then ubatch 4096 for higher prefill throughput. Run `benchmark_prefill.py` to measure current speeds.
 *   Two-tier context compaction system (model-generated summary, hard trim) with send-time compression for KV-cache stability.
 *   Session management: named sessions, `/sessions`, `/session`, `/rename`, `/context`.
 *   ThinkingStripper fixes for Qwen3.5 `<think>` tags, non-thinking models, and unclosed tag leaks.

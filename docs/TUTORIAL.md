@@ -237,7 +237,7 @@ This is where the prompt is processed — the most compute-intensive phase:
 4. **Batch processing** — Tokens are processed in micro-batches (`n_ubatch`). Larger batches = fewer GPU kernel launches = faster prefill. This is why bumping ubatch from 512 to 4096 gave 4.6x prefill speedup on Coder-Next.
 5. **Progress event** — The server emits an SSE progress event with prompt token count so the client can display "Prefill: 16.7K / 262K tokens".
 
-**Performance**: Prefill speed ranges from 63 tok/s (MiniMax 230B, mostly CPU) to 1,067 tok/s (GLM 30B, all attention on GPU with ubatch=2048).
+**Performance**: Prefill speed varies by an order of magnitude across the configured agents — from ~60 tok/s for the largest CPU-bound MoE models (q35_ultra 397B with 17B active) to ~1000+ tok/s for small models with all attention on GPU (GLM 30B, Coder-30B variants). To measure current speeds on your hardware, run `python3 benchmark_prefill.py` from the server machine.
 
 #### Stage 6: Token Generation (Autoregressive Decoding)
 
