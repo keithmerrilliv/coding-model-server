@@ -237,7 +237,25 @@ This is where the prompt is processed — the most compute-intensive phase:
 4. **Batch processing** — Tokens are processed in micro-batches (`n_ubatch`). Larger batches = fewer GPU kernel launches = faster prefill. This is why bumping ubatch from 512 to 4096 gave 4.6x prefill speedup on Coder-Next.
 5. **Progress event** — The server emits an SSE progress event with prompt token count so the client can display "Prefill: 16.7K / 262K tokens".
 
-**Performance**: Prefill speed varies by an order of magnitude across the configured agents — from ~60 tok/s for the largest CPU-bound MoE models (q35_ultra 397B with 17B active) to ~1000+ tok/s for small models with all attention on GPU (GLM 30B, Coder-30B variants). To measure current speeds on your hardware, run `python3 benchmark_prefill.py` from the server machine.
+**Performance**: Prefill speed varies by ~18x across the configured agents — from ~140 tok/s for the largest CPU-bound MoE models (480B-class architects) to ~2,500 tok/s for small all-on-GPU models (GLM 30B, Coder-30B variants). The benchmark below was measured on the reference hardware (RTX 5080, CUDA 12.8, ~4K-token prompt, with `--warmup` to exclude model load time):
+
+| Agent | Prompt tokens | Prefill (tok/s) | Notes |
+|-------|---------------|-----------------|-------|
+| `glm` | 6,972 | **2,552** | GLM-4.7-Flash, all 47 layers on GPU + cpu_moe |
+| `debugger` | 8,383 | **2,386** | Coder-30B Turbo, 30/48 layers on GPU |
+| `fast_implementer` | 8,666 | **2,309** | Coder-30B Fast, 26/48 layers, 262K ctx |
+| `reviewer` | 9,405 | **1,392** | Coder-30B HD (Q8_0), 21/48 layers |
+| `implementer` | 8,671 | **1,156** | Qwen3.5-35B, 22/48 layers, 262K ctx |
+| `nemotron` | 4,521 | **904** | Nemotron-3-Nano, all 52 layers + cpu_moe |
+| `m25_architect` | 7,171 | **749** | MiniMax M2.5, 62/62 layers + cpu_moe |
+| `m25_implementer` | 7,068 | **734** | MiniMax M2.5 (same model, different role) |
+| `deep_implementer` | 6,972 | **675** | Coder-Next 80B, 48/48 layers + cpu_moe |
+| `q35_architect` | 8,792 | **225** | Qwen3.5-122B, 9/40 layers (heavy CPU load) |
+| `q35_ultra` | 7,076 | **180** | Qwen3.5-397B, 60/60 layers + cpu_moe |
+| `lite_architect` | 8,337 | **153** | Coder-480B IQ1_M, 4/62 layers |
+| `architect` | 8,787 | **140** | Coder-480B Q2_K_XL, 4/62 layers + YaRN |
+
+To measure current speeds on your hardware, run `python3 benchmark_prefill.py --warmup` from the server machine. The `--warmup` flag is important: it discards the first request per agent so model load time is excluded from the TTFT measurement. Without `--warmup`, the slowest agents will appear orders of magnitude slower than they actually are during normal operation.
 
 #### Stage 6: Token Generation (Autoregressive Decoding)
 
