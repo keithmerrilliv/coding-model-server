@@ -1,0 +1,34 @@
+[Unit]
+Description=Qwen Autonomous Orchestrator Daemon
+# Wait for the inference server before starting — we'll talk to its
+# /v1/chat/completions endpoint once the real planner agent lands in 1b.
+After=network.target qwen-server.service
+Wants=qwen-server.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=/home/keith-merrill/Dev/qwen-server
+ExecStart=/home/keith-merrill/Dev/qwen-server/venv/bin/python orchestrator_daemon.py
+Restart=always
+RestartSec=10
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+
+# No CUDA needed — daemon is a pure Python coordinator. Inference happens
+# inside qwen-server.service which already owns the GPU. Keeping the env
+# minimal here also means we can restart this independently without
+# touching CUDA at all.
+Environment="PYTHONUNBUFFERED=1"
+
+# Configuration (poll interval, log level, Jira creds in 1c) lives in .env
+EnvironmentFile=-/home/keith-merrill/Dev/qwen-server/.env
+
+# Resource limits
+LimitNOFILE=65536
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

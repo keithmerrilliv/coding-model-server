@@ -1,0 +1,6 @@
+#!/usr/bin/env python3
+"""qwen-autonomous — entry point shim, mirrors client.py."""
+import sys
+from qwen_client.autonomous import main
+
+sys.exit(main())

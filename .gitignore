@@ -4,6 +4,7 @@ __pycache__/
 venv/
 .env
 qwen_memory_db/
+qwen_tasks_db/
 server.log
 tools/
 tools.*.bak/
