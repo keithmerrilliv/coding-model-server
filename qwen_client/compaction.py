@@ -131,7 +131,7 @@ def compact_conversation(history, model, agent_theme=None, keep_recent=4, reason
         )
         resp = requests.post(
             config.API_URL, json=payload,
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", **config.auth_headers},
             timeout=120,
         )
         if resp.status_code != 200:
