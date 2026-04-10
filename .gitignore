@@ -6,6 +6,7 @@ venv/
 qwen_memory_db/
 server.log
 tools/
+tools.*.bak/
 .DS_Store
 appledeepdoc-mcp/
 scraping/output

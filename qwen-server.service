@@ -15,10 +15,10 @@ TimeoutStopSec=60
 StandardOutput=journal
 StandardError=journal
 
-# CUDA environment
-Environment="CUDA_HOME=/usr/local/cuda-13.1"
-Environment="LD_LIBRARY_PATH=/usr/local/cuda-13.1/lib64"
-Environment="PATH=/usr/local/cuda-13.1/bin:/usr/local/bin:/usr/bin"
+# CUDA environment — use 12.8, NOT 13.x (13.x has MMQ compiler bug on Blackwell/sm_120a)
+Environment="CUDA_HOME=/usr/local/cuda-12.8"
+Environment="LD_LIBRARY_PATH=/usr/local/cuda-12.8/lib64"
+Environment="PATH=/usr/local/cuda-12.8/bin:/usr/local/bin:/usr/bin"
 Environment="PYTHONUNBUFFERED=1"
 
 # Model configuration (override in .env file)

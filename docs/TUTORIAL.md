@@ -7,7 +7,7 @@ This guide walks through setting up a local LLM inference server with a multi-ag
 **Server machine (Linux):**
 - NVIDIA GPU with at least 8 GB VRAM (16 GB recommended)
 - 64 GB+ system RAM (192 GB for large models like 397B/480B)
-- NVIDIA drivers + CUDA toolkit installed
+- NVIDIA drivers + CUDA 12.8 toolkit (CUDA 13.x has MMQ kernel bugs on Blackwell GPUs)
 - Python 3.10+
 
 **Client machine (macOS or Linux):**
@@ -496,8 +496,12 @@ Pre-built CUDA wheels may not match your CUDA toolkit version. Build from source
 
 ```bash
 source venv/bin/activate
-CMAKE_ARGS="-DGGML_CUDA=on" pip install llama-cpp-python==X.Y.Z --no-binary llama-cpp-python --no-cache-dir
+CMAKE_ARGS="-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=120 -DGGML_CUDA_FORCE_CUBLAS=OFF -DCUDAToolkit_ROOT=/usr/local/cuda-12.8" \
+CUDACXX=/usr/local/cuda-12.8/bin/nvcc \
+pip install llama-cpp-python==X.Y.Z --no-binary llama-cpp-python --no-cache-dir
 ```
+
+> **Blackwell GPU users (RTX 5080/5090):** You must use CUDA 12.8, not 13.x. CUDA 13.x has a compiler bug that silently disables MMQ kernels, causing ~7x prefill regression with cuBLAS fallback. See llama.cpp issues #18331 and #18398.
 
 Verify CUDA loaded after install:
 ```bash
