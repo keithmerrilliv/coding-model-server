@@ -1289,18 +1289,39 @@ def process_remote_commands(response_text: str) -> Optional[str]:
     # mistaken for command boundaries.  Each command block runs from its opening tag
     # to the next known opening tag (or end of string).  No closing tags required.
     #
-    # Accept 1-3 opening AND closing angle brackets to tolerate Qwen3 models
-    # that generate various bracket styles:
+    # The regex matches liberally (1-3 brackets on each side) so we can detect
+    # malformed markers as content-boundary anchors, but a post-match validation
+    # step rejects any bracket combination that isn't one of the documented forms:
     #   <<<TAG>>>  -- standard triple-bracket format
-    #   <TAG>>>    -- after <tool_call> special token (single open, triple close)
-    #   <TAG>      -- XML-style (single open, single close; seen with EDIT_FILE)
+    #   <TAG>>>    -- after <tool_call> special token strip (1 open, 3 close)
+    #   <TAG>      -- XML-style (1 open, 1 close; seen with EDIT_FILE)
+    # Asymmetric or partial markers like <<<TAG> or <<TAG>>> are rejected, which
+    # forces the model to emit a properly-formed marker on its next turn instead
+    # of silently executing a tool from a malformed call.
     _TAG_NAMES = '|'.join(command_handlers.keys())
-    _COMMAND_RE = rf'<{{1,3}}({_TAG_NAMES})>{{1,3}}\s*(.*?)(?=<{{1,3}}(?:{_TAG_NAMES})>{{1,3}}|\Z)'
+    _COMMAND_RE = (
+        rf'(<{{1,3}})({_TAG_NAMES})(>{{1,3}})\s*'
+        rf'(.*?)'
+        rf'(?=<{{1,3}}(?:{_TAG_NAMES})>{{1,3}}|\Z)'
+    )
+    _VALID_BRACKETS = frozenset({('<<<', '>>>'), ('<', '>>>'), ('<', '>')})
 
     all_matches = []
     for match in re.finditer(_COMMAND_RE, response_text, re.DOTALL | re.IGNORECASE):
-        tag = match.group(1).upper()
-        content = match.group(2).strip()
+        open_brackets = match.group(1)
+        tag = match.group(2).upper()
+        close_brackets = match.group(3)
+        content = match.group(4).strip()
+
+        if (open_brackets, close_brackets) not in _VALID_BRACKETS:
+            if _logger:
+                _logger.warning(
+                    "Rejecting malformed tool marker: %s%s%s — expected one of "
+                    "<<<TAG>>>, <TAG>>>, or <TAG>",
+                    open_brackets, tag, close_brackets
+                )
+            continue
+
         if content:  # skip empty blocks (e.g. stale closing tags parsed as openers)
             all_matches.append((match.start(), match, tag, command_handlers[tag]))
 
@@ -1317,7 +1338,7 @@ def process_remote_commands(response_text: str) -> Optional[str]:
             results.append(f"\n... [OMITTED {len(all_matches) - i} ADDITIONAL COMMANDS TO PREVENT CONTEXT OVERFLOW] ...")
             break
 
-        arg = match.group(2)
+        arg = match.group(4)
         # Strip closing tags the model generates (e.g. </REMOTE_EXEC>, </list_dir>).
         # These get captured as part of the content and corrupt shell commands
         # (the shell interprets </TAG> as input redirection < /TAG>).
