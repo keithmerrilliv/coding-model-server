@@ -405,8 +405,13 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                     not agentic_ctx.plan.is_empty
                     and agentic_ctx.plan.goal is not None
                 )
-                # Strip residual XML-like tags that aren't tool commands or real prose
-                _substantive = re.sub(r'</?[A-Z_]+\w*>\s*\d*', '', cleaned_response).strip()
+                # Strip residual XML-like tags (any case, any bracket count) that aren't
+                # tool commands or real prose — catches degenerate output like a lone
+                # "<continue>" or "<<<CONTINUE>>>" (the documented continuation marker that
+                # otherwise has no handler).  Without this, such responses would slip through
+                # as "substantive" and the orchestrator would prematurely declare the task
+                # complete instead of nudging with the next plan step.
+                _substantive = re.sub(r'<+/?[A-Za-z_]\w*>+\s*\d*', '', cleaned_response).strip()
                 if not _substantive and (has_pending_steps or has_active_plan):
                     print_colored(
                         "\n[Thinking turn] Agent updated plan/scratchpad. Nudging to continue...",
