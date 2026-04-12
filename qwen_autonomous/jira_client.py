@@ -244,6 +244,14 @@ class AtlassianApiJiraClient(JiraClient):
                 "it or stay on the FakeJiraClient by leaving JIRA_URL unset"
             ) from e
 
+        # Defensive normalization — .env files commonly have trailing
+        # whitespace and a trailing slash on URLs, both of which break
+        # Atlassian REST routing in subtle ways.
+        url = url.strip().rstrip("/")
+        email = email.strip()
+        api_token = api_token.strip()
+        project_key = project_key.strip()
+
         self._jira = Jira(url=url, username=email, password=api_token, cloud=True)
         self.project_key = project_key
         logger.info("AtlassianApiJiraClient connected to %s (project=%s)",
@@ -313,9 +321,23 @@ class AtlassianApiJiraClient(JiraClient):
             jql = f'project = "{self.project_key}" AND parent = "{parent_epic_key}"'
         else:
             jql = f'project = "{self.project_key}"'
-        results = self._jira.jql(jql).get("issues", [])
+        response = self._jira.jql(jql)
+        # The atlassian-python-api library returns the parsed JSON as-is.
+        # An error response from Jira looks like {"errorMessages": [...],
+        # "errors": {...}} with no "issues" key at all. Returning an empty
+        # list there would silently swallow auth/access failures and let
+        # the sync worker think it had nothing to do, so we surface it.
+        if not isinstance(response, dict) or "issues" not in response:
+            error_msg = (
+                response.get("errorMessages", ["unknown error"])[0]
+                if isinstance(response, dict) else str(response)
+            )
+            raise RuntimeError(
+                f"Jira JQL response did not include 'issues' key — likely "
+                f"an auth or permission failure. Response: {error_msg}"
+            )
         out: list[JiraIssue] = []
-        for r in results:
+        for r in response["issues"]:
             f = r.get("fields", {})
             out.append(JiraIssue(
                 key=r["key"],
