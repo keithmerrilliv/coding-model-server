@@ -49,6 +49,12 @@ from qwen_autonomous.planner import (
     PlannerYaml,
     call_planner,
 )
+from qwen_autonomous.jira_client import (
+    AtlassianApiJiraClient,
+    FakeJiraClient,
+    JiraClient,
+)
+from qwen_autonomous.jira_sync import JiraSync
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
@@ -328,11 +334,52 @@ def tick(db: Database) -> None:
             logger.exception("spec %s: error during plan-review pass", spec.id)
 
 
+def _build_jira_client() -> JiraClient:
+    """Construct the right Jira client based on environment configuration.
+
+    If JIRA_URL / JIRA_EMAIL / JIRA_API_TOKEN are all set, use the real
+    Atlassian client. Otherwise default to FakeJiraClient — the daemon
+    still runs, the sync worker still runs, it just doesn't talk to a
+    real Jira instance. This means we can develop and test against the
+    fake without needing live credentials.
+    """
+    url = os.getenv("JIRA_URL", "").strip()
+    email = os.getenv("JIRA_EMAIL", "").strip()
+    token = os.getenv("JIRA_API_TOKEN", "").strip()
+    project_key = os.getenv("JIRA_PROJECT_KEY", "AUTO").strip()
+
+    if url and email and token:
+        try:
+            client: JiraClient = AtlassianApiJiraClient(
+                url=url, email=email, api_token=token, project_key=project_key,
+            )
+            logger.info("Jira sync ENABLED (real client, project=%s)",
+                        project_key)
+            return client
+        except Exception as e:
+            logger.warning(
+                "Jira credentials present but client init failed (%s); "
+                "falling back to FakeJiraClient", e,
+            )
+
+    logger.info("Jira sync running with FakeJiraClient (no JIRA_URL/EMAIL/"
+                "TOKEN configured) — events will not reach a real Jira "
+                "instance, but the worker will run normally")
+    return FakeJiraClient(project_key=project_key)
+
+
 def main() -> int:
     logger.info("orchestrator daemon starting (poll=%.1fs)", POLL_INTERVAL)
     db = Database()
     logger.info("task store: %s", db.db_path)
     logger.info("workspace:  %s", db.workspace_root)
+
+    # Spin up the Jira sync worker on its own thread. It shares the same
+    # Database instance (SQLite WAL is thread-safe) and runs independently
+    # of the main planner loop, so a Jira outage never blocks planning.
+    jira_client = _build_jira_client()
+    jira_sync = JiraSync(db, jira_client)
+    jira_sync.start()
 
     flag = _ShutdownFlag()
     flag.install_handlers()
@@ -340,28 +387,32 @@ def main() -> int:
     last_heartbeat = 0.0
     HEARTBEAT_INTERVAL = 60.0
 
-    while not flag.set:
-        try:
-            tick(db)
-        except Exception:
-            logger.exception("tick failed; continuing")
-
-        # Periodic heartbeat into the events table — useful for liveness checks
-        # and for sync workers (Phase 1c) to know the daemon is alive.
-        now = time.time()
-        if now - last_heartbeat >= HEARTBEAT_INTERVAL:
+    try:
+        while not flag.set:
             try:
-                db.record_event(EventKind.DAEMON_TICK,
-                                payload={"poll_interval": POLL_INTERVAL})
+                tick(db)
             except Exception:
-                logger.exception("heartbeat write failed")
-            last_heartbeat = now
+                logger.exception("tick failed; continuing")
 
-        # Sleep in small chunks so SIGTERM is responsive.
-        slept = 0.0
-        while slept < POLL_INTERVAL and not flag.set:
-            time.sleep(min(0.5, POLL_INTERVAL - slept))
-            slept += 0.5
+            # Periodic heartbeat into the events table — useful for liveness
+            # checks and for the Jira sync worker to know the daemon is alive.
+            now = time.time()
+            if now - last_heartbeat >= HEARTBEAT_INTERVAL:
+                try:
+                    db.record_event(EventKind.DAEMON_TICK,
+                                    payload={"poll_interval": POLL_INTERVAL})
+                except Exception:
+                    logger.exception("heartbeat write failed")
+                last_heartbeat = now
+
+            # Sleep in small chunks so SIGTERM is responsive.
+            slept = 0.0
+            while slept < POLL_INTERVAL and not flag.set:
+                time.sleep(min(0.5, POLL_INTERVAL - slept))
+                slept += 0.5
+    finally:
+        logger.info("stopping jira-sync worker...")
+        jira_sync.stop()
 
     logger.info("orchestrator daemon stopped")
     db.close_all()

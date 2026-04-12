@@ -223,6 +223,20 @@ class Database:
                 (epic_key, _iso(utc_now()), spec_id),
             )
 
+    def set_gate_jira_issue(self, gate_id: str, issue_key: str) -> None:
+        with self.transaction() as conn:
+            conn.execute(
+                "UPDATE review_gates SET jira_issue_key = ? WHERE id = ?",
+                (issue_key, gate_id),
+            )
+
+    def set_task_jira_issue(self, task_id: str, issue_key: str) -> None:
+        with self.transaction() as conn:
+            conn.execute(
+                "UPDATE tasks SET jira_issue_key = ?, updated_at = ? WHERE id = ?",
+                (issue_key, _iso(utc_now()), task_id),
+            )
+
     # ── tasks ────────────────────────────────────────────────────────────────
 
     def create_task(self, *, spec_id: str, agent: str, role: str, title: str,
@@ -489,6 +503,27 @@ class Database:
             (last_seen_id, limit),
         ).fetchall()
         return [_row_to_event(r) for r in rows]
+
+    # ── sync_state (background worker bookkeeping) ───────────────────────────
+
+    def get_sync_state(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        row = self._conn().execute(
+            "SELECT value FROM sync_state WHERE key = ?", (key,)
+        ).fetchone()
+        return row["value"] if row else default
+
+    def set_sync_state(self, key: str, value: str) -> None:
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO sync_state (key, value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = excluded.updated_at
+                """,
+                (key, value, _iso(utc_now())),
+            )
 
 
 # ── row → model conversion ───────────────────────────────────────────────────

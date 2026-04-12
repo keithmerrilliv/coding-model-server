@@ -66,6 +66,15 @@ CREATE TABLE IF NOT EXISTS review_gates (
     responded_at        TEXT
 );
 
+-- Bookkeeping for background sync workers. Each worker stores its
+-- "last processed event id" (and any other state it needs) here as a
+-- key-value row, so it can resume from where it left off after a crash.
+CREATE TABLE IF NOT EXISTS sync_state (
+    key         TEXT PRIMARY KEY,
+    value       TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+
 -- Append-only audit log. Crash recovery replays from here.
 CREATE TABLE IF NOT EXISTS events (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
