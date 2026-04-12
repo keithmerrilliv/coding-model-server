@@ -148,6 +148,33 @@ Three-tier automatic context management:
 
 Manual compaction available via `/compact`.
 
+## Autonomous Mode
+
+A separate service mode where you submit a markdown spec and the system autonomously develops, tests, and presents software for your review.
+
+```bash
+# Submit a spec
+python qwen-autonomous submit spec.md
+
+# Watch progress
+python qwen-autonomous status <spec_id>
+
+# Review and approve gates
+python qwen-autonomous gates
+python qwen-autonomous review <gate_id> --approve
+
+# Check event log
+python qwen-autonomous events <spec_id>
+```
+
+**Pipeline:** Planner (q35_architect) → Architect → *design review gate* → Implementer → *code review gate* → Reviewer + tests → *release gate* → DONE
+
+**Human in the loop:** Every major transition requires your explicit approval — the system blocks at review gates until you approve or reject. Rejection notes feed back into the agent for a retry. If Jira is configured (`JIRA_*` env vars), gates sync to a Jira board with native email notifications so you can approve from anywhere.
+
+**Orchestrator daemon:** Runs as a separate systemd unit (`qwen-orchestrator.service`). Polls the SQLite task store, calls agents via the inference API, runs tests via subprocess. Independent of the interactive client.
+
+See `docs/PHASE2_TEST_PLAN.md` for the full manual test procedure.
+
 ## API
 
 The server exposes an OpenAI-compatible API. When `ADMIN_API_KEY` is set, all endpoints require an `X-Admin-Key` header.
@@ -159,6 +186,11 @@ The server exposes an OpenAI-compatible API. When `ADMIN_API_KEY` is set, all en
 - `POST /v1/memory/search` — Search RAG memory
 - `POST /v1/memory/ingest` — Ingest PDF into memory
 - `POST /v1/files/upload` — Upload file to server
+- `POST /v1/autonomous/specs` — Submit a markdown spec (autonomous mode)
+- `GET /v1/autonomous/specs` — List recent specs
+- `GET /v1/autonomous/specs/{id}` — Spec details with gates and events
+- `GET /v1/autonomous/gates` — List open review gates
+- `POST /v1/autonomous/gates/{id}/respond` — Approve or reject a gate
 
 ## Project Structure
 
@@ -180,8 +212,20 @@ qwen-server/
 │   ├── config.py          #   Configuration, constants
 │   ├── models.py          #   Agent theme management
 │   └── agentic/           #   RAG: scratchpad, planner, budget
+├── qwen_autonomous/       # Autonomous mode task store + agents
+│   ├── db.py              #   SQLite-backed task store (WAL, thread-safe)
+│   ├── models.py          #   Pydantic models (Spec, Task, Gate, Event)
+│   ├── schema.sql         #   DDL for specs, tasks, artifacts, gates, events
+│   ├── planner.py         #   Planner agent (spec → YAML or clarifications)
+│   ├── executor.py        #   Execution agents (architect/implementer/reviewer)
+│   ├── jira_client.py     #   Jira interface (FakeJiraClient + real Atlassian)
+│   └── jira_sync.py       #   Bidirectional sync (SQLite ↔ Jira)
+├── orchestrator_daemon.py # Autonomous mode coordinator (systemd)
+├── qwen-autonomous        # Autonomous mode CLI entry point
 ├── tools/                 # llama-server binary + shared libs
 ├── scraping/              # Apple documentation scraper
 └── docs/                  # Additional documentation
-    └── RAG_UPDATES.md     #   RAG database & query strategy changes
+    ├── TUTORIAL.md        #   10-stage pipeline tutorial
+    ├── PHASE2_TEST_PLAN.md #  Manual test plan for autonomous mode
+    └── SUMMARY.md         #   Changelog and optimization history
 ```
