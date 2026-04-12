@@ -191,6 +191,10 @@ class JiraSync:
             self._handle_gate_responded(event)
         elif kind == EventKind.PLANNER_RAN:
             self._handle_planner_ran(event)
+        elif kind == EventKind.AGENT_RAN:
+            self._handle_agent_ran(event)
+        elif kind == EventKind.TEST_RAN:
+            self._handle_test_ran(event)
         # Other event kinds (TASK_*, ARTIFACT_CREATED, DAEMON_TICK) are
         # intentionally ignored in 1c — Phase 2 wires them up when tasks
         # actually start executing.
@@ -296,6 +300,32 @@ class JiraSync:
         except Exception:
             payload = {}
         body = "**Planner ran**\n\n```json\n" + str(payload) + "\n```"
+        try:
+            self.client.add_comment(spec.jira_epic_key, body)
+        except Exception as e:
+            logger.warning("jira-sync: failed to comment on epic %s: %s",
+                           spec.jira_epic_key, e)
+
+    def _handle_agent_ran(self, event: Event) -> None:
+        """Comment on the spec epic when an execution agent completes."""
+        self._comment_on_epic(event, "Agent ran")
+
+    def _handle_test_ran(self, event: Event) -> None:
+        """Comment on the spec epic with test run results."""
+        self._comment_on_epic(event, "Tests ran")
+
+    def _comment_on_epic(self, event: Event, label: str) -> None:
+        if event.spec_id is None:
+            return
+        spec = self.db.get_spec(event.spec_id)
+        if spec is None or not spec.jira_epic_key:
+            return
+        try:
+            import json
+            payload = json.loads(event.payload_json) if event.payload_json else {}
+        except Exception:
+            payload = {}
+        body = f"**{label}**\n\n```json\n{payload}\n```"
         try:
             self.client.add_comment(spec.jira_epic_key, body)
         except Exception as e:

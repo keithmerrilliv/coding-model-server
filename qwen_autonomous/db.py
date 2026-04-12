@@ -292,6 +292,25 @@ class Database:
         ).fetchone()
         return row[0]
 
+    def increment_task_retry(self, task_id: str) -> None:
+        """Atomically bump retry_count for a task."""
+        now = utc_now()
+        with self.transaction() as conn:
+            conn.execute(
+                "UPDATE tasks SET retry_count = retry_count + 1, "
+                "updated_at = ? WHERE id = ?",
+                (_iso(now), task_id),
+            )
+
+    def list_tasks_for_spec_by_role(self, spec_id: str,
+                                     role: str) -> list[Task]:
+        rows = self._conn().execute(
+            "SELECT * FROM tasks WHERE spec_id = ? AND role = ? "
+            "ORDER BY created_at",
+            (spec_id, role),
+        ).fetchall()
+        return [_row_to_task(r) for r in rows]
+
     def update_task_status(self, task_id: str, status: TaskStatus) -> None:
         now = utc_now()
         started_clause = ""

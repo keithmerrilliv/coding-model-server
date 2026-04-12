@@ -69,6 +69,8 @@ class EventKind(str, Enum):
     GATE_CREATED = "gate_created"
     GATE_RESPONDED = "gate_responded"
     PLANNER_RAN = "planner_ran"
+    AGENT_RAN = "agent_ran"              # architect/implementer/reviewer completed
+    TEST_RAN = "test_ran"                # subprocess test execution completed
     DAEMON_TICK = "daemon_tick"          # heartbeat for liveness checks
 
 
