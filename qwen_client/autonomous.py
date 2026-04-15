@@ -22,6 +22,9 @@ from pathlib import Path
 from typing import Optional
 
 import requests
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 
 # ── Server config (mirrors qwen_client/config.py conventions) ────────────────

@@ -33,6 +33,11 @@ import signal
 import sys
 import time
 from datetime import datetime, timezone
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 from qwen_autonomous import (
     ArtifactKind,

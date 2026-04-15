@@ -10,6 +10,7 @@ check and what to do if something goes wrong.
 - [ ] The `.env` file has `ADMIN_API_KEY` set
 - [ ] The `.env` file has `JIRA_*` vars set (optional — if not set, Jira sync runs against the fake and gates are CLI-only)
 - [ ] `pyyaml` is installed in the venv (`pip install pyyaml` — needed by the daemon to parse plan YAML)
+- [ ] `pytest` is installed in the venv (`pip install pytest` — the reviewer runs `python3 -m pytest` against generated code; without it every spec dead-ends in the retry loop with "No module named pytest")
 - [ ] No model is currently loaded (or the server is idle) — the test will trigger multiple model swaps
 
 ## Test 1: Full happy path (spec → DONE)
@@ -72,7 +73,7 @@ python orchestrator_daemon.py
 ```bash
 cd ~/Dev/qwen-server
 source venv/bin/activate
-export ADMIN_API_KEY=<your key>
+export ADMIN_API_KEY=bCBL2KlWGMcgMmHuUdvA-3-uarEvGZh_TTOdnI98RZU
 python qwen-autonomous submit /tmp/test_spec.md
 ```
 
@@ -332,8 +333,55 @@ you'd used the CLI.
 | `No <<<DESIGN>>>` parse error | Agent didn't follow the output format | Check the spec clarity. Try a simpler spec. Check the raw response in the events log. |
 | `No <<<FILE:` parse error | Same — implementer didn't produce file blocks | Same remediation. The implementer system prompt is very explicit; this usually means the model was confused by the spec. |
 | Tests fail repeatedly | Generated code has real bugs | Check `test_output.txt` in the workspace. The test failures are real — the model wrote buggy code. After 3 retries it gives up. You can manually fix the code and re-submit. |
+| Tests fail but the code looks correct | **Reviewer wrote buggy tests.** The retry loop will blame the implementer and rewrite working code to match bad tests — a doom loop. Read `test_*.py` in the workspace critically before approving `release_approval`. See "Known pipeline gap" below. |
 | Jira sync doesn't fire | JIRA_URL/EMAIL/TOKEN not set or invalid | Check daemon startup logs for "Jira sync running with FakeJiraClient". Re-run the smoke test from Phase 1c. |
 | `yaml.safe_load` fails | Plan YAML is malformed | Check `plan.yaml` in the workspace. The planner occasionally produces invalid YAML. Reject the plan gate and let it retry. |
+
+---
+
+## Known pipeline gap: reviewer tests are not gated
+
+Observed during the first real Phase 2 run (spec_7b1c868d, word frequency counter):
+
+The pipeline gates the **implementer's output** (`code_review` gate) and the
+**final pass/fail verdict** (`release_approval` gate), but the **reviewer's
+test file itself is never reviewed**. The human only sees test results — not
+the test code.
+
+This is a real problem because the reviewer can write broken tests:
+
+- **Broken assertions**: e.g. asserting that `--top 10` returns 10 lines from
+  an input that only has 1 unique word (correct behavior: 1 line). The
+  implementer gets blamed and may rewrite correct code to match the bad test.
+- **Broken test harness code**: e.g. passing an `int` to `subprocess.run`'s
+  argv list, which raises `TypeError` before the CLI is even invoked. This
+  failure has nothing to do with the code under test, but the retry loop
+  cannot distinguish it from a real failure.
+
+When this happens:
+1. The reviewer writes N tests, some of them buggy.
+2. Tests "fail" — but some failures are in the test code itself.
+3. The orchestrator retries the implementer with `tests failed` feedback.
+4. The implementer rewrites correct code to match the broken tests, or
+   burns retries making no meaningful progress.
+5. After 3 retries the spec goes FAILED with working code that happened
+   to violate buggy tests.
+
+**Workaround for now:** before approving `release_approval`, open
+`test_*.py` in the workspace and read it. If you see broken tests, either:
+- Manually edit the test file and re-run pytest yourself, OR
+- Reject the `code_review` gate with a *narrowly scoped* note that
+  specifies only the real implementer bugs and explicitly says
+  "do NOT change anything else."
+- (Rejecting `release_approval` re-runs the implementer, not the reviewer,
+  so you cannot get fresh tests from that gate — only from a re-run of the
+  reviewer, which only happens after a new `code_review` approval.)
+
+**Proper fix (future work):** add a `test_review` gate between the
+reviewer's test generation and the pytest execution step, so the human
+can reject buggy tests before they poison the retry loop. Alternatively,
+make the reviewer's test output go through a second LLM pass (or a
+syntactic linter) that checks for obvious harness bugs before running.
 
 ---
 

@@ -7,6 +7,8 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
+User=keith-merrill
+Group=keith-merrill
 WorkingDirectory=/home/keith-merrill/Dev/qwen-server
 ExecStart=/home/keith-merrill/Dev/qwen-server/venv/bin/python server.py
 Restart=always

@@ -643,6 +643,10 @@ Update these after each retrieval step. They help you stay organized and efficie
         f'{TOOL_REFERENCE}'
     )
 
+    _REVIEWER_SYSTEM_PROMPT = (
+        f'You are a code reviewer. {EXECUTOR_PROMPT}\n\nIdentify issues and suggest improvements. You are encouraged to provide detailed advice and recommendations.\n\nCOMPREHENSIVE ANALYSIS: When performing code reviews, leverage multiple tools to understand the codebase thoroughly:\n\nGIT AWARENESS: Use Git via `<<<REMOTE_EXEC>>>` to understand code context:\n- `git log`, `git diff`, `git blame`, `git show`, `git status`\n\nFILE NAVIGATION: Use `<<<GLOB>>>` and `<<<GREP>>>` to find and search files.\n\nDOCUMENTATION - You can and should write/update documentation:\n- Use `<<<WRITE_FILE>>>` for NEW documentation files\n- Use `<<<EDIT_FILE>>>` for targeted updates to EXISTING docs (PREFERRED)\n\nEDIT_FILE FORMAT (use EXACTLY this format):\n<<<EDIT_FILE>>>/path/to/file\n<<<OLD>>>\nexact text to find\n<<<NEW>>>\nreplacement text\n\nWARNING: Do NOT use git-style markers like <<<<<<< SEARCH or ======= or >>>>>>> REPLACE. Use <<<OLD>>> and <<<NEW>>> only.\n\nAlways gather comprehensive context before providing your review.\n{GIT_TOOL_REFERENCE}'
+    )
+
     # MiniMax M2.5 generates garbled Unicode (triple-encoded U+FFFD from training
     # data corruption). Force ASCII-only diagrams to prevent hallucinated mojibake.
     _MINIMAX_UNICODE_GUARD = (
@@ -684,8 +688,14 @@ Update these after each retrieval step. They help you stay organized and efficie
         ),
         'reviewer': _create_agent_config(
             'Reviewer — Coder-30B Q8_0 (3B/30B MoE, 65K ctx, ngl=21, high precision)',
-            f'You are a code reviewer. {EXECUTOR_PROMPT}\n\nIdentify issues and suggest improvements. You are encouraged to provide detailed advice and recommendations.\n\nCOMPREHENSIVE ANALYSIS: When performing code reviews, leverage multiple tools to understand the codebase thoroughly:\n\nGIT AWARENESS: Use Git via `<<<REMOTE_EXEC>>>` to understand code context:\n- `git log`, `git diff`, `git blame`, `git show`, `git status`\n\nFILE NAVIGATION: Use `<<<GLOB>>>` and `<<<GREP>>>` to find and search files.\n\nDOCUMENTATION - You can and should write/update documentation:\n- Use `<<<WRITE_FILE>>>` for NEW documentation files\n- Use `<<<EDIT_FILE>>>` for targeted updates to EXISTING docs (PREFERRED)\n\nEDIT_FILE FORMAT (use EXACTLY this format):\n<<<EDIT_FILE>>>/path/to/file\n<<<OLD>>>\nexact text to find\n<<<NEW>>>\nreplacement text\n\nWARNING: Do NOT use git-style markers like <<<<<<< SEARCH or ======= or >>>>>>> REPLACE. Use <<<OLD>>> and <<<NEW>>> only.\n\nAlways gather comprehensive context before providing your review.\n{GIT_TOOL_REFERENCE}',
+            _REVIEWER_SYSTEM_PROMPT,
             _CODER_30B_HD,
+            executor=True
+        ),
+        'deep_reviewer': _create_agent_config(
+            'Reviewer — Qwen3.5-122B Q4_K_M (10B/122B MoE, 65K ctx, ngl=9, deep judgment)',
+            _REVIEWER_SYSTEM_PROMPT,
+            _QWEN35_122B,
             executor=True
         ),
         'debugger': _create_agent_config(
@@ -1200,9 +1210,22 @@ class LlamaServerManager:
 
     @staticmethod
     def _build_openai_messages(messages: List, system_prompt: str) -> List[dict]:
-        """Build OpenAI-format messages array from ChatMessage list + system prompt."""
+        """Build OpenAI-format messages array from ChatMessage list + system prompt.
+
+        If the caller already supplied a system message (autonomous mode sends
+        task-specific prompts with output-format markers the pipeline parses),
+        trust it and skip the server's agent-config system prompt. Injecting
+        both produces two system messages, which strict Jinja templates
+        (e.g. Qwen3.5-397B) reject with 'System message must be at the
+        beginning', and also confuses the model when the two prompts conflict.
+        """
+        def _role(m):
+            return m["role"] if isinstance(m, dict) else m.role
+
+        client_has_system = bool(messages) and _role(messages[0]) == "system"
+
         openai_msgs = []
-        if system_prompt:
+        if system_prompt and not client_has_system:
             openai_msgs.append({"role": "system", "content": system_prompt})
         for msg in messages:
             if isinstance(msg, dict):
@@ -1310,9 +1333,16 @@ CHATML_END = "<|im_end|>"
 
 
 def build_model_prompt(messages: List[ChatMessage], system_prompt: str, model_path: str) -> str:
-    """Build a ChatML-formatted prompt for Qwen models"""
+    """Build a ChatML-formatted prompt for Qwen models.
+
+    If the caller already supplied a system message (autonomous mode sends
+    its own role-specific prompts), trust it and skip the server's
+    agent-config system prompt. Otherwise two system blocks land in the
+    ChatML stream with conflicting instructions.
+    """
     parts = []
-    if system_prompt:
+    client_has_system = bool(messages) and messages[0].role == "system"
+    if system_prompt and not client_has_system:
         parts.append(f"{CHATML_START}system\n{system_prompt}{CHATML_END}\n")
 
     for msg in messages:

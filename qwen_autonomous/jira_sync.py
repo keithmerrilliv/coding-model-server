@@ -54,7 +54,7 @@ from qwen_autonomous import (
 )
 from qwen_autonomous.jira_client import (
     ISSUE_TYPE_EPIC,
-    ISSUE_TYPE_STORY,
+    ISSUE_TYPE_TASK,
     JiraClient,
     STATUS_CANCELLED,
     STATUS_DONE,
@@ -254,7 +254,7 @@ class JiraSync:
         issue_key = self.client.create_issue(
             summary=title,
             description=gate.prompt_md,
-            issue_type=ISSUE_TYPE_STORY,
+            issue_type=ISSUE_TYPE_TASK,
             parent_epic_key=parent_epic_key,
         )
         self.db.set_gate_jira_issue(gate.id, issue_key)

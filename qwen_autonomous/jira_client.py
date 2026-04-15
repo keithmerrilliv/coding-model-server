@@ -45,11 +45,24 @@ STATUS_DONE = "Done"
 STATUS_REJECTED = "Rejected"
 STATUS_CANCELLED = "Cancelled"
 
+# Fallback chain for workflows that don't define every logical status.
+# Default Jira Cloud workflows only have To Do / In Progress / Done, so
+# "In Review", "Rejected", and "Cancelled" have to collapse onto something
+# real. The chain is tried in order — first hit wins.
+STATUS_FALLBACKS: dict[str, list[str]] = {
+    STATUS_TODO: [STATUS_TODO],
+    STATUS_IN_PROGRESS: [STATUS_IN_PROGRESS],
+    STATUS_IN_REVIEW: [STATUS_IN_REVIEW, STATUS_IN_PROGRESS],
+    STATUS_DONE: [STATUS_DONE],
+    STATUS_REJECTED: [STATUS_REJECTED, STATUS_DONE],
+    STATUS_CANCELLED: [STATUS_CANCELLED, STATUS_DONE],
+}
+
 # Issue types
 ISSUE_TYPE_EPIC = "Epic"
 ISSUE_TYPE_STORY = "Story"
 ISSUE_TYPE_TASK = "Task"
-ISSUE_TYPE_SUBTASK = "Sub-task"
+ISSUE_TYPE_SUBTASK = "Subtask"
 
 
 # ── Plain data records ───────────────────────────────────────────────────────
@@ -290,8 +303,31 @@ class AtlassianApiJiraClient(JiraClient):
         return result["key"]
 
     def transition_issue(self, issue_key: str, target_status: str) -> None:
-        # atlassian-python-api exposes a transition by name helper
-        self._jira.set_issue_status(issue_key, target_status)
+        # `set_issue_status` resolves target names to transition IDs by
+        # walking available transitions, but returns None for names the
+        # workflow doesn't define — then the library explodes trying to
+        # POST None as the transition id. Resolve it ourselves so we can
+        # (a) fall back to a nearby status and (b) skip no-op transitions
+        # (Jira doesn't offer a self-loop and will reject them).
+        current = self._jira.get_issue_status(issue_key)
+        candidates = STATUS_FALLBACKS.get(target_status, [target_status])
+        if current in candidates:
+            return
+
+        transitions = self._jira.get_issue_transitions(issue_key)
+        by_target = {t["to"]: t["id"] for t in transitions}
+        for candidate in candidates:
+            if candidate in by_target:
+                self._jira.set_issue_status_by_transition_id(
+                    issue_key, by_target[candidate]
+                )
+                return
+
+        raise RuntimeError(
+            f"no usable transition for '{target_status}' "
+            f"(current={current}) on {issue_key}. "
+            f"Workflow offers: {sorted(by_target)}"
+        )
 
     def add_comment(self, issue_key: str, body: str) -> None:
         self._jira.issue_add_comment(issue_key, body)
