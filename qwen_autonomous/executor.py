@@ -21,7 +21,9 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shutil
 import subprocess
+import sys
 import textwrap
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -438,33 +440,130 @@ def build_reviewer_message(
 
 # ── Test runner ──────────────────────────────────────────────────────────────
 
-def run_tests(
-    spec_dir: Path,
-    framework: str = "pytest",
-    timeout: int = 120,
-) -> tuple[bool, str]:
-    """Run tests in the spec workspace via subprocess.
+def _sandbox_available() -> bool:
+    """True if we can sandbox test execution with bubblewrap on this host."""
+    return sys.platform.startswith("linux") and shutil.which("bwrap") is not None
 
-    Returns (passed, combined_output). The daemon uses the output to
-    build failure reports that get fed back to the implementer on retry.
+
+def _wrap_in_sandbox(cmd: list[str], spec_dir: Path) -> list[str]:
+    """Wrap `cmd` in a bubblewrap sandbox.
+
+    The sandbox denies the LLM-generated tests access to anything outside the
+    spec workspace:
+
+      - `--unshare-all` creates fresh user/ipc/pid/uts/cgroup/net namespaces,
+        so the tests cannot see host processes and have no network (not even
+        loopback).
+      - `/home` and `/root` are masked with tmpfs so secrets (`.env`, `.ssh`,
+        API tokens, browser profiles, etc.) are invisible.
+      - `/usr`, `/etc`, `/bin`, `/lib*`, `/opt` are bound read-only so Python
+        and pytest can still import system libraries.
+      - The venv holding the running Python + pytest is bound read-only.
+      - `spec_dir` is bound read-write so pytest can create `.pytest_cache`
+        and tests can write their own fixtures.
+      - `--clearenv` strips inherited env vars — tests see a minimal,
+        predictable environment.
+
+    Tests that legitimately need network or host access won't work under this
+    sandbox; set QWEN_ALLOW_UNSANDBOXED_TESTS=1 to opt out at your own risk.
     """
-    if framework in ("pytest", "python"):
-        cmd = ["python3", "-m", "pytest", "-v", "--tb=short", str(spec_dir)]
-    elif framework == "jest":
-        cmd = ["npx", "jest", "--no-coverage", "--roots", str(spec_dir)]
-    else:
-        # Default to pytest
-        cmd = ["python3", "-m", "pytest", "-v", "--tb=short", str(spec_dir)]
+    venv_root = Path(sys.executable).resolve().parent.parent
+    spec_abs = spec_dir.resolve()
+    return [
+        "bwrap",
+        "--die-with-parent",
+        "--new-session",
+        "--unshare-all",
+        "--clearenv",
+        "--setenv", "PATH", "/usr/local/bin:/usr/bin:/bin",
+        "--setenv", "HOME", "/tmp",
+        "--setenv", "LANG", "C.UTF-8",
+        "--setenv", "PYTHONUNBUFFERED", "1",
+        "--setenv", "PYTHONDONTWRITEBYTECODE", "1",
+        # Baseline filesystem — read-only
+        "--ro-bind", "/usr", "/usr",
+        "--ro-bind-try", "/lib", "/lib",
+        "--ro-bind-try", "/lib64", "/lib64",
+        "--ro-bind-try", "/lib32", "/lib32",
+        "--ro-bind-try", "/bin", "/bin",
+        "--ro-bind-try", "/sbin", "/sbin",
+        "--ro-bind-try", "/etc", "/etc",
+        "--ro-bind-try", "/opt", "/opt",
+        # Fresh kernel interfaces and writable tmp
+        "--proc", "/proc",
+        "--dev", "/dev",
+        "--tmpfs", "/tmp",
+        "--tmpfs", "/var/tmp",
+        # Hide every user home, then re-expose just what we need
+        "--tmpfs", "/home",
+        "--tmpfs", "/root",
+        "--ro-bind", str(venv_root), str(venv_root),
+        "--bind", str(spec_abs), str(spec_abs),
+        "--chdir", str(spec_abs),
+        "--",
+    ] + cmd
 
-    logger.info("running tests: %s (timeout=%ds)", " ".join(cmd), timeout)
+
+# Per-framework default timeouts (seconds). Swift/Xcode builds are slow,
+# especially cold, so their defaults are generous.
+DEFAULT_TIMEOUTS: dict[str, int] = {
+    "pytest": 120,
+    "python": 120,
+    "jest": 120,
+    "swift_test": 300,
+    "xcodebuild_test": 900,
+}
+
+MAC_RUNNER_URL = os.getenv("MAC_RUNNER_URL", "http://127.0.0.1:5050")
+MAC_RUNNER_API_KEY = os.getenv("MAC_RUNNER_API_KEY", "")
+
+# Relative paths inside spec_dir that should never be shipped to the Mac
+# runner as patch content (they're not part of the LLM's diff).
+_SPEC_SKIP_PATTERNS = (".pytest_cache", "__pycache__", ".DS_Store", "test_output.txt")
+
+
+def _run_local_tests(spec_dir: Path, framework: str, timeout: int) -> tuple[bool, str]:
+    """Run pytest/jest locally (bwrap sandbox on Linux).
+
+    LLM-generated test code runs inside a bubblewrap sandbox by default. If
+    bwrap is unavailable, the test run fails with a clear diagnostic unless
+    QWEN_ALLOW_UNSANDBOXED_TESTS is explicitly set.
+    """
+    if framework == "jest":
+        raw_cmd = ["npx", "jest", "--no-coverage", "--roots", str(spec_dir)]
+    else:
+        raw_cmd = [sys.executable, "-m", "pytest", "-v", "--tb=short", str(spec_dir)]
+
+    allow_unsandboxed = os.getenv("QWEN_ALLOW_UNSANDBOXED_TESTS", "").lower() in ("1", "true", "yes")
+
+    if _sandbox_available():
+        cmd = _wrap_in_sandbox(raw_cmd, spec_dir)
+        sandbox_mode = "bwrap"
+    elif allow_unsandboxed:
+        cmd = raw_cmd
+        sandbox_mode = "UNSANDBOXED (QWEN_ALLOW_UNSANDBOXED_TESTS=1)"
+        logger.warning(
+            "running LLM-generated tests WITHOUT a sandbox — tests have full "
+            "access to this user's environment"
+        )
+    else:
+        msg = (
+            "Refusing to run LLM-generated tests: bwrap (bubblewrap) is not "
+            "available and QWEN_ALLOW_UNSANDBOXED_TESTS is not set. Install "
+            "bubblewrap (e.g. `apt install bubblewrap` on Debian/Ubuntu) on "
+            "the Linux server, or set QWEN_ALLOW_UNSANDBOXED_TESTS=1 to opt "
+            "out (not recommended — tests run with the orchestrator's own "
+            "privileges)."
+        )
+        logger.error(msg)
+        return False, msg
+
+    logger.info("running tests via %s: %s (timeout=%ds)",
+                sandbox_mode, " ".join(raw_cmd), timeout)
 
     try:
         result = subprocess.run(
-            cmd,
-            cwd=spec_dir,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
+            cmd, cwd=spec_dir, capture_output=True, text=True, timeout=timeout,
         )
         output = result.stdout + "\n" + result.stderr
         passed = result.returncode == 0
@@ -475,6 +574,136 @@ def run_tests(
         output = f"Test runner failed: {type(e).__name__}: {e}"
         passed = False
 
+    return passed, output.strip()
+
+
+def _collect_patch_files(spec_dir: Path) -> tuple[list[dict], Optional[str]]:
+    """Enumerate spec_dir as UTF-8 patch files for the Mac runner.
+
+    Returns (patch_files, error). On binary-content encounter, returns
+    ([], error_message) so the caller can fail fast.
+    """
+    patch_files: list[dict] = []
+    spec_root = spec_dir.resolve()
+    for p in sorted(spec_root.rglob("*")):
+        if not p.is_file():
+            continue
+        rel = p.relative_to(spec_root).as_posix()
+        if any(skip in rel.split("/") for skip in _SPEC_SKIP_PATTERNS):
+            continue
+        try:
+            content = p.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            return [], f"non-UTF8 file in spec: {rel} (binary patches not supported)"
+        patch_files.append({"path": rel, "content": content})
+    return patch_files, None
+
+
+def _run_mac_runner_tests(
+    spec_dir: Path,
+    framework: str,
+    timeout: int,
+    *,
+    repo: Optional[str],
+    base_ref: str = "HEAD",
+    scheme: Optional[str] = None,
+    destination: Optional[str] = None,
+    configuration: Optional[str] = None,
+    workspace: Optional[str] = None,
+    project: Optional[str] = None,
+    filter: Optional[str] = None,
+) -> tuple[bool, str]:
+    """Dispatch swift_test / xcodebuild_test to the Mac runner over HTTP."""
+    if not MAC_RUNNER_API_KEY:
+        return False, (
+            "MAC_RUNNER_API_KEY is not set on the orchestrator. Configure "
+            "MAC_RUNNER_URL and MAC_RUNNER_API_KEY in ~/.config/qwen-server/.env "
+            "to dispatch Swift/Xcode tests to the Mac runner."
+        )
+    if not repo:
+        return False, (
+            f"{framework} requires a 'repo' (symbolic name registered in the "
+            f"Mac runner's repos.yml). Add it to the spec's test_strategy block."
+        )
+
+    patch_files, err = _collect_patch_files(spec_dir)
+    if err:
+        return False, err
+
+    payload: dict = {
+        "spec_id": spec_dir.name,
+        "repo": repo,
+        "base_ref": base_ref,
+        "patch_files": patch_files,
+        "framework": framework,
+        "timeout": timeout,
+    }
+    for key, val in (("scheme", scheme), ("destination", destination),
+                     ("configuration", configuration), ("workspace", workspace),
+                     ("project", project), ("filter", filter)):
+        if val is not None:
+            payload[key] = val
+
+    url = f"{MAC_RUNNER_URL.rstrip('/')}/v1/run_tests"
+    headers = {"X-Runner-Key": MAC_RUNNER_API_KEY}
+    # Give the HTTP call headroom beyond the test timeout so the runner can
+    # finish packaging the response even on a long run.
+    http_timeout = timeout + 30
+
+    logger.info("dispatching %s to mac-runner %s (timeout=%ds, %d files)",
+                framework, url, timeout, len(patch_files))
+    try:
+        resp = requests.post(url, json=payload, headers=headers, timeout=http_timeout)
+    except requests.RequestException as e:
+        return False, f"mac-runner unreachable at {url}: {e}"
+
+    if resp.status_code != 200:
+        return False, f"mac-runner HTTP {resp.status_code}: {resp.text[:2000]}"
+
+    try:
+        data = resp.json()
+    except ValueError:
+        return False, f"mac-runner returned non-JSON response: {resp.text[:2000]}"
+
+    return bool(data.get("passed")), str(data.get("output", ""))
+
+
+def run_tests(
+    spec_dir: Path,
+    framework: str = "pytest",
+    timeout: Optional[int] = None,
+    **framework_opts,
+) -> tuple[bool, str]:
+    """Run tests for a spec.
+
+    Dispatches by framework:
+      - pytest / python / jest   → local (bwrap sandbox on Linux)
+      - swift_test               → Mac runner HTTP dispatch; requires `repo`
+      - xcodebuild_test          → Mac runner HTTP dispatch; requires `repo` + `scheme`
+
+    framework_opts carries the framework-specific configuration from the
+    planner's test_strategy block (repo, base_ref, scheme, destination,
+    configuration, workspace, project, filter) — unknown keys are ignored.
+
+    Returns (passed, combined_output).
+    """
+    effective_timeout = timeout if timeout is not None else DEFAULT_TIMEOUTS.get(framework, 120)
+
+    if framework in ("swift_test", "xcodebuild_test"):
+        passed, output = _run_mac_runner_tests(
+            spec_dir, framework, effective_timeout,
+            repo=framework_opts.get("repo"),
+            base_ref=framework_opts.get("base_ref", "HEAD"),
+            scheme=framework_opts.get("scheme"),
+            destination=framework_opts.get("destination"),
+            configuration=framework_opts.get("configuration"),
+            workspace=framework_opts.get("workspace"),
+            project=framework_opts.get("project"),
+            filter=framework_opts.get("filter"),
+        )
+    else:
+        passed, output = _run_local_tests(spec_dir, framework, effective_timeout)
+
     logger.info("test result: %s (%d chars output)",
                 "PASS" if passed else "FAIL", len(output))
-    return passed, output.strip()
+    return passed, (output or "").strip()

@@ -12,3 +12,6 @@ tools.*.bak/
 appledeepdoc-mcp/
 scraping/output
 server_stats.csv
+
+# Mac-runner local caches (should never be in the repo)
+Library/Caches/qwen-runner/

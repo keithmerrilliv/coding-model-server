@@ -25,7 +25,7 @@ class Config:
         return {}
 
     # Command execution security settings
-    ALLOW_SHELL_MODE = os.getenv('ALLOW_SHELL_MODE', 'true').lower() == 'true'
+    ALLOW_SHELL_MODE = os.getenv('ALLOW_SHELL_MODE', 'false').lower() == 'true'
     COMMAND_WHITELIST = os.getenv('COMMAND_WHITELIST', '').split(',') if os.getenv('COMMAND_WHITELIST') else None
 
     # Permission mode: 'default' (prompt all), 'acceptEdits' (auto-approve file ops), 'yolo' (auto-approve all)

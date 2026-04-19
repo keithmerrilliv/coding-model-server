@@ -614,7 +614,15 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
     tests_passed = True
     test_output = ""
     if tests_required and result.test_files:
-        tests_passed, test_output = run_tests(spec_dir, framework=framework)
+        # Pass through framework-specific options from the planner's test_strategy
+        # (repo, scheme, destination, etc. for Swift/Xcode via the mac-runner).
+        framework_opts = {
+            k: v for k, v in test_strategy.items()
+            if k not in ("framework", "required")
+        }
+        tests_passed, test_output = run_tests(
+            spec_dir, framework=framework, **framework_opts,
+        )
         _write_artifact(spec_dir, "test_output.txt", test_output)
         db.record_event(EventKind.TEST_RAN, spec_id=spec.id, task_id=task.id,
                         payload={"passed": tests_passed,

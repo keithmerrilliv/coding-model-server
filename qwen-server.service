@@ -23,13 +23,27 @@ Environment="LD_LIBRARY_PATH=/usr/local/cuda-12.8/lib64"
 Environment="PATH=/usr/local/cuda-12.8/bin:/usr/local/bin:/usr/bin"
 Environment="PYTHONUNBUFFERED=1"
 
-# Model configuration (override in .env file)
+# Model configuration. Prefer ~/.config/qwen-server/.env (keeps secrets out of
+# the repo); repo-local .env is kept as a fallback during migration.
 EnvironmentFile=-/home/keith-merrill/Dev/qwen-server/.env
+EnvironmentFile=-%h/.config/qwen-server/.env
 
 # Resource limits
 LimitNOFILE=65536
 LimitMEMLOCK=infinity
 NoNewPrivileges=true
+
+# Security hardening — keep it light here because llama.cpp + CUDA need broad
+# syscall access. Tighten further (SystemCallFilter, MemoryDenyWriteExecute)
+# only after testing they don't break your GPU backend.
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
 
 # GPU access (device policy not available in user services)
 

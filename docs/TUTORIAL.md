@@ -87,10 +87,13 @@ curl -s http://localhost:5000/v1/chat/completions \
 ### 1.5 Configure Environment
 
 ```bash
-cp .env.example .env
-# Edit .env:
+mkdir -p ~/.config/qwen-server
+cp .env.example ~/.config/qwen-server/.env
+chmod 600 ~/.config/qwen-server/.env
+# Edit ~/.config/qwen-server/.env:
 #   PORT=5000
-#   HOST=0.0.0.0
+#   HOST=127.0.0.1          # 0.0.0.0 only if you need LAN access
+#   ADMIN_API_KEY=<generate with: python -c "import secrets; print(secrets.token_urlsafe(32))">
 ```
 
 ### 1.6 Start as a Service (Recommended)

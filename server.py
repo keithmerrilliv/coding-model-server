@@ -220,7 +220,7 @@ def _create_agent_config(description, system_prompt, model_config, executor=Fals
 
 class Config:
     PORT = int(os.getenv('PORT', 5000))
-    HOST = os.getenv('HOST', '0.0.0.0')
+    HOST = os.getenv('HOST', '127.0.0.1')
     ADMIN_API_KEY = os.getenv('ADMIN_API_KEY', '')
     INGEST_ALLOWED_DIR = os.getenv('INGEST_ALLOWED_DIR', '')
     
@@ -2172,7 +2172,19 @@ def stream_completion(messages: List[ChatMessage], system_prompt: str, model_pat
 
 
 if __name__ == "__main__":
+    import sys
     import uvicorn
+
+    # Refuse to start with no admin key unless explicitly opted out.
+    # Empty ADMIN_API_KEY previously left every admin endpoint open — combined
+    # with HOST=0.0.0.0 that meant a default install was fully unauthenticated.
+    if not Config.ADMIN_API_KEY and os.getenv('QWEN_ALLOW_UNAUTH', '').lower() not in ('1', 'true', 'yes'):
+        logger.error(
+            "ADMIN_API_KEY is not set. All admin endpoints would be unauthenticated. "
+            "Set ADMIN_API_KEY in ~/.config/qwen-server/.env, or set "
+            "QWEN_ALLOW_UNAUTH=1 to explicitly permit unauthenticated operation."
+        )
+        sys.exit(1)
 
     # Validate configuration
     errors = Config.validate()
