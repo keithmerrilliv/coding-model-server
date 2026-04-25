@@ -1,4 +1,6 @@
 """Agent task orchestrator — the core tool-calling loop."""
+import json
+import os
 import re
 import threading
 
@@ -23,6 +25,88 @@ def set_tool_functions(process_fn, extract_fn, execute_fn):
     _process_remote_commands = process_fn
     _extract_fallback_commands = extract_fn
     _execute_remote_command = execute_fn
+
+
+# ---------------------------------------------------------------------------
+# Native tool-calling (prototype)
+# ---------------------------------------------------------------------------
+# When QWEN_NATIVE_TOOLS=1 and the active model is in NATIVE_TOOLS_AGENTS,
+# we send an OpenAI `tools` array with the request and dispatch any returned
+# `tool_calls` instead of relying on <<<TAG>>> marker parsing. Only
+# REMOTE_EXEC has been migrated; every other tool still flows through markers.
+NATIVE_TOOLS_AGENTS = {"glm"}
+
+_REMOTE_EXEC_TOOL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "remote_exec",
+        "description": (
+            "Execute a shell command on the user's machine and return its "
+            "combined stdout/stderr. Use for filesystem inspection, builds, "
+            "tests, git operations, and other shell tasks. Do NOT use this "
+            "for writing files — use the marker-based EDIT_FILE / WRITE_FILE "
+            "tools for edits so diff preview and write-loop detection work."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "The exact shell command to execute.",
+                },
+            },
+            "required": ["command"],
+        },
+    },
+}
+
+
+def _native_tools_for(model: str):
+    """Return the native tools list for *model*, or None to disable.
+
+    Gated on QWEN_NATIVE_TOOLS=1 and the agent being in NATIVE_TOOLS_AGENTS.
+    """
+    if os.environ.get("QWEN_NATIVE_TOOLS") != "1":
+        return None
+    if model not in NATIVE_TOOLS_AGENTS:
+        return None
+    return [_REMOTE_EXEC_TOOL_SCHEMA]
+
+
+def _dispatch_native_tool_calls(tool_calls, agentic_ctx):
+    """Run each tool_call, return list of (tool_call_id, name, result) triples.
+
+    Only ``remote_exec`` is wired in this prototype; unknown names return an
+    error string so the model can recover. Increments the agentic budget once
+    per tool call to mirror marker-path accounting.
+    """
+    results = []
+    for tc in tool_calls:
+        tc_id = tc.get("id") or ""
+        fn = tc.get("function") or {}
+        name = fn.get("name") or ""
+        args_raw = fn.get("arguments") or "{}"
+        try:
+            args = json.loads(args_raw) if isinstance(args_raw, str) else (args_raw or {})
+        except json.JSONDecodeError as e:
+            results.append((tc_id, name,
+                            f"ERROR: malformed JSON arguments ({e}). Raw: {args_raw[:200]}"))
+            continue
+
+        if name == "remote_exec":
+            command = (args.get("command") or "").strip()
+            if not command:
+                results.append((tc_id, name, "ERROR: empty 'command' argument"))
+                continue
+            print_colored(f"\n[native tool] remote_exec: {command}", COLORS['CYAN'])
+            output = _execute_remote_command(command)
+            agentic_ctx.budget.increment()
+            results.append((tc_id, name, output if output is not None else "(no output)"))
+        else:
+            results.append((tc_id, name,
+                            f"ERROR: unknown tool '{name}'. Only remote_exec is wired for native tool-calling; "
+                            f"use marker-based tools (<<<EDIT_FILE>>>, <<<WRITE_FILE>>>, etc.) for everything else."))
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -167,7 +251,7 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                         "content": "TURN LIMIT REACHED. Provide your final answer now based on everything gathered so far.",
                     })
                     save_chat_history(history, model)
-                    synth_text, _ = get_completion(history, model, agent_theme)
+                    synth_text, _, _ = get_completion(history, model, agent_theme)
                     if synth_text:
                         history.append({"role": "assistant", "content": synth_text})
                         save_chat_history(history, model)
@@ -178,8 +262,11 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                 # ── Inject agentic context before completion ──
                 injection = agentic_ctx.get_pre_completion_injection()
 
-                response_text, finish_reason = get_completion(
-                    history, model, agent_theme, agentic_context=injection
+                native_tools = _native_tools_for(model)
+                response_text, finish_reason, tool_calls = get_completion(
+                    history, model, agent_theme, agentic_context=injection,
+                    tools=native_tools,
+                    tool_choice="auto" if native_tools else None,
                 )
                 if response_text is None:
                     consecutive_errors += 1
@@ -217,7 +304,7 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                     })
                     save_chat_history(history, model)
 
-                    cont_text, finish_reason = get_completion(history, model, agent_theme)
+                    cont_text, finish_reason, _ = get_completion(history, model, agent_theme)
                     if cont_text is None:
                         task_aborted = True
                         break
@@ -243,8 +330,35 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                     history.append({"role": "assistant", "content": aggregated_response})
                     save_chat_history(history, model)
                 else:
-                    history.append({"role": "assistant", "content": response_text})
+                    assistant_msg = {"role": "assistant", "content": response_text}
+                    if tool_calls:
+                        assistant_msg["tool_calls"] = tool_calls
+                    history.append(assistant_msg)
                     save_chat_history(history, model)
+
+                # ── Native tool_calls dispatch ──
+                # When the model emitted OpenAI-shape tool_calls (only enabled
+                # when QWEN_NATIVE_TOOLS=1 + agent in NATIVE_TOOLS_AGENTS),
+                # dispatch them and feed results back as role:"tool" messages.
+                # Skip marker parsing entirely for this turn.
+                if tool_calls:
+                    print_colored(
+                        f"\n[native tools] {len(tool_calls)} call(s) — dispatching... "
+                        f"[{agentic_ctx.budget.current}/{agentic_ctx.budget.max_iterations}]",
+                        COLORS['CYAN']
+                    )
+                    results = _dispatch_native_tool_calls(tool_calls, agentic_ctx)
+                    for tc_id, name, output in results:
+                        history.append({
+                            "role": "tool",
+                            "tool_call_id": tc_id,
+                            "name": name,
+                            "content": output if isinstance(output, str) else str(output),
+                        })
+                    save_chat_history(history, model)
+                    task_commands_executed = True
+                    nudge_count = 0
+                    continue
 
                 # ── Response-level loop detection ──
                 # Catches loops where the model generates the same response repeatedly,
@@ -269,7 +383,7 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                         ),
                     })
                     save_chat_history(history, model)
-                    synth_text, _ = get_completion(history, model, agent_theme)
+                    synth_text, _, _ = get_completion(history, model, agent_theme)
                     if synth_text:
                         history.append({"role": "assistant", "content": synth_text})
                         save_chat_history(history, model)
@@ -350,7 +464,7 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                                 ),
                             })
                             save_chat_history(history, model)
-                            synth_text, _ = get_completion(history, model, agent_theme)
+                            synth_text, _, _ = get_completion(history, model, agent_theme)
                             if synth_text:
                                 history.append({"role": "assistant", "content": synth_text})
                                 save_chat_history(history, model)

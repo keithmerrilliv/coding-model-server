@@ -44,15 +44,25 @@ logger = logging.getLogger(__name__)
 # ============================================================================ 
 
 class ChatMessage(BaseModel):
-    """A single message in the chat conversation"""
-    role: Literal["system", "user", "assistant"]
-    content: str
+    """A single message in the chat conversation.
+
+    Supports OpenAI tool-calling shape: assistant messages may carry
+    `tool_calls`, and tool-result turns use role='tool' with `tool_call_id`.
+    """
+    role: Literal["system", "user", "assistant", "tool"]
+    content: Optional[str] = None
+    name: Optional[str] = None
+    tool_call_id: Optional[str] = None
+    tool_calls: Optional[List[Dict[str, Any]]] = None
 
     @field_validator('content')
     @classmethod
-    def content_not_empty(cls, v: str) -> str:
-        if not v or not v.strip():
-            raise ValueError('content cannot be empty')
+    def content_not_empty(cls, v: Optional[str]) -> Optional[str]:
+        # Empty content is permitted for assistant turns that carry only tool_calls.
+        if v is None:
+            return v
+        if not v.strip():
+            raise ValueError('content cannot be empty when provided')
         return v
 
 
@@ -63,6 +73,9 @@ class ChatCompletionRequest(BaseModel):
     stream: bool = False
     max_tokens: int = Field(default=16384, ge=1, le=524288)
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
+    tools: Optional[List[Dict[str, Any]]] = None
+    tool_choice: Optional[Any] = None  # str ("auto"|"none"|"required") or {"type":"function","function":{"name":...}}
+    parallel_tool_calls: Optional[bool] = None
 
     @field_validator('messages')
     @classmethod
@@ -202,8 +215,16 @@ def _create_model_config(path_env, path_default, n_gpu_layers, n_ctx=32768, n_ba
 
 
 
-def _create_agent_config(description, system_prompt, model_config, executor=False):
-    """Helper function to create standardized agent configurations"""
+def _create_agent_config(description, system_prompt, model_config, executor=False,
+                         system_prompt_native_tools=None):
+    """Helper function to create standardized agent configurations.
+
+    ``system_prompt_native_tools`` is an optional alternative system prompt that
+    the chat handler swaps in when the request carries an OpenAI ``tools``
+    array. Use it to drop marker-format guidance for tools that have been
+    migrated to native function-calls (otherwise the marker docs collide with
+    the schema and the model emits malformed hybrids).
+    """
     config = {
         'description': description,
         'system_prompt': system_prompt,
@@ -211,6 +232,8 @@ def _create_agent_config(description, system_prompt, model_config, executor=Fals
     }
     if executor:
         config['executor'] = True
+    if system_prompt_native_tools is not None:
+        config['system_prompt_native_tools'] = system_prompt_native_tools
     return config
 
 
@@ -615,6 +638,45 @@ Update these after each retrieval step. They help you stay organized and efficie
         f'You are an implementer. {EXECUTOR_PROMPT}\n\nCOMPREHENSIVE IMPLEMENTATION: When implementing tasks, leverage multiple tools to understand the codebase thoroughly:\n\nEXECUTION ENVIRONMENT: You are running on a macOS environment with full access to development tools.\n- Use `<<<REMOTE_EXEC>>>` for ALL shell commands (including Xcode tools, Git, file operations).\n- Do NOT distinguish between "server" and "client". Everything runs locally.\n\nFILE OPERATIONS:\n- Use `<<<GLOB>>>` to find files: `<<<GLOB>>>**/*.swift`\n- Use `<<<GREP>>>` to search code: `<<<GREP>>>TODO|src/`\n- Use `<<<LIST_DIR>>>` to explore directories\n- Use `<<<READ_FILE>>>` to read file contents\n- Use `<<<WRITE_FILE>>>` for new files or complete rewrites\n- Use `<<<EDIT_FILE>>>` for targeted changes to existing files (PREFERRED)\n\nGIT AWARENESS: Use Git via `<<<REMOTE_EXEC>>>` to understand code context:\n- `git log`, `git diff`, `git blame`, `git show`, `git status`\n\nAPPLE DEVELOPMENT via `<<<REMOTE_EXEC>>>`:\n- Compile Swift: `swiftc file.swift -o output`\n- Compile Metal: `xcrun -sdk macosx metal -c shader.metal -o shader.air`\n- Build Xcode: `xcodebuild -project Foo.xcodeproj -scheme Foo build`\n\n{TOOL_REFERENCE}'
     )
 
+    # Tools-aware variant — used when the request carries a `tools` array.
+    # Drops <<<REMOTE_EXEC>>> marker docs (the model should call the
+    # remote_exec function directly via the OpenAI tools interface) and keeps
+    # marker docs only for the tools that have NOT been migrated yet.
+    _IMPLEMENTER_NATIVE_TOOLS_SYSTEM_PROMPT = (
+        'You are an implementer working on a macOS development environment with '
+        'full access to development tools, source files, and Git. Take action '
+        '— never just describe what you would do.\n\n'
+        'TOOL CONVENTIONS — this session uses TWO interfaces:\n\n'
+        '1) FUNCTION CALL (use the OpenAI tools interface — do NOT emit these as text):\n'
+        '   - `remote_exec(command)` — execute any shell command (builds, tests, '
+        'git, ls, grep, sips, xcodebuild, swiftc, etc.). Call this through the '
+        'function-call interface. NEVER write `<<<REMOTE_EXEC>>>` as text — that '
+        'marker is deprecated for this session.\n\n'
+        '2) INLINE MARKERS (emit these tags directly in your response text):\n'
+        '   - `<<<READ_FILE>>>path` — read a file\n'
+        '   - `<<<LIST_DIR>>>path` — list a directory\n'
+        '   - `<<<GLOB>>>**/*.swift` — find files by pattern\n'
+        '   - `<<<GREP>>>pattern|path` — search code\n'
+        '   - `<<<WRITE_FILE>>>path\\ncontent` — create or rewrite a file\n'
+        '   - `<<<EDIT_FILE>>>path\\n<<<OLD>>>existing\\n<<<NEW>>>replacement` — '
+        'targeted edit (PREFERRED for changes to existing files)\n'
+        '   - `<<<SAVE_MEMORY>>>note` — record a finding\n\n'
+        'RULES:\n'
+        '- Shell commands → call `remote_exec` (function call). Never the marker.\n'
+        '- File modification → use `<<<EDIT_FILE>>>` (preferred) or `<<<WRITE_FILE>>>`. '
+        'NEVER modify files via `remote_exec` (no `python -c`, `sed -i`, heredocs, '
+        '`>` redirects). Shell-based file edits bypass diff preview, write-loop '
+        'detection, and checkpoints.\n'
+        '- File inspection → prefer `<<<GLOB>>>` / `<<<GREP>>>` over shell `find` / `grep` (faster, cleaner output).\n'
+        '- After writing files, call `remote_exec` to verify (build, run tests).\n'
+        '- Every response must produce at least one tool call (function or marker).\n'
+        '- Never ask for permission. You have full file access.\n\n'
+        'WORKING MEMORY (optional but encouraged for multi-step tasks):\n'
+        '<<<SCRATCHPAD>>>\nFACTS:\n- key findings\nOPEN_QUESTIONS:\n- what you still need\n\n'
+        '<<<PLAN>>>\nGOAL: ...\nSTEPS:\n1. [ ] first\n2. [ ] second\nCURRENT: 1\n\n'
+        '<<<CONFIDENCE>>>0-100\n'
+    )
+
     _ARCHITECT_SYSTEM_PROMPT = (
         f'You are a system architect. {EXECUTOR_PROMPT}\n\n'
         'ROLE: You DESIGN systems and PLAN implementations. You do NOT write large amounts '
@@ -753,7 +815,8 @@ Update these after each retrieval step. They help you stay organized and efficie
             'Implementer — GLM-4.7-Flash Q4_K_M (3B/30B MoE, 262K ctx, ngl=47, Zhipu AI)',
             _IMPLEMENTER_SYSTEM_PROMPT,
             _GLM47_FLASH,
-            executor=True
+            executor=True,
+            system_prompt_native_tools=_IMPLEMENTER_NATIVE_TOOLS_SYSTEM_PROMPT,
         ),
     }
 
@@ -1077,7 +1140,10 @@ class LlamaServerManager:
     def proxy_stream(self, messages: List[dict], system_prompt: str,
                      model_id: str, max_tokens: int, temperature: float,
                      model_config: dict = None,
-                     est_prompt_tokens: int = 0) -> Iterator[str]:
+                     est_prompt_tokens: int = 0,
+                     tools: Optional[List[Dict[str, Any]]] = None,
+                     tool_choice: Optional[Any] = None,
+                     parallel_tool_calls: Optional[bool] = None) -> Iterator[str]:
         """Stream a chat completion via the llama-server subprocess."""
         self.last_request_time = time.time()
 
@@ -1103,6 +1169,16 @@ class LlamaServerManager:
             # Each model config specifies which tokens to ban via logit_bias.
             "logit_bias": (model_config or {}).get('logit_bias', []),
         }
+        if tools:
+            payload["tools"] = tools
+            # The chatml/logit_bias workaround for marker-only models bans the
+            # very tokens (<tool_call>, etc.) that native tool-calling needs to
+            # emit. Drop the bias when the caller opts into native tools.
+            payload["logit_bias"] = []
+        if tool_choice is not None:
+            payload["tool_choice"] = tool_choice
+        if parallel_tool_calls is not None:
+            payload["parallel_tool_calls"] = parallel_tool_calls
 
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
         finish_reason = None
@@ -1137,10 +1213,15 @@ class LlamaServerManager:
                         if fr:
                             finish_reason = fr
 
-                        # Also check for tool_calls that might not be in content
-                        if delta.get("tool_calls"):
-                            logger.warning("llama-server returned tool_calls in delta (not proxied): %s",
-                                           json.dumps(delta["tool_calls"]))
+                        # Proxy native tool_calls deltas straight through. Each
+                        # delta carries a partial slice (function name, then
+                        # incremental argument JSON) keyed by index so the
+                        # client reassembles parallel calls.
+                        tc = delta.get("tool_calls")
+                        if tc:
+                            self.last_request_time = time.time()
+                            out_chunk = build_stream_chunk(completion_id, model_id, tool_calls=tc)
+                            yield f"data: {json.dumps(out_chunk)}\n\n"
 
                         if content:
                             accumulated_text.append(content)
@@ -1179,7 +1260,10 @@ class LlamaServerManager:
 
     def proxy_sync(self, messages: List[dict], system_prompt: str,
                    model_id: str, max_tokens: int, temperature: float,
-                   model_config: dict = None) -> dict:
+                   model_config: dict = None,
+                   tools: Optional[List[Dict[str, Any]]] = None,
+                   tool_choice: Optional[Any] = None,
+                   parallel_tool_calls: Optional[bool] = None) -> dict:
         """Synchronous chat completion via the llama-server subprocess."""
         self.last_request_time = time.time()
 
@@ -1194,19 +1278,30 @@ class LlamaServerManager:
             "repeat_last_n": (model_config or {}).get('repeat_last_n', 256),
             "logit_bias": (model_config or {}).get('logit_bias', []),
         }
+        if tools:
+            payload["tools"] = tools
+            payload["logit_bias"] = []
+        if tool_choice is not None:
+            payload["tool_choice"] = tool_choice
+        if parallel_tool_calls is not None:
+            payload["parallel_tool_calls"] = parallel_tool_calls
 
         resp = http_requests.post(url, json=payload, timeout=600)
         if resp.status_code != 200:
             raise HTTPException(status_code=502, detail=f"llama-server error: {resp.text}")
 
         result = resp.json()
-        text = result["choices"][0]["message"]["content"]
+        message = result["choices"][0].get("message", {})
+        text = message.get("content") or ""
         text = strip_thinking(text)
+        tool_calls = message.get("tool_calls")
         finish_reason = result["choices"][0].get("finish_reason", "stop")
         usage = result.get("usage", {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
 
         self.last_request_time = time.time()
-        return build_completion_response(model_id, text, usage, finish_reason=finish_reason)
+        return build_completion_response(model_id, text, usage,
+                                         finish_reason=finish_reason,
+                                         tool_calls=tool_calls)
 
     @staticmethod
     def _build_openai_messages(messages: List, system_prompt: str) -> List[dict]:
@@ -1227,11 +1322,31 @@ class LlamaServerManager:
         openai_msgs = []
         if system_prompt and not client_has_system:
             openai_msgs.append({"role": "system", "content": system_prompt})
+
+        def _get(m, key, default=None):
+            if isinstance(m, dict):
+                return m.get(key, default)
+            return getattr(m, key, default)
+
         for msg in messages:
-            if isinstance(msg, dict):
-                openai_msgs.append({"role": msg["role"], "content": msg["content"]})
-            else:
-                openai_msgs.append({"role": msg.role, "content": msg.content})
+            role = _get(msg, "role")
+            content = _get(msg, "content")
+            built = {"role": role, "content": content if content is not None else ""}
+            # Preserve OpenAI tool-calling fields when present.
+            tool_calls = _get(msg, "tool_calls")
+            if tool_calls:
+                built["tool_calls"] = tool_calls
+                # Assistant turns that carry tool_calls may have null content;
+                # llama-server tolerates content="" but some templates require null.
+                if not content:
+                    built["content"] = None
+            tool_call_id = _get(msg, "tool_call_id")
+            if tool_call_id:
+                built["tool_call_id"] = tool_call_id
+            name = _get(msg, "name")
+            if name:
+                built["name"] = name
+            openai_msgs.append(built)
         return openai_msgs
 
 
@@ -1346,7 +1461,7 @@ def build_model_prompt(messages: List[ChatMessage], system_prompt: str, model_pa
         parts.append(f"{CHATML_START}system\n{system_prompt}{CHATML_END}\n")
 
     for msg in messages:
-        parts.append(f"{CHATML_START}{msg.role}\n{msg.content}{CHATML_END}\n")
+        parts.append(f"{CHATML_START}{msg.role}\n{msg.content or ''}{CHATML_END}\n")
 
     parts.append(f"{CHATML_START}assistant\n")
     return "".join(parts)
@@ -1433,8 +1548,12 @@ def calculate_token_budget(model, messages: List, system_prompt: str, model_path
 # ============================================================================ 
 
 def build_completion_response(model_id: str, text: str, usage: Dict[str, int],
-                              finish_reason: str = "stop") -> Dict[str, Any]:
+                              finish_reason: str = "stop",
+                              tool_calls: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     """Build OpenAI-compatible completion response"""
+    message: Dict[str, Any] = {"role": "assistant", "content": text}
+    if tool_calls:
+        message["tool_calls"] = tool_calls
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
         "object": "chat.completion",
@@ -1442,10 +1561,7 @@ def build_completion_response(model_id: str, text: str, usage: Dict[str, int],
         "model": model_id,
         "choices": [{
             "index": 0,
-            "message": {
-                "role": "assistant",
-                "content": text
-            },
+            "message": message,
             "finish_reason": finish_reason
         }],
         "usage": {
@@ -1457,10 +1573,21 @@ def build_completion_response(model_id: str, text: str, usage: Dict[str, int],
 
 
 def build_stream_chunk(completion_id: str, model_id: str, content: Optional[str] = None,
-                       finish: bool = False, finish_reason: Optional[str] = None) -> Dict[str, Any]:
-    """Build OpenAI-compatible streaming chunk"""
+                       finish: bool = False, finish_reason: Optional[str] = None,
+                       tool_calls: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    """Build OpenAI-compatible streaming chunk.
+
+    `tool_calls` is the raw `delta.tool_calls` array from llama-server (list of
+    {index, id?, type?, function:{name?, arguments?}} dicts) — passed through
+    untouched so the client can reassemble parallel calls by index.
+    """
     if finish and not finish_reason:
         finish_reason = "stop"
+    delta: Dict[str, Any] = {}
+    if content:
+        delta["content"] = content
+    if tool_calls:
+        delta["tool_calls"] = tool_calls
     return {
         "id": completion_id,
         "object": "chat.completion.chunk",
@@ -1468,7 +1595,7 @@ def build_stream_chunk(completion_id: str, model_id: str, content: Optional[str]
         "model": model_id,
         "choices": [{
             "index": 0,
-            "delta": {"content": content} if content else {},
+            "delta": delta,
             "finish_reason": finish_reason if finish else None
         }]
     }
@@ -1926,11 +2053,22 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
             )
 
         agent_config = Config.AGENTS[request.model]
-        system_prompt = agent_config['system_prompt']
+        # Swap in the tools-aware system prompt when the request supplies a
+        # tools array AND the agent has a variant defined. Marker docs in the
+        # default prompt collide with the OpenAI tools schema and produce
+        # malformed marker/native hybrids if both arrive together.
+        if request.tools and agent_config.get('system_prompt_native_tools'):
+            system_prompt = agent_config['system_prompt_native_tools']
+        else:
+            system_prompt = agent_config['system_prompt']
 
         # Few-shot: inject format examples only for short conversations
-        # (once the model has seen enough real exchanges, the examples waste tokens)
-        if agent_config.get('executor') and Config.FEW_SHOT and len(request.messages) <= 4:
+        # (once the model has seen enough real exchanges, the examples waste tokens).
+        # Skip when the caller supplied native tools — the few-shot teaches
+        # marker format (<<<GLOB>>>, ...) and would actively contradict the
+        # tools schema, leading the model to emit malformed marker/native hybrids.
+        if (agent_config.get('executor') and Config.FEW_SHOT
+                and len(request.messages) <= 4 and not request.tools):
             few_shot_msgs = [ChatMessage(role=m['role'], content=m['content']) for m in Config.FEW_SHOT]
             request.messages = few_shot_msgs + list(request.messages)
 
@@ -1956,13 +2094,23 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
         model_config = agent_config['model_config']
         model_path = model_config['path']
 
+        # Native tool-calling is only wired through the llama-server subprocess
+        # backend in this prototype. The in-process llama_cpp path would need a
+        # separate Jinja-aware integration.
+        if request.tools and model_config.get('backend') != 'llama_server':
+            raise HTTPException(
+                status_code=400,
+                detail=(f"Native tools (request.tools) only supported on llama_server backend; "
+                        f"agent '{request.model}' uses {model_config.get('backend','llama_cpp')}.")
+            )
+
         # Route by backend
         if model_config.get('backend') == 'llama_server':
             # llama-server subprocess backend
             llama_server_manager.ensure_running(model_config)
 
             # Estimate token budget (no local model to tokenize with)
-            prompt_text = system_prompt + ''.join(m.content for m in request.messages)
+            prompt_text = system_prompt + ''.join((m.content or '') for m in request.messages)
             est_prompt_tokens = int(len(prompt_text) / 3.5)
             n_ctx = model_config.get('n_ctx', 32768)
             available = max(n_ctx - est_prompt_tokens, 1)
@@ -1982,7 +2130,9 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
                     llama_server_manager.proxy_stream(
                         request.messages, augmented_system, request.model,
                         clamped_max, request.temperature, model_config=model_config,
-                        est_prompt_tokens=est_prompt_tokens),
+                        est_prompt_tokens=est_prompt_tokens,
+                        tools=request.tools, tool_choice=request.tool_choice,
+                        parallel_tool_calls=request.parallel_tool_calls),
                     media_type="text/event-stream"
                 )
             else:
@@ -1992,7 +2142,9 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
                     None,
                     lambda: llama_server_manager.proxy_sync(
                         request.messages, augmented_system, request.model,
-                        clamped_max, request.temperature, model_config=model_config)
+                        clamped_max, request.temperature, model_config=model_config,
+                        tools=request.tools, tool_choice=request.tool_choice,
+                        parallel_tool_calls=request.parallel_tool_calls)
                 )
         else:
             # Standard llama_cpp path

@@ -73,8 +73,11 @@ def _compress_history(messages, keep_recent=6, summary_len=200):
 
     for i, msg in enumerate(messages):
         if i < cutoff:
-            content = msg["content"]
-            is_tool_output = content.startswith("Tool output:\n")
+            content = msg.get("content") or ""
+            is_tool_output = (
+                content.startswith("Tool output:\n")
+                or msg.get("role") == "tool"
+            )
             threshold = 500 if is_tool_output else 2000
 
             if len(content) > threshold:
@@ -90,12 +93,18 @@ def _compress_history(messages, keep_recent=6, summary_len=200):
 # Main completion function
 # ---------------------------------------------------------------------------
 
-def get_completion(history, model, agent_theme, agentic_context=None):
+def get_completion(history, model, agent_theme, agentic_context=None,
+                   tools=None, tool_choice=None):
     """Get a streaming completion from the server.
 
-    Returns ``(response_text, finish_reason)`` on success, or
-    ``(None, None)`` on failure.  ``finish_reason`` is ``"stop"`` for
-    normal completion, ``"length"`` for truncation.
+    Returns ``(response_text, finish_reason, tool_calls)`` on success, or
+    ``(None, None, None)`` on failure.  ``finish_reason`` is ``"stop"`` for
+    normal completion, ``"length"`` for truncation, ``"tool_calls"`` when
+    the model emitted a native tool invocation.
+
+    ``tool_calls`` is a list of OpenAI-shape dicts (``{id, type, function:{
+    name, arguments}}``) reassembled from streaming deltas, or ``None`` when
+    the model did not call any tools.
 
     If *agentic_context* is provided it is appended as an additional user
     message in the **sanitized copy only** — the actual *history* list is
@@ -104,16 +113,36 @@ def get_completion(history, model, agent_theme, agentic_context=None):
     full_response = ""
     finish_reason = "stop"
     server_error_occurred = False
+    tool_calls_acc = {}  # index -> {id, type, function:{name, arguments}}
 
-    # Sanitize history — strip internal flags, filter invalid messages
+    # Sanitize history — strip internal flags, filter invalid messages.
+    # "tool" messages are valid OpenAI roles for tool-result turns; assistant
+    # messages may carry only tool_calls (empty content), so do not require
+    # content for assistant or tool turns.
     sanitized_history = []
-    valid_roles = {"system", "user", "assistant"}
+    valid_roles = {"system", "user", "assistant", "tool"}
 
     for msg in history:
-        content = msg.get("content", "").strip()
         role = msg.get("role", "")
-        if content and role in valid_roles:
-            sanitized_history.append({"role": role, "content": content})
+        if role not in valid_roles:
+            continue
+        content = (msg.get("content") or "").strip()
+        has_tool_calls = bool(msg.get("tool_calls"))
+        # Drop empty messages unless they carry tool_calls (assistant) or
+        # are a tool-result turn (which always needs to ride along even if
+        # the command had empty stdout — content="(no output)" upstream).
+        if not content and not has_tool_calls and role != "tool":
+            continue
+        out = {"role": role, "content": content}
+        if has_tool_calls:
+            out["tool_calls"] = msg["tool_calls"]
+            if not content:
+                out["content"] = None
+        if msg.get("tool_call_id"):
+            out["tool_call_id"] = msg["tool_call_id"]
+        if msg.get("name"):
+            out["name"] = msg["name"]
+        sanitized_history.append(out)
 
     if not sanitized_history:
         sanitized_history.append({"role": "user", "content": "Hello"})
@@ -131,6 +160,10 @@ def get_completion(history, model, agent_theme, agentic_context=None):
         "stream": True,
         "max_tokens": 30000,
     }
+    if tools:
+        payload["tools"] = tools
+    if tool_choice is not None:
+        payload["tool_choice"] = tool_choice
 
     # Progress tracking
     start_time = time.time()
@@ -204,7 +237,7 @@ def get_completion(history, model, agent_theme, agentic_context=None):
                     progress_thread.start()
                     continue
                 print_colored(f"\nError: {error_text}", COLORS['FAIL'])
-                return None, None
+                return None, None, None
 
             # ── TTFT watchdog ──
             # iter_lines() blocks during the entire prefill stage waiting for the
@@ -257,6 +290,28 @@ def get_completion(history, model, agent_theme, agentic_context=None):
                                         print(content, end="", flush=True)
                                         full_response += content
                                         chunk_count += 1
+                                    # Native tool_calls arrive as indexed deltas:
+                                    # {index, id?, type?, function:{name?, arguments?}}.
+                                    # Reassemble by index so parallel calls stay separate.
+                                    for tc in delta.get("tool_calls") or []:
+                                        if not first_token_time:
+                                            first_token_time = time.time()
+                                            stop_progress.set()
+                                        idx = tc.get("index", 0)
+                                        slot = tool_calls_acc.setdefault(
+                                            idx, {"id": "", "type": "function",
+                                                  "function": {"name": "", "arguments": ""}}
+                                        )
+                                        if "id" in tc:
+                                            slot["id"] = tc["id"]
+                                        if "type" in tc:
+                                            slot["type"] = tc["type"]
+                                        fn = tc.get("function", {})
+                                        if "name" in fn:
+                                            slot["function"]["name"] += fn["name"]
+                                        if "arguments" in fn:
+                                            slot["function"]["arguments"] += fn["arguments"]
+                                        chunk_count += 1
                                     if choice.get("finish_reason"):
                                         finish_reason = choice["finish_reason"]
                                 elif "error" in data:
@@ -283,7 +338,7 @@ def get_completion(history, model, agent_theme, agentic_context=None):
                     finish_reason = "interrupted"
                     break
                 else:
-                    return None, None
+                    return None, None, None
             except (requests.exceptions.ChunkedEncodingError, urllib3.exceptions.ProtocolError):
                 # Watchdog killed the connection on TTFT timeout — abort cleanly
                 # rather than retrying (the underlying issue is server-side).
@@ -298,7 +353,7 @@ def get_completion(history, model, agent_theme, agentic_context=None):
                         "  Check `top`, `free -h`, and `nvidia-smi` on the server.",
                         COLORS['FAIL']
                     )
-                    return None, None
+                    return None, None, None
                 # Real connection drop — bubble to outer handler which retries
                 raise
 
@@ -324,7 +379,7 @@ def get_completion(history, model, agent_theme, agentic_context=None):
                 progress_thread = threading.Thread(target=show_progress, daemon=True)
                 progress_thread.start()
                 continue
-            return None, None
+            return None, None, None
         except (requests.exceptions.ChunkedEncodingError, urllib3.exceptions.ProtocolError) as e:
             stop_progress.set()
             print_colored(f"\n[Client] Connection interrupted: {e}. Retrying...", COLORS['WARNING'])
@@ -339,7 +394,7 @@ def get_completion(history, model, agent_theme, agentic_context=None):
         except Exception as e:
             stop_progress.set()
             print_colored(f"\nUnexpected error: {e}", COLORS['FAIL'])
-            return None, None
+            return None, None, None
 
     stop_progress.set()
     print()
@@ -358,4 +413,8 @@ def get_completion(history, model, agent_theme, agentic_context=None):
     if finish_reason == "length":
         print_colored("[Truncated] Response hit token limit — continuation needed.", COLORS['WARNING'])
 
-    return full_response, finish_reason
+    tool_calls_list = (
+        [tool_calls_acc[i] for i in sorted(tool_calls_acc)]
+        if tool_calls_acc else None
+    )
+    return full_response, finish_reason, tool_calls_list
