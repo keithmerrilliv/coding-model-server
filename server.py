@@ -561,16 +561,18 @@ Update these after each retrieval step. They help you stay organized and efficie
     # Measurements (2026-04-24):
     #   ngl=48 ctx=131K Q4_0 ub=2048 → 6,026 MiB used, 9,784 free (initial)
     #   ngl=48 ctx=262K Q8_0 ub=4096 → 12,585 MiB used, 3,225 free (1st tune)
-    #   ngl=48 ctx=262K Q8_0 ub=5120 → estimated 14,200 / 1,600 free (push)
-    # Compute buffer is the dominant cost at this size; bumping ub from 4096
-    # to 5120 trades ~1.6 GB of headroom for ~25 % faster prefill.
+    #   ngl=48 ctx=262K Q8_0 ub=5120 → 14,260 MiB used, 1,550 free (2nd tune)
+    #   ngl=48 ctx=262K Q8_0 ub=6144 → OOM at compute buffer alloc (CUDA -6)
+    #   ngl=48 ctx=262K Q8_0 ub=5632 → estimated 15,094 used / 716 free (3rd)
+    # Compute buffer scales 1.63 MiB/ub-unit observed 4096→5120. Pushing
+    # beyond ub=5632 exhausts the headroom margin; ub=6144 confirmed OOM.
     _QWEN36_35B = _create_model_config(
         'MODEL_PATH_QWEN36_35B',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf',
-        48, 262144, 5120, backend='llama_server',
+        48, 262144, 5632, backend='llama_server',
         server_extra_args=['--jinja', '--reasoning-format', 'none'],
         type_k=8, type_v=8,
-        cpu_moe=True, n_ubatch=5120,
+        cpu_moe=True, n_ubatch=5632,
         repeat_penalty=1.05,
     )
 
