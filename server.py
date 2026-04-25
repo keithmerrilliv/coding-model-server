@@ -558,29 +558,32 @@ Update these after each retrieval step. They help you stay organized and efficie
     # Qwen3.6-35B-A3B UD-Q4_K_M — direct successor to Qwen3.5-35B-A3B (same
     # MoE shape: 3B active, 35B total). Unsloth Dynamic 2.0 quant. 22.1 GB.
     # Released 2026-04-16. cpu_moe puts experts on CPU, attention on GPU.
-    # Measured 2026-04-24 at ngl=48 ctx=131K Q4_0 ub=2048: 6,026 MiB used,
-    # 9,784 MiB free. Tuned to: ctx=262K (native max), Q8_0 KV cache (better
-    # quality), ub=4096 (faster prefill). Estimated ~10 GB used / ~5.5 GB free.
+    # Measurements (2026-04-24):
+    #   ngl=48 ctx=131K Q4_0 ub=2048 → 6,026 MiB used, 9,784 free (initial)
+    #   ngl=48 ctx=262K Q8_0 ub=4096 → 12,585 MiB used, 3,225 free (1st tune)
+    #   ngl=48 ctx=262K Q8_0 ub=5120 → estimated 14,200 / 1,600 free (push)
+    # Compute buffer is the dominant cost at this size; bumping ub from 4096
+    # to 5120 trades ~1.6 GB of headroom for ~25 % faster prefill.
     _QWEN36_35B = _create_model_config(
         'MODEL_PATH_QWEN36_35B',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf',
-        48, 262144, 4096, backend='llama_server',
+        48, 262144, 5120, backend='llama_server',
         server_extra_args=['--jinja', '--reasoning-format', 'none'],
         type_k=8, type_v=8,
-        cpu_moe=True, n_ubatch=4096,
+        cpu_moe=True, n_ubatch=5120,
         repeat_penalty=1.05,
     )
 
     # Qwen3.6-27B Q4_K_M — DENSE 27B model, ~16.8 GB. Released 2026-04-22.
     # 64 attention layers; dense (no cpu_moe possible). 16 GB VRAM forces
-    # partial GPU offload. Measured 2026-04-24 at ngl=20 ctx=131K Q4_0
-    # ub=2048: 9,496 MiB used, 6,313 MiB free. Tuned ngl 20→36 for faster
-    # decode (bigger fraction of attention on GPU). Estimated ~14 GB used /
-    # ~1.8 GB free at the new setting.
+    # partial GPU offload. Per-layer cost ~280 MiB (245 weight + 36 KV at
+    # 131K Q4_0). Pushed ngl 20→36→40 across two iterations.
+    # Measured 2026-04-24 at ngl=36: 13,513 MiB used, 2,297 free. Bumped
+    # to ngl=40 (estimated ~14,640 used / ~1,170 free).
     _QWEN36_27B = _create_model_config(
         'MODEL_PATH_QWEN36_27B',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3.6-27B-GGUF/Qwen3.6-27B-Q4_K_M.gguf',
-        36, 131072, 2048, backend='llama_server',
+        40, 131072, 2048, backend='llama_server',
         server_extra_args=['--jinja', '--reasoning-format', 'none'],
         type_k=2, type_v=2,
         n_ubatch=2048,
