@@ -5,9 +5,9 @@ This project is a local LLM inference server with a multi-agent CLI client. The 
 
 ## 2. Key Features
 *   **Multi-Agent Architecture:** 13 agents with specialized roles and model configurations:
-    *   `implementer` (Qwen3.5-35B, default), `deep_implementer` (Coder-Next 80B), `fast_implementer` (Coder-30B)
-    *   `debugger` (Coder-30B), `reviewer` (Coder-30B Q8_0)
-    *   `architect` (Coder-480B Q2_K_XL), `lite_architect` (Coder-480B IQ1_M), `q35_architect` (Qwen3.5-122B), `q35_ultra` (Qwen3.5-397B)
+    *   `implementer` (Qwen3.6-35B-A3B, default), `deep_implementer` (Coder-Next 80B), `fast_implementer` (Coder-30B)
+    *   `debugger` (Coder-30B), `reviewer` (Coder-30B Q8_0), `deep_reviewer` (Qwen3.5-122B)
+    *   `architect` (Coder-480B Q2_K_XL), `lite_architect` (Coder-480B IQ1_M), `q36_architect` (Qwen3.6-27B dense — replaces retired q35_architect/q35_ultra)
     *   `m25_implementer` / `m25_architect` (MiniMax M2.5 230B)
     *   `nemotron` (Nemotron-3-Nano, 1M native context), `glm` (GLM-4.7-Flash)
 *   **Dual Backend:** Models run either in-process via llama-cpp-python or as a llama-server subprocess. The subprocess backend enables `--cpu-moe` (MoE expert weights on CPU), native Jinja templates, and architectures not yet in llama-cpp-python.
@@ -83,10 +83,10 @@ This project is a local LLM inference server with a multi-agent CLI client. The 
 
 ### Phase 8: Performance, Stability & Flagship Models (Mar 28 – Apr 1)
 *   `--cpu-moe` optimization: MoE expert weights on CPU, enabling near-max GPU layer offload for attention layers. Unlocked 1M native context for Nemotron (Mamba-hybrid, only 6/52 layers need KV cache).
-*   Swapped default implementer to Qwen3.5-35B (262K context, in-process backend).
-*   Upgraded llama-cpp-python to 0.3.19, moved Qwen3.5 to in-process backend.
-*   Prefill optimization: `-ub 4096` + `--swa-full` for 4.6x faster Coder-Next prefill.
-*   q35_ultra moved to llama_server with `--cpu-moe`: 5 min → 26 sec per turn, then ubatch 4096 for higher prefill throughput. Run `benchmark_prefill.py --warmup` to measure current speeds.
+*   Swapped default implementer to Qwen3.6-35B-A3B (UD-Q4_K_M, 131K context, llama_server backend with cpu_moe).
+*   Retired q35_architect (Qwen3.5-122B) and q35_ultra (Qwen3.5-397B) in favor of `q36_architect` (Qwen3.6-27B dense, 16.8 GB, beats Qwen3.5-397B on SWE-bench Verified 77.2 vs 76.2).
+*   Upgraded llama-cpp-python to 0.3.19; deep_reviewer still uses Qwen3.5-122B in-process.
+*   Prefill optimization: `-ub 4096` + `--swa-full` for 4.6x faster Coder-Next prefill. Run `benchmark_prefill.py --warmup` to measure current speeds.
 *   CUDA 12.8 rebuild fixes broken MMQ kernels on Blackwell (CUDA 13.x compiler bug). Coder-30B Turbo prefill went 145 → 2,386 tok/s (16.5x); see `docs/TUTORIAL.md` for the full agent table.
 *   Two-tier context compaction system (model-generated summary, hard trim) with send-time compression for KV-cache stability.
 *   Session management: named sessions, `/sessions`, `/session`, `/rename`, `/context`.
@@ -112,4 +112,4 @@ This project is a local LLM inference server with a multi-agent CLI client. The 
 *   See `docs/PHASE2_TEST_PLAN.md` for the manual test procedure.
 
 ## 5. Current Status
-As of April 2026, the project runs 13 agent configurations across two backends on an RTX 5080. The default implementer is Qwen3.5-35B with 262K context. The flagship reasoning agent (q35_ultra, Qwen3.5-397B) achieves 26-second turn times via `--cpu-moe`. The RAG database holds ~85K high-quality documents. The interactive client supports full agentic context, context compaction, and session management. A new **autonomous service mode** allows submitting specifications that are autonomously planned, designed, implemented, tested, and presented for human review — with Jira integration and email notifications at every gate.
+As of April 2026, the project runs 13 agent configurations across two backends on an RTX 5080. The default implementer is **Qwen3.6-35B-A3B** (UD-Q4_K_M, 131K context, llama_server backend). The flagship architect/planner is **q36_architect** (Qwen3.6-27B dense, beats the retired Qwen3.5-397B on SWE-bench). The RAG database holds ~85K high-quality documents. The interactive client supports full agentic context, context compaction, session management, and an opt-in **native tool-calling** path (OpenAI tools API for `remote_exec` on the `glm` agent). A new **autonomous service mode** allows submitting specifications that are autonomously planned, designed, implemented, tested, and presented for human review — with Jira integration and email notifications at every gate.

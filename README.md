@@ -56,15 +56,15 @@ Each agent maps to a model configuration and system prompt. Switch with `/model 
 
 | Agent | Role | Model | Active/Total | Context | ngl | Backend |
 |-------|------|-------|--------------|---------|-----|---------|
-| `implementer` | Default implementation | Qwen3.5-35B Q4_K_M | 3B/35B | 262K | 22 | in-process |
+| `implementer` | Default implementation | Qwen3.6-35B-A3B UD-Q4_K_M | 3B/35B | 131K | 48 | subprocess |
 | `deep_implementer` | Deep reasoning | Coder-Next Q8_0 | 3B/80B | 256K | 48 | subprocess |
 | `fast_implementer` | Fast implementation | Coder-30B Q4_K_M | 3B/30B | 256K | 26 | in-process |
 | `debugger` | Debugging | Coder-30B Q4_K_M | 3B/30B | 131K | 30 | in-process |
 | `reviewer` | Code review | Coder-30B Q8_0 | 3B/30B | 65K | 21 | in-process |
+| `deep_reviewer` | Deep judgment | Qwen3.5-122B-A10B Q4_K_M | 10B/122B | 65K | 9 | in-process |
 | `architect` | System design | Coder-480B Q2_K_XL | 35B/480B | 64K | 4 | in-process |
 | `lite_architect` | Lite design | Coder-480B IQ1_M | 35B/480B | 32K | 4 | in-process |
-| `q35_architect` | Mid-tier design | Qwen3.5-122B Q4_K_M | 10B/122B | 65K | 9 | in-process |
-| `q35_ultra` | Flagship design | Qwen3.5-397B IQ1_M | 17B/397B | 96K | 8 | in-process |
+| `q36_architect` | Flagship design (replaces q35_architect + q35_ultra) | Qwen3.6-27B Q4_K_M | 27B dense | 131K | 20 | subprocess |
 | `m25_implementer` | Implementation | MiniMax M2.5 Q4_K_M | 10B/230B | 98K | 62 | subprocess |
 | `m25_architect` | Architecture | MiniMax M2.5 Q4_K_M | 10B/230B | 98K | 62 | subprocess |
 | `nemotron` | Fastest implementation | Nemotron-3-Nano Q4_K_M | 3.5B/30B | **1M** | 52 | subprocess |
@@ -167,7 +167,7 @@ python qwen-autonomous review <gate_id> --approve
 python qwen-autonomous events <spec_id>
 ```
 
-**Pipeline:** Planner (q35_architect) → Architect → *design review gate* → Implementer → *code review gate* → Reviewer + tests → *release gate* → DONE
+**Pipeline:** Planner (q36_architect) → Architect → *design review gate* → Implementer → *code review gate* → Reviewer + tests → *release gate* → DONE
 
 **Human in the loop:** Every major transition requires your explicit approval — the system blocks at review gates until you approve or reject. Rejection notes feed back into the agent for a retry. If Jira is configured (`JIRA_*` env vars), gates sync to a Jira board with native email notifications so you can approve from anywhere.
 

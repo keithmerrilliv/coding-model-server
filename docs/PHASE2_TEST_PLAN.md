@@ -81,7 +81,7 @@ python qwen-autonomous submit /tmp/test_spec.md
 
 ### 1.4 Watch the planner
 
-The daemon will call q35_architect (Qwen3.5-122B) as the planner.
+The daemon will call q36_architect (Qwen3.6-27B) as the planner.
 Watch the daemon logs. Within 2-5 minutes you should see either:
 
 - `planner: needs clarification` — the planner wants more info.
@@ -104,11 +104,11 @@ python qwen-autonomous review <gate_id> --approve --notes "proceed"
 ### 1.6 Watch the architect
 
 The daemon transitions the spec to EXECUTING and bootstraps 3 tasks.
-The architect (q35_architect) runs next. This takes 5-15 minutes.
+The architect (q36_architect) runs next. This takes 5-15 minutes.
 
 **Check in the daemon logs:**
 - `bootstrapped 3 tasks from plan YAML`
-- `calling agent=q35_architect, role=architect`
+- `calling agent=q36_architect, role=architect`
 - `architect done, design_approval gate created`
 
 **Check on disk:**

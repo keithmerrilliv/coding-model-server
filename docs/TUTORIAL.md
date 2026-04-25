@@ -248,13 +248,12 @@ This is where the prompt is processed — the most compute-intensive phase:
 | `debugger` | 8,383 | **2,386** | Coder-30B Turbo, 30/48 layers on GPU |
 | `fast_implementer` | 8,666 | **2,309** | Coder-30B Fast, 26/48 layers, 262K ctx |
 | `reviewer` | 9,405 | **1,392** | Coder-30B HD (Q8_0), 21/48 layers |
-| `implementer` | 8,671 | **1,156** | Qwen3.5-35B, 22/48 layers, 262K ctx |
+| `implementer` | 8,671 | **1,156** | Qwen3.6-35B-A3B, 48/48 layers + cpu_moe (re-measure after swap) |
 | `nemotron` | 4,521 | **904** | Nemotron-3-Nano, all 52 layers + cpu_moe |
 | `m25_architect` | 7,171 | **749** | MiniMax M2.5, 62/62 layers + cpu_moe |
 | `m25_implementer` | 7,068 | **734** | MiniMax M2.5 (same model, different role) |
 | `deep_implementer` | 6,972 | **675** | Coder-Next 80B, 48/48 layers + cpu_moe |
-| `q35_architect` | 8,792 | **225** | Qwen3.5-122B, 9/40 layers (heavy CPU load) |
-| `q35_ultra` | 7,076 | **180** | Qwen3.5-397B, 60/60 layers + cpu_moe |
+| `q36_architect` | — | — | Qwen3.6-27B dense, 20/64 layers (re-measure after swap) |
 | `lite_architect` | 8,337 | **153** | Coder-480B IQ1_M, 4/62 layers |
 | `architect` | 8,787 | **140** | Coder-480B Q2_K_XL, 4/62 layers + YaRN |
 

@@ -56,6 +56,22 @@ MODELS = [
         "local_dir": os.path.join(BASE_DIR, "GLM-4.7-Flash-GGUF"),
         "size": "~18.3 GB",
     },
+    {
+        "id": 6,
+        "name": "Qwen3.6-35B-A3B UD-Q4_K_M",
+        "repo": "unsloth/Qwen3.6-35B-A3B-GGUF",
+        "files": ["Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"],
+        "local_dir": os.path.join(BASE_DIR, "Qwen3.6-35B-A3B-GGUF"),
+        "size": "~22.1 GB",
+    },
+    {
+        "id": 7,
+        "name": "Qwen3.6-27B Q4_K_M (dense)",
+        "repo": "unsloth/Qwen3.6-27B-GGUF",
+        "files": ["Qwen3.6-27B-Q4_K_M.gguf"],
+        "local_dir": os.path.join(BASE_DIR, "Qwen3.6-27B-GGUF"),
+        "size": "~16.8 GB",
+    },
 ]
 
 

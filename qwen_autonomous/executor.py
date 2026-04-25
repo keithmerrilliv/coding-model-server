@@ -36,7 +36,7 @@ logger = logging.getLogger("orchestrator.executor")
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
-ARCHITECT_AGENT = os.getenv("AUTONOMOUS_ARCHITECT_AGENT", "q35_architect")
+ARCHITECT_AGENT = os.getenv("AUTONOMOUS_ARCHITECT_AGENT", "q36_architect")
 IMPLEMENTER_AGENT = os.getenv("AUTONOMOUS_IMPLEMENTER_AGENT", "implementer")
 REVIEWER_AGENT = os.getenv("AUTONOMOUS_REVIEWER_AGENT", "reviewer")
 

@@ -540,24 +540,12 @@ Update these after each retrieval step. They help you stay organized and efficie
         cpu_moe=True,
     )
 
-    # ── Qwen3.5 family ──
-
-    # Qwen3.5-35B-A3B Q4_K_M — successor to Coder-30B, same 3B active MoE
-    # 22 GB model. Qwen3.5 arch supported since llama-cpp-python 0.3.17 (in-process).
-    # 262K native context with Q4_0 KV cache. Reduced ngl from 24 to 22 for 262K headroom.
-    # ngl=24 at 131K: 1,619 MiB free | ngl=22 at 262K: testing (measured 2026-04-01)
-    _QWEN35_35B = _create_model_config(
-        'MODEL_PATH_QWEN35_35B',
-        '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3.5-35B-A3B-GGUF/Qwen3.5-35B-A3B-Q4_K_M.gguf',
-        22, 262144, 1024,
-        type_k=2, type_v=2,
-        repeat_penalty=1.05,  # Lower penalty for code generation — 1.15 caused premature EOS on large files
-    )
+    # ── Qwen3.5 family (deep_reviewer still uses 122B) ──
 
     # Qwen3.5-122B-A10B Q4_K_M — mid-tier MoE (10B active, 76.5 GB, 3 shards)
-    # Strong agentic/function-calling (72.2 BFCL-V4). Mostly CPU, limited GPU layers.
-    # Qwen3.5 arch supported since llama-cpp-python 0.3.17 (in-process).
-    # 131K native context, using 65K to leave headroom.
+    # Retained for `deep_reviewer` only. Old q35_architect/q35_ultra agents
+    # were retired in favor of Qwen3.6-27B (smaller dense model that beats
+    # Qwen3.5-397B on SWE-bench Verified, 77.2 vs 76.2).
     # ngl=9 at 65K: 1,209 MiB free (measured 2026-03-30, ~1,507 MiB/layer)
     _QWEN35_122B = _create_model_config(
         'MODEL_PATH_QWEN35_122B',
@@ -565,17 +553,37 @@ Update these after each retrieval step. They help you stay organized and efficie
         9, 65536, 1024,
     )
 
-    # Qwen3.5-397B-A17B IQ1_M — flagship (17B active, ~100 GB, 4 shards, 60 layers)
-    # Successor to 480B Coder as premium architect — DESIGN ROLE, not implementation.
-    # Moved to llama_server with --cpu-moe: expert weights on CPU, attention on GPU.
-    # ngl=8 in-process: ~5 min/turn (prefill-bound). With --cpu-moe, targeting ngl=60 (all layers).
-    _QWEN35_397B = _create_model_config(
-        'MODEL_PATH_QWEN35_397B',
-        '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3.5-397B-A17B-GGUF/UD-IQ1_M/Qwen3.5-397B-A17B-UD-IQ1_M-00001-of-00004.gguf',
-        61, 98304, 4096, backend='llama_server',
-        server_extra_args=['--jinja', '--reasoning-format', 'none', '-fa', 'on'],
-        type_k=8, type_v=2,
-        cpu_moe=True, n_ubatch=4096,
+    # ── Qwen3.6 family (replaces Qwen3.5-35B implementer + 122B/397B architects) ──
+
+    # Qwen3.6-35B-A3B UD-Q4_K_M — direct successor to Qwen3.5-35B-A3B (same
+    # MoE shape: 3B active, 35B total). Unsloth Dynamic 2.0 quant. 22.1 GB.
+    # Released 2026-04-16. Routed through llama_server so we get the native
+    # Jinja chat template (and a future one-line native-tools opt-in).
+    # Initial config mirrors Qwen3.5-35B for safety; tune ngl after first
+    # measurement. cpu_moe puts experts on CPU, attention on GPU.
+    _QWEN36_35B = _create_model_config(
+        'MODEL_PATH_QWEN36_35B',
+        '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf',
+        48, 131072, 2048, backend='llama_server',
+        server_extra_args=['--jinja', '--reasoning-format', 'none'],
+        type_k=2, type_v=2,
+        cpu_moe=True, n_ubatch=2048,
+        repeat_penalty=1.05,
+    )
+
+    # Qwen3.6-27B Q4_K_M — DENSE 27B model, ~16.8 GB. Released 2026-04-22.
+    # Per Unsloth/Qwen benchmarks, scores 77.2 on SWE-bench Verified, beating
+    # the previous Qwen3.5-397B-A17B flagship (76.2). Retired both
+    # q35_architect (122B) and q35_ultra (397B) in favor of this.
+    # 16 GB VRAM is tight for a 16.8 GB model + KV cache + compute buffers,
+    # so partial GPU offload (ngl=20) with Q4_0 cache. Bump ngl after measure.
+    _QWEN36_27B = _create_model_config(
+        'MODEL_PATH_QWEN36_27B',
+        '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3.6-27B-GGUF/Qwen3.6-27B-Q4_K_M.gguf',
+        20, 131072, 2048, backend='llama_server',
+        server_extra_args=['--jinja', '--reasoning-format', 'none'],
+        type_k=2, type_v=2,
+        n_ubatch=2048,
     )
 
     # ── Non-Qwen models ──
@@ -725,9 +733,9 @@ Update these after each retrieval step. They help you stay organized and efficie
     # 'executor': True means few-shot + fallback extraction are enabled.
     AGENTS = {
         'implementer': _create_agent_config(
-            'Implementer — Qwen3.5-35B Q4_K_M (3B/35B MoE, 262K ctx, ngl=22, default)',
+            'Implementer — Qwen3.6-35B-A3B UD-Q4_K_M (3B/35B MoE, 131K ctx, ngl=48 cpu_moe, default)',
             _IMPLEMENTER_SYSTEM_PROMPT,
-            _QWEN35_35B,
+            _QWEN36_35B,
             executor=True
         ),
         'deep_implementer': _create_agent_config(
@@ -784,17 +792,11 @@ Update these after each retrieval step. They help you stay organized and efficie
             _MINIMAX_M25,
             executor=True
         ),
-        # ── Qwen3.5 agents ──
-        'q35_architect': _create_agent_config(
-            'Architect — Qwen3.5-122B Q4_K_M (10B/122B MoE, 65K ctx, ngl=9, mid-tier)',
+        # ── Qwen3.6 agents (replaced retired Qwen3.5 architect tier) ──
+        'q36_architect': _create_agent_config(
+            'Architect — Qwen3.6-27B Q4_K_M (27B dense, 131K ctx, ngl=20, beats Qwen3.5-397B on SWE-bench)',
             _ARCHITECT_SYSTEM_PROMPT,
-            _QWEN35_122B,
-            executor=True
-        ),
-        'q35_ultra': _create_agent_config(
-            'Architect — Qwen3.5-397B IQ1_M (17B/397B MoE, 96K ctx, ngl=60, flagship)',
-            _ARCHITECT_SYSTEM_PROMPT,
-            _QWEN35_397B,
+            _QWEN36_27B,
             executor=True
         ),
         # ── Non-Qwen agents ──

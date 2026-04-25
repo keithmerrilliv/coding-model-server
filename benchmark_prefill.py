@@ -7,7 +7,7 @@ machine for accurate measurements.
 
 Usage:
     python3 benchmark_prefill.py                       # benchmark all agents
-    python3 benchmark_prefill.py -a q35_ultra glm      # benchmark specific agents
+    python3 benchmark_prefill.py -a q36_architect glm  # benchmark specific agents
     python3 benchmark_prefill.py --prompt-tokens 4000  # custom prompt size
     python3 benchmark_prefill.py --warmup              # discard first request
     python3 benchmark_prefill.py --json results.json   # save results

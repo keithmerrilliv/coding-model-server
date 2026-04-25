@@ -6,7 +6,7 @@ Reads a markdown spec (plus any prior clarification Q/A) and either:
 
 Calls the qwen-server /v1/chat/completions endpoint over HTTP. The model is
 configurable via the AUTONOMOUS_PLANNER_AGENT env var; default is
-``q35_architect`` (Qwen3.5-122B), chosen for reasoning capacity over raw speed.
+``q36_architect`` (Qwen3.6-27B), chosen for reasoning capacity over raw speed.
 
 The planner's only contract is the output format. It is NOT supposed to
 write code, make architectural decisions, or expand scope. Its job is
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
-PLANNER_AGENT = os.getenv("AUTONOMOUS_PLANNER_AGENT", "q35_architect")
+PLANNER_AGENT = os.getenv("AUTONOMOUS_PLANNER_AGENT", "q36_architect")
 QWEN_SERVER_HOST = os.getenv("QWEN_SERVER_IP", "127.0.0.1")
 QWEN_SERVER_PORT = int(os.getenv("QWEN_SERVER_PORT", "5000"))
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
