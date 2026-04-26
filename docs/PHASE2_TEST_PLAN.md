@@ -9,8 +9,19 @@ check and what to do if something goes wrong.
 - [ ] qwen-server is running (`systemctl status qwen-server`)
 - [ ] The `.env` file has `ADMIN_API_KEY` set
 - [ ] The `.env` file has `JIRA_*` vars set (optional — if not set, Jira sync runs against the fake and gates are CLI-only)
+- [ ] The `.env` file has the autonomous agent overrides set:
+      `AUTONOMOUS_ARCHITECT_AGENT=q36_architect`,
+      `AUTONOMOUS_IMPLEMENTER_AGENT=deep_implementer`,
+      `AUTONOMOUS_REVIEWER_AGENT=deep_reviewer`.
+      Code defaults differ (`q36_architect` / `implementer` / `reviewer`); without these overrides you get the lighter default pipeline. Verify the chosen agent names exist server-side:
+      `grep -n "'q36_architect'\\|'deep_implementer'\\|'deep_reviewer'" server.py`
+- [ ] **Restart `orchestrator_daemon.py` after any `.env` edit.** The daemon calls `load_dotenv` once at import; an already-running daemon keeps stale agent names baked in and tasks bootstrap with whatever was in the env at startup. This is what killed `spec_df452c01` (architect bootstrapped as the retired `q35_ultra`, failed in 40s with "agent not found").
 - [ ] `pyyaml` is installed in the venv (`pip install pyyaml` — needed by the daemon to parse plan YAML)
 - [ ] `pytest` is installed in the venv (`pip install pytest` — the reviewer runs `python3 -m pytest` against generated code; without it every spec dead-ends in the retry loop with "No module named pytest")
+- [ ] `bubblewrap` is installed (`which bwrap` returns a path). LLM-generated tests run inside a `bwrap` sandbox by default; without it, every test run fails fast unless `QWEN_ALLOW_UNSANDBOXED_TESTS=1` is set (not recommended). Install on Debian/Ubuntu: `sudo apt install bubblewrap`.
+- [ ] **Ubuntu 24+ AppArmor restriction check.** Run `sysctl kernel.apparmor_restrict_unprivileged_userns`. If it returns `1`, bwrap will fail every test run with `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted` even though bwrap itself is installed. Two workarounds:
+  - **Per-session (preferred):** export `QWEN_ALLOW_UNSANDBOXED_TESTS=1` before starting `orchestrator_daemon.py`. Tests then run with the daemon's own privileges. The orchestrator already only writes inside `qwen_tasks_db/specs/<spec_id>/`, so for single-user dev machines the security delta is small.
+  - **Host-wide:** `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` (and persist via `/etc/sysctl.d/`). Affects all software using unprivileged user namespaces, not just bwrap. **A proper AppArmor profile for bwrap is the correct long-term fix — see memory `project_bwrap_apparmor.md`.**
 - [ ] No model is currently loaded (or the server is idle) — the test will trigger multiple model swaps
 
 ## Test 1: Full happy path (spec → DONE)
@@ -335,6 +346,7 @@ you'd used the CLI.
 | Tests fail repeatedly | Generated code has real bugs | Check `test_output.txt` in the workspace. The test failures are real — the model wrote buggy code. After 3 retries it gives up. You can manually fix the code and re-submit. |
 | Tests fail but the code looks correct | **Reviewer wrote buggy tests.** The retry loop will blame the implementer and rewrite working code to match bad tests — a doom loop. Read `test_*.py` in the workspace critically before approving `release_approval`. See "Known pipeline gap" below. |
 | Jira sync doesn't fire | JIRA_URL/EMAIL/TOKEN not set or invalid | Check daemon startup logs for "Jira sync running with FakeJiraClient". Re-run the smoke test from Phase 1c. |
+| `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted` in `test_output.txt`; tests never run | Ubuntu 24+ ships with `kernel.apparmor_restrict_unprivileged_userns=1`, which blocks the user/network namespace operations bwrap needs. See prereq above. **Note: even with the env-var workaround you must restart the daemon — `executor.py` only honors it at process start, and earlier the env-var was ignored entirely when bwrap was *installed but broken* (fixed 2026-04-25, priority flip).** |
 | `yaml.safe_load` fails | Plan YAML is malformed | Check `plan.yaml` in the workspace. The planner occasionally produces invalid YAML. Reject the plan gate and let it retry. |
 
 ---

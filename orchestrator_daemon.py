@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import signal
 import sys
 import time
@@ -562,6 +563,74 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
                 spec.id, len(result.files), task.retry_count)
 
 
+# Pytest summary line: e.g. "1 passed in 0.01s", "2 failed, 3 passed in 0.5s",
+# "5 errors in 1.0s". We only care that *some* outcome count is reported.
+_PYTEST_SUMMARY_RE = re.compile(
+    r"\b\d+\s+(passed|failed|error|errors|skipped|xfailed|xpassed|deselected)\b",
+    re.IGNORECASE,
+)
+# Jest summary: "Tests: N passed, M total"
+_JEST_SUMMARY_RE = re.compile(r"Tests?:\s+\d+\s+\w+", re.IGNORECASE)
+
+
+def _extract_actionable_test_output(output: str, framework: str, max_chars: int = 8000) -> str:
+    """Trim test output to the actionable parts for implementer retry feedback.
+
+    Verbose pytest output is mostly noise (collection, plugin versions, progress
+    markers) and the actionable bits (assertion tracebacks + the short summary)
+    are at the bottom. The previous 3000-char truncation often cut OFF the
+    failures and left the implementer with only the preamble — leading to
+    repeated retries that converged on the same wrong implementation. Drop the
+    preamble; keep the failures and the final summary.
+
+    For unrecognized frameworks, fall back to a tail-biased truncation.
+    """
+    if not output:
+        return output
+    fw = framework.lower()
+    if fw in ("pytest", "python"):
+        # Pytest's failure section starts with `=========== FAILURES ===========`.
+        # Anything before that is collection/progress noise.
+        marker = output.find("FAILURES")
+        if marker != -1:
+            # Step back to the start of the line to keep the banner intact.
+            line_start = output.rfind("\n", 0, marker) + 1
+            extracted = output[line_start:]
+            if len(extracted) <= max_chars:
+                return extracted
+            # Keep the head (first failures) + the tail (summary) — the middle
+            # is just more failures of the same kind in most cases.
+            head = extracted[: max_chars - 1200]
+            tail = extracted[-1200:]
+            return head + "\n\n[... output truncated ...]\n\n" + tail
+    # Default: tail-biased — the summary is at the end and matters most.
+    if len(output) <= max_chars:
+        return output
+    return "[... output truncated ...]\n\n" + output[-max_chars:]
+
+
+def _validate_test_output_structure(test_output: str, framework: str) -> tuple[bool, str]:
+    """Confirm the test output has the structural shape of a real test run.
+
+    Catches the failure mode where a sandbox error or collection failure exits
+    cleanly without any tests actually running, leaving the orchestrator with
+    no evidence either way. Returns (ok, reason). On (False, reason) the
+    caller should force tests_passed=False — the runner can't be trusted.
+
+    Frameworks we don't recognize (Swift via mac-runner, custom) pass through.
+    """
+    if not test_output or not test_output.strip():
+        return False, "test_output is empty"
+    fw = framework.lower()
+    if fw in ("pytest", "python"):
+        if not _PYTEST_SUMMARY_RE.search(test_output):
+            return False, "no pytest summary line ('N passed/failed/error') detected"
+    elif fw == "jest":
+        if not _JEST_SUMMARY_RE.search(test_output):
+            return False, "no jest summary line ('Tests: ...') detected"
+    return True, ""
+
+
 def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
     import yaml as _yaml
 
@@ -623,6 +692,26 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
         tests_passed, test_output = run_tests(
             spec_dir, framework=framework, **framework_opts,
         )
+        # Layer 1 (anti-hallucination guard): a test runner that exits 0 with
+        # no parseable summary line means the runner short-circuited (sandbox
+        # error, no tests collected, output truncation). Trusting the
+        # subprocess returncode alone let a "Reviewer verdict: PASS"
+        # propagate while pytest never executed (the bwrap/AppArmor case).
+        # If the output doesn't match the framework's summary shape, force
+        # FAIL — even when subprocess.returncode was 0.
+        if tests_passed:
+            ok, reason = _validate_test_output_structure(test_output, framework)
+            if not ok:
+                logger.warning(
+                    "spec %s: test_output failed structural validation (%s); "
+                    "forcing tests_passed=False to block hallucinated PASS",
+                    spec.id, reason,
+                )
+                tests_passed = False
+                test_output = (
+                    f"[orchestrator guard] {reason}\n\n"
+                    f"Original test runner output:\n{test_output}"
+                )
         _write_artifact(spec_dir, "test_output.txt", test_output)
         db.record_event(EventKind.TEST_RAN, spec_id=spec.id, task_id=task.id,
                         payload={"passed": tests_passed,
@@ -648,10 +737,15 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
         logger.info("spec %s: reviewer done, tests passed, "
                     "release_approval gate created", spec.id)
     else:
-        # Tests failed or reviewer said FAIL — attempt retry
+        # Tests failed or reviewer said FAIL — attempt retry. Send the
+        # actionable slice of test output (failures + summary) rather than
+        # the verbose head, so the implementer's retry sees the real
+        # AssertionError lines instead of pytest's collection preamble.
+        actionable = _extract_actionable_test_output(test_output, framework)
         failure_detail = (
             f"Reviewer verdict: {result.verdict}\n\n"
-            f"Test output:\n```\n{test_output[:3000]}\n```\n\n"
+            f"Test output (failures + summary, full output in test_output.txt):\n"
+            f"```\n{actionable}\n```\n\n"
             f"Review:\n{result.review_md}\n"
         )
         _write_artifact(spec_dir, "failure_report.md", failure_detail)

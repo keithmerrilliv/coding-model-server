@@ -42,11 +42,11 @@ REVIEWER_AGENT = os.getenv("AUTONOMOUS_REVIEWER_AGENT", "reviewer")
 
 ARCHITECT_TIMEOUT = float(os.getenv("AUTONOMOUS_ARCHITECT_TIMEOUT", "2700"))
 IMPLEMENTER_TIMEOUT = float(os.getenv("AUTONOMOUS_IMPLEMENTER_TIMEOUT", "1800"))
-REVIEWER_TIMEOUT = float(os.getenv("AUTONOMOUS_REVIEWER_TIMEOUT", "1200"))
+REVIEWER_TIMEOUT = float(os.getenv("AUTONOMOUS_REVIEWER_TIMEOUT", "2700"))
 
 ARCHITECT_MAX_TOKENS = int(os.getenv("AUTONOMOUS_ARCHITECT_MAX_TOKENS", "8000"))
 IMPLEMENTER_MAX_TOKENS = int(os.getenv("AUTONOMOUS_IMPLEMENTER_MAX_TOKENS", "16000"))
-REVIEWER_MAX_TOKENS = int(os.getenv("AUTONOMOUS_REVIEWER_MAX_TOKENS", "12000"))
+REVIEWER_MAX_TOKENS = int(os.getenv("AUTONOMOUS_REVIEWER_MAX_TOKENS", "16000"))
 
 MAX_RETRIES = int(os.getenv("AUTONOMOUS_MAX_RETRIES", "3"))
 
@@ -177,52 +177,62 @@ IMPLEMENTER_SYSTEM_PROMPT = textwrap.dedent("""\
     """)
 
 REVIEWER_SYSTEM_PROMPT = textwrap.dedent("""\
-    You are the REVIEWER agent for an autonomous software development service.
-    You receive the specification, the architecture design, and the
-    implementation source files. Your job:
+    You are the REVIEWER for an autonomous software service. You receive the
+    spec, the design, and the implementer's source files. You (1) write test
+    files that exercise the acceptance criteria, and (2) review the code.
 
-    1. Write test files that verify the acceptance criteria.
-    2. Review the code for correctness relative to the spec and design.
-    3. Report your findings.
+    Your verdict reflects STATIC CODE REVIEW only — you do not see test
+    execution output, and the orchestrator runs your tests separately. Phrase
+    findings as "test X is designed to check Y", never "tests passed".
 
     # Output format
 
-    First, output any test files:
+    Test files first (one block per file):
 
-    <<<FILE: test_something.py>>>
-    <complete test file content>
-    <<<END_FILE>>>
+        <<<FILE: test_something.py>>>
+        <complete test file content>
+        <<<END_FILE>>>
 
-    Then output your review report:
+    Then exactly one review block:
 
-    <<<REVIEW>>>
-    ## Test Files Written
-    - <list each test file and what it covers>
+        <<<REVIEW>>>
+        ## Test Files Written
+        - <file>: <which acceptance criteria it exercises>
 
-    ## Code Review
-    ### Issues Found
-    - <severity: critical/major/minor> <file>:<location> <description>
+        ## Code Review
+        ### Issues Found
+        - <severity: critical/major/minor> <file>:<line> — <description>
+        (Or: "No issues found.")
 
-    (If no issues: "No issues found.")
+        ### Verdict
+        PASS
+        (Or FAIL if you found a critical code defect.)
 
-    ### Verdict
-    PASS
+        ### Verdict Evidence
+        <REQUIRED — see below>
 
-    (or FAIL if there are critical issues that will cause test failures)
+        ### Notes
+        <anything the implementer should know on retry>
+        <<<END_REVIEW>>>
 
-    ### Notes
-    <anything the implementer should know if this is sent back for a retry>
-    <<<END_REVIEW>>>
+    # Verdict Evidence (REQUIRED, parsed by the orchestrator)
+
+    Empty or missing evidence forces FAIL — an unanchored verdict is rejected.
+
+    For PASS: one line per acceptance criterion mapped to its test:
+        - <criterion text> → <test_file.py::test_function_name>
+
+    For FAIL: one line per blocking defect:
+        - <severity> <file>:<line> — <description>
+
+    No prose in this field. No test-result claims.
 
     # Rules
 
-    1. Focus on correctness relative to the spec's acceptance criteria.
-    2. Write tests that can actually be run — correct imports, real paths,
-       no mocked dependencies unless the spec calls for it.
-    3. Use the test framework specified in the plan (default: pytest).
-    4. If the implementation is complete and correct, verdict is PASS.
-    5. Only use FAIL if there are critical issues that will cause failures.
-    6. Do NOT add test scope beyond what the spec requires.
+    1. Use the framework named in the plan (default: pytest).
+    2. Tests must be runnable: real imports, real paths, no spec-violating mocks.
+    3. PASS requires no critical/major defects you can cite by file:line.
+    4. Do not expand scope beyond the spec.
     """)
 
 
@@ -291,6 +301,14 @@ _REVIEW_RE = re.compile(
 _VERDICT_RE = re.compile(
     r"###\s*Verdict\s*\n+\s*(PASS|FAIL)", re.IGNORECASE,
 )
+# Captures the body of the Verdict Evidence block, terminated by the next
+# `### Heading` or end-of-text. Anchors the LLM's verdict to specific evidence
+# (acceptance criteria → test for PASS, file:line for FAIL); the parser
+# downgrades a missing/empty body to FAIL regardless of stated verdict.
+_VERDICT_EVIDENCE_RE = re.compile(
+    r"###\s*Verdict\s+Evidence\s*\n+(.*?)(?=\n###\s|\Z)",
+    re.DOTALL | re.IGNORECASE,
+)
 
 
 @dataclass
@@ -330,12 +348,35 @@ def parse_architect_response(text: str) -> ArchitectResult | ParseError:
     return ArchitectResult(design_md=design, raw=text)
 
 
+def _strip_markdown_fence(content: str) -> str:
+    """Remove a leading ```<lang> and trailing ``` fence if the model wrapped
+    the file body in a markdown code block. The implementer is instructed to
+    write raw file content, but it occasionally formats responses as markdown
+    — leaving the fence in causes a SyntaxError on import. Only stripped when
+    the content is *fully wrapped* (open fence on first line, close fence on
+    last line); partial fences are kept so we don't corrupt files that
+    legitimately contain a triple-backtick (e.g. README docs).
+    """
+    s = content.strip()
+    if not s.startswith("```"):
+        return content
+    first_nl = s.find("\n")
+    if first_nl == -1:
+        return content
+    if not s.endswith("```"):
+        return content
+    body = s[first_nl + 1 : -3].rstrip()
+    # Preserve any leading/trailing newlines the original had after stripping
+    # so re-emitted files match what callers expect.
+    return body + "\n" if not body.endswith("\n") else body
+
+
 def parse_implementer_response(text: str) -> ImplementerResult | ParseError:
     cleaned = _strip_thinking(text)
     matches = _FILE_RE.findall(cleaned)
     if not matches:
         return ParseError("No <<<FILE: path>>>…<<<END_FILE>>> blocks found", text)
-    files = [(path.strip(), content) for path, content in matches]
+    files = [(path.strip(), _strip_markdown_fence(content)) for path, content in matches]
     return ImplementerResult(files=files, raw=text)
 
 
@@ -354,6 +395,23 @@ def parse_reviewer_response(text: str) -> ReviewerResult | ParseError:
     # Extract verdict
     verdict_match = _VERDICT_RE.search(review_md)
     verdict = verdict_match.group(1).upper() if verdict_match else "FAIL"
+
+    # Layer 3 (anti-hallucination guard): the reviewer must back its verdict
+    # with structured evidence — acceptance-criterion → test mapping for PASS,
+    # or file:line defects for FAIL. Empty/missing evidence downgrades the
+    # verdict to FAIL with a diagnostic appended to the review_md so the
+    # implementer retry sees why.
+    evidence_match = _VERDICT_EVIDENCE_RE.search(review_md)
+    evidence_body = evidence_match.group(1).strip() if evidence_match else ""
+    if verdict == "PASS" and not evidence_body:
+        verdict = "FAIL"
+        review_md += (
+            "\n\n---\n\n"
+            "**[orchestrator guard]** Verdict downgraded to FAIL: the reviewer "
+            "stated PASS but did not provide the required `### Verdict Evidence` "
+            "block (acceptance-criterion → test-function mapping). An unanchored "
+            "verdict is treated as a hallucination and rejected."
+        )
 
     return ReviewerResult(
         test_files=test_files,
@@ -467,7 +525,12 @@ def _wrap_in_sandbox(cmd: list[str], spec_dir: Path) -> list[str]:
     Tests that legitimately need network or host access won't work under this
     sandbox; set QWEN_ALLOW_UNSANDBOXED_TESTS=1 to opt out at your own risk.
     """
-    venv_root = Path(sys.executable).resolve().parent.parent
+    # Walk up from sys.executable WITHOUT resolving symlinks — venv pythons
+    # are typically a symlink chain (`venv/bin/python -> python3 -> /usr/bin/python3`)
+    # and .resolve() follows it all the way to /usr, so `--ro-bind /usr /usr`
+    # would replace the venv bind and `sys.executable`'s own path would be
+    # invisible inside the sandbox.
+    venv_root = Path(sys.executable).absolute().parent.parent
     spec_abs = spec_dir.resolve()
     return [
         "bwrap",
@@ -536,16 +599,21 @@ def _run_local_tests(spec_dir: Path, framework: str, timeout: int) -> tuple[bool
 
     allow_unsandboxed = os.getenv("QWEN_ALLOW_UNSANDBOXED_TESTS", "").lower() in ("1", "true", "yes")
 
-    if _sandbox_available():
-        cmd = _wrap_in_sandbox(raw_cmd, spec_dir)
-        sandbox_mode = "bwrap"
-    elif allow_unsandboxed:
+    # The env var takes priority over bwrap detection: if the user explicitly
+    # opted out, honor it — even when bwrap is installed but broken (e.g.
+    # AppArmor restricting unprivileged user namespaces, which silently
+    # makes every bwrap invocation fail with "Operation not permitted"
+    # before pytest gets a chance to run).
+    if allow_unsandboxed:
         cmd = raw_cmd
         sandbox_mode = "UNSANDBOXED (QWEN_ALLOW_UNSANDBOXED_TESTS=1)"
         logger.warning(
             "running LLM-generated tests WITHOUT a sandbox — tests have full "
             "access to this user's environment"
         )
+    elif _sandbox_available():
+        cmd = _wrap_in_sandbox(raw_cmd, spec_dir)
+        sandbox_mode = "bwrap"
     else:
         msg = (
             "Refusing to run LLM-generated tests: bwrap (bubblewrap) is not "

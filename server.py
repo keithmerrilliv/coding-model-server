@@ -2074,8 +2074,16 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
         # Skip when the caller supplied native tools — the few-shot teaches
         # marker format (<<<GLOB>>>, ...) and would actively contradict the
         # tools schema, leading the model to emit malformed marker/native hybrids.
+        # Skip when the caller supplied its own system message — they're
+        # driving the contract (e.g. autonomous planner/architect/reviewer
+        # with strict <<<YAML>>>/<<<DESIGN>>>/<<<FILE:>>> output formats) and
+        # few-shot would inject conflicting marker instructions ahead of it.
+        client_has_system = (
+            bool(request.messages) and request.messages[0].role == "system"
+        )
         if (agent_config.get('executor') and Config.FEW_SHOT
-                and len(request.messages) <= 4 and not request.tools):
+                and len(request.messages) <= 4 and not request.tools
+                and not client_has_system):
             few_shot_msgs = [ChatMessage(role=m['role'], content=m['content']) for m in Config.FEW_SHOT]
             request.messages = few_shot_msgs + list(request.messages)
 
