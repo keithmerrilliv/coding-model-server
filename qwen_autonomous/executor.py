@@ -314,6 +314,9 @@ def call_agent(
         "max_tokens": max_tokens,
         "temperature": 0.2,
         "stream": False,
+        # Opt out of server-side RAG: chat-memory injection is noise for
+        # autonomous structured prompts (specs, designs, code blocks).
+        "skip_memory": True,
     }
 
     logger.info("calling agent=%s, role=%s, msg_count=%d, max_tokens=%d",

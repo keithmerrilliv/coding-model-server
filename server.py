@@ -77,6 +77,13 @@ class ChatCompletionRequest(BaseModel):
     tools: Optional[List[Dict[str, Any]]] = None
     tool_choice: Optional[Any] = None  # str ("auto"|"none"|"required") or {"type":"function","function":{"name":...}}
     parallel_tool_calls: Optional[bool] = None
+    # Opt-out for the server-side ChromaDB memory injection. Autonomous
+    # callers (architect/implementer/reviewer/supervisor/planner) set this
+    # to True so the user-populated chat memory doesn't pollute their
+    # structured prompts (the memory was populated by chat-style use; a
+    # semantic search of "## Specification\n\n# Roman numeral converter…"
+    # mostly retrieves noise). Default False preserves chat behavior.
+    skip_memory: bool = False
 
     @field_validator('messages')
     @classmethod
@@ -2095,8 +2102,10 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
             few_shot_msgs = [ChatMessage(role=m['role'], content=m['content']) for m in Config.FEW_SHOT]
             request.messages = few_shot_msgs + list(request.messages)
 
-        # RAG: Retrieve relevant memories
-        if memory_service and request.messages:
+        # RAG: Retrieve relevant memories. Skipped when the caller opts out
+        # (autonomous agents do this — their structured prompts don't benefit
+        # from a chat-populated semantic index).
+        if memory_service and request.messages and not request.skip_memory:
             # Find the last user message to use as query
             last_user_msg = next((m.content for m in reversed(request.messages) if m.role == 'user'), None)
 

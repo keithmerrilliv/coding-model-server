@@ -314,6 +314,8 @@ def call_planner(
         "max_tokens": PLANNER_MAX_TOKENS,
         "temperature": 0.2,        # low — we want consistent structured output
         "stream": False,
+        # Opt out of server-side RAG (see executor.py call_agent).
+        "skip_memory": True,
     }
 
     logger.info("planner: calling agent=%s, spec_chars=%d, clarifications=%d",

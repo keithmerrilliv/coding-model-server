@@ -312,6 +312,9 @@ def _post_completion(messages: list[dict]) -> dict:
         "stream": False,
         "tools": [DECIDE_TOOL_SCHEMA],
         "tool_choice": {"type": "function", "function": {"name": "decide"}},
+        # Server-side RAG would inject chat-memory context that's pure noise
+        # for a meta-decision agent reasoning over structured outcomes.
+        "skip_memory": True,
     }
 
     resp = requests.post(url, json=payload, headers=headers,
