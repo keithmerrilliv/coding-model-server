@@ -101,16 +101,38 @@ def role_to_agent(role: str) -> str:
     return ROLE_TO_AGENT.get(role, IMPLEMENTER_AGENT)
 
 
+# ── Complexity → implementer tier mapping ────────────────────────────────────
+#
+# The architect emits a COMPLEXITY block (parsed by parse_architect_response).
+# `_select_implementer_agent` consults the architect's recommendation if it's
+# in the whitelist; otherwise it falls back to the tier default; otherwise
+# the env-default IMPLEMENTER_AGENT. Telemetry is deferred — see
+# ~/.claude/projects/.../memory/project_implementer_telemetry.md.
+
+TIER_TO_IMPLEMENTER = {
+    "low": "fast_implementer",
+    "medium": "implementer",
+    "high": "deep_implementer",
+    "extreme": "m25_implementer",
+}
+
+ALLOWED_IMPLEMENTER_AGENTS = {
+    "fast_implementer", "implementer", "deep_implementer", "m25_implementer", "glm",
+}
+
+
 # ── System prompts ───────────────────────────────────────────────────────────
 
 ARCHITECT_SYSTEM_PROMPT = textwrap.dedent("""\
     You are the ARCHITECT agent for an autonomous software development service.
     Your job: read the specification and produce a design document that the
-    IMPLEMENTER can execute exactly, without ambiguity.
+    IMPLEMENTER can execute exactly, without ambiguity. You also assess the
+    project's complexity and recommend which implementer agent should build it.
 
     # Output format
 
-    Respond with EXACTLY ONE block. No preamble. No text outside the markers.
+    Respond with EXACTLY TWO blocks, in this order. No preamble. No text
+    outside the markers.
 
     <<<DESIGN>>>
     # Architecture: <project title>
@@ -134,6 +156,29 @@ ARCHITECT_SYSTEM_PROMPT = textwrap.dedent("""\
     - [ ] <each criterion from the spec, restated in testable form>
     <<<END>>>
 
+    <<<COMPLEXITY>>>
+    Tier: <low|medium|high|extreme>
+    Recommended agent: <fast_implementer|implementer|deep_implementer|m25_implementer|glm>
+    Justification: <one or two sentences citing concrete signals — file count,
+    language count, algorithmic depth, integration surface, edge-case density,
+    test surface — that drove the tier and agent choice>
+    <<<END_COMPLEXITY>>>
+
+    # Tier guide
+
+    - low:     1-2 small files, single language, no external integrations,
+               trivial logic, < 10 test cases. Suits `fast_implementer`.
+    - medium:  3-6 files, single primary language, modest algorithmic content,
+               10-30 test cases. Suits `implementer` (the default).
+    - high:    7+ files OR cross-language OR non-trivial algorithms (parsers,
+               schedulers, custom data structures) OR external integrations
+               (HTTP clients, DB schemas) OR 30+ test cases. Suits
+               `deep_implementer`.
+    - extreme: production system with concurrency, persistence, or security
+               surface; multi-module refactor of an existing codebase; or
+               anything where correctness depends on subtle invariants.
+               Suits `m25_implementer`.
+
     # Rules
 
     1. Be prescriptive. The implementer follows your design exactly.
@@ -142,6 +187,8 @@ ARCHITECT_SYSTEM_PROMPT = textwrap.dedent("""\
     4. Do NOT write implementation code. That is the implementer's job.
     5. Do NOT add scope beyond what the spec requests.
     6. Every acceptance criterion from the spec must appear in your checklist.
+    7. Pick the LOWEST tier that fits — do not over-allocate compute. A `high`
+       agent for a `low` job wastes time and VRAM; the inverse causes failures.
     """)
 
 IMPLEMENTER_SYSTEM_PROMPT = textwrap.dedent("""\
@@ -291,6 +338,10 @@ def call_agent(
 _DESIGN_RE = re.compile(
     r"<<<DESIGN>>>\s*(.*?)\s*<<<END>>>", re.DOTALL | re.IGNORECASE,
 )
+_COMPLEXITY_RE = re.compile(
+    r"<<<COMPLEXITY>>>\s*(.*?)\s*<<<END_COMPLEXITY>>>",
+    re.DOTALL | re.IGNORECASE,
+)
 _FILE_RE = re.compile(
     r"<<<FILE:\s*([^\n>]+?)>>>\s*(.*?)\s*<<<END_FILE>>>",
     re.DOTALL | re.IGNORECASE,
@@ -315,6 +366,10 @@ _VERDICT_EVIDENCE_RE = re.compile(
 class ArchitectResult:
     design_md: str
     raw: str
+    # Optional — parsed from the COMPLEXITY block. Older architect outputs and
+    # malformed blocks leave this None; orchestrator falls back to the env
+    # default implementer in that case.
+    complexity: Optional[dict] = None
 
 
 @dataclass
@@ -345,7 +400,47 @@ def parse_architect_response(text: str) -> ArchitectResult | ParseError:
     design = m.group(1).strip()
     if not design:
         return ParseError("<<<DESIGN>>> block was empty", text)
-    return ArchitectResult(design_md=design, raw=text)
+    complexity = _parse_complexity_block(cleaned)
+    return ArchitectResult(design_md=design, raw=text, complexity=complexity)
+
+
+def _parse_complexity_block(cleaned_text: str) -> Optional[dict]:
+    """Extract and validate the <<<COMPLEXITY>>> block.
+
+    Returns None on missing/malformed input — the orchestrator handles the
+    None case by falling back to the env-default implementer. We deliberately
+    do NOT raise ParseError for a missing complexity block: backwards-compat
+    matters more than enforcing a brand-new field on the architect, and the
+    fallback is safe.
+    """
+    m = _COMPLEXITY_RE.search(cleaned_text)
+    if not m:
+        return None
+    body = m.group(1).strip()
+    if not body:
+        return None
+
+    fields = {}
+    for line in body.splitlines():
+        if ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        fields[key.strip().lower()] = value.strip()
+
+    tier = (fields.get("tier") or "").lower()
+    if tier not in TIER_TO_IMPLEMENTER:
+        # Unknown tier — return what we got but flag for telemetry
+        tier = ""
+    rec = (fields.get("recommended agent") or fields.get("recommended_agent") or "").strip()
+    if rec and rec not in ALLOWED_IMPLEMENTER_AGENTS:
+        rec = ""  # silently drop — _select_implementer_agent will fall back
+    justification = (fields.get("justification") or "").strip()
+
+    return {
+        "tier": tier or None,
+        "recommended_agent": rec or None,
+        "justification": justification or None,
+    }
 
 
 def _strip_markdown_fence(content: str) -> str:
@@ -473,10 +568,21 @@ def build_reviewer_message(
     design_md: str,
     code_files: list[tuple[str, str]],
     test_framework: str = "pytest",
+    rejection_notes: Optional[str] = None,
 ) -> list[dict[str, str]]:
     file_sections = []
     for path, content in code_files:
         file_sections.append(f"### {path}\n```\n{content}\n```\n")
+
+    retry_block = ""
+    if rejection_notes:
+        retry_block = (
+            "\n\n## Prior reviewer attempt failed — fix this before resubmitting\n\n"
+            f"{rejection_notes}\n\n"
+            "Apply this feedback in your next test file. Do not repeat the same "
+            "defect. If the feedback names a missing import, add it; if it names "
+            "a broken assertion, fix it.\n"
+        )
 
     return [
         {"role": "system", "content": REVIEWER_SYSTEM_PROMPT},
@@ -487,6 +593,7 @@ def build_reviewer_message(
             f"{design_md}\n\n"
             "## Implementation Files\n\n"
             + "\n".join(file_sections)
+            + retry_block
             + f"\n\n---\n\n"
             f"Test framework: {test_framework}\n\n"
             "Your task: write test files and review the implementation. "

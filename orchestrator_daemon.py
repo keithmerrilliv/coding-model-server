@@ -63,11 +63,13 @@ from qwen_autonomous.jira_client import (
 )
 from qwen_autonomous.jira_sync import JiraSync
 from qwen_autonomous.executor import (
+    ALLOWED_IMPLEMENTER_AGENTS,
     ArchitectResult,
     ImplementerResult,
     MAX_RETRIES,
     ParseError,
     ReviewerResult,
+    TIER_TO_IMPLEMENTER,
     _write_artifact,
     build_architect_message,
     build_implementer_message,
@@ -78,11 +80,13 @@ from qwen_autonomous.executor import (
     parse_reviewer_response,
     run_tests,
 )
+from qwen_autonomous import supervisor as _supervisor
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
 POLL_INTERVAL = float(os.getenv("ORCHESTRATOR_POLL_INTERVAL", "5"))
 LOG_LEVEL = os.getenv("ORCHESTRATOR_LOG_LEVEL", "INFO").upper()
+SUPERVISOR_ENABLED = os.getenv("AUTONOMOUS_SUPERVISOR", "0") == "1"
 
 logging.basicConfig(
     level=LOG_LEVEL,
@@ -383,7 +387,12 @@ def _process_executing(db: Database, spec: Spec) -> None:
       3. Either start it, check its review gate, or handle crash recovery.
     """
     tasks = db.list_tasks_for_spec(spec.id)
-    if not tasks:
+    # Bootstrap when there are no tasks (fresh spec) OR every task is SKIPPED
+    # (post-replan: supervisor invalidated the prior task DAG and we re-entered
+    # EXECUTING with a new plan). Without this, a replan that completes leaves
+    # only DONE+SKIPPED tasks, _find_current_task returns None, and the spec
+    # gets falsely marked DONE without ever re-running the new plan.
+    if not tasks or all(t.status == TaskStatus.SKIPPED for t in tasks):
         _bootstrap_tasks(db, spec)
         return
 
@@ -488,6 +497,17 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
     db.create_artifact(spec_id=spec.id, task_id=task.id,
                        kind=ArtifactKind.DESIGN, path="design.md")
 
+    # Persist complexity assessment as a workspace artifact. None when the
+    # architect skipped or malformed the COMPLEXITY block — _run_implementer
+    # falls back to the env-default agent in that case.
+    if result.complexity:
+        import json as _json
+        _write_artifact(spec_dir, "complexity.json",
+                        _json.dumps(result.complexity, indent=2) + "\n")
+        logger.info("spec %s: architect complexity assessment: tier=%r agent=%r",
+                    spec.id, result.complexity.get("tier"),
+                    result.complexity.get("recommended_agent"))
+
     # Create design_approval gate
     db.update_task_status(task.id, TaskStatus.BLOCKED_ON_REVIEW)
     db.create_gate(
@@ -520,13 +540,23 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
                 rejection_notes = g.reviewer_notes
                 break
 
+    # Pick the implementer agent from the architect's complexity recommendation.
+    # Falls back to env-default (whatever was bootstrapped on the task) if no
+    # complexity.json exists or the recommendation is invalid.
+    chosen_agent = _select_implementer_agent(spec_dir)
+    if chosen_agent and chosen_agent != task.agent:
+        logger.info("spec %s: architect recommendation overrides implementer agent: %r → %r",
+                    spec.id, task.agent, chosen_agent)
+        db.update_task_agent(task.id, chosen_agent)
+
     messages = build_implementer_message(spec_md, design_md,
                                          rejection_notes=rejection_notes)
-    raw = call_agent("implementer", messages)
+    raw = call_agent("implementer", messages, agent=chosen_agent)
     result = parse_implementer_response(raw)
 
     db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
                     payload={"role": "implementer",
+                             "agent": chosen_agent or task.agent,
                              "result_kind": type(result).__name__,
                              "retry": task.retry_count})
 
@@ -652,8 +682,15 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
     framework = test_strategy.get("framework", "pytest")
     tests_required = test_strategy.get("required", True)
 
+    # Pull supervisor feedback if this is a reviewer retry. Without this the
+    # reviewer reruns blind, regenerating the same broken tests — observed in
+    # spec_d8ac6b36 where a missing `import pytest` survived 3 retries.
+    rejection_notes = _latest_supervisor_feedback(db, spec.id, target_role="reviewer") \
+        if task.retry_count > 0 else None
+
     messages = build_reviewer_message(spec_md, design_md, code_files,
-                                       test_framework=framework)
+                                       test_framework=framework,
+                                       rejection_notes=rejection_notes)
     raw = call_agent("reviewer", messages)
     result = parse_reviewer_response(raw)
 
@@ -752,7 +789,305 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
         _attempt_retry(db, spec, task, failure_detail)
 
 
+# ── Supervisor-driven transition layer (Phase 2.5) ──────────────────────────
+#
+# When SUPERVISOR_ENABLED, _attempt_retry and _handle_gate_rejection consult
+# the supervisor agent (qwen_autonomous.supervisor) to decide the next
+# transition instead of routing on hardcoded if/elif by role.
+#
+# Limitations of the prototype:
+#   - request_clarification halts the spec on a CLARIFICATION gate; the human
+#     must respond manually. There is no auto-resume that re-invokes the
+#     supervisor with the response — that's a follow-up.
+#   - retry target_role=architect creates an approved CLARIFICATION gate with
+#     the feedback as notes, but the existing build_architect_message() does
+#     NOT consume clarification rounds. The audit trail is captured but the
+#     architect re-runs without seeing the feedback. The supervisor's system
+#     prompt steers it toward `replan` for design-level defects, which is
+#     the path that actually plumbs the feedback (via _process_pending_plan).
+#   - retry target_role=reviewer just resets reviewer to PENDING; no feedback
+#     channel exists for the reviewer.
+
+def _list_artifact_summaries(db: Database, spec_id: str) -> list[dict]:
+    """Compact summary of all artifacts on disk — for the supervisor context."""
+    rows = db._conn().execute(
+        "SELECT kind, path FROM artifacts WHERE spec_id = ? ORDER BY created_at",
+        (spec_id,),
+    ).fetchall()
+    spec_dir = db.spec_dir(spec_id)
+    out = []
+    for r in rows:
+        path = r["path"]
+        full = spec_dir / path
+        size = full.stat().st_size if full.exists() else None
+        item = {"kind": r["kind"], "path": path}
+        if size is not None:
+            item["bytes"] = size
+        out.append(item)
+    return out
+
+
+def _build_supervisor_context(db: Database, spec: Spec, task, outcome: str,
+                              *, reviewer_notes: str | None = None,
+                              test_output_excerpt: str | None = None,
+                              agent_error_excerpt: str | None = None,
+                              ) -> "_supervisor.SupervisorContext":
+    """Assemble the structured snapshot the supervisor reasons over."""
+    transitions_used = db.count_events(
+        spec_id=spec.id, kind=EventKind.SUPERVISOR_DECISION,
+    )
+    return {
+        "spec_id": spec.id,
+        "spec_title": spec.title,
+        "phase": task.role,
+        "role": task.role,
+        "outcome": outcome,
+        "retry_count": task.retry_count,
+        "transitions_used": transitions_used,
+        "plan_yaml": spec.normalized_yaml,
+        "reviewer_notes": reviewer_notes,
+        "test_output_excerpt": test_output_excerpt,
+        "agent_error_excerpt": agent_error_excerpt,
+        "artifacts": _list_artifact_summaries(db, spec.id),
+        "prior_decisions": _load_prior_decisions(db, spec.id),
+    }
+
+
+def _select_implementer_agent(spec_dir) -> "str | None":
+    """Read complexity.json and pick the implementer agent.
+
+    Precedence: architect's specific `recommended_agent` (if it's in the
+    whitelist) → tier default (if tier is recognized) → None (caller uses the
+    env-default IMPLEMENTER_AGENT). Returns None silently on any error so a
+    malformed or absent complexity.json never blocks the pipeline.
+    """
+    import json as _json
+    cpath = spec_dir / "complexity.json"
+    if not cpath.exists():
+        return None
+    try:
+        c = _json.loads(cpath.read_text())
+    except (OSError, _json.JSONDecodeError):
+        return None
+    rec = (c.get("recommended_agent") or "").strip()
+    if rec in ALLOWED_IMPLEMENTER_AGENTS:
+        return rec
+    tier = (c.get("tier") or "").strip().lower()
+    return TIER_TO_IMPLEMENTER.get(tier)
+
+
+def _latest_supervisor_feedback(db: Database, spec_id: str,
+                                *, target_role: str) -> str | None:
+    """Most recent supervisor `feedback_to_inject` for *target_role* on this spec.
+
+    Used by `_run_reviewer` (and any role whose retry path can't carry feedback
+    through a synthetic gate) to read the supervisor's directive on retry.
+    Returns None if no matching decision is found.
+    """
+    import json
+    rows = db.list_events_by_kind(
+        spec_id=spec_id, kind=EventKind.SUPERVISOR_DECISION, limit=20,
+    )
+    for r in rows:  # most-recent first
+        if not r.payload_json:
+            continue
+        try:
+            payload = json.loads(r.payload_json)
+        except json.JSONDecodeError:
+            continue
+        if (payload.get("action") == "retry"
+                and payload.get("target_role") == target_role
+                and payload.get("feedback_to_inject")):
+            return payload["feedback_to_inject"]
+    return None
+
+
+def _load_prior_decisions(db: Database, spec_id: str) -> list[dict]:
+    """Most-recent N supervisor decisions for *spec_id*, oldest-first.
+
+    Decoded from the events table's payload_json, capped to the supervisor
+    transition budget so we never render more than the model could have made.
+    """
+    import json
+    rows = db.list_events_by_kind(
+        spec_id=spec_id,
+        kind=EventKind.SUPERVISOR_DECISION,
+        limit=_supervisor.MAX_SUPERVISOR_TRANSITIONS,
+    )
+    out = []
+    for r in reversed(rows):  # oldest-first for natural reading order
+        if not r.payload_json:
+            continue
+        try:
+            payload = json.loads(r.payload_json)
+        except json.JSONDecodeError:
+            continue
+        out.append({
+            "action": payload.get("action", "?"),
+            "target_role": payload.get("target_role"),
+            "reason": payload.get("reason", ""),
+        })
+    return out
+
+
+def _retry_role_with_feedback(db: Database, spec: Spec, target_role: str,
+                              feedback: str, *, current_task) -> None:
+    """Apply a supervisor-issued retry to *target_role*.
+
+    For implementer/reviewer-driven retries that originate from the reviewer
+    task (test failure or release rejection), we also reset the current_task
+    (typically the reviewer) to PENDING so it re-runs after the implementer.
+    """
+    role_tasks = db.list_tasks_for_spec_by_role(spec.id, target_role)
+    target = role_tasks[0] if role_tasks else None
+    if target is None:
+        logger.error("spec %s: supervisor said retry %s but no such task; aborting",
+                     spec.id, target_role)
+        db.update_task_status(current_task.id, TaskStatus.FAILED)
+        db.update_spec_status(spec.id, SpecStatus.FAILED)
+        return
+
+    if target.retry_count >= MAX_RETRIES:
+        logger.error("spec %s: supervisor said retry %s but retry budget exhausted (%d/%d); aborting",
+                     spec.id, target_role, target.retry_count, MAX_RETRIES)
+        db.update_task_status(current_task.id, TaskStatus.FAILED)
+        db.update_spec_status(spec.id, SpecStatus.FAILED)
+        return
+
+    if target_role == "implementer":
+        synth = db.create_gate(
+            spec_id=spec.id, task_id=target.id,
+            gate_type=GateType.CODE_REVIEW,
+            prompt_md="## Supervisor-issued retry",
+        )
+        db.respond_to_gate(synth.id, "rejected", notes=feedback)
+    elif target_role == "architect":
+        synth = db.create_gate(
+            spec_id=spec.id,
+            gate_type=GateType.CLARIFICATION,
+            prompt_md="## Supervisor-issued architect retry",
+        )
+        db.respond_to_gate(synth.id, "approved", notes=feedback)
+    # reviewer: no feedback channel; just rerun
+
+    db.increment_task_retry(target.id)
+    db.update_task_status(target.id, TaskStatus.PENDING)
+    if current_task.id != target.id:
+        # Reset downstream task too so it re-runs after target completes
+        db.update_task_status(current_task.id, TaskStatus.PENDING)
+    logger.info("spec %s: supervisor retry %s (attempt %d/%d)",
+                spec.id, target_role, target.retry_count + 1, MAX_RETRIES)
+
+
+def _apply_supervisor_decision(db: Database, spec: Spec, task,
+                               decision: "_supervisor.SupervisorDecision",
+                               *, legacy_feedback: str | None) -> None:
+    """Translate a SupervisorDecision into DB state changes.
+
+    `legacy_feedback` is the failure_detail / reviewer_notes the legacy code
+    would have used — passed through when the supervisor declines to provide
+    its own feedback (defensive default for retry/replan).
+    """
+    db.record_event(
+        EventKind.SUPERVISOR_DECISION,
+        spec_id=spec.id, task_id=task.id,
+        payload={
+            "action": decision.action,
+            "target_role": decision.target_role,
+            "reason": decision.reason,
+            "feedback_to_inject": decision.feedback_to_inject,
+        },
+    )
+
+    if decision.action == "advance":
+        logger.info("spec %s: supervisor → advance: %s", spec.id, decision.reason)
+        db.update_task_status(task.id, TaskStatus.DONE)
+        return
+
+    if decision.action == "abort":
+        logger.warning("spec %s: supervisor → abort: %s", spec.id, decision.reason)
+        db.update_task_status(task.id, TaskStatus.FAILED)
+        db.update_spec_status(spec.id, SpecStatus.FAILED)
+        return
+
+    if decision.action == "retry":
+        feedback = decision.feedback_to_inject or legacy_feedback or ""
+        logger.info("spec %s: supervisor → retry %s: %s",
+                    spec.id, decision.target_role, decision.reason)
+        _retry_role_with_feedback(db, spec, decision.target_role, feedback,
+                                  current_task=task)
+        return
+
+    if decision.action == "replan":
+        logger.info("spec %s: supervisor → replan: %s", spec.id, decision.reason)
+        feedback = decision.feedback_to_inject or legacy_feedback
+        if feedback:
+            synth = db.create_gate(
+                spec_id=spec.id,
+                gate_type=GateType.CLARIFICATION,
+                prompt_md="## Supervisor-requested replan",
+            )
+            db.respond_to_gate(synth.id, "approved", notes=feedback)
+        # Mark ALL existing tasks SKIPPED (including DONE ones) so the new
+        # plan produces a fresh task DAG. Leaving DONE tasks in place causes
+        # _process_executing to skip the bootstrap branch and falsely mark
+        # the spec DONE without running the new plan.
+        for t in db.list_tasks_for_spec(spec.id):
+            if t.status != TaskStatus.SKIPPED:
+                db.update_task_status(t.id, TaskStatus.SKIPPED)
+        db.update_spec_status(spec.id, SpecStatus.PENDING_PLAN)
+        return
+
+    if decision.action == "request_clarification":
+        logger.info("spec %s: supervisor → request_clarification: %s",
+                    spec.id, decision.reason)
+        db.update_task_status(task.id, TaskStatus.BLOCKED_ON_REVIEW)
+        db.create_gate(
+            spec_id=spec.id, task_id=task.id,
+            gate_type=GateType.CLARIFICATION,
+            prompt_md=(
+                "## Supervisor needs clarification\n\n"
+                f"{decision.feedback_to_inject}\n\n"
+                "Approve with notes to provide an answer, or reject to abort."
+            ),
+        )
+        return
+
+    # Defensive: schema validation in supervisor.py should make this unreachable
+    logger.error("spec %s: unknown supervisor action %r; aborting",
+                 spec.id, decision.action)
+    db.update_task_status(task.id, TaskStatus.FAILED)
+    db.update_spec_status(spec.id, SpecStatus.FAILED)
+
+
 def _attempt_retry(db: Database, spec: Spec, task, failure_detail: str) -> None:
+    """Decide what to do after a test-failure / reviewer-FAIL outcome.
+
+    With SUPERVISOR_ENABLED, asks the supervisor agent; on SupervisorError
+    (transport, parse, schema violation), falls back to the legacy retry
+    path so a flaky meta-call can't take down the spec.
+    """
+    if not SUPERVISOR_ENABLED:
+        _legacy_attempt_retry(db, spec, task, failure_detail)
+        return
+
+    ctx = _build_supervisor_context(
+        db, spec, task,
+        outcome="test_fail",
+        test_output_excerpt=failure_detail,
+    )
+    try:
+        decision = _supervisor.decide(ctx)
+    except _supervisor.SupervisorError as e:
+        logger.warning("spec %s: supervisor failed (%s); falling back to legacy retry",
+                       spec.id, e)
+        _legacy_attempt_retry(db, spec, task, failure_detail)
+        return
+    _apply_supervisor_decision(db, spec, task, decision,
+                               legacy_feedback=failure_detail)
+
+
+def _legacy_attempt_retry(db: Database, spec: Spec, task, failure_detail: str) -> None:
     """Send the spec back to the implementer for another attempt, or fail."""
     impl_tasks = db.list_tasks_for_spec_by_role(spec.id, "implementer")
     impl_task = impl_tasks[0] if impl_tasks else None
@@ -808,6 +1143,32 @@ def _check_execution_gate(db: Database, spec: Spec, task) -> None:
 
 
 def _handle_gate_rejection(db: Database, spec: Spec, task, gate) -> None:
+    """Decide what to do after a human-rejected review gate.
+
+    With SUPERVISOR_ENABLED, asks the supervisor agent; on SupervisorError,
+    falls back to the legacy role-keyed branching.
+    """
+    if not SUPERVISOR_ENABLED:
+        _legacy_handle_gate_rejection(db, spec, task, gate)
+        return
+
+    ctx = _build_supervisor_context(
+        db, spec, task,
+        outcome="review_reject",
+        reviewer_notes=gate.reviewer_notes,
+    )
+    try:
+        decision = _supervisor.decide(ctx)
+    except _supervisor.SupervisorError as e:
+        logger.warning("spec %s: supervisor failed (%s); falling back to legacy gate handler",
+                       spec.id, e)
+        _legacy_handle_gate_rejection(db, spec, task, gate)
+        return
+    _apply_supervisor_decision(db, spec, task, decision,
+                               legacy_feedback=gate.reviewer_notes)
+
+
+def _legacy_handle_gate_rejection(db: Database, spec: Spec, task, gate) -> None:
     """Handle a rejected review gate for a task."""
     if task.role == "architect":
         # Re-run the architect with rejection notes as a clarification.

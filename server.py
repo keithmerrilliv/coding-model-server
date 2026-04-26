@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field, field_validator
 from memory_service import MemoryService
 from web_search_service import WebSearchService
 from server_manager import AppleDeepDocsService
+from qwen_autonomous.supervisor import SYSTEM_PROMPT as _SUPERVISOR_SYSTEM_PROMPT
 
 # Configure logging
 logging.basicConfig(
@@ -803,6 +804,13 @@ Update these after each retrieval step. They help you stay organized and efficie
             _ARCHITECT_SYSTEM_PROMPT,
             _QWEN36_27B,
             executor=True
+        ),
+        # Supervisor — meta-orchestrator. Always invoked with native tools
+        # (decide()), never with marker-based shell tools, so executor=False.
+        'supervisor': _create_agent_config(
+            'Supervisor — Qwen3.6-27B Q4_K_M (27B dense, decision-only, no shell tools)',
+            _SUPERVISOR_SYSTEM_PROMPT,
+            _QWEN36_27B,
         ),
         # ── Non-Qwen agents ──
         'nemotron': _create_agent_config(

@@ -72,6 +72,7 @@ class EventKind(str, Enum):
     AGENT_RAN = "agent_ran"              # architect/implementer/reviewer completed
     TEST_RAN = "test_ran"                # subprocess test execution completed
     DAEMON_TICK = "daemon_tick"          # heartbeat for liveness checks
+    SUPERVISOR_DECISION = "supervisor_decision"  # meta-orchestrator transition
 
 
 # ── Records ──────────────────────────────────────────────────────────────────

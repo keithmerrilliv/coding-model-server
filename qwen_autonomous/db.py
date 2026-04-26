@@ -302,6 +302,20 @@ class Database:
                 (_iso(now), task_id),
             )
 
+    def update_task_agent(self, task_id: str, agent: str) -> None:
+        """Override the agent recorded for a task.
+
+        Used when the architect's complexity assessment routes the implementer
+        task to a non-default agent. Keeping the DB record authoritative
+        matters for telemetry queries ("which agent built spec X?").
+        """
+        now = utc_now()
+        with self.transaction() as conn:
+            conn.execute(
+                "UPDATE tasks SET agent = ?, updated_at = ? WHERE id = ?",
+                (agent, _iso(now), task_id),
+            )
+
     def list_tasks_for_spec_by_role(self, spec_id: str,
                                      role: str) -> list[Task]:
         rows = self._conn().execute(
@@ -513,6 +527,24 @@ class Database:
                 "ORDER BY id DESC LIMIT ?",
                 (spec_id, limit),
             ).fetchall()
+        return [_row_to_event(r) for r in rows]
+
+    def count_events(self, *, spec_id: str, kind: EventKind) -> int:
+        """Count events of *kind* for a spec. Used for supervisor budget."""
+        row = self._conn().execute(
+            "SELECT COUNT(*) AS n FROM events WHERE spec_id = ? AND kind = ?",
+            (spec_id, kind.value),
+        ).fetchone()
+        return int(row["n"]) if row else 0
+
+    def list_events_by_kind(self, *, spec_id: str, kind: EventKind,
+                            limit: int = 20) -> list[Event]:
+        """Most-recent-first list of events of *kind* for a spec."""
+        rows = self._conn().execute(
+            "SELECT * FROM events WHERE spec_id = ? AND kind = ? "
+            "ORDER BY id DESC LIMIT ?",
+            (spec_id, kind.value, limit),
+        ).fetchall()
         return [_row_to_event(r) for r in rows]
 
     def events_after(self, last_seen_id: int, limit: int = 100) -> list[Event]:
