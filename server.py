@@ -545,7 +545,7 @@ Update these after each retrieval step. They help you stay organized and efficie
         'MODEL_PATH_30B_HD',
         '/home/keith-merrill/.lmstudio/models/lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q8_0.gguf',
         49, 196608, 4096, backend='llama_server',
-        server_extra_args=['--chat-template', 'chatml'],
+        server_extra_args=['--chat-template', 'chatml', '--swa-full'],
         logit_bias=[[151657, -100.0], [151658, -100.0]],
         cpu_moe=True, n_ubatch=3072,
     )
@@ -564,7 +564,7 @@ Update these after each retrieval step. They help you stay organized and efficie
         'MODEL_PATH_480B_LITE',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/Qwen3-Coder-480B-A35B-Instruct-UD-IQ1_M.gguf',
         63, 32768, 4096, backend='llama_server',
-        server_extra_args=['--chat-template', 'chatml'],
+        server_extra_args=['--chat-template', 'chatml', '--swa-full'],
         logit_bias=[[151657, -100.0], [151658, -100.0]],
         cpu_moe=True, n_ubatch=4096,
     )
@@ -582,7 +582,7 @@ Update these after each retrieval step. They help you stay organized and efficie
         'MODEL_PATH_480B_ULTRA',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/Qwen3-Coder-480B-A35B-Instruct-UD-Q2_K_XL-00001-of-00004.gguf',
         63, 32768, 4096, backend='llama_server',
-        server_extra_args=['--chat-template', 'chatml'],
+        server_extra_args=['--chat-template', 'chatml', '--swa-full'],
         logit_bias=[[151657, -100.0], [151658, -100.0]],
         cpu_moe=True, n_ubatch=4096,
     )
@@ -601,7 +601,7 @@ Update these after each retrieval step. They help you stay organized and efficie
         'MODEL_PATH_MINIMAX_M25',
         '/home/keith-merrill/.lmstudio/models/unsloth/MiniMax-M2.5-GGUF/Q4_K_M/MiniMax-M2.5-Q4_K_M-00001-of-00004.gguf',
         62, 118784, 4096, backend='llama_server', n_ubatch=4096,
-        server_extra_args=['--jinja', '--reasoning-format', 'none'],
+        server_extra_args=['--jinja', '--reasoning-format', 'none', '--swa-full'],
         logit_bias=[[200052, -100.0], [200053, -100.0]],
         type_k=2, type_v=2,
         cpu_moe=True,
@@ -626,7 +626,7 @@ Update these after each retrieval step. They help you stay organized and efficie
         'MODEL_PATH_QWEN35_122B',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3.5-122B-A10B-GGUF/Q4_K_M/Qwen3.5-122B-A10B-Q4_K_M-00001-of-00003.gguf',
         49, 262144, 4096, backend='llama_server',
-        server_extra_args=['--jinja', '--reasoning-format', 'none'],
+        server_extra_args=['--jinja', '--reasoning-format', 'none', '--swa-full'],
         cpu_moe=True, n_ubatch=3072,
     )
 
@@ -647,7 +647,7 @@ Update these after each retrieval step. They help you stay organized and efficie
         'MODEL_PATH_QWEN36_35B',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf',
         48, 262144, 5632, backend='llama_server',
-        server_extra_args=['--jinja', '--reasoning-format', 'none'],
+        server_extra_args=['--jinja', '--reasoning-format', 'none', '--swa-full'],
         type_k=8, type_v=8,
         cpu_moe=True, n_ubatch=5632,
         repeat_penalty=1.05,
@@ -663,7 +663,7 @@ Update these after each retrieval step. They help you stay organized and efficie
         'MODEL_PATH_QWEN36_27B',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3.6-27B-GGUF/Qwen3.6-27B-Q4_K_M.gguf',
         40, 131072, 2048, backend='llama_server',
-        server_extra_args=['--jinja', '--reasoning-format', 'none'],
+        server_extra_args=['--jinja', '--reasoning-format', 'none', '--swa-full'],
         type_k=2, type_v=2,
         n_ubatch=2048,
     )
@@ -1114,6 +1114,11 @@ class LlamaServerManager:
             '--port', str(self.LLAMA_SERVER_PORT),
             '-np', '1',
             '--lookup-cache-dynamic', '/tmp/llama-lookup-cache.bin',
+            # On retries (autonomous flow rebuilds the prompt from scratch),
+            # llama-server scans the new prompt against the cached KV state
+            # and reuses the longest matching prefix. 256 is the minimum
+            # match length; larger values miss shorter common prefixes.
+            '--cache-reuse', '256',
         ]
 
         # MoE models: keep expert weights on CPU, put more attention layers on GPU
