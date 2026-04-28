@@ -110,6 +110,8 @@ class JiraSync:
         self.poll_interval = poll_interval
         self._shutdown = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        # Maps event_id → consecutive-failure count; cleared on success.
+        self._event_retries: dict[int, int] = {}
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
@@ -157,6 +159,12 @@ class JiraSync:
 
     # ── forward: SQLite → Jira ───────────────────────────────────────────────
 
+    # In-memory retry counter for events that fail to sync. Keyed by event id.
+    # An event is retried up to _MAX_EVENT_RETRIES times before we advance the
+    # watermark past it (logging a CRITICAL warning so the operator can
+    # reconcile the SQLite event log against Jira manually).
+    _MAX_EVENT_RETRIES = 3
+
     def _forward_sync(self) -> None:
         last_seen = int(self.db.get_sync_state(LAST_EVENT_KEY, default="0") or "0")
         events = self.db.events_after(last_seen, limit=SYNC_BATCH_SIZE)
@@ -165,18 +173,32 @@ class JiraSync:
         logger.debug("jira-sync: processing %d events from id>%d",
                      len(events), last_seen)
         for event in events:
+            if event.id is None:
+                continue  # safety: rows always have an id, but skip if not
             try:
                 self._handle_event(event)
-            except Exception:
-                logger.exception(
-                    "jira-sync: error handling event id=%s kind=%s "
-                    "(advancing high-water mark anyway to avoid blocking)",
-                    event.id, event.kind.value,
-                )
-            # Advance the high-water mark after each event so a crash
-            # mid-batch doesn't replay the entire batch on restart.
-            if event.id is not None:
+                self._event_retries.pop(event.id, None)
                 self.db.set_sync_state(LAST_EVENT_KEY, str(event.id))
+            except Exception:
+                count = self._event_retries.get(event.id, 0) + 1
+                self._event_retries[event.id] = count
+                if count >= self._MAX_EVENT_RETRIES:
+                    logger.critical(
+                        "jira-sync: event id=%s kind=%s failed %d times — "
+                        "advancing watermark; reconcile SQLite events vs Jira manually",
+                        event.id, event.kind.value, count,
+                    )
+                    self._event_retries.pop(event.id, None)
+                    self.db.set_sync_state(LAST_EVENT_KEY, str(event.id))
+                else:
+                    logger.warning(
+                        "jira-sync: event id=%s kind=%s failed (attempt %d/%d); "
+                        "watermark held, will retry next tick",
+                        event.id, event.kind.value, count, self._MAX_EVENT_RETRIES,
+                    )
+                    # Stop processing this batch — the failed event blocks
+                    # subsequent ones until it succeeds or hits the cap.
+                    break
 
     def _handle_event(self, event: Event) -> None:
         kind = event.kind

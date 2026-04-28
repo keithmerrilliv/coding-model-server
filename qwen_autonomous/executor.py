@@ -792,14 +792,39 @@ def _run_local_tests(spec_dir: Path, framework: str, timeout: int) -> tuple[bool
     logger.info("running tests via %s: %s (timeout=%ds)",
                 sandbox_mode, " ".join(raw_cmd), timeout)
 
+    # Cap on captured output. Without this, a runaway test that prints a
+    # tight loop of MB/s straight to stdout buffers everything in memory
+    # and OOMs the orchestrator. 4 MiB is plenty for real test traces.
+    MAX_OUTPUT_BYTES = 4 * 1024 * 1024
+
+    def _truncate(s: str) -> str:
+        b = s.encode("utf-8", errors="replace")
+        if len(b) <= MAX_OUTPUT_BYTES:
+            return s
+        return (
+            b[: MAX_OUTPUT_BYTES // 2].decode("utf-8", errors="replace")
+            + f"\n... [truncated {len(b) - MAX_OUTPUT_BYTES} bytes of output] ...\n"
+            + b[-MAX_OUTPUT_BYTES // 2 :].decode("utf-8", errors="replace")
+        )
+
     try:
         result = subprocess.run(
             cmd, cwd=spec_dir, capture_output=True, text=True, timeout=timeout,
         )
-        output = result.stdout + "\n" + result.stderr
+        stdout = _truncate(result.stdout or "")
+        stderr = _truncate(result.stderr or "")
+        output = stdout + "\n" + stderr
         passed = result.returncode == 0
-    except subprocess.TimeoutExpired:
-        output = f"Tests timed out after {timeout}s"
+    except subprocess.TimeoutExpired as e:
+        # Surface partial output on timeout so the supervisor / reviewer can
+        # diagnose; previously this discarded the partial stdout/stderr.
+        partial_stdout = _truncate((e.stdout or b"").decode("utf-8", errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or ""))
+        partial_stderr = _truncate((e.stderr or b"").decode("utf-8", errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or ""))
+        output = (
+            f"Tests timed out after {timeout}s\n"
+            f"--- partial stdout ---\n{partial_stdout}\n"
+            f"--- partial stderr ---\n{partial_stderr}"
+        )
         passed = False
     except Exception as e:
         output = f"Test runner failed: {type(e).__name__}: {e}"

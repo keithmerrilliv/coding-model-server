@@ -62,6 +62,7 @@ from qwen_autonomous.jira_client import (
     JiraClient,
 )
 from qwen_autonomous.jira_sync import JiraSync
+from qwen_autonomous import executor
 from qwen_autonomous.executor import (
     ALLOWED_IMPLEMENTER_AGENTS,
     ArchitectResult,
@@ -418,7 +419,21 @@ def _process_executing(db: Database, spec: Spec) -> None:
 def _bootstrap_tasks(db: Database, spec: Spec) -> None:
     """Parse the planner's YAML into Task rows."""
     import yaml as _yaml
+    if not spec.normalized_yaml:
+        # State machine reached EXECUTING without a plan (supervisor replan
+        # path or hand-edited DB row). Without this guard, safe_load(None)
+        # returns None and plan.get("phases") AttributeErrors with a stack
+        # trace that's hard to read in the daemon log.
+        logger.error("spec %s: EXECUTING with no normalized_yaml — marking failed",
+                     spec.id)
+        db.update_spec_status(spec.id, SpecStatus.FAILED)
+        return
     plan = _yaml.safe_load(spec.normalized_yaml)
+    if not isinstance(plan, dict):
+        logger.error("spec %s: normalized_yaml is not a dict (got %s) — marking failed",
+                     spec.id, type(plan).__name__)
+        db.update_spec_status(spec.id, SpecStatus.FAILED)
+        return
     phases = plan.get("phases", [])
     if not phases:
         logger.error("spec %s: plan YAML has no phases — marking failed",
@@ -429,8 +444,7 @@ def _bootstrap_tasks(db: Database, spec: Spec) -> None:
         role = phase.get("role", "implementer")
         db.create_task(
             spec_id=spec.id,
-            agent=__import__("qwen_autonomous.executor",
-                             fromlist=["role_to_agent"]).role_to_agent(role),
+            agent=executor.role_to_agent(role),
             role=role,
             title=phase.get("name", role),
             description=str(phase.get("success", "")),

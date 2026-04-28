@@ -1001,16 +1001,32 @@ class ModelManager:
         model_config = Config.AGENTS[agent_name]['model_config']
         model_path = model_config['path']
 
-        # Free VRAM from llama-server subprocess before loading a llama_cpp model
-        llama_server_manager.shutdown()
-
         with self.lock:
-            # Cache hit — same agent as last time
+            # Cache hit — same agent as last time. Don't touch llama-server.
+            # Old behavior unconditionally shut down llama-server here, which
+            # would SIGTERM in-flight streams when a chat to a llama_cpp
+            # agent landed alongside one to a llama_server agent.
             if self._cached_model is not None and self._cached_agent == agent_name:
                 logger.info("Reusing cached model for %s", agent_name)
                 return self._cached_model
 
-            # Cache miss — unload previous model first
+            # Cache miss — switching to a llama_cpp model. Free VRAM held by
+            # any llama_server subprocess. If there are in-flight requests on
+            # llama-server, wait briefly so we don't kill them mid-stream.
+            if llama_server_manager.is_running():
+                deadline = time.time() + 60  # 1 min cap on the wait
+                while time.time() < deadline and llama_server_manager.has_active_requests():
+                    time.sleep(0.5)
+                if llama_server_manager.has_active_requests():
+                    logger.warning(
+                        "Loading llama_cpp model %s but llama-server still has "
+                        "active requests after 60s; shutting down anyway (VRAM "
+                        "constraint). Some llama-server clients may see 500 errors.",
+                        agent_name,
+                    )
+                llama_server_manager.shutdown()
+
+            # Unload previous llama_cpp model first
             if self._cached_model is not None:
                 logger.info("Agent switch: unloading %s to load %s", self._cached_agent, agent_name)
                 del self._cached_model
@@ -1210,6 +1226,16 @@ class LlamaServerManager:
         """Stop the subprocess gracefully, then force-kill if needed. Thread-safe."""
         with self.lock:
             self._shutdown_unlocked()
+
+    def is_running(self) -> bool:
+        """True if a llama-server subprocess is currently alive."""
+        with self.lock:
+            return self.process is not None and self.process.poll() is None
+
+    def has_active_requests(self) -> bool:
+        """True if any sync/stream request is mid-flight against llama-server."""
+        with self.lock:
+            return self._active_requests > 0
 
     def ensure_running(self, model_config: dict):
         """Ensure llama-server is running with the correct model. Handles model swaps."""
