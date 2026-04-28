@@ -1066,7 +1066,9 @@ class LlamaServerManager:
     """Manages a llama-server subprocess for models that require it (e.g. qwen3next arch)."""
 
     LLAMA_SERVER_PORT = 8081
-    IDLE_TIMEOUT = 600  # 10 minutes
+    # Idle timeout — only counts when no requests are active. The watchdog
+    # also checks _active_requests below and never kills mid-stream.
+    IDLE_TIMEOUT = 1800  # 30 minutes
     HEALTH_POLL_INTERVAL = 0.5
     HEALTH_TIMEOUT = 120  # seconds to wait for /health
 
@@ -1081,6 +1083,9 @@ class LlamaServerManager:
         self.process: Optional[subprocess.Popen] = None
         self.current_model_path: Optional[str] = None
         self.last_request_time: float = 0
+        # Number of in-flight requests. Watchdog skips the kill while >0.
+        # Race-free under CPython's GIL for ±1 increments.
+        self._active_requests: int = 0
         self._watchdog_thread: Optional[Thread] = None
         self._watchdog_running = False
 
@@ -1232,7 +1237,13 @@ class LlamaServerManager:
         self._watchdog_thread.start()
 
     def _idle_watchdog(self):
-        """Background thread: shut down subprocess if idle for IDLE_TIMEOUT seconds."""
+        """Background thread: shut down subprocess if idle for IDLE_TIMEOUT seconds.
+
+        Skips kill while any request is in-flight. Without this guard the
+        watchdog would race with long synchronous requests (architect /
+        reviewer generations that exceed IDLE_TIMEOUT) and SIGKILL the
+        subprocess mid-response, dropping the client's connection.
+        """
         while self._watchdog_running:
             time.sleep(30)  # Check every 30s
             if not self._watchdog_running:
@@ -1240,6 +1251,10 @@ class LlamaServerManager:
             with self.lock:
                 if self.process is None:
                     break
+                if self._active_requests > 0:
+                    # In-flight request — don't shut down. Treat as activity.
+                    self.last_request_time = time.time()
+                    continue
                 idle = time.time() - self.last_request_time
                 if idle >= self.IDLE_TIMEOUT:
                     logger.info("llama-server idle for %.0fs, shutting down to free resources", idle)
@@ -1255,118 +1270,121 @@ class LlamaServerManager:
                      parallel_tool_calls: Optional[bool] = None) -> Iterator[str]:
         """Stream a chat completion via the llama-server subprocess."""
         self.last_request_time = time.time()
-
-        # Emit progress event so client can display prompt size during prefill
-        n_ctx = (model_config or {}).get('n_ctx', 32768)
-        progress_event = {"type": "progress", "stage": "prefill",
-                          "prompt_tokens": est_prompt_tokens, "n_ctx": n_ctx}
-        yield f"data: {json.dumps(progress_event)}\n\n"
-
-        openai_messages = self._build_openai_messages(messages, system_prompt)
-        url = f"http://127.0.0.1:{self.LLAMA_SERVER_PORT}/v1/chat/completions"
-        payload = {
-            "messages": openai_messages,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "stream": True,
-            # No explicit stop sequences — llama-server's chat template handles
-            # end-of-turn tokens (im_end, EOT, etc.) natively. Passing them here
-            # causes premature stopping via double-matching.
-            "repeat_penalty": (model_config or {}).get('repeat_penalty', 1.15),
-            "repeat_last_n": (model_config or {}).get('repeat_last_n', 256),
-            # Ban model-specific native tool tokens to prevent format corruption.
-            # Each model config specifies which tokens to ban via logit_bias.
-            "logit_bias": (model_config or {}).get('logit_bias', []),
-        }
-        if tools:
-            payload["tools"] = tools
-            # The chatml/logit_bias workaround for marker-only models bans the
-            # very tokens (<tool_call>, etc.) that native tool-calling needs to
-            # emit. Drop the bias when the caller opts into native tools.
-            payload["logit_bias"] = []
-        if tool_choice is not None:
-            payload["tool_choice"] = tool_choice
-        if parallel_tool_calls is not None:
-            payload["parallel_tool_calls"] = parallel_tool_calls
-
-        completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
-        finish_reason = None
-        accumulated_text = []  # Diagnostic: capture full response
-        think_stripper = ThinkingStripper()
-
+        self._active_requests += 1
         try:
-            with http_requests.post(url, json=payload, stream=True,
-                                    timeout=Config.LLAMA_SERVER_REQUEST_TIMEOUT) as resp:
-                if resp.status_code != 200:
-                    error_body = resp.text
-                    logger.error("llama-server returned %d: %s", resp.status_code, error_body)
-                    error_chunk = {"error": {"message": f"llama-server error: {error_body}", "type": "server_error"}}
-                    yield f"data: {json.dumps(error_chunk)}\n\n"
-                    yield "data: [DONE]\n\n"
-                    return
+            # Emit progress event so client can display prompt size during prefill
+            n_ctx = (model_config or {}).get('n_ctx', 32768)
+            progress_event = {"type": "progress", "stage": "prefill",
+                              "prompt_tokens": est_prompt_tokens, "n_ctx": n_ctx}
+            yield f"data: {json.dumps(progress_event)}\n\n"
 
-                resp.encoding = 'utf-8'  # llama-server sends UTF-8; override requests' ISO-8859-1 default
-                for line in resp.iter_lines(decode_unicode=True):
-                    if not line or not line.startswith("data: "):
-                        continue
-                    data = line[6:]
-                    if data.strip() == "[DONE]":
-                        break
-                    try:
-                        chunk = json.loads(data)
-                        choices = chunk.get("choices", [])
-                        if not choices:
+            openai_messages = self._build_openai_messages(messages, system_prompt)
+            url = f"http://127.0.0.1:{self.LLAMA_SERVER_PORT}/v1/chat/completions"
+            payload = {
+                "messages": openai_messages,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "stream": True,
+                # No explicit stop sequences — llama-server's chat template handles
+                # end-of-turn tokens (im_end, EOT, etc.) natively. Passing them here
+                # causes premature stopping via double-matching.
+                "repeat_penalty": (model_config or {}).get('repeat_penalty', 1.15),
+                "repeat_last_n": (model_config or {}).get('repeat_last_n', 256),
+                # Ban model-specific native tool tokens to prevent format corruption.
+                # Each model config specifies which tokens to ban via logit_bias.
+                "logit_bias": (model_config or {}).get('logit_bias', []),
+            }
+            if tools:
+                payload["tools"] = tools
+                # The chatml/logit_bias workaround for marker-only models bans the
+                # very tokens (<tool_call>, etc.) that native tool-calling needs to
+                # emit. Drop the bias when the caller opts into native tools.
+                payload["logit_bias"] = []
+            if tool_choice is not None:
+                payload["tool_choice"] = tool_choice
+            if parallel_tool_calls is not None:
+                payload["parallel_tool_calls"] = parallel_tool_calls
+
+            completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+            finish_reason = None
+            accumulated_text = []  # Diagnostic: capture full response
+            think_stripper = ThinkingStripper()
+
+            try:
+                with http_requests.post(url, json=payload, stream=True,
+                                        timeout=Config.LLAMA_SERVER_REQUEST_TIMEOUT) as resp:
+                    if resp.status_code != 200:
+                        error_body = resp.text
+                        logger.error("llama-server returned %d: %s", resp.status_code, error_body)
+                        error_chunk = {"error": {"message": f"llama-server error: {error_body}", "type": "server_error"}}
+                        yield f"data: {json.dumps(error_chunk)}\n\n"
+                        yield "data: [DONE]\n\n"
+                        return
+
+                    resp.encoding = 'utf-8'  # llama-server sends UTF-8; override requests' ISO-8859-1 default
+                    for line in resp.iter_lines(decode_unicode=True):
+                        if not line or not line.startswith("data: "):
                             continue
-                        delta = choices[0].get("delta", {})
-                        content = delta.get("content")
-                        fr = choices[0].get("finish_reason")
-                        if fr:
-                            finish_reason = fr
+                        data = line[6:]
+                        if data.strip() == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(data)
+                            choices = chunk.get("choices", [])
+                            if not choices:
+                                continue
+                            delta = choices[0].get("delta", {})
+                            content = delta.get("content")
+                            fr = choices[0].get("finish_reason")
+                            if fr:
+                                finish_reason = fr
 
-                        # Proxy native tool_calls deltas straight through. Each
-                        # delta carries a partial slice (function name, then
-                        # incremental argument JSON) keyed by index so the
-                        # client reassembles parallel calls.
-                        tc = delta.get("tool_calls")
-                        if tc:
-                            self.last_request_time = time.time()
-                            out_chunk = build_stream_chunk(completion_id, model_id, tool_calls=tc)
-                            yield f"data: {json.dumps(out_chunk)}\n\n"
-
-                        if content:
-                            accumulated_text.append(content)
-                            # Strip <think>...</think> blocks from streaming output
-                            filtered = think_stripper.feed(content)
-                            if filtered:
-                                self.last_request_time = time.time()  # Keep watchdog at bay during long streams
-                                out_chunk = build_stream_chunk(completion_id, model_id, content=filtered)
+                            # Proxy native tool_calls deltas straight through. Each
+                            # delta carries a partial slice (function name, then
+                            # incremental argument JSON) keyed by index so the
+                            # client reassembles parallel calls.
+                            tc = delta.get("tool_calls")
+                            if tc:
+                                self.last_request_time = time.time()
+                                out_chunk = build_stream_chunk(completion_id, model_id, tool_calls=tc)
                                 yield f"data: {json.dumps(out_chunk)}\n\n"
-                    except json.JSONDecodeError:
-                        continue
 
-        except Exception as e:
-            logger.error("Error proxying stream from llama-server: %s", e, exc_info=True)
-            error_chunk = {"error": {"message": str(e), "type": "server_error"}}
-            yield f"data: {json.dumps(error_chunk)}\n\n"
+                            if content:
+                                accumulated_text.append(content)
+                                # Strip <think>...</think> blocks from streaming output
+                                filtered = think_stripper.feed(content)
+                                if filtered:
+                                    self.last_request_time = time.time()  # Keep watchdog at bay during long streams
+                                    out_chunk = build_stream_chunk(completion_id, model_id, content=filtered)
+                                    yield f"data: {json.dumps(out_chunk)}\n\n"
+                        except json.JSONDecodeError:
+                            continue
+
+            except Exception as e:
+                logger.error("Error proxying stream from llama-server: %s", e, exc_info=True)
+                error_chunk = {"error": {"message": str(e), "type": "server_error"}}
+                yield f"data: {json.dumps(error_chunk)}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+
+            # Flush any remaining buffered content from the thinking stripper
+            remaining = think_stripper.flush()
+            if remaining:
+                out_chunk = build_stream_chunk(completion_id, model_id, content=remaining)
+                yield f"data: {json.dumps(out_chunk)}\n\n"
+
+            # Log the full response for diagnostics (repr escapes newlines for single-line journald)
+            full_text = ''.join(accumulated_text)
+            logger.info("llama-server proxy response (%d chars): %s",
+                         len(full_text), repr(full_text[:2000]))
+
+            final_chunk = build_stream_chunk(completion_id, model_id, finish=True,
+                                             finish_reason=finish_reason or "stop")
+            yield f"data: {json.dumps(final_chunk)}\n\n"
             yield "data: [DONE]\n\n"
-            return
-
-        # Flush any remaining buffered content from the thinking stripper
-        remaining = think_stripper.flush()
-        if remaining:
-            out_chunk = build_stream_chunk(completion_id, model_id, content=remaining)
-            yield f"data: {json.dumps(out_chunk)}\n\n"
-
-        # Log the full response for diagnostics (repr escapes newlines for single-line journald)
-        full_text = ''.join(accumulated_text)
-        logger.info("llama-server proxy response (%d chars): %s",
-                     len(full_text), repr(full_text[:2000]))
-
-        final_chunk = build_stream_chunk(completion_id, model_id, finish=True,
-                                         finish_reason=finish_reason or "stop")
-        yield f"data: {json.dumps(final_chunk)}\n\n"
-        yield "data: [DONE]\n\n"
-        self.last_request_time = time.time()
+        finally:
+            self.last_request_time = time.time()
+            self._active_requests -= 1
 
     def proxy_sync(self, messages: List[dict], system_prompt: str,
                    model_id: str, max_tokens: int, temperature: float,
@@ -1396,22 +1414,26 @@ class LlamaServerManager:
         if parallel_tool_calls is not None:
             payload["parallel_tool_calls"] = parallel_tool_calls
 
-        resp = http_requests.post(url, json=payload, timeout=Config.LLAMA_SERVER_REQUEST_TIMEOUT)
-        if resp.status_code != 200:
-            raise HTTPException(status_code=502, detail=f"llama-server error: {resp.text}")
+        self._active_requests += 1
+        try:
+            resp = http_requests.post(url, json=payload, timeout=Config.LLAMA_SERVER_REQUEST_TIMEOUT)
+            if resp.status_code != 200:
+                raise HTTPException(status_code=502, detail=f"llama-server error: {resp.text}")
 
-        result = resp.json()
-        message = result["choices"][0].get("message", {})
-        text = message.get("content") or ""
-        text = strip_thinking(text)
-        tool_calls = message.get("tool_calls")
-        finish_reason = result["choices"][0].get("finish_reason", "stop")
-        usage = result.get("usage", {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
+            result = resp.json()
+            message = result["choices"][0].get("message", {})
+            text = message.get("content") or ""
+            text = strip_thinking(text)
+            tool_calls = message.get("tool_calls")
+            finish_reason = result["choices"][0].get("finish_reason", "stop")
+            usage = result.get("usage", {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
 
-        self.last_request_time = time.time()
-        return build_completion_response(model_id, text, usage,
-                                         finish_reason=finish_reason,
-                                         tool_calls=tool_calls)
+            self.last_request_time = time.time()
+            return build_completion_response(model_id, text, usage,
+                                             finish_reason=finish_reason,
+                                             tool_calls=tool_calls)
+        finally:
+            self._active_requests -= 1
 
     @staticmethod
     def _build_openai_messages(messages: List, system_prompt: str) -> List[dict]:
