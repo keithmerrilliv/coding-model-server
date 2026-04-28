@@ -544,8 +544,10 @@ Update these after each retrieval step. They help you stay organized and efficie
     # default llama_cpp / ngl=4 layout left ~14 of the 480B's expert mass on
     # CPU in a non-cpu_moe layout, which hurts decode bandwidth even more
     # than for ULTRA because IQ1_M's per-token byte count is already lower.
-    # Q4_0 KV at 32K ctx + ub=4096 mirrors ULTRA. Re-tune ub if compute
-    # buffer turns out to scale differently for IQ1_M.
+    # Q8_0 KV at 32K (capped here, not native 256K) — see
+    # feedback_kv_quant_preference: at this model's KV layout (8 heads × 62
+    # layers × 64 head_dim) Q8_0 KV at 256K would need ~33 GB on its own.
+    # 32K is the largest ctx where Q8_0 KV still fits.
     _QWEN_480B_LITE = _create_model_config(
         'MODEL_PATH_480B_LITE',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/Qwen3-Coder-480B-A35B-Instruct-UD-IQ1_M.gguf',
@@ -553,16 +555,15 @@ Update these after each retrieval step. They help you stay organized and efficie
         server_extra_args=['--chat-template', 'chatml'],
         logit_bias=[[151657, -100.0], [151658, -100.0]],
         cpu_moe=True, n_ubatch=4096,
-        type_k=2, type_v=2,
     )
 
     # Ultra: Premium reasoning using Q2_K_XL on 192GB RAM.
     # llama_server + cpu_moe → all 62 attention sublayers + output on GPU
     # (ngl=63: llama.cpp counts output as the 63rd "layer"). Experts on CPU.
-    # Native context is 262144; we run 32K to keep KV cache small.
-    # Q4_0 KV cache (type_k/type_v=2): halves cache size vs Q8_0 (~2.1 GB vs ~4.1 GB
-    # at 32K), redirecting that VRAM to a larger compute buffer (ub=4096 → ~5 GB).
-    # At 32K with Q2_K_XL weights, Q4_0 KV is well below the noise floor of weight quant.
+    # Native context is 262144 but unreachable on a 16 GB GPU for this
+    # model's KV layout (8 KV heads × 62 layers × 64 head_dim ⇒ 33 GB Q8_0
+    # at 256K). 32K is the largest ctx where Q8_0 KV still fits — see
+    # feedback_kv_quant_preference (prefer KV quality over more context).
     # logit_bias bans <tool_call>/</tool_call> tokens (same Qwen3-Coder family as
     # Coder-Next; verify IDs via /tokenize after first load if drift suspected).
     _QWEN_480B_ULTRA = _create_model_config(
@@ -572,7 +573,6 @@ Update these after each retrieval step. They help you stay organized and efficie
         server_extra_args=['--chat-template', 'chatml'],
         logit_bias=[[151657, -100.0], [151658, -100.0]],
         cpu_moe=True, n_ubatch=4096,
-        type_k=2, type_v=2,
     )
 
     # MINIMAX: MiniMax M2.5 (230B MoE, 10B active params, 62 layers, ~1,760 MiB/layer)
@@ -821,7 +821,7 @@ Update these after each retrieval step. They help you stay organized and efficie
             executor=True
         ),
         'architect': _create_agent_config(
-            'Architect — Coder-480B Q2_K_XL (35B/480B MoE, 32K ctx Q4_0, ngl=63 cpu_moe, ultra reasoning)',
+            'Architect — Coder-480B Q2_K_XL (35B/480B MoE, 32K ctx Q8_0, ngl=63 cpu_moe, ultra reasoning)',
             _ARCHITECT_SYSTEM_PROMPT,
             _QWEN_480B_ULTRA,
             executor=True
@@ -845,7 +845,7 @@ Update these after each retrieval step. They help you stay organized and efficie
             executor=True
         ),
         'lite_architect': _create_agent_config(
-            'Architect — Coder-480B IQ1_M (35B/480B MoE, 32K ctx Q4_0, ngl=63 cpu_moe, lite reasoning)',
+            'Architect — Coder-480B IQ1_M (35B/480B MoE, 32K ctx Q8_0, ngl=63 cpu_moe, lite reasoning)',
             f'You are a system architect. {EXECUTOR_PROMPT}\n\nFILE WRITING: Use `<<<WRITE_FILE>>>` to create or update source files. After writing, use `<<<REMOTE_EXEC>>>` to compile and verify.\n\n{TOOL_REFERENCE}',
             _QWEN_480B_LITE,
             executor=True
