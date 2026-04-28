@@ -7,8 +7,9 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-User=keith-merrill
-Group=keith-merrill
+# User= / Group= are not valid in --user units (the service already runs
+# as the invoking user). Leaving them in caused status=216/GROUP and
+# repeated restart-loop failures.
 WorkingDirectory=/home/keith-merrill/Dev/qwen-server
 ExecStart=/home/keith-merrill/Dev/qwen-server/venv/bin/python server.py
 Restart=always
@@ -30,22 +31,12 @@ EnvironmentFile=-%h/.config/qwen-server/.env
 
 # Resource limits
 LimitNOFILE=65536
-LimitMEMLOCK=infinity
-NoNewPrivileges=true
-
-# Security hardening — keep it light here because llama.cpp + CUDA need broad
-# syscall access. Tighten further (SystemCallFilter, MemoryDenyWriteExecute)
-# only after testing they don't break your GPU backend.
-PrivateTmp=yes
-ProtectKernelTunables=yes
-ProtectKernelLogs=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
-RestrictSUIDSGID=yes
-RestrictRealtime=yes
-LockPersonality=yes
-
-# GPU access (device policy not available in user services)
+# NOTE: NoNewPrivileges, LimitMEMLOCK=infinity, and the Protect*/Restrict*/
+# LockPersonality hardening directives are not usable in --user units —
+# they require capabilities the user-mode systemd manager cannot grant
+# (status=218/CAPABILITIES). Move this unit to a system-mode service if
+# you want hardening back. GPU access also doesn't need device policy
+# in user mode.
 
 [Install]
 WantedBy=default.target

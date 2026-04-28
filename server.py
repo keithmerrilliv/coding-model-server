@@ -56,6 +56,24 @@ class ChatMessage(BaseModel):
     tool_call_id: Optional[str] = None
     tool_calls: Optional[List[Dict[str, Any]]] = None
 
+    @field_validator('content', mode='before')
+    @classmethod
+    def flatten_content_parts(cls, v):
+        # OpenAI multimodal content: third-party clients (qwen-code, openai-python
+        # ≥1.0) may send `content` as a list of parts like
+        # [{"type":"text","text":"..."}]. Flatten to a plain string so the rest
+        # of the pipeline (template formatting, marker scanning) keeps working.
+        # Non-text parts are dropped — there's no vision pipeline here.
+        if isinstance(v, list):
+            parts = []
+            for part in v:
+                if isinstance(part, dict) and part.get('type') == 'text':
+                    text = part.get('text')
+                    if isinstance(text, str):
+                        parts.append(text)
+            return '\n'.join(parts) if parts else None
+        return v
+
     @field_validator('content')
     @classmethod
     def content_not_empty(cls, v: Optional[str]) -> Optional[str]:
@@ -861,15 +879,28 @@ Update these after each retrieval step. They help you stay organized and efficie
 # Security Dependencies
 # ============================================================================
 
-async def verify_admin_key(x_admin_key: Optional[str] = Header(None)):
+async def verify_admin_key(
+    x_admin_key: Optional[str] = Header(None),
+    authorization: Optional[str] = Header(None),
+):
     """Verify admin API key if ADMIN_API_KEY is configured.
+
+    Accepts either the legacy `X-Admin-Key` header (used by the bundled
+    `qwen_client`) or the OpenAI-standard `Authorization: Bearer <key>`
+    header (used by third-party clients like qwen-code, OpenAI SDKs, etc.).
 
     Uses hmac.compare_digest for timing-safe comparison to prevent
     key extraction via timing side-channel attacks.
     """
-    if Config.ADMIN_API_KEY:
-        if not x_admin_key or not hmac.compare_digest(x_admin_key, Config.ADMIN_API_KEY):
-            raise HTTPException(status_code=401, detail="Invalid or missing admin API key")
+    if not Config.ADMIN_API_KEY:
+        return
+    candidate = x_admin_key
+    if not candidate and authorization:
+        scheme, _, token = authorization.partition(' ')
+        if scheme.lower() == 'bearer' and token:
+            candidate = token.strip()
+    if not candidate or not hmac.compare_digest(candidate, Config.ADMIN_API_KEY):
+        raise HTTPException(status_code=401, detail="Invalid or missing admin API key")
 
 
 # ============================================================================
