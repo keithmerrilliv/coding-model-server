@@ -218,7 +218,11 @@ IMPLEMENTER_SYSTEM_PROMPT = textwrap.dedent("""\
     4. Do NOT create test files — the REVIEWER handles those.
     5. If the spec requires a requirements.txt, setup.py, or similar, include it.
     6. Write COMPLETE files, not snippets or diffs.
-    7. On a retry attempt (when previous code was rejected), you will see
+    7. Inside a <<<FILE>>> block, write the file's RAW content. Do NOT wrap
+       the content in markdown ```language fences — the daemon strips them
+       defensively, but a missing close fence (e.g. on truncation) corrupts
+       the file. Just emit the content directly.
+    8. On a retry attempt (when previous code was rejected), you will see
        the reviewer's feedback. Fix every issue identified and output ALL
        files again — the daemon overwrites previous versions.
     """)
@@ -446,27 +450,65 @@ def _parse_complexity_block(cleaned_text: str) -> Optional[dict]:
     }
 
 
+_KNOWN_CODE_LANG_TAGS = frozenset({
+    "python", "py",
+    "ts", "typescript", "tsx",
+    "js", "javascript", "jsx", "mjs", "cjs",
+    "json", "yaml", "yml", "toml", "ini", "xml",
+    "html", "css", "scss", "sass",
+    "rust", "rs", "go", "java", "kotlin", "kt",
+    "swift", "c", "cpp", "cc", "h", "hpp", "objc", "m",
+    "ruby", "rb", "php", "perl", "pl",
+    "sh", "bash", "zsh", "fish",
+    "sql", "graphql", "proto",
+    "dockerfile", "makefile", "cmake",
+    "lua", "r", "scala", "haskell", "hs", "elixir", "ex", "erlang", "erl",
+})
+
+
 def _strip_markdown_fence(content: str) -> str:
-    """Remove a leading ```<lang> and trailing ``` fence if the model wrapped
-    the file body in a markdown code block. The implementer is instructed to
-    write raw file content, but it occasionally formats responses as markdown
-    — leaving the fence in causes a SyntaxError on import. Only stripped when
-    the content is *fully wrapped* (open fence on first line, close fence on
-    last line); partial fences are kept so we don't corrupt files that
-    legitimately contain a triple-backtick (e.g. README docs).
+    """Remove a markdown ``` code fence wrapping the file body.
+
+    The implementer is told to write raw file content, but it sometimes
+    formats responses as a fenced code block — leaving the fence in
+    causes SyntaxError on import.
+
+    Three cases handled:
+      1. Fully wrapped: open fence on first line, close fence on last
+         line. Both stripped.
+      2. Leading fence only (model forgot to close, or output truncated
+         by max_tokens). Stripped only when the language tag is a known
+         code lang — a bare ``` with no tag is left alone because a
+         markdown doc could legitimately open with one.
+      3. No fences anywhere: content returned unchanged.
+
+    Trailing-fence-only (close without open) is left alone — that
+    pattern shows up in legitimate `.md` files and shouldn't be
+    truncated.
     """
     s = content.strip()
     if not s.startswith("```"):
         return content
+
     first_nl = s.find("\n")
     if first_nl == -1:
-        return content
-    if not s.endswith("```"):
-        return content
-    body = s[first_nl + 1 : -3].rstrip()
-    # Preserve any leading/trailing newlines the original had after stripping
-    # so re-emitted files match what callers expect.
-    return body + "\n" if not body.endswith("\n") else body
+        return content  # single line starting with ``` — too ambiguous
+
+    fully_wrapped = s.endswith("```") and first_nl < len(s) - 3
+    if fully_wrapped:
+        body = s[first_nl + 1 : -3].rstrip()
+        return body + "\n" if not body.endswith("\n") else body
+
+    # Leading fence only. Strip when the language tag clearly identifies
+    # this as a code wrap, not legitimate markdown content.
+    opener = s[:first_nl].strip()       # e.g. "```python"
+    lang = opener[3:].strip().lower()   # everything after the backticks
+    if lang in _KNOWN_CODE_LANG_TAGS:
+        body = s[first_nl + 1 :].rstrip()
+        return body + "\n" if not body.endswith("\n") else body
+
+    # Bare ``` with no language, or unrecognized tag — preserve as-is.
+    return content
 
 
 def parse_implementer_response(text: str) -> ImplementerResult | ParseError:
