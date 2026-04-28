@@ -106,7 +106,17 @@ def compact_conversation(history, model, agent_theme=None, keep_recent=4, reason
     if len(history) <= keep_recent + 4:
         return False, "History too short to compact."
 
-    old_messages = history[:-keep_recent] if keep_recent else history[:]
+    # Preserve any leading system message(s) — without this, repeated
+    # compactions evict the agent's role contract by wrapping it inside the
+    # generated user-role summary. Same regression class as 2b37b77f
+    # (trim_history) and the audit's CRITICAL #2 finding.
+    sys_msgs: list = []
+    body_start = 0
+    while body_start < len(history) and history[body_start].get("role") == "system":
+        sys_msgs.append(history[body_start])
+        body_start += 1
+
+    old_messages = history[body_start:-keep_recent] if keep_recent else history[body_start:]
     recent = history[-keep_recent:] if keep_recent else []
 
     # Don't bother if old_messages is trivial
@@ -152,12 +162,12 @@ def compact_conversation(history, model, agent_theme=None, keep_recent=4, reason
         if not any(s in summary_text.upper() for s in expected_sections):
             logger.warning("Compaction summary missing expected sections, using anyway")
 
-        # Replace history in place
+        # Replace history in place — preserve original system messages.
         summary_msg = {
             "role": "user",
             "content": f"[Conversation Summary — {len(old_messages)} messages compacted]\n\n{summary_text}"
         }
-        history[:] = [summary_msg] + recent
+        history[:] = sys_msgs + [summary_msg] + recent
 
         logger.info("Compacted %d messages into summary (%d chars), kept %d recent",
                      len(old_messages), len(summary_text), len(recent))

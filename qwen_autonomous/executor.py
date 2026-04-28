@@ -84,13 +84,18 @@ def _write_artifact(spec_dir: Path, rel_path: str, content: str) -> Path:
     Strips leading ``/`` so models can't write absolute paths (Python's
     ``Path / "/abs"`` would discard the left operand). Then resolves
     symlinks and checks the result is still under ``spec_dir``.
+
+    Uses Path.is_relative_to (not str.startswith): the latter would treat
+    /work/abc-evil/x as nested under /work/abc, so a sibling-prefix dir
+    escape would not be caught. is_relative_to compares path components.
     """
     # Strip leading slashes only — do NOT use lstrip("./") which eats
     # individual chars and would normalize "../../../x" into "x".
     while rel_path.startswith("/"):
         rel_path = rel_path[1:]
+    spec_root = spec_dir.resolve()
     abs_path = (spec_dir / rel_path).resolve()
-    if not str(abs_path).startswith(str(spec_dir.resolve())):
+    if not abs_path.is_relative_to(spec_root):
         raise ValueError(f"Path traversal rejected: {rel_path}")
     abs_path.parent.mkdir(parents=True, exist_ok=True)
     abs_path.write_text(content)

@@ -1170,7 +1170,12 @@ class LlamaServerManager:
                     self.last_request_time = time.time()
                     self._start_watchdog()
                     return
-            except http_requests.ConnectionError:
+            except (http_requests.ConnectionError, http_requests.Timeout):
+                # Both are normal during startup: refused-connection while
+                # the server isn't listening yet, then read-timeout if it
+                # accepts but isn't ready. Without catching Timeout here the
+                # exception escapes the loop, bypasses _shutdown_unlocked,
+                # and leaks the subprocess to the caller.
                 pass
             time.sleep(self.HEALTH_POLL_INTERVAL)
 
@@ -1269,8 +1274,9 @@ class LlamaServerManager:
                      tool_choice: Optional[Any] = None,
                      parallel_tool_calls: Optional[bool] = None) -> Iterator[str]:
         """Stream a chat completion via the llama-server subprocess."""
-        self.last_request_time = time.time()
-        self._active_requests += 1
+        with self.lock:
+            self.last_request_time = time.time()
+            self._active_requests += 1
         try:
             # Emit progress event so client can display prompt size during prefill
             n_ctx = (model_config or {}).get('n_ctx', 32768)
@@ -1383,8 +1389,9 @@ class LlamaServerManager:
             yield f"data: {json.dumps(final_chunk)}\n\n"
             yield "data: [DONE]\n\n"
         finally:
-            self.last_request_time = time.time()
-            self._active_requests -= 1
+            with self.lock:
+                self.last_request_time = time.time()
+                self._active_requests -= 1
 
     def proxy_sync(self, messages: List[dict], system_prompt: str,
                    model_id: str, max_tokens: int, temperature: float,
@@ -1393,7 +1400,8 @@ class LlamaServerManager:
                    tool_choice: Optional[Any] = None,
                    parallel_tool_calls: Optional[bool] = None) -> dict:
         """Synchronous chat completion via the llama-server subprocess."""
-        self.last_request_time = time.time()
+        with self.lock:
+            self.last_request_time = time.time()
 
         openai_messages = self._build_openai_messages(messages, system_prompt)
         url = f"http://127.0.0.1:{self.LLAMA_SERVER_PORT}/v1/chat/completions"
@@ -1414,7 +1422,8 @@ class LlamaServerManager:
         if parallel_tool_calls is not None:
             payload["parallel_tool_calls"] = parallel_tool_calls
 
-        self._active_requests += 1
+        with self.lock:
+            self._active_requests += 1
         try:
             resp = http_requests.post(url, json=payload, timeout=Config.LLAMA_SERVER_REQUEST_TIMEOUT)
             if resp.status_code != 200:
@@ -1428,12 +1437,14 @@ class LlamaServerManager:
             finish_reason = result["choices"][0].get("finish_reason", "stop")
             usage = result.get("usage", {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
 
-            self.last_request_time = time.time()
+            with self.lock:
+                self.last_request_time = time.time()
             return build_completion_response(model_id, text, usage,
                                              finish_reason=finish_reason,
                                              tool_calls=tool_calls)
         finally:
-            self._active_requests -= 1
+            with self.lock:
+                self._active_requests -= 1
 
     @staticmethod
     def _build_openai_messages(messages: List, system_prompt: str) -> List[dict]:
