@@ -540,18 +540,22 @@ Update these after each retrieval step. They help you stay organized and efficie
     )
 
     # Ultra: Premium reasoning using Q2_K_XL on 192GB RAM.
-    # llama_server + cpu_moe → all 62 attention sublayers on GPU, experts on CPU.
-    # Native context is 262144; we run 32K to keep KV cache small (~2 GB at Q8_0)
-    # and leave headroom for compute buffer scaling with ub.
+    # llama_server + cpu_moe → all 62 attention sublayers + output on GPU
+    # (ngl=63: llama.cpp counts output as the 63rd "layer"). Experts on CPU.
+    # Native context is 262144; we run 32K to keep KV cache small.
+    # Q4_0 KV cache (type_k/type_v=2): halves cache size vs Q8_0 (~2.1 GB vs ~4.1 GB
+    # at 32K), redirecting that VRAM to a larger compute buffer (ub=4096 → ~5 GB).
+    # At 32K with Q2_K_XL weights, Q4_0 KV is well below the noise floor of weight quant.
     # logit_bias bans <tool_call>/</tool_call> tokens (same Qwen3-Coder family as
     # Coder-Next; verify IDs via /tokenize after first load if drift suspected).
     _QWEN_480B_ULTRA = _create_model_config(
         'MODEL_PATH_480B_ULTRA',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/Qwen3-Coder-480B-A35B-Instruct-UD-Q2_K_XL-00001-of-00004.gguf',
-        62, 32768, 4096, backend='llama_server',
+        63, 32768, 4096, backend='llama_server',
         server_extra_args=['--chat-template', 'chatml'],
         logit_bias=[[151657, -100.0], [151658, -100.0]],
-        cpu_moe=True, n_ubatch=2048,
+        cpu_moe=True, n_ubatch=4096,
+        type_k=2, type_v=2,
     )
 
     # MINIMAX: MiniMax M2.5 (230B MoE, 10B active params, 62 layers, ~1,760 MiB/layer)
@@ -790,7 +794,7 @@ Update these after each retrieval step. They help you stay organized and efficie
             executor=True
         ),
         'architect': _create_agent_config(
-            'Architect — Coder-480B Q2_K_XL (35B/480B MoE, 32K ctx, ngl=62 cpu_moe, ultra reasoning)',
+            'Architect — Coder-480B Q2_K_XL (35B/480B MoE, 32K ctx Q4_0, ngl=63 cpu_moe, ultra reasoning)',
             _ARCHITECT_SYSTEM_PROMPT,
             _QWEN_480B_ULTRA,
             executor=True
