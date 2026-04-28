@@ -28,7 +28,7 @@ Environment="PYTHONUNBUFFERED=1"
 # Configuration (poll interval, log level, Jira creds in 1c) lives in .env.
 # Prefer ~/.config/qwen-server/.env; repo-local .env kept as migration fallback.
 EnvironmentFile=-/home/keith-merrill/Dev/qwen-server/.env
-EnvironmentFile=-%h/.config/qwen-server/.env
+EnvironmentFile=-/home/keith-merrill/.config/qwen-server/.env
 
 # Resource limits
 LimitNOFILE=65536
@@ -50,11 +50,11 @@ RestrictRealtime=yes
 RestrictNamespaces=yes
 LockPersonality=yes
 ProtectSystem=strict
-ReadWritePaths=%h/Dev/qwen-server %h/qwen_tasks_db /tmp /var/tmp
+ReadWritePaths=/home/keith-merrill/Dev/qwen-server /tmp /var/tmp
 # LLM-generated tests are sandboxed separately via bubblewrap — see
 # qwen_autonomous/executor.py::run_tests. Install `bubblewrap` on the host:
 #   apt install bubblewrap
 # Or set QWEN_ALLOW_UNSANDBOXED_TESTS=1 to opt out (not recommended).
 
 [Install]
-WantedBy=default.target
+WantedBy=multi-user.target
