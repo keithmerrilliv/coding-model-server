@@ -529,13 +529,23 @@ Update these after each retrieval step. They help you stay organized and efficie
         cpu_moe=True, n_ubatch=4096,
     )
 
-    # HD: High-precision Q8_0 weights with Q4_0 KV cache for reviews
-    # Q8_0 weights are ~2x Q4_K_M per layer — ngl=21 + 82K ctx OOMs.
-    # Reduced to 65K ctx to fit. Q4_0 KV cache keeps VRAM manageable.
+    # HD: High-precision Q8_0 weights for reviewer-tier judgment.
+    # Migrated 2026-04-28 from llama_cpp (ngl=21, 65K Q4_0 KV) to llama_server
+    # + cpu_moe. Old layout offloaded 21 of 48 layers — each carrying all 128
+    # experts, of which only 8 are active per token — so most GPU bandwidth
+    # was wasted reading dead expert weights. cpu_moe keeps attention on GPU
+    # and only the 8 active experts per token are read from CPU memory.
+    # Q8_0 KV (per feedback_kv_quant_preference) at 131K — native 256K would
+    # need ~12.9 GB KV alone. 131K matches the FAST/TURBO Coder-30B siblings.
+    # Logit-ban for <tool_call>/</tool_call> tokens shared across the
+    # Qwen3-Coder family; same IDs verified for Coder-Next (151657/151658).
     _CODER_30B_HD = _create_model_config(
         'MODEL_PATH_30B_HD',
         '/home/keith-merrill/.lmstudio/models/lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q8_0.gguf',
-        21, 65536, 2048, type_k=2, type_v=2
+        49, 131072, 4096, backend='llama_server',
+        server_extra_args=['--chat-template', 'chatml'],
+        logit_bias=[[151657, -100.0], [151658, -100.0]],
+        cpu_moe=True, n_ubatch=2048,
     )
 
     # Lite: IQ1_M variant of the 480B Coder. Same architecture as ULTRA; the
@@ -827,7 +837,7 @@ Update these after each retrieval step. They help you stay organized and efficie
             executor=True
         ),
         'reviewer': _create_agent_config(
-            'Reviewer — Coder-30B Q8_0 (3B/30B MoE, 65K ctx, ngl=21, high precision)',
+            'Reviewer — Coder-30B Q8_0 (3B/30B MoE, 131K ctx Q8_0, ngl=49 cpu_moe, high precision)',
             _REVIEWER_SYSTEM_PROMPT,
             _CODER_30B_HD,
             executor=True
