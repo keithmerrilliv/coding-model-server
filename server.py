@@ -536,17 +536,18 @@ Update these after each retrieval step. They help you stay organized and efficie
     # was wasted reading dead expert weights. cpu_moe keeps attention on GPU
     # and only the 8 active experts per token are read from CPU memory.
     # Q8_0 KV (per feedback_kv_quant_preference) at 196K — native 256K would
-    # need ~12.9 GB KV alone, leaving no room for ub > 1024; 196K Q8_0 fits
-    # at ub=8192 with ~1.5 GB headroom for fast prefill on long review
-    # prompts. Logit-ban for <tool_call>/</tool_call> tokens shared across
-    # the Qwen3-Coder family; same IDs verified for Coder-Next (151657/151658).
+    # need ~12.9 GB KV alone. 196K + ub=3072 lands ~1.16 GB free (very tight,
+    # at user-sanctioned tolerance); ub=8192 OOMs because compute-buffer
+    # scaling is ~1.28 MiB/ub above ub=2048, not the ~0.4 MiB/ub the small-ub
+    # observation suggests. Logit-ban for <tool_call>/</tool_call> tokens
+    # shared across the Qwen3-Coder family (151657/151658).
     _CODER_30B_HD = _create_model_config(
         'MODEL_PATH_30B_HD',
         '/home/keith-merrill/.lmstudio/models/lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q8_0.gguf',
-        49, 196608, 8192, backend='llama_server',
+        49, 196608, 4096, backend='llama_server',
         server_extra_args=['--chat-template', 'chatml'],
         logit_bias=[[151657, -100.0], [151658, -100.0]],
-        cpu_moe=True, n_ubatch=8192,
+        cpu_moe=True, n_ubatch=3072,
     )
 
     # Lite: IQ1_M variant of the 480B Coder. Same architecture as ULTRA; the
@@ -838,7 +839,7 @@ Update these after each retrieval step. They help you stay organized and efficie
             executor=True
         ),
         'reviewer': _create_agent_config(
-            'Reviewer — Coder-30B Q8_0 (3B/30B MoE, 196K ctx Q8_0, ngl=49 cpu_moe ub=8192, high precision)',
+            'Reviewer — Coder-30B Q8_0 (3B/30B MoE, 196K ctx Q8_0, ngl=49 cpu_moe ub=3072, high precision)',
             _REVIEWER_SYSTEM_PROMPT,
             _CODER_30B_HD,
             executor=True
