@@ -280,6 +280,13 @@ class Config:
     # Prefill (batch) benefits from hyperthreads — use all 32 threads
     DEFAULT_N_THREADS_BATCH = int(os.getenv('MODEL_N_THREADS_BATCH', 32))
     DEFAULT_N_BATCH = int(os.getenv('MODEL_N_BATCH', 2048))  # Reverted to 2048 to prevent OOM
+
+    # Upper bound on a single llama-server inference call. Must be >= the
+    # longest autonomous role timeout (qwen_autonomous/executor.py defaults
+    # ARCHITECT/REVIEWER to 2700s) so that the inner request doesn't fail
+    # before the outer orchestrator's deadline. Override via env if you need
+    # patience for slower hardware or longer max_tokens.
+    LLAMA_SERVER_REQUEST_TIMEOUT = float(os.getenv('LLAMA_SERVER_REQUEST_TIMEOUT', 2700))
     
     # ── Unified tool reference ──
     BASE_TOOLS = [
@@ -1251,7 +1258,8 @@ class LlamaServerManager:
         think_stripper = ThinkingStripper()
 
         try:
-            with http_requests.post(url, json=payload, stream=True, timeout=600) as resp:
+            with http_requests.post(url, json=payload, stream=True,
+                                    timeout=Config.LLAMA_SERVER_REQUEST_TIMEOUT) as resp:
                 if resp.status_code != 200:
                     error_body = resp.text
                     logger.error("llama-server returned %d: %s", resp.status_code, error_body)
@@ -1351,7 +1359,7 @@ class LlamaServerManager:
         if parallel_tool_calls is not None:
             payload["parallel_tool_calls"] = parallel_tool_calls
 
-        resp = http_requests.post(url, json=payload, timeout=600)
+        resp = http_requests.post(url, json=payload, timeout=Config.LLAMA_SERVER_REQUEST_TIMEOUT)
         if resp.status_code != 200:
             raise HTTPException(status_code=502, detail=f"llama-server error: {resp.text}")
 
