@@ -6,6 +6,10 @@ import logging
 import threading
 
 import requests
+
+# Module-level session: keepalive across the chat-loop's many polls,
+# heartbeats, and streaming requests to the server.
+_SESSION = requests.Session()
 import urllib3
 
 from qwen_client.config import config, COLORS, print_colored
@@ -18,7 +22,7 @@ def wait_for_server():
     print_colored(f"\nConnection lost. Waiting for server at {config.LINUX_SERVER_IP}...", COLORS['WARNING'])
     while True:
         try:
-            response = requests.get(config.HEALTH_URL, timeout=config.REQUEST_TIMEOUT)
+            response = _SESSION.get(config.HEALTH_URL, timeout=config.REQUEST_TIMEOUT)
             if response.status_code == 200:
                 print_colored("\nServer is back online! Resuming...", COLORS['GREEN'])
                 return True
@@ -185,7 +189,7 @@ def get_completion(history, model, agent_theme, agentic_context=None,
             elapsed = now - start_time
             if now - last_heartbeat > 30:
                 try:
-                    requests.get(config.HEALTH_URL, timeout=2)
+                    _SESSION.get(config.HEALTH_URL, timeout=2)
                     last_heartbeat = now
                 except Exception:
                     pass
@@ -232,7 +236,7 @@ def get_completion(history, model, agent_theme, agentic_context=None,
 
     while True:
         try:
-            response = requests.post(config.API_URL, json=payload, headers=config.auth_headers, stream=True, timeout=7200)
+            response = _SESSION.post(config.API_URL, json=payload, headers=config.auth_headers, stream=True, timeout=7200)
 
             if response.status_code != 200:
                 stop_progress.set()

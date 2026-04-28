@@ -31,6 +31,12 @@ from typing import Optional
 
 import requests
 
+# Module-level session: reuses TCP+TLS connections across the
+# architect → implementer → reviewer → supervisor sequence, saving
+# 5-30 ms per call. Keepalive matters most over real network; even
+# on localhost the socket-setup elimination is measurable.
+_SESSION = requests.Session()
+
 logger = logging.getLogger("orchestrator.executor")
 
 
@@ -331,7 +337,7 @@ def call_agent(
     logger.info("calling agent=%s, role=%s, msg_count=%d, max_tokens=%d",
                 agent, role, len(messages), max_tokens)
 
-    resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
+    resp = _SESSION.post(url, json=payload, headers=headers, timeout=timeout)
     resp.raise_for_status()
     data = resp.json()
 
@@ -878,7 +884,7 @@ def _run_mac_runner_tests(
     logger.info("dispatching %s to mac-runner %s (timeout=%ds, %d files)",
                 framework, url, timeout, len(patch_files))
     try:
-        resp = requests.post(url, json=payload, headers=headers, timeout=http_timeout)
+        resp = _SESSION.post(url, json=payload, headers=headers, timeout=http_timeout)
     except requests.RequestException as e:
         return False, f"mac-runner unreachable at {url}: {e}"
 

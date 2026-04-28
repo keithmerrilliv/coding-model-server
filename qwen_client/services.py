@@ -10,6 +10,10 @@ from pathlib import Path
 
 import requests
 
+# Module-level session: keepalive across the client's many memory/search/
+# ingest calls saves TCP+TLS setup per request.
+_SESSION = requests.Session()
+
 from qwen_client.config import config, COLORS, print_colored
 
 logger = logging.getLogger(__name__)
@@ -49,7 +53,7 @@ def ingest_url_content(url):
     """Fetch URL content, strip HTML, and send to server memory."""
     try:
         print_colored(f"[Client] Deep-ingesting content from {url}...", COLORS['BLUE'])
-        response = requests.get(url, timeout=20)
+        response = _SESSION.get(url, timeout=20)
         if response.status_code != 200:
             return f"Error: Failed to fetch URL (Status {response.status_code})"
 
@@ -60,7 +64,7 @@ def ingest_url_content(url):
         text = soup.get_text(separator=' ', strip=True)
 
         payload = {"text": f"Source URL: {url}\n\n{text}"}
-        mem_resp = requests.post(config.MEMORY_API_URL, json=payload, headers=config.auth_headers, timeout=30)
+        mem_resp = _SESSION.post(config.MEMORY_API_URL, json=payload, headers=config.auth_headers, timeout=30)
 
         if mem_resp.status_code == 200:
             return f"Successfully ingested full content from {url} into RAG database."
@@ -75,7 +79,7 @@ def ingest_url_content(url):
 def save_memory(text):
     """Send a memory/fact to the server to be saved."""
     try:
-        response = requests.post(config.MEMORY_API_URL, json={"text": text}, headers=config.auth_headers, timeout=config.REQUEST_TIMEOUT)
+        response = _SESSION.post(config.MEMORY_API_URL, json={"text": text}, headers=config.auth_headers, timeout=config.REQUEST_TIMEOUT)
         if response.status_code == 200:
             print_colored(f"Memory Saved: {text[:60]}...", COLORS['GREEN'])
             return "Memory saved successfully."
@@ -140,7 +144,7 @@ def ingest_codebase(directory, extensions=None):
                     continue
 
                 # Send with source path — server uses CodeChunker for AST chunking
-                response = requests.post(
+                response = _SESSION.post(
                     config.MEMORY_API_URL,
                     json={"text": content, "source": filepath},
                     headers=config.auth_headers,
@@ -167,7 +171,7 @@ def ingest_pdf(path):
     """Tell the server to ingest a local PDF file."""
     try:
         print_colored(f"Requesting server to ingest PDF: {path}", COLORS['CYAN'])
-        response = requests.post(config.INGEST_API_URL, json={"path": path}, headers=config.auth_headers, timeout=config.LONG_REQUEST_TIMEOUT)
+        response = _SESSION.post(config.INGEST_API_URL, json={"path": path}, headers=config.auth_headers, timeout=config.LONG_REQUEST_TIMEOUT)
         if response.status_code == 200:
             result = response.json()
             msg = f"Successfully ingested {result['filename']}: {result['chunks']} chunks from {result['pages']} pages."
@@ -185,7 +189,7 @@ def web_search(query):
     """Send a search query to the server."""
     try:
         print_colored(f"Searching web for: {query}", COLORS['CYAN'])
-        response = requests.post(config.SEARCH_API_URL, json={"query": query}, headers=config.auth_headers, timeout=config.REQUEST_TIMEOUT)
+        response = _SESSION.post(config.SEARCH_API_URL, json={"query": query}, headers=config.auth_headers, timeout=config.REQUEST_TIMEOUT)
         if response.status_code == 200:
             result = response.json().get("result", "No results")
             print_colored(f"\n{result}\n", COLORS['GREEN'])
@@ -353,7 +357,7 @@ def apple_deep_docs_search(tool, args):
     try:
         print_colored(f"Calling Apple Deep Docs ({tool}): {args}", COLORS['CYAN'])
         payload = {"tool": tool, "arguments": args}
-        response = requests.post(config.DEEP_DOCS_API_URL, json=payload, headers=config.auth_headers, timeout=config.LONG_REQUEST_TIMEOUT)
+        response = _SESSION.post(config.DEEP_DOCS_API_URL, json=payload, headers=config.auth_headers, timeout=config.LONG_REQUEST_TIMEOUT)
 
         if response.status_code == 200:
             result = response.json().get("result", "No results")

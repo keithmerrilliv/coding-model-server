@@ -89,7 +89,13 @@ def load_chat_history_from_file(filepath):
 
 
 def save_chat_history(history, current_agent="implementer"):
-    """Save full chat history and metadata to file, stripping internal keys."""
+    """Save full chat history and metadata to file, stripping internal keys.
+
+    Atomic via tmp-file + os.replace so SIGINT/OOM mid-write doesn't truncate
+    the session and JSONDecodeError on the next load. No indent — file is
+    consumed programmatically; pretty-print costs ~30% file size and
+    serialization time on every call (~3-5× per turn).
+    """
     try:
         ensure_session_dir()
         pruned_history = _prune_history(history)
@@ -103,8 +109,11 @@ def save_chat_history(history, current_agent="implementer"):
             "session_name": config.SESSION_NAME,
             "timestamp": datetime.now().isoformat(),
         }
-        with open(config.CHAT_HISTORY_FILE, 'w') as f:
-            json.dump(data, f, indent=2)
+        target = config.CHAT_HISTORY_FILE
+        tmp = f"{target}.tmp"
+        with open(tmp, 'w') as f:
+            json.dump(data, f)
+        os.replace(tmp, target)
     except Exception as e:
         print_colored(f"Warning: Failed to save chat history: {e}", COLORS['WARNING'])
 

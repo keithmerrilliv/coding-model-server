@@ -22,6 +22,8 @@ from typing import Literal, Optional, TypedDict
 
 import requests
 
+_SESSION = requests.Session()
+
 logger = logging.getLogger("orchestrator.supervisor")
 
 
@@ -317,7 +319,7 @@ def _post_completion(messages: list[dict]) -> dict:
         "skip_memory": True,
     }
 
-    resp = requests.post(url, json=payload, headers=headers,
+    resp = _SESSION.post(url, json=payload, headers=headers,
                          timeout=SUPERVISOR_TIMEOUT)
     resp.raise_for_status()
     return resp.json()

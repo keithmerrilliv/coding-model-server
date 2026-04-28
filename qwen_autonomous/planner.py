@@ -23,6 +23,8 @@ from typing import Optional
 
 import requests
 
+_SESSION = requests.Session()
+
 logger = logging.getLogger(__name__)
 
 
@@ -338,7 +340,7 @@ def call_planner(
                 agent, len(spec_markdown),
                 len(clarifications) if clarifications else 0)
 
-    resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
+    resp = _SESSION.post(url, json=payload, headers=headers, timeout=timeout)
     resp.raise_for_status()
     data = resp.json()
 
