@@ -1,4 +1,15 @@
-# Qwen Remote Client
+# Qwen Remote Client — core dependencies
 
 requests>=2.32.3
 python-dotenv>=1.0.1
+
+# Recommended: rich terminal formatting (diffs, syntax highlighting, panels).
+# The client falls back to plain ANSI text if rich is missing, so this is a
+# strong recommendation, not a hard requirement.
+rich>=13.0
+
+# Optional: BeautifulSoup is only used by the deep-ingestion scraping path
+# (e.g. apple_deep_docs). All other client features work without it. The
+# client surfaces a clear error message if you invoke a scraping flow while
+# bs4 is uninstalled. Comment this line out if you don't use scraping.
+beautifulsoup4>=4.12

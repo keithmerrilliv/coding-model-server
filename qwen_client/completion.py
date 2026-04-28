@@ -37,13 +37,19 @@ def wait_for_server():
 # ---------------------------------------------------------------------------
 
 def _trim_history_for_context(history):
-    """Trim history when context limit is reached."""
+    """Trim history when context limit is reached.
+
+    Preserves history[0] if it's a system prompt — without this, repeated
+    trims under context pressure eventually evict the agent's role
+    instructions and the model loses its contract.
+    """
     if len(history) > 2:
-        trim_index = max(1, int(len(history) * 0.25))
+        sys_offset = 1 if history[0].get("role") == "system" else 0
+        trim_index = max(sys_offset + 1, int(len(history) * 0.25))
         while trim_index < len(history) - 1 and history[trim_index]["role"] != "user":
             trim_index += 1
         trimmed_past = history[trim_index:-1]
-        history[:] = trimmed_past + [history[-1]]
+        history[:] = history[:sys_offset] + trimmed_past + [history[-1]]
 
         sanitized_retry = []
         valid_roles = {"system", "user", "assistant"}
