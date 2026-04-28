@@ -538,12 +538,22 @@ Update these after each retrieval step. They help you stay organized and efficie
         21, 65536, 2048, type_k=2, type_v=2
     )
 
-    # Lite: Faster reasoning on system RAM (32k native context, no YaRN — IQ1_M too
-    # aggressively quantized for reliable extended-context output)
+    # Lite: IQ1_M variant of the 480B Coder. Same architecture as ULTRA; the
+    # only difference is more aggressive quant (~1.7 bpw vs ~2.7 bpw). Migrated
+    # 2026-04-28 to llama_server + cpu_moe to mirror ULTRA's recipe — the
+    # default llama_cpp / ngl=4 layout left ~14 of the 480B's expert mass on
+    # CPU in a non-cpu_moe layout, which hurts decode bandwidth even more
+    # than for ULTRA because IQ1_M's per-token byte count is already lower.
+    # Q4_0 KV at 32K ctx + ub=4096 mirrors ULTRA. Re-tune ub if compute
+    # buffer turns out to scale differently for IQ1_M.
     _QWEN_480B_LITE = _create_model_config(
         'MODEL_PATH_480B_LITE',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/Qwen3-Coder-480B-A35B-Instruct-UD-IQ1_M.gguf',
-        4, 32768, 1024
+        63, 32768, 4096, backend='llama_server',
+        server_extra_args=['--chat-template', 'chatml'],
+        logit_bias=[[151657, -100.0], [151658, -100.0]],
+        cpu_moe=True, n_ubatch=4096,
+        type_k=2, type_v=2,
     )
 
     # Ultra: Premium reasoning using Q2_K_XL on 192GB RAM.
@@ -605,7 +615,7 @@ Update these after each retrieval step. They help you stay organized and efficie
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3.5-122B-A10B-GGUF/Q4_K_M/Qwen3.5-122B-A10B-Q4_K_M-00001-of-00003.gguf',
         49, 262144, 4096, backend='llama_server',
         server_extra_args=['--jinja', '--reasoning-format', 'none'],
-        cpu_moe=True, n_ubatch=4096,
+        cpu_moe=True, n_ubatch=3072,
     )
 
     # ── Qwen3.6 family (replaces Qwen3.5-35B implementer + 122B/397B architects) ──
@@ -823,7 +833,7 @@ Update these after each retrieval step. They help you stay organized and efficie
             executor=True
         ),
         'deep_reviewer': _create_agent_config(
-            'Reviewer — Qwen3.5-122B Q4_K_M (10B/122B MoE, 256K ctx Q8_0, ngl=49 cpu_moe, deep judgment)',
+            'Reviewer — Qwen3.5-122B Q4_K_M (10B/122B MoE, 256K ctx Q8_0, ngl=49 cpu_moe ub=3072, deep judgment)',
             _REVIEWER_SYSTEM_PROMPT,
             _QWEN35_122B,
             executor=True
@@ -835,7 +845,7 @@ Update these after each retrieval step. They help you stay organized and efficie
             executor=True
         ),
         'lite_architect': _create_agent_config(
-            'Architect — Coder-480B IQ1_M (35B/480B MoE, 32K ctx, ngl=4, lite reasoning)',
+            'Architect — Coder-480B IQ1_M (35B/480B MoE, 32K ctx Q4_0, ngl=63 cpu_moe, lite reasoning)',
             f'You are a system architect. {EXECUTOR_PROMPT}\n\nFILE WRITING: Use `<<<WRITE_FILE>>>` to create or update source files. After writing, use `<<<REMOTE_EXEC>>>` to compile and verify.\n\n{TOOL_REFERENCE}',
             _QWEN_480B_LITE,
             executor=True
