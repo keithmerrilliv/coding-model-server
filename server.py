@@ -587,15 +587,25 @@ Update these after each retrieval step. They help you stay organized and efficie
 
     # ── Qwen3.5 family (deep_reviewer still uses 122B) ──
 
-    # Qwen3.5-122B-A10B Q4_K_M — mid-tier MoE (10B active, 76.5 GB, 3 shards)
-    # Retained for `deep_reviewer` only. Old q35_architect/q35_ultra agents
-    # were retired in favor of Qwen3.6-27B (smaller dense model that beats
-    # Qwen3.5-397B on SWE-bench Verified, 77.2 vs 76.2).
-    # ngl=9 at 65K: 1,209 MiB free (measured 2026-03-30, ~1,507 MiB/layer)
+    # Qwen3.5-122B-A10B Q4_K_M — mid-tier MoE (10B active, 76.5 GB, 3 shards).
+    # Retained for `deep_reviewer` only.
+    #
+    # Migrated 2026-04-28 from llama_cpp (ngl=9, 65K, no cpu_moe) to
+    # llama_server + cpu_moe at native 256K context. The previous layout
+    # offloaded 9 full layers (incl. 256 dense experts each) to GPU but only
+    # 8 experts were active per token, wasting GPU bandwidth. With cpu_moe,
+    # attention sublayers go on GPU and ALL experts stay on CPU, reading only
+    # the 8 active experts per layer per token. Decode is bandwidth-bound on
+    # 10B active params at Q4_K_M ≈ 6 GB/token; DDR5-5600 dual-channel ≈ 90
+    # GB/s gives a ~15 tok/s ceiling, vs the ~6 tok/s we measured under the
+    # old layout. Architecture: 48 transformer blocks, 3072 dim, 32 attn /
+    # 2 KV heads (aggressive GQA → tiny KV cache), 256 experts × 1024 FFN.
     _QWEN35_122B = _create_model_config(
         'MODEL_PATH_QWEN35_122B',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3.5-122B-A10B-GGUF/Q4_K_M/Qwen3.5-122B-A10B-Q4_K_M-00001-of-00003.gguf',
-        9, 65536, 1024,
+        49, 262144, 4096, backend='llama_server',
+        server_extra_args=['--jinja', '--reasoning-format', 'none'],
+        cpu_moe=True, n_ubatch=4096,
     )
 
     # ── Qwen3.6 family (replaces Qwen3.5-35B implementer + 122B/397B architects) ──
@@ -813,7 +823,7 @@ Update these after each retrieval step. They help you stay organized and efficie
             executor=True
         ),
         'deep_reviewer': _create_agent_config(
-            'Reviewer — Qwen3.5-122B Q4_K_M (10B/122B MoE, 65K ctx, ngl=9, deep judgment)',
+            'Reviewer — Qwen3.5-122B Q4_K_M (10B/122B MoE, 256K ctx Q8_0, ngl=49 cpu_moe, deep judgment)',
             _REVIEWER_SYSTEM_PROMPT,
             _QWEN35_122B,
             executor=True
