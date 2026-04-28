@@ -191,6 +191,13 @@ _CLARIFY_RE = re.compile(
 _YAML_RE = re.compile(
     r"<<<YAML>>>\s*(.*?)\s*<<<END>>>", re.DOTALL | re.IGNORECASE,
 )
+# Fallback for partial/unclosed CLARIFY blocks: planner is non-deterministic
+# and occasionally emits the opener without an explicit <<<END>>>. Accept the
+# tail of the response as the questions block. NOT applied to YAML — a missing
+# END there means structurally malformed output we shouldn't try to recover.
+_CLARIFY_OPEN_ONLY_RE = re.compile(
+    r"<<<CLARIFY>>>\s*(.*)", re.DOTALL | re.IGNORECASE,
+)
 
 
 def _strip_thinking(text: str) -> str:
@@ -228,6 +235,15 @@ def parse_planner_response(text: str) -> PlannerResult:
                 raw_response=text,
             )
         return PlannerYaml(yaml_text=yaml_text, raw_response=text)
+
+    # Fallback: the model opened CLARIFY but never closed with <<<END>>>.
+    # Treat the tail as the questions block. Only used when no YAML was
+    # found anywhere — if YAML is present, an unclosed CLARIFY suggests the
+    # model is confused and we should fail loudly.
+    if not clarify_match and not yaml_match:
+        open_only = _CLARIFY_OPEN_ONLY_RE.search(cleaned)
+        if open_only:
+            clarify_match = open_only
 
     if clarify_match:
         body = clarify_match.group(1).strip()
