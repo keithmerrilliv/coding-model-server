@@ -198,7 +198,6 @@ The server exposes an OpenAI-compatible API. When `ADMIN_API_KEY` is set, all en
 qwen-server/
 ├── server.py              # FastAPI server, model configs, inference
 ├── client.py              # Client entry point
-├── qwen_remote.py         # Legacy monolithic client (still functional)
 ├── tool_handlers.py       # Tool execution, permissions, file ops
 ├── memory_service.py      # ChromaDB RAG service
 ├── web_search_service.py  # DuckDuckGo web search

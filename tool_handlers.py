@@ -1,8 +1,8 @@
 """
-Tool handler functions extracted from qwen_remote.py
+Tool handler functions for the Qwen Remote Client.
 
 These functions handle command execution, file operations, search,
-and other tool-related operations for the Qwen Remote Client.
+and other tool-related operations. Imported by qwen_client.
 
 Must be configured via configure() before use.
 """
@@ -172,8 +172,16 @@ def _should_auto_approve(tool_name):
 
     Returns:
         bool: True if the operation should be auto-approved.
+
+    REMOTE_EXEC under yolo additionally requires ALLOW_REMOTE_EXEC_YOLO=1
+    in the environment. Defense-in-depth: a prompt-injected memory or
+    cross-origin CSRF that lands a malicious REMOTE_EXEC must compromise
+    yolo mode AND the env opt-in to silently execute. Without the opt-in
+    yolo still prompts for shell, even though it auto-approves edits.
     """
     if _permission_mode == 'yolo':
+        if tool_name == 'REMOTE_EXEC':
+            return os.getenv('ALLOW_REMOTE_EXEC_YOLO', '').lower() in ('1', 'true', 'yes')
         return True
     if _permission_mode == 'acceptEdits':
         # Auto-approve everything EXCEPT shell commands
