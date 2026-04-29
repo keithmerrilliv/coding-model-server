@@ -18,11 +18,19 @@ Client (macOS/Linux)                    Server (Linux + GPU)
                                        └──────────────────────────┘
 ```
 
-**Dual backend**: Models using architectures supported by llama-cpp-python run in-process (`llama_cpp`). Models needing native Jinja templates or unsupported architectures (Qwen3.5, Nemotron, MiniMax, GLM) use a `llama-server` subprocess.
+**Dual backend** (mostly historical — the in-process path is being retired):
+Almost all agents now run on the `llama_server` subprocess with `--cpu-moe`,
+which puts attention sublayers on GPU and keeps MoE experts on CPU. Two
+agents (`debugger`, `fast_implementer`) still use the in-process
+`llama_cpp` path; both are scheduled for migration.
 
-**VRAM coordination**: Only one model is loaded at a time. Mutual exclusion between backends ensures the GPU is freed before loading a different model.
+**VRAM coordination**: Only one model is loaded at a time. When a request
+for a llama_cpp-backed agent lands while a llama_server stream is in
+flight, the loader waits up to 60s for the in-flight request to drain
+before shutting the subprocess down.
 
-**On-demand loading**: Models load when first requested and unload when idle (10-min watchdog for subprocess backend) or when a different model is requested.
+**On-demand loading**: Models load when first requested and unload when
+idle (30-min watchdog; in-flight requests block the kill).
 
 ## Quick Start
 
@@ -54,23 +62,22 @@ journalctl -u qwen-server -f   # View logs
 
 Each agent maps to a model configuration and system prompt. Switch with `/model <name>` or `@agent_name message`.
 
-| Agent | Role | Model | Active/Total | Context | ngl | Backend |
-|-------|------|-------|--------------|---------|-----|---------|
-| `implementer` | Default implementation | Qwen3.6-35B-A3B UD-Q4_K_M | 3B/35B | 131K | 48 | subprocess |
-| `deep_implementer` | Deep reasoning | Coder-Next Q8_0 | 3B/80B | 256K | 48 | subprocess |
-| `fast_implementer` | Fast implementation | Coder-30B Q4_K_M | 3B/30B | 256K | 26 | in-process |
-| `debugger` | Debugging | Coder-30B Q4_K_M | 3B/30B | 131K | 30 | in-process |
-| `reviewer` | Code review | Coder-30B Q8_0 | 3B/30B | 65K | 21 | in-process |
-| `deep_reviewer` | Deep judgment | Qwen3.5-122B-A10B Q4_K_M | 10B/122B | 65K | 9 | in-process |
-| `architect` | System design | Coder-480B Q2_K_XL | 35B/480B | 64K | 4 | in-process |
-| `lite_architect` | Lite design | Coder-480B IQ1_M | 35B/480B | 32K | 4 | in-process |
-| `q36_architect` | Flagship design (replaces q35_architect + q35_ultra) | Qwen3.6-27B Q4_K_M | 27B dense | 131K | 20 | subprocess |
-| `m25_implementer` | Implementation | MiniMax M2.5 Q4_K_M | 10B/230B | 98K | 62 | subprocess |
-| `m25_architect` | Architecture | MiniMax M2.5 Q4_K_M | 10B/230B | 98K | 62 | subprocess |
-| `nemotron` | Fastest implementation | Nemotron-3-Nano Q4_K_M | 3.5B/30B | **1M** | 52 | subprocess |
-| `glm` | Implementation | GLM-4.7-Flash Q4_K_M | 3B/30B | 262K | 47 | subprocess |
+| Agent | Role | Model | Active/Total | Context | KV | ngl | Backend |
+|-------|------|-------|--------------|---------|-----|-----|---------|
+| `implementer` | Default implementation | Qwen3.6-35B-A3B UD-Q4_K_M | 3B/35B | 262K | Q8_0 | 48 cpu_moe | subprocess |
+| `deep_implementer` | Deep reasoning | Coder-Next Q8_0 | 3B/80B | 256K | Q8_0 | 48 cpu_moe | subprocess |
+| `fast_implementer` | Fast implementation | Coder-30B Q4_K_M | 3B/30B | 256K | Q4_0 | 26 | in-process |
+| `debugger` | Debugging | Coder-30B Q4_K_M | 3B/30B | 131K | Q4_0 | 34 | in-process |
+| `reviewer` | Code review | Coder-30B Q8_0 | 3B/30B | 196K | Q8_0 | 49 cpu_moe | subprocess |
+| `deep_reviewer` | Deep judgment | Qwen3.5-122B-A10B Q4_K_M | 10B/122B | **256K** | Q8_0 | 49 cpu_moe | subprocess |
+| `architect` | System design | Coder-480B Q2_K_XL | 35B/480B | 32K | Q8_0 | 63 cpu_moe | subprocess |
+| `lite_architect` | Lite design | Coder-480B IQ1_M | 35B/480B | 32K | Q8_0 | 63 cpu_moe | subprocess |
+| `q36_architect` / `supervisor` | Flagship design | Qwen3.6-27B Q4_K_M (dense) | 27B dense | 131K | Q4_0 | 40 | subprocess |
+| `m25_implementer` / `m25_architect` | Implementation / architecture | MiniMax M2.5 Q4_K_M | 10B/230B | 116K | Q4_0 | 62 cpu_moe | subprocess |
+| `nemotron` | Fastest brainstorm | Nemotron-3-Nano Q4_K_M | 3.5B/30B | **1M** | Q8_0 | 52 cpu_moe | subprocess |
+| `glm` | Implementation | GLM-4.7-Flash Q4_K_M | 3B/30B | 262K | Q8_0 | 47 cpu_moe | subprocess |
 
-Subprocess models use `--cpu-moe` to keep MoE expert weights on CPU, enabling near-max GPU layer offload for attention. Nemotron's Mamba-hybrid architecture (only 6/52 layers need KV cache) allows a full 1M native context on RTX 5080.
+Subprocess models use `--cpu-moe` to keep MoE expert weights on CPU, enabling near-max GPU layer offload for attention. Nemotron's Mamba-hybrid architecture (only 6/52 layers need KV cache) allows a full 1M native context on RTX 5080. KV-cache preference is Q8_0 wherever it fits — see `~/.claude/.../memory/feedback_kv_quant_preference.md` for the rationale (KV-quant noise produces diffuse quality degradation harder to manage than smaller context).
 
 ## Client Commands
 

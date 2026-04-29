@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""qwen-orchestrator daemon — Phase 1b.
+"""qwen-orchestrator daemon.
 
 Long-running process that drives autonomous-mode specs through their state
-machine.
+machine. The full pipeline (plan → architect → implementer → reviewer →
+supervisor retry/replan) lives here.
 
-State transitions handled here:
+State transitions:
 
     PENDING_PLAN ──┬──> NEEDS_CLARIFICATION  (planner asked questions)
                    ├──> PLAN_REVIEW           (planner produced YAML)
@@ -14,16 +15,18 @@ State transitions handled here:
                           │                    → re-run planner with answers)
                           └──> CANCELLED       (clarification gate rejected)
 
-    PLAN_REVIEW ──┬──> EXECUTING               (plan approved — Phase 2 takes over)
+    PLAN_REVIEW ──┬──> EXECUTING               (plan approved)
                   └──> PENDING_PLAN            (plan rejected → planner re-runs
                                                 with rejection notes as a
                                                 clarification round)
 
-    EXECUTING ──> [Phase 2]                    (no-op in 1b)
+    EXECUTING ──> [architect → review-gate → implementer → review-gate →
+                   reviewer → review-gate → COMPLETED, with supervisor-
+                   driven retries on review rejection or test failure]
 
 The daemon talks to the qwen_autonomous SQLite store directly (it shares
 the file with qwen-server) and to the qwen-server inference HTTP API for
-calling the planner agent. It must NOT serve HTTP itself.
+calling each agent. It must NOT serve HTTP itself.
 """
 from __future__ import annotations
 
@@ -293,8 +296,7 @@ def _process_plan_review(db: Database, spec: Spec) -> None:
         return  # waiting on the human
 
     if gate.status == GateStatus.APPROVED:
-        logger.info("spec %s: plan approved, transitioning to EXECUTING "
-                    "(Phase 2 will take over)", spec.id)
+        logger.info("spec %s: plan approved, transitioning to EXECUTING", spec.id)
         db.update_spec_status(spec.id, SpecStatus.EXECUTING)
     elif gate.status == GateStatus.REJECTED:
         # The reviewer's rejection notes become a synthetic clarification

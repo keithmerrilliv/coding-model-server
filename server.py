@@ -806,7 +806,7 @@ Update these after each retrieval step. They help you stay organized and efficie
         ),
         # ── Qwen3.6 agents (replaced retired Qwen3.5 architect tier) ──
         'q36_architect': _create_agent_config(
-            'Architect — Qwen3.6-27B Q4_K_M (27B dense, 131K ctx, ngl=20, beats Qwen3.5-397B on SWE-bench)',
+            'Architect — Qwen3.6-27B Q4_K_M (27B dense, 131K Q4_0 ctx, ngl=40, autonomous default planner+architect)',
             _ARCHITECT_SYSTEM_PROMPT,
             _QWEN36_27B,
             executor=True
@@ -1004,7 +1004,9 @@ class ModelManager:
 # ============================================================================
 
 class LlamaServerManager:
-    """Manages a llama-server subprocess for models that require it (e.g. qwen3next arch)."""
+    """Manages a llama-server subprocess. The default backend for almost all
+    agents — only ``debugger`` and ``fast_implementer`` still use the
+    in-process llama_cpp path."""
 
     LLAMA_SERVER_PORT = 8081
     # Idle timeout — only counts when no requests are active. The watchdog
@@ -1421,9 +1423,9 @@ class LlamaServerManager:
         If the caller already supplied a system message (autonomous mode sends
         task-specific prompts with output-format markers the pipeline parses),
         trust it and skip the server's agent-config system prompt. Injecting
-        both produces two system messages, which strict Jinja templates
-        (e.g. Qwen3.5-397B) reject with 'System message must be at the
-        beginning', and also confuses the model when the two prompts conflict.
+        both produces two system messages, which strict Jinja templates reject
+        with 'System message must be at the beginning', and also confuses the
+        model when the two prompts conflict.
         """
         def _role(m):
             return m["role"] if isinstance(m, dict) else m.role
@@ -2044,7 +2046,7 @@ def upload_file_endpoint(request: FileUploadRequest):
 
 
 # ============================================================================
-# Autonomous Mode Endpoints (Phase 1a)
+# Autonomous Mode Endpoints
 #
 # Spec ingest, task store, and review gates for the autonomous service mode.
 # State lives in qwen_tasks_db/tasks.sqlite via qwen_autonomous.Database.

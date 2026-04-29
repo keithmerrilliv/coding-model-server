@@ -14,6 +14,10 @@ or in a repo-local `.env` for dev. Loaded by startup scripts and systemd units.
 | `QWEN_ALLOW_UNAUTH` | *(unset)* | Set to `1` to permit unauthenticated operation (local dev only — never on a LAN-exposed instance). |
 | `QWEN_ENV_FILE` | *(unset)* | Override the .env path loaded by `start.sh` / `start-client.sh`. |
 | `QWEN_ALLOW_UNSANDBOXED_TESTS` | *(unset)* | Set to `1` to run LLM-generated tests without the bubblewrap sandbox. Not recommended — tests then execute with the orchestrator's own privileges. Install `bubblewrap` (`apt install bubblewrap`) instead. |
+| `LLAMA_SERVER_REQUEST_TIMEOUT` | `2700` | Max seconds for a single llama-server inference call. Must be ≥ the longest `AUTONOMOUS_*_TIMEOUT` so the inner request doesn't fail before the outer role budget. |
+| `ALLOW_REMOTE_EXEC_YOLO` | *(unset)* | Defense-in-depth: even in `PERMISSION_MODE=yolo`, `<<<REMOTE_EXEC>>>` shell commands still prompt unless this is set to `1`. Two opt-ins must compromise (yolo flag + this env) before LLM-emitted shell runs silently. |
+| `CORS_ORIGINS` | `localhost,127.0.0.1` | CSV of allowed CORS origins. Must include port (e.g. `http://localhost:3000`) for browser dashboards. `allow_credentials` is automatically disabled when `*` is in the list. |
+| `INGEST_ALLOWED_DIR` | *(unset)* | Directory under which `/v1/memory/ingest` accepts paths (in addition to system temp). Realpath-resolved before the prefix check, so symlinks can't escape. |
 | `MAC_RUNNER_URL` | `http://127.0.0.1:5050` | Where the orchestrator dispatches `swift_test` / `xcodebuild_test` jobs. Default assumes an SSH reverse tunnel from the Mac. |
 | `MAC_RUNNER_API_KEY` | *(empty)* | Shared secret — must match `QWEN_RUNNER_API_KEY` in the Mac runner's `~/.config/qwen-runner/.env`. |
 
@@ -63,6 +67,24 @@ The planner emits a `test_strategy` map that the daemon forwards to
 | `PERMISSION_MODE` | `default` | `default` / `acceptEdits` / `yolo` |
 | `ALLOW_SHELL_MODE` | `true` | Allow pipes, redirects, and shell features |
 | `COMMAND_WHITELIST` | *(none)* | CSV of allowed commands (empty = all allowed) |
+
+### Autonomous mode (orchestrator)
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AUTONOMOUS_PLANNER_AGENT` | `q36_architect` | Agent that runs the spec → YAML planner step. |
+| `AUTONOMOUS_ARCHITECT_AGENT` | `q36_architect` | Agent for the design phase. |
+| `AUTONOMOUS_IMPLEMENTER_AGENT` | `implementer` | Default implementer; the architect can recommend a tier-specific override per spec. |
+| `AUTONOMOUS_REVIEWER_AGENT` | `reviewer` | Reviewer agent; usually overridden to `deep_reviewer` in `.env`. |
+| `AUTONOMOUS_SUPERVISOR_AGENT` | `supervisor` | Meta-orchestrator that decides retry / fail / replan paths. |
+| `AUTONOMOUS_PLANNER_TIMEOUT` | `900` | Seconds. Must be ≤ `LLAMA_SERVER_REQUEST_TIMEOUT`. |
+| `AUTONOMOUS_ARCHITECT_TIMEOUT` | `2700` | Seconds. |
+| `AUTONOMOUS_IMPLEMENTER_TIMEOUT` | `1800` | Seconds. |
+| `AUTONOMOUS_REVIEWER_TIMEOUT` | `2700` | Seconds. |
+| `AUTONOMOUS_PLANNER_MAX_TOKENS` | `4000` | Token budget for planner output. |
+| `AUTONOMOUS_ARCHITECT_MAX_TOKENS` | `8000` | Token budget for architect output. |
+| `AUTONOMOUS_IMPLEMENTER_MAX_TOKENS` | `16000` | Token budget for implementer output. |
+| `AUTONOMOUS_REVIEWER_MAX_TOKENS` | `16000` | Token budget for reviewer output. |
+| `AUTONOMOUS_MAX_RETRIES` | `3` | Per-task retry cap before the supervisor escalates. |
 
 ## Per-Model Configuration
 

@@ -79,9 +79,17 @@ ROLE_TO_MAX_TOKENS = {
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
+_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+
+
 def _strip_thinking(text: str) -> str:
-    """Remove ``<think>…</think>`` blocks leaked by some Qwen3.5 variants."""
-    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+    """Remove ``<think>…</think>`` blocks the model emits before its answer.
+
+    Qwen3.x family ships with thinking enabled in their chat templates.
+    Server-side ThinkingStripper handles the streaming case; this is the
+    sync-parse fallback (compiled at import for repeated calls).
+    """
+    return _THINK_BLOCK_RE.sub("", text).strip()
 
 
 def _write_artifact(spec_dir: Path, rel_path: str, content: str) -> Path:

@@ -5,7 +5,10 @@ the autonomous service mode. Both the FastAPI server (which exposes the
 public /v1/autonomous endpoints) and the orchestrator daemon (which runs
 agents and processes review gates) import from here.
 
-Phase 1a scope: schema, models, db helpers, event log. No agent execution.
+Submodules: models (pydantic types) · db (SQLite store) · planner (spec → YAML)
+· executor (agent calls + parsing + sandboxed test execution) · supervisor
+(retry/replan decisions) · jira_client / jira_sync (bidirectional Atlassian
+mirror).
 """
 from qwen_autonomous.models import (
     Spec,

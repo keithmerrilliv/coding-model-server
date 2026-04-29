@@ -202,13 +202,16 @@ _CLARIFY_OPEN_ONLY_RE = re.compile(
 )
 
 
-def _strip_thinking(text: str) -> str:
-    """Remove `<think>...</think>` blocks if the model emitted any.
+_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
-    Some Qwen3.5 variants leak thinking tags even with reasoning disabled.
-    See the llama-server backend gotchas for the full story.
+
+def _strip_thinking(text: str) -> str:
+    """Remove `<think>...</think>` blocks the model emits before its answer.
+
+    The Qwen3.x chat templates surface reasoning via these tags; we drop
+    them defensively before parsing structured planner output.
     """
-    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+    return _THINK_BLOCK_RE.sub("", text).strip()
 
 
 def parse_planner_response(text: str) -> PlannerResult:

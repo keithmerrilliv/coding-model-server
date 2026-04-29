@@ -1,4 +1,34 @@
-## Qwen Added Memories
-- Recent improvements to qwen-server include: 1) Upgraded 'implementer' and 'metal_implementer' to Qwen3-Coder-Next Q8_0 (80B MoE) with a native 256k context window, 2) Settled on 21 GPU layers for the 30B HD (Q8_0) model on RTX 5080, 3) Implemented high-fidelity RAG ingestion with 'ingest_xcode_docs.py' and 'scrape_apple_deep.py', 4) Added the '<<<DEEP_INGEST>>>' tool to qwen_remote.py for full-text URL scraping, 5) Switched to a load-on-demand architecture (auto-unload) for 0% idle VRAM usage, 6) Added 'inspect_memory.py' for RAG database maintenance, 7) Fixed 404 errors by removing obsolete manual unload logic from the client.
-- Complete git history of recent qwen-server improvements includes: 1) 37c86e10: Finalized Qwen3-Coder-Next tuning and added inspect_memory.py utility. 2) 8fc80315: Upgraded agents to 80B Qwen3-Coder-Next Q8_0 model. 3) d00b94cf: Implemented high-fidelity RAG ingestion (Xcode docs, targeted scraping, DEEP_INGEST tool). 4) e181cffc: Optimized GPU layers to 21 for 30B HD model. 5) 901a8495: Fixed 404 errors by removing obsolete client-side unload logic. 6) dbf6671e: Fixed 12 critical bugs including race conditions, security issues, and deadlocks. 2) d25ceccb: Removed duplicate _create_model_config function and updated server_manager.py path. 3) feb878fd: Simplified client and server scripts with helper functions and consolidated configurations. 4) 97a06010: Added Homebrew installation tool and enhanced && command separation with pipe/redirection detection. 5) aa06b25f: Enhanced implementer agent with Xcode tools and improved shell command access. 6) c4a34eb7: Improved context window error detection logic. 7) 48ecd7a8: Sanitized chat history to prevent 422 validation errors. 8) 3aee6ea7: Reduced Coder-30B context to native 32k, increased GPU layers and batch. 9) ac1e6495: Added token budget awareness to prevent truncation. These represent major improvements in security, stability, functionality, and maintainability of the qwen-server project.
-- Recent improvements to qwen-server include: 1) Upgraded 'implementer' and 'metal_implementer' to Qwen3-Coder-Next Q8_0 (80B MoE) with a native 256k context window, 2) Settled on 21 GPU layers for the 30B HD (Q8_0) model on RTX 5080, 3) Implemented high-fidelity RAG ingestion with 'ingest_xcode_docs.py' and 'scrape_apple_deep.py', 4) Added the '<<<DEEP_INGEST>>>' tool to qwen_remote.py for full-text URL scraping, 5) Switched to a load-on-demand architecture (auto-unload) for 0% idle VRAM usage, 6) Added 'inspect_memory.py' for RAG database maintenance, 7) Fixed 404 errors by removing obsolete manual unload logic from the client.
+# Qwen Server — Project Notes
+
+This file is kept short on purpose. For day-to-day state see:
+
+- `README.md` — what the project is, how to install/run, file layout
+- `CONFIGURATION.md` — env vars, agent-config knobs, systemd services
+- `~/.claude/.../memory/MEMORY.md` — VRAM budget, calibrations, action items
+  (Claude Code's project memory — not committed to this repo)
+
+## Architecture in one paragraph
+
+FastAPI inference server (`server.py`) + autonomous orchestrator daemon
+(`orchestrator_daemon.py`). Most agents run on the `llama_server`
+subprocess backend with `--cpu-moe` (attention sublayers on GPU,
+experts on CPU); `debugger` and `fast_implementer` still use the
+in-process `llama_cpp` backend. A modular client (`qwen_client/`)
+streams completions, executes tool markers (`<<<REMOTE_EXEC>>>`,
+`<<<WRITE_FILE>>>`, etc.) on the operator's machine, and supports
+three permission modes (`default` / `acceptEdits` / `yolo`).
+Autonomous mode runs `architect → implementer → reviewer` against
+specs, with bwrap-sandboxed test execution and Jira sync.
+
+## When to look elsewhere
+
+- Modifying agent VRAM tuning → `MEMORY.md`'s VRAM Budget section + the
+  per-agent `_create_model_config` calls in `server.py`.
+- Adding a new agent → mirror the closest existing pattern in
+  `server.py`'s `Config.AGENTS`; bump `AUTONOMOUS_*_AGENT` env in
+  `~/.config/qwen-server/.env` if it should be the autonomous default.
+- Sandbox / security → `qwen-orchestrator.service`,
+  `qwen_autonomous/executor.py::_run_local_tests`, and
+  `~/.claude/.../memory/project_security_actionables.md`.
+- Anything else → `git log --grep '<keyword>'` is usually faster than
+  documentation.
