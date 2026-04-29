@@ -300,41 +300,15 @@ class Config:
 
     TOOL_REFERENCE = "# TOOLS — emit these markers inline to execute commands.\n" + "\n".join(ALL_TOOLS)
 
-    # ── Git-enhanced tool reference for reviewer ──
+    # ── Tool reference for reviewer ──
+    # Adds a single git-context line to the base reference. The model already
+    # knows git/find/grep/diff/wc syntax; the prior 30-line cheat-sheet was
+    # ~600 tokens of negative-value prompt mass on every reviewer call.
     GIT_TOOL_REFERENCE = (
-        "# TOOLS — emit these markers inline and the client runs them automatically.\n" +
-        "\n".join(ALL_TOOLS) +
-        "\n\n# ESSENTIAL TOOLS FOR CODE REVIEW — Comprehensive toolkit for thorough code analysis:"
-        "\n# Git commands for understanding code changes and history:" +
-        "\n<<<REMOTE_EXEC>>>git status                      — check current repository state" +
-        "\n<<<REMOTE_EXEC>>>git log --oneline -10           — view recent commit history" +
-        "\n<<<REMOTE_EXEC>>>git diff                        — see current uncommitted changes" +
-        "\n<<<REMOTE_EXEC>>>git diff --cached               — see staged changes" +
-        "\n<<<REMOTE_EXEC>>>git diff HEAD~1                 — compare working directory to last commit" +
-        "\n<<<REMOTE_EXEC>>>git show HEAD                   — show details of last commit" +
-        "\n<<<REMOTE_EXEC>>>git blame filename              — see who made changes to each line" +
-        "\n<<<REMOTE_EXEC>>>git log -p --follow filepath    — see history of changes to a specific file" +
-        "\n<<<REMOTE_EXEC>>>git diff HEAD~3 HEAD            — compare changes between commits" +
-        "\n<<<REMOTE_EXEC>>>git log --author=\"Author Name\" --since=\"2 weeks ago\"  — find commits by author/time" +
-        "\n\n# File system navigation and search:" +
-        "\n<<<REMOTE_EXEC>>>find . -name \"*.py\" -type f     — find all Python files" +
-        "\n<<<REMOTE_EXEC>>>find . -name \"*.js\" -o -name \"*.ts\"  — find JavaScript/TypeScript files" +
-        "\n<<<REMOTE_EXEC>>>find . -name \"*.java\" -o -name \"*.cpp\" -o -name \"*.h\"  — find source files" +
-        "\n<<<REMOTE_EXEC>>>find . -name \"*test*\" -o -name \"*spec*\"  — find test files" +
-        "\n<<<REMOTE_EXEC>>>find . -name \"*.md\" -o -name \"*.txt\"  — find documentation files" +
-        "\n<<<REMOTE_EXEC>>>find . -size +1M -name \"*.log\"  — find large log files" +
-        "\n<<<REMOTE_EXEC>>>grep -r \"TODO|FIXME|HACK\" .    — find code comments indicating work to do" +
-        "\n<<<REMOTE_EXEC>>>grep -rn \"error\" .              — find error mentions in code" +
-        "\n<<<REMOTE_EXEC>>>grep -rn \"DEBUG|debug|console.log\" .  — find debug statements" +
-        "\n\n# Code analysis and comparison:" +
-        "\n<<<REMOTE_EXEC>>>diff file1 file2                — compare two files" +
-        "\n<<<REMOTE_EXEC>>>diff -u old_file new_file       — unified diff format" +
-        "\n<<<REMOTE_EXEC>>>wc -l filename                  — count lines in file" +
-        "\n<<<REMOTE_EXEC>>>head -20 filename               — show first 20 lines" +
-        "\n<<<REMOTE_EXEC>>>tail -20 filename               — show last 20 lines" +
-        "\n<<<REMOTE_EXEC>>>sort filename                   — sort file contents" +
-        "\n<<<REMOTE_EXEC>>>uniq -c filename                — count unique lines" +
-        "\n<<<REMOTE_EXEC>>>stat filename                   — detailed file information"
+        TOOL_REFERENCE +
+        "\n\n# Use `<<<REMOTE_EXEC>>>git ...` (status, log, diff, blame, show) to "
+        "investigate change history. Use `find` / `grep` / `diff` / `wc` for "
+        "navigation and analysis."
     )
 
     # ── Token budget guidance (injected dynamically) ──
@@ -370,55 +344,23 @@ BUDGET GUIDELINES:
     # ── macOS development toolkit (injected into EXECUTOR_PROMPT) ──
     MACOS_TOOLKIT = """
 MACOS DEVELOPMENT TOOLKIT — Available via `<<<REMOTE_EXEC>>>`:
-You are running on macOS with FULL local access. You CAN and SHOULD write and execute scripts.
+You are running on macOS with FULL local access. You CAN and SHOULD write and execute
+scripts (python3 / node / swift / ruby), and you have the standard Unix toolchain
+(jq, awk, sqlite3, ffmpeg, curl, gh, make/cmake/clang, otool, pdftotext, etc).
 
-SCRIPTING RUNTIMES — Write scripts to files and execute them for complex tasks:
-- Python 3: `python3 script.py` — data processing, API calls, complex logic, automation
-- Node.js: `node script.js` or `npx <package>` — JS scripting, ad-hoc npm packages
-- Swift: `swift script.swift` — Apple-native scripting, no Xcode project needed
-- Ruby: `ruby script.rb` — quick scripting
-- Perl: `perl -e '...'` — powerful one-liners, regex processing
-
-DATA PROCESSING — Transform, query, and convert data:
-- jq: `jq '.key' file.json` — parse/transform JSON (use this for ALL JSON manipulation)
-- xmllint: `xmllint --xpath '//tag' file.xml` — parse/query XML and HTML
-- awk: `awk '{print $2}' file` — columnar data extraction, field processing
-- sqlite3: `sqlite3 db.sqlite 'SELECT ...'` — query any SQLite database directly
-- plutil: `plutil -convert json file.plist -o -` — convert plists to/from JSON/XML
-- textutil: `textutil -convert txt file.docx` — convert between doc formats (html, rtf, txt, docx)
-
-macOS-SPECIFIC POWER TOOLS:
-- mdfind: `mdfind -name "file"` or `mdfind "content"` — Spotlight search (extremely fast)
-- mdls: `mdls file` — rich file metadata (dimensions, author, dates, etc.)
-- sips: `sips -z 100 100 img.png` — resize/convert/rotate images (no ImageMagick needed)
-- pbcopy/pbpaste: pipe to/from clipboard
-- osascript: `osascript -e 'tell app "Finder" to ...'` — automate any macOS app
-- open: `open file.pdf` or `open -a Safari url` — open files/URLs in apps
-- defaults: `defaults read com.apple.finder` — read/write macOS preferences
-
-MEDIA & PDF (Homebrew):
-- ffmpeg: audio/video processing, conversion, extraction
-- pdftotext/pdfinfo (poppler): extract text from PDFs, get PDF metadata
-
-BUILD & COMPILATION:
-- make / cmake: build automation
-- clang / clang++: C/C++ compilation
-- swiftc: Swift compilation
+macOS-SPECIFIC tools you may not reach for by default:
+- mdfind / mdls: Spotlight search and file metadata
+- sips: resize/convert/rotate images without ImageMagick
+- plutil / textutil: convert plists / docx ↔ JSON/HTML/RTF
+- osascript: automate any macOS app via AppleScript
+- pbcopy / pbpaste: pipe to/from clipboard
+- open: launch files/URLs in their default app
+- defaults: read/write macOS preferences
 - xcodebuild / xcrun: full Xcode CLI toolchain
-- gh: GitHub CLI (issues, PRs, releases, API)
+- swiftc: Swift compilation
 
-NETWORKING:
-- curl: HTTP requests, API calls, downloads
-- wget: file downloads with resume support
-
-BINARY INSPECTION:
-- otool -L: list linked libraries (like ldd)
-- nm: list symbols in object files
-- lipo -info: inspect universal binary architectures
-- file: identify file types
-
-IMPORTANT: Do NOT hesitate to write a Python/Node/Swift script when the task is complex.
-A 20-line Python script is often better than a long chain of shell commands."""
+IMPORTANT: For complex tasks, write a python3/node/swift script rather than
+chaining shell commands."""
 
     # ── Behavioral instruction for action-oriented agents ──
     EXECUTOR_PROMPT = """You execute tasks by running commands and writing files.
