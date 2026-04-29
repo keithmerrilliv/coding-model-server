@@ -5,13 +5,18 @@ venv/
 .env
 qwen_memory_db/
 qwen_tasks_db/
+qwen_tasks_db.bak.*/
 server.log
 tools/
 tools.*.bak/
 .DS_Store
 appledeepdoc-mcp/
 scraping/output
-server_stats.csv
+server_stats.csv*
+
+# Local-only artifacts that should not land in the repo
+.claude/
+audit_report.md
 
 # Mac-runner local caches (should never be in the repo)
 Library/Caches/qwen-runner/
