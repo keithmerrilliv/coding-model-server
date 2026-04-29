@@ -75,8 +75,15 @@ class MemoryService:
         return self._embedding_model.encode(text, show_progress_bar=False).tolist()
 
     def _content_hash(self, text: str) -> str:
-        """MD5 hex digest of text, used for deduplication."""
-        return hashlib.md5(text.encode()).hexdigest()
+        """SHA-256 hex digest of text, used for deduplication.
+
+        SHA-256 (not MD5): not security-critical here, but using a
+        cryptographic-looking hash invites future misuse and MD5 is
+        widely flagged by static analyzers. Truncate to 32 hex chars
+        (128 bits) to match the previous storage size for any existing
+        ChromaDB rows that already carry a content_hash field.
+        """
+        return hashlib.sha256(text.encode()).hexdigest()[:32]
 
     def add_memory(self, text: str, metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Add a new memory string to the database. Returns dict with status on success, error on failure."""

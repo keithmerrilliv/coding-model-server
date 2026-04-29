@@ -1346,9 +1346,18 @@ class LlamaServerManager:
                 with http_requests.post(url, json=payload, stream=True,
                                         timeout=Config.LLAMA_SERVER_REQUEST_TIMEOUT) as resp:
                     if resp.status_code != 200:
-                        error_body = resp.text
-                        logger.error("llama-server returned %d: %s", resp.status_code, error_body)
-                        error_chunk = {"error": {"message": f"llama-server error: {error_body}", "type": "server_error"}}
+                        # Log full error server-side; return a generic message
+                        # to the client. The raw error body can leak model paths,
+                        # llama-server version, library internals, and OS errors.
+                        request_id = uuid.uuid4().hex[:8]
+                        logger.error(
+                            "llama-server returned %d (rid=%s): %s",
+                            resp.status_code, request_id, resp.text,
+                        )
+                        error_chunk = {"error": {
+                            "message": f"upstream inference error (request_id={request_id})",
+                            "type": "server_error",
+                        }}
                         yield f"data: {json.dumps(error_chunk)}\n\n"
                         yield "data: [DONE]\n\n"
                         return
@@ -1453,7 +1462,15 @@ class LlamaServerManager:
         try:
             resp = http_requests.post(url, json=payload, timeout=Config.LLAMA_SERVER_REQUEST_TIMEOUT)
             if resp.status_code != 200:
-                raise HTTPException(status_code=502, detail=f"llama-server error: {resp.text}")
+                request_id = uuid.uuid4().hex[:8]
+                logger.error(
+                    "llama-server returned %d (rid=%s): %s",
+                    resp.status_code, request_id, resp.text,
+                )
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"upstream inference error (request_id={request_id})",
+                )
 
             result = resp.json()
             message = result["choices"][0].get("message", {})
@@ -1996,28 +2013,33 @@ def ingest_memory_endpoint(request: IngestRequest):
     if not memory_service:
         raise HTTPException(status_code=503, detail="Memory service not initialized")
 
-    # Path security validation
-    normalized = os.path.normpath(request.path)
-    if '..' in normalized.split(os.sep):
+    # Path security validation. Use realpath (not just normpath) so a symlink
+    # from an allowed directory to outside-the-jail is caught. normpath alone
+    # would let /allowed/symlink → /etc/passwd through.
+    if '..' in request.path.split(os.sep):
         raise HTTPException(status_code=400, detail="Path traversal not allowed")
-    if not os.path.isabs(normalized):
+    if not os.path.isabs(request.path):
         raise HTTPException(status_code=400, detail="Only absolute paths are allowed")
-    
+    try:
+        resolved = os.path.realpath(request.path)
+    except OSError as e:
+        raise HTTPException(status_code=400, detail=f"Cannot resolve path: {e}")
+
     # Allow ingestion from system temp directory (for uploads)
     import tempfile
-    temp_dir = os.path.normpath(tempfile.gettempdir())
-    is_in_temp = normalized.startswith(temp_dir + os.sep) or normalized == temp_dir
+    temp_dir = os.path.realpath(tempfile.gettempdir())
+    is_in_temp = resolved.startswith(temp_dir + os.sep) or resolved == temp_dir
 
     if Config.INGEST_ALLOWED_DIR:
-        allowed = os.path.normpath(Config.INGEST_ALLOWED_DIR)
-        is_in_allowed = normalized.startswith(allowed + os.sep) or normalized == allowed
-        
+        allowed = os.path.realpath(Config.INGEST_ALLOWED_DIR)
+        is_in_allowed = resolved.startswith(allowed + os.sep) or resolved == allowed
+
         if not is_in_allowed and not is_in_temp:
             raise HTTPException(status_code=403, detail=f"Path must be under {allowed} or {temp_dir}")
     elif not is_in_temp:
         raise HTTPException(status_code=403, detail=f"Path must be under {temp_dir} (set INGEST_ALLOWED_DIR to allow other paths)")
 
-    result = memory_service.ingest_pdf(normalized)
+    result = memory_service.ingest_pdf(resolved)
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
 
@@ -2311,9 +2333,16 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
             # llama-server subprocess backend
             llama_server_manager.ensure_running(model_config)
 
-            # Estimate token budget (no local model to tokenize with)
-            prompt_text = system_prompt + ''.join((m.content or '') for m in request.messages)
-            est_prompt_tokens = int(len(prompt_text) / 3.5)
+            # Estimate token budget without allocating a giant string just to
+            # measure its length (system_prompt + N messages can be 100K+ chars
+            # on long sessions). Sum lengths instead. Ratio: chars/2.5 is
+            # closer to reality on code-heavy and CJK input than chars/3.5;
+            # underestimating tokens overshoots the budget and silently
+            # truncates mid-stream.
+            est_prompt_chars = len(system_prompt) + sum(
+                len(m.content or '') for m in request.messages
+            )
+            est_prompt_tokens = int(est_prompt_chars / 2.5)
             n_ctx = model_config.get('n_ctx', 32768)
             available = max(n_ctx - est_prompt_tokens, 1)
             clamped_max = min(request.max_tokens, available)

@@ -1,0 +1,42 @@
+title: "Word Frequency Counter CLI"
+goal: |
+  Build a Python 3.11+ CLI tool that reads a text file and prints the top N most frequent words with their counts. Words are case-insensitive, punctuation is stripped, output format is "<count> <word>" sorted by count descending.
+language: python
+target_runtime: "Python 3.11+"
+output_location:
+  repo: new project
+  directory: null
+acceptance_criteria:
+  - "Reads from a file path given as the first argument"
+  - "--top N flag works with default of 10"
+  - "Case-insensitive word matching (Hello == hello)"
+  - "Strips common punctuation (.,;:!?\"'()-—)"
+  - "Exits with code 1 and clear message if file doesn't exist"
+  - "Handles empty files gracefully (prints nothing, exits 0)"
+test_strategy:
+  framework: pytest
+  required: true
+  notes: test_wordfreq.py
+constraints:
+  dependencies_allowed: false
+  notes: Python 3.11+ standard library only; single file wordfreq.py
+phases:
+  - name: design
+    role: architect
+    inputs: ["spec.md"]
+    outputs: ["design.md"]
+    success: "Architecture document covering CLI argument parsing, text processing pipeline, and output formatting"
+  - name: implement
+    role: implementer
+    inputs: ["design.md", "spec.md"]
+    outputs: ["wordfreq.py", "test_wordfreq.py"]
+    success: "Code passes all tests; acceptance criteria covered"
+    execution_target: server
+  - name: test
+    role: reviewer
+    inputs: ["wordfreq.py", "test_wordfreq.py"]
+    outputs: ["test_report.md"]
+    success: "All pytest tests pass; acceptance criteria verified"
+risks:
+  - "Edge cases with unusual punctuation or Unicode characters"
+  - "Large file handling (memory efficiency)"

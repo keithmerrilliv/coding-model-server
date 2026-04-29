@@ -48,6 +48,9 @@ _MAX_CHECKPOINTS = 20
 
 # Write-loop detection: {normalized_path: write_count}
 _write_counts = {}
+# Separate counter for shell-write redirects so a real path literally named
+# "__shell_writes__" can't collide with the global counter.
+_shell_write_count = 0
 _MAX_WRITES_PER_FILE = 3
 
 # ---------------------------------------------------------------------------
@@ -64,8 +67,19 @@ PROTECTED_FILES = [
 ]
 
 def _is_protected_path(filepath):
-    """Check if a path is protected. Returns (is_protected, reason)."""
-    norm = os.path.normpath(os.path.expanduser(filepath))
+    """Check if a path is protected. Returns (is_protected, reason).
+
+    Uses realpath (not just normpath) so a symlink from a benign-looking
+    path to a protected one is still caught. Without realpath,
+    `/home/user/Dev/symlink → /etc/passwd` would slip the /etc check.
+    """
+    expanded = os.path.expanduser(filepath)
+    try:
+        norm = os.path.realpath(expanded)
+    except OSError:
+        # If the path doesn't exist yet, fall back to the lexical normpath.
+        # Real-world: this happens when WRITE_FILE creates a new file.
+        norm = os.path.normpath(expanded)
     # Check directory components
     parts = norm.split(os.sep)
     for pdir in PROTECTED_PATHS:
@@ -121,8 +135,10 @@ def _check_deny_rules(command):
 
 
 def reset_write_counts():
-    """Clear per-file write counters between tasks."""
+    """Clear per-file and shell-write counters between tasks."""
+    global _shell_write_count
     _write_counts.clear()
+    _shell_write_count = 0
 
 
 def configure(config, colors, print_colored_fn, logger_inst, temp_tracker, external_handlers, **kwargs):
@@ -555,10 +571,11 @@ def execute_remote_command(command, chunk_output=True):
         command
     )
     if _shell_write_match:
-        _write_counts['__shell_writes__'] = _write_counts.get('__shell_writes__', 0) + 1
-        if _write_counts['__shell_writes__'] > _MAX_WRITES_PER_FILE:
-            over = _write_counts['__shell_writes__'] - _MAX_WRITES_PER_FILE
-            msg = (f"Shell file write BLOCKED ({_write_counts['__shell_writes__'] - 1} attempts). "
+        global _shell_write_count
+        _shell_write_count += 1
+        if _shell_write_count > _MAX_WRITES_PER_FILE:
+            over = _shell_write_count - _MAX_WRITES_PER_FILE
+            msg = (f"Shell file write BLOCKED ({_shell_write_count - 1} attempts). "
                    f"Do NOT use python open(), cat <<, sed -i, or > to write files. "
                    f"You MUST use <<<WRITE_FILE>>>path\\ncontent or <<<EDIT_FILE>>> instead.")
             _logger.warning(msg)
@@ -567,7 +584,7 @@ def execute_remote_command(command, chunk_output=True):
                 return None  # Hard stop — agent won't learn, break the loop
             return msg  # Return feedback so agent learns to switch approach
         _print_colored(f"\nAgent is writing files via shell instead of <<<WRITE_FILE>>>.", _colors['WARNING'])
-        _print_colored(f"   This bypasses diff preview and loop detection. ({_write_counts['__shell_writes__']}/{_MAX_WRITES_PER_FILE})", _colors['WARNING'])
+        _print_colored(f"   This bypasses diff preview and loop detection. ({_shell_write_count}/{_MAX_WRITES_PER_FILE})", _colors['WARNING'])
 
     _print_colored(f"\nAgent wants to run command: {command}", _colors['WARNING'])
 

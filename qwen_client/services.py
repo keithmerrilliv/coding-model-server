@@ -6,6 +6,7 @@ import threading
 import select
 import atexit
 import logging
+import time
 from pathlib import Path
 
 import requests
@@ -49,8 +50,45 @@ MAX_FILE_SIZE = 100_000  # 100 KB — skip generated/minified files
 # Memory & ingestion
 # ---------------------------------------------------------------------------
 
+def _is_safe_public_url(url: str) -> tuple[bool, str]:
+    """SSRF guard: only allow http/https URLs to public IPs.
+
+    Blocks LLM-driven fetches to:
+      - cloud-metadata addresses (169.254.169.254 etc.)
+      - loopback (127.0.0.0/8, ::1)
+      - link-local (169.254.0.0/16, fe80::/10)
+      - RFC1918 / private (10/8, 172.16/12, 192.168/16, fc00::/7)
+      - other reserved ranges (multicast, etc.)
+    Returns (is_safe, reason). reason is empty on success.
+    """
+    import socket
+    import ipaddress
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return False, f"unsupported scheme {parsed.scheme!r}"
+    if not parsed.hostname:
+        return False, "missing hostname"
+    try:
+        addrs = socket.getaddrinfo(parsed.hostname, None)
+    except socket.gaierror as e:
+        return False, f"DNS lookup failed: {e}"
+    for family, _t, _p, _c, sockaddr in addrs:
+        ip_str = sockaddr[0]
+        try:
+            ip = ipaddress.ip_address(ip_str)
+        except ValueError:
+            return False, f"invalid IP {ip_str!r}"
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved or ip.is_unspecified:
+            return False, f"refusing non-public IP {ip}"
+    return True, ""
+
+
 def ingest_url_content(url):
     """Fetch URL content, strip HTML, and send to server memory."""
+    safe, reason = _is_safe_public_url(url)
+    if not safe:
+        return f"Error: SSRF guard rejected URL ({reason})"
     try:
         print_colored(f"[Client] Deep-ingesting content from {url}...", COLORS['BLUE'])
         response = _SESSION.get(url, timeout=20)
@@ -210,28 +248,32 @@ class CupertinoMCPClient:
     def __init__(self):
         self.process = None
         self.msg_id = 1
-        self.lock = threading.Lock()
+        # RLock so _send_request can hold the lock and call start() inside
+        # it without deadlocking. Lock-protected start() prevents two
+        # concurrent first-time callers from each spawning a subprocess.
+        self.lock = threading.RLock()
 
     def start(self):
         """Start the Cupertino MCP server process."""
-        if self.process and self.process.poll() is None:
-            return True
-        try:
-            cupertino_path = subprocess.check_output(["which", "cupertino"], text=True).strip()
-            if not cupertino_path:
+        with self.lock:
+            if self.process and self.process.poll() is None:
+                return True
+            try:
+                cupertino_path = subprocess.check_output(["which", "cupertino"], text=True).strip()
+                if not cupertino_path:
+                    return False
+                self.process = subprocess.Popen(
+                    [cupertino_path, "serve"],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    bufsize=1,
+                )
+                return True
+            except Exception as e:
+                print_colored(f"Error starting Cupertino MCP: {e}", COLORS['FAIL'])
                 return False
-            self.process = subprocess.Popen(
-                [cupertino_path, "serve"],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                text=True,
-                bufsize=1,
-            )
-            return True
-        except Exception as e:
-            print_colored(f"Error starting Cupertino MCP: {e}", COLORS['FAIL'])
-            return False
 
     def stop(self):
         """Stop the Cupertino MCP server process."""
@@ -274,8 +316,14 @@ class CupertinoMCPClient:
                 self.process.stdin.write(json.dumps(request) + "\n")
                 self.process.stdin.flush()
 
-                for _ in range(50):
-                    line = self._readline_with_timeout(timeout=30)
+                # Total wall-time bound: previously 50 × 30s readline timeout
+                # could hold the lock for up to 25 min on a misbehaving MCP
+                # that emits a stream of non-matching JSON.
+                MAX_TOTAL_WALL_TIME = 120  # 2 min
+                deadline = time.time() + MAX_TOTAL_WALL_TIME
+                while time.time() < deadline:
+                    remaining = deadline - time.time()
+                    line = self._readline_with_timeout(timeout=min(30, remaining))
                     if not line:
                         if self.process.poll() is not None:
                             return {"error": "Cupertino MCP server process exited unexpectedly."}
@@ -289,7 +337,7 @@ class CupertinoMCPClient:
                         continue
                     if response.get("id") == req_id:
                         return response.get("result", {})
-                return {"error": "Cupertino MCP sent too many non-matching responses"}
+                return {"error": f"Cupertino MCP response not received within {MAX_TOTAL_WALL_TIME}s"}
             except Exception as e:
                 return {"error": f"Communication error: {e}"}
 

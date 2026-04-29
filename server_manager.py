@@ -12,7 +12,7 @@ import os
 import json
 import select
 import logging
-from threading import Lock, Thread
+from threading import RLock, Thread
 from typing import Dict, List, Optional, Any
 
 # Configure logging
@@ -35,7 +35,10 @@ class AppleDeepDocsService:
             
         self.process = None
         self.msg_id = 1
-        self.lock = Lock()
+        # RLock so call_tool can hold the lock and call start() inside it
+        # without deadlocking. start() also takes the lock to serialize
+        # spawn races between concurrent first-time callers.
+        self.lock = RLock()
         self.venv_python = self._get_venv_python_path()
         self.is_running = False
 
@@ -60,11 +63,21 @@ class AppleDeepDocsService:
             return os.path.join(self.mcp_path, "venv", "bin", "python")
 
     def start(self):
-        """Start the MCP server process and perform handshake if not already running"""
-        if self.process and self.process.poll() is None:
-            self.is_running = True
-            return True
+        """Start the MCP server process and perform handshake if not already running.
 
+        Lock-protected start: previously the alive check was outside the lock,
+        so two concurrent callers could both observe "not running" and each
+        Popen a fresh subprocess. The second one would overwrite self.process
+        and leak the first.
+        """
+        with self.lock:
+            if self.process and self.process.poll() is None:
+                self.is_running = True
+                return True
+            return self._start_unlocked()
+
+    def _start_unlocked(self):
+        """Internal: caller must hold self.lock."""
         try:
             main_py = os.path.join(self.mcp_path, "main.py")
             if not os.path.exists(self.venv_python):
@@ -174,10 +187,15 @@ class AppleDeepDocsService:
                 self.process.stdin.write(payload + "\n")
                 self.process.stdin.flush()
 
-                # Read response with timeout
-                max_attempts = 50
-                for _ in range(max_attempts):
-                    line = self._readline_with_timeout(timeout=60)
+                # Read response with both per-readline AND total wall-time bounds.
+                # Without the wall-time cap, max_attempts × per-call timeout could
+                # hold self.lock for up to 50 minutes if the MCP server emits a
+                # stream of non-matching JSON, blocking every other call_tool.
+                MAX_TOTAL_WALL_TIME = 180  # 3 min — generous for slow doc fetches
+                deadline = time.time() + MAX_TOTAL_WALL_TIME
+                while time.time() < deadline:
+                    remaining = deadline - time.time()
+                    line = self._readline_with_timeout(timeout=min(60, remaining))
                     if not line:
                         if self.process.poll() is not None:
                             self.is_running = False
@@ -206,7 +224,7 @@ class AppleDeepDocsService:
                     except json.JSONDecodeError:
                         continue
 
-                return "Error: MCP server sent too many non-matching responses."
+                return f"Error: MCP server response not received within {MAX_TOTAL_WALL_TIME}s."
 
             except Exception as e:
                 logger.error(f"Communication error with Deep Docs MCP: {e}")
