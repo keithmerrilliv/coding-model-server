@@ -33,7 +33,7 @@ _config = None
 _colors = None
 _print_colored = None
 _logger = None
-_temp_tracker = None  # dict with 'add', 'remove', 'cleanup' functions
+_temp_tracker = None  # dict with 'add' function (the only key consumed here)
 _external_handlers = None  # dict with save_memory, web_search, etc.
 
 # Extended state (set via configure **kwargs)
@@ -149,7 +149,7 @@ def configure(config, colors, print_colored_fn, logger_inst, temp_tracker, exter
         colors: COLORS dict mapping color names to ANSI codes.
         print_colored_fn: print_colored(text, color) function.
         logger_inst: logging.Logger instance.
-        temp_tracker: dict with keys 'add', 'remove', 'cleanup' mapping to functions.
+        temp_tracker: dict with key 'add' mapping to a function that registers a temp file path.
         external_handlers: dict with keys 'save_memory', 'web_search',
             'handle_cupertino_search', 'handle_apple_deep_docs', 'ingest_pdf',
             'ingest_url_content' mapping to their respective functions.
@@ -1191,12 +1191,21 @@ def grep_search(payload):
                     except ValueError:
                         rel_path = filepath
 
+                    # Precompute newline offsets ONCE so per-match line lookup
+                    # is O(log lines) via bisect instead of O(file_size) per
+                    # match via content[:match.start()].count('\n').
+                    import bisect
+                    line_starts = [0]
+                    for i, ch in enumerate(content):
+                        if ch == '\n':
+                            line_starts.append(i + 1)
+
                     for match in matches[:10]:  # Limit matches per file
                         if len(results) >= max_results:
                             break
 
-                        # Find line number
-                        line_num = content[:match.start()].count('\n') + 1
+                        # bisect_right gives 1-indexed line number directly
+                        line_num = bisect.bisect_right(line_starts, match.start())
                         line_content = lines[line_num - 1] if line_num <= len(lines) else ""
 
                         # Truncate long lines

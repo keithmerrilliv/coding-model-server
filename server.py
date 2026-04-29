@@ -197,13 +197,11 @@ class IngestRequest(BaseModel):
 # ============================================================================
 
 def _create_model_config(path_env, path_default, n_gpu_layers, n_ctx=32768, n_batch=2048, backend='llama_cpp',
-                         server_extra_args=None, logit_bias=None, yarn=False, type_k=8, type_v=8,
+                         server_extra_args=None, logit_bias=None, type_k=8, type_v=8,
                          repeat_penalty=1.15, repeat_last_n=256, cpu_moe=False, n_ubatch=512):
     """Helper function to create standardized model configurations.
 
     Args:
-        yarn: If True, include YaRN RoPE scaling parameters. Only needed for models
-              using extended context via YaRN (e.g. 480B Ultra with 2x scaling).
         type_k: GGML type for KV cache keys (8=Q8_0, 2=Q4_0). Default Q8_0.
         type_v: GGML type for KV cache values (8=Q8_0, 2=Q4_0). Default Q8_0.
         repeat_penalty: Penalizes repeated tokens (1.0=off). Lower values help code generation.
@@ -223,16 +221,6 @@ def _create_model_config(path_env, path_default, n_gpu_layers, n_ctx=32768, n_ba
         'repeat_last_n': repeat_last_n,
         'cpu_moe': cpu_moe,
     }
-    if yarn:
-        config.update({
-            'rope_scaling_type': 2,
-            'rope_freq_scale': 1.0,
-            'yarn_ext_factor': -1.0,
-            'yarn_attn_factor': 1.0,
-            'yarn_beta_fast': 32.0,
-            'yarn_beta_slow': 1.0,
-            'yarn_orig_ctx': 32768,
-        })
     if server_extra_args is not None:
         config['server_extra_args'] = server_extra_args
     if logit_bias is not None:
@@ -1053,11 +1041,6 @@ class ModelManager:
                     rope_scaling_type=model_config.get('rope_scaling_type', -1),
                     rope_freq_base=model_config.get('rope_freq_base', 0.0),
                     rope_freq_scale=model_config.get('rope_freq_scale', 0.0),
-                    yarn_ext_factor=model_config.get('yarn_ext_factor', -1.0),
-                    yarn_attn_factor=model_config.get('yarn_attn_factor', 1.0),
-                    yarn_beta_fast=model_config.get('yarn_beta_fast', 32.0),
-                    yarn_beta_slow=model_config.get('yarn_beta_slow', 1.0),
-                    yarn_orig_ctx=model_config.get('yarn_orig_ctx', 0),
                     verbose=False
                 )
 
@@ -1552,11 +1535,22 @@ _REACT_RE = re.compile(r'<REACT>.*?</REACT>\s*', re.DOTALL)
 
 
 def strip_thinking(text: str) -> str:
-    """Remove thinking/reasoning content from completed text."""
-    text = _THINK_FULL_RE.sub('', text)
-    text = _THINK_ORPHAN_RE.sub('', text)
-    text = _THINK_UNCLOSED_RE.sub('', text)  # Truncated thinking (hit max_tokens)
-    text = _REACT_RE.sub('', text)  # Qwen3.5 reasoning blocks
+    """Remove thinking/reasoning content from completed text.
+
+    Short-circuit when no marker is present — the common case for non-
+    reasoning models. Substring checks are far cheaper than four DOTALL
+    regex passes over a 30K-token response.
+    """
+    has_think = '<think>' in text or '</think>' in text
+    has_react = '<REACT>' in text
+    if not has_think and not has_react:
+        return text
+    if has_think:
+        text = _THINK_FULL_RE.sub('', text)
+        text = _THINK_ORPHAN_RE.sub('', text)
+        text = _THINK_UNCLOSED_RE.sub('', text)  # Truncated thinking (hit max_tokens)
+    if has_react:
+        text = _REACT_RE.sub('', text)  # Qwen3.5 reasoning blocks
     return text
 
 
@@ -1579,21 +1573,32 @@ class ThinkingStripper:
 
     MAX_BUFFER = 32768  # chars — Nemotron generates 8K+ thinking blocks
 
+    # The closing tag we're looking for; cached to avoid re-computing length.
+    _CLOSE_TAG = '</think>'
+    _CLOSE_LEN = len(_CLOSE_TAG)
+
     def __init__(self):
         self.state = self.BUFFERING
         self.buffer = ''
+        # How far we've already scanned for the close tag. Without this,
+        # find('</think>') restarts at index 0 every chunk, making the
+        # accumulator O(n²) over buffer length.
+        self._search_start = 0
 
     def feed(self, token: str) -> str:
         """Feed a token, return text to emit (empty string = suppress)."""
         if self.state == self.PASSTHROUGH:
             return token
 
+        prev_len = len(self.buffer)
         self.buffer += token
 
-        # Check for </think> — everything before it (inclusive) is thinking
-        close_idx = self.buffer.find('</think>')
+        # Scan only the new tail (minus tag-length-1 to catch tag boundaries
+        # that span the previous chunk + this one).
+        scan_from = max(0, prev_len - (self._CLOSE_LEN - 1))
+        close_idx = self.buffer.find(self._CLOSE_TAG, scan_from)
         if close_idx != -1:
-            after = self.buffer[close_idx + len('</think>'):]
+            after = self.buffer[close_idx + self._CLOSE_LEN:]
             self.state = self.PASSTHROUGH
             self.buffer = ''
             return after.lstrip()

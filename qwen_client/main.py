@@ -11,7 +11,7 @@ from qwen_client.display import set_terminal_title
 from qwen_client.models import AGENT_THEMES, fetch_available_models
 from qwen_client.history import save_chat_history, load_chat_history, migrate_legacy_sessions, session_path
 from qwen_client.readline_mgr import READLINE_AVAILABLE, setup_readline, add_to_history
-from qwen_client.temp_manager import _add_temp_file, _remove_temp_file, _cleanup_old_temp_files
+from qwen_client.temp_manager import _add_temp_file
 from qwen_client.services import (
     save_memory, web_search, ingest_pdf, ingest_url_content,
     handle_cupertino_search, handle_apple_deep_docs,
@@ -51,8 +51,6 @@ def _configure_tool_handlers():
         logger_inst=logger,
         temp_tracker={
             'add': _add_temp_file,
-            'remove': _remove_temp_file,
-            'cleanup': _cleanup_old_temp_files,
         },
         external_handlers={
             'save_memory': save_memory,

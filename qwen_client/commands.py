@@ -261,7 +261,6 @@ def handle_user_command(user_input, history, model, agent_theme):
         }
         current_idx = modes.index(config.PERMISSION_MODE) if config.PERMISSION_MODE in modes else 0
         config.PERMISSION_MODE = modes[(current_idx + 1) % len(modes)]
-        config.ALLOW_ALL = config.PERMISSION_MODE == 'yolo'
         _tool_handlers.set_permission_mode(config.PERMISSION_MODE)
         color = COLORS['FAIL'] if config.PERMISSION_MODE == 'yolo' else COLORS['GREEN']
         print_colored(f"Permission mode: {config.PERMISSION_MODE} — {labels[config.PERMISSION_MODE]}", color)

@@ -291,12 +291,3 @@ class MemoryService:
             return ""
 
         return context_str + "\n"
-
-    def dispose(self):
-        """Dispose of the embedding model to free memory"""
-        if self._embedding_model:
-            del self._embedding_model
-            self._embedding_model = None
-            import gc
-            gc.collect()
-        logger.info("Memory service resources disposed.")

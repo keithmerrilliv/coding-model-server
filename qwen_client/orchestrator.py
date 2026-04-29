@@ -155,19 +155,25 @@ def _looks_like_stall(response_text: str) -> bool:
 def _check_history_budget(history, model="implementer", agent_theme=None):
     """Proactively manage history size with tiered compaction.
 
-    Budget is measured on the compressed view (_compress_history) — the same
-    form that actually gets sent to the model.  This avoids in-place history
-    mutation, which invalidates llama-server's KV-cache prefix and forces
-    full re-prefill (catastrophic for large CPU-bound models like 397B).
-
     Tier 1 (120K chars): Model-generated conversation summary.
     Tier 2 (150K chars): Hard trim as last resort (drops oldest 25%).
+
+    Cheap fast path: measure raw character size first. _compress_history
+    truncates large messages but is a full O(n) pass over history; running
+    it on every turn just to size-check costs measurable wall time on
+    long sessions. Only run the full compress when raw size is in the
+    danger band.
     """
     from qwen_client.completion import _trim_history_for_context, _compress_history
     from qwen_client.compaction import compact_conversation
 
-    # Measure on the compressed view — raw history is much larger but
-    # _compress_history truncates old messages at send time anyway.
+    # Cheap raw-size estimate; well below the 120K threshold short-circuit.
+    raw_chars = sum(len(m.get("content") or "") for m in history)
+    if raw_chars < 100000:
+        return
+
+    # In the danger band — pay for the compressed view (same form sent
+    # to the model).
     compressed = _compress_history(history)
     total_chars = sum(len(m.get("content", "")) for m in compressed)
 

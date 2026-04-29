@@ -36,7 +36,6 @@ class Config:
         PERMISSION_MODE = 'yolo'
     else:
         PERMISSION_MODE = 'default'
-    ALLOW_ALL = PERMISSION_MODE == 'yolo'
 
     # Display settings
     VERBOSE_MODE = True  # True=full tool output, False=compact one-liners
@@ -54,7 +53,6 @@ class Config:
     CHUNK_SIZE = 6000
     CHUNK_OVERLAP = 500
     CHUNK_THRESHOLD = 8000
-    MAX_DISPLAY_CHARS = 8000
 
     # Timeout settings
     COMMAND_TIMEOUT = 240
