@@ -51,6 +51,14 @@ RestrictNamespaces=yes
 LockPersonality=yes
 ProtectSystem=strict
 ReadWritePaths=/home/keith-merrill/Dev/qwen-server /tmp /var/tmp
+# Block read access to credential / SSH paths in the orchestrator user's
+# home. ProtectSystem=strict + ReadWritePaths already prevent writes
+# outside the workspace, but those flags don't restrict reads. With
+# QWEN_ALLOW_UNSANDBOXED_TESTS=1 (or a sandbox bypass), LLM-generated
+# code running as this UID would otherwise have read access to ssh keys
+# and gnupg material. Belt-and-suspenders since bwrap is the primary
+# isolation; this is the secondary defense.
+InaccessiblePaths=-/home/keith-merrill/.ssh -/home/keith-merrill/.gnupg -/home/keith-merrill/.aws -/home/keith-merrill/.config/git
 # LLM-generated tests are sandboxed separately via bubblewrap — see
 # qwen_autonomous/executor.py::run_tests. Install `bubblewrap` on the host:
 #   apt install bubblewrap
