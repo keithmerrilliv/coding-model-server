@@ -20,3 +20,7 @@ audit_report.md
 
 # Mac-runner local caches (should never be in the repo)
 Library/Caches/qwen-runner/
+
+# Node / dashboard build artifacts
+node_modules/
+dashboard/dist/
