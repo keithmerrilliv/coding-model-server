@@ -717,6 +717,16 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
     if isinstance(result, ParseError):
         logger.error("spec %s: reviewer response unparseable: %s",
                      spec.id, result.reason)
+        # Persist the raw response so the operator can post-mortem the
+        # parse failure. Without this, ~10 minutes of reviewer compute
+        # is opaque after the fact.
+        try:
+            (spec_dir / "reviewer_failed_response.txt").write_text(
+                f"# parse error: {result.reason}\n\n{result.text}"
+            )
+        except OSError as e:
+            logger.warning("spec %s: could not persist failed reviewer "
+                           "response: %s", spec.id, e)
         db.update_task_status(task.id, TaskStatus.FAILED)
         db.update_spec_status(spec.id, SpecStatus.FAILED)
         return
