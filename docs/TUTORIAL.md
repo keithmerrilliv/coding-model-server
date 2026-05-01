@@ -257,7 +257,7 @@ This is where the prompt is processed — the most compute-intensive phase:
 | `lite_architect` | 8,337 | **153** | Coder-480B IQ1_M, 4/62 layers |
 | `architect` | 8,787 | **140** | Coder-480B Q2_K_XL, 4/62 layers + YaRN |
 
-To measure current speeds on your hardware, run `python3 benchmark_prefill.py --warmup` from the server machine. The `--warmup` flag is important: it discards the first request per agent so model load time is excluded from the TTFT measurement. Without `--warmup`, the slowest agents will appear orders of magnitude slower than they actually are during normal operation.
+To measure current speeds on your hardware, run `python3 scripts/benchmark_prefill.py --warmup` from the server machine. The `--warmup` flag is important: it discards the first request per agent so model load time is excluded from the TTFT measurement. Without `--warmup`, the slowest agents will appear orders of magnitude slower than they actually are during normal operation.
 
 #### Stage 6: Token Generation (Autoregressive Decoding)
 

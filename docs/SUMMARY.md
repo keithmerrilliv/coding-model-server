@@ -86,7 +86,7 @@ This project is a local LLM inference server with a multi-agent CLI client. The 
 *   Swapped default implementer to Qwen3.6-35B-A3B (UD-Q4_K_M, 131K context, llama_server backend with cpu_moe).
 *   Retired q35_architect (Qwen3.5-122B) and q35_ultra (Qwen3.5-397B) in favor of `q36_architect` (Qwen3.6-27B dense, 16.8 GB, beats Qwen3.5-397B on SWE-bench Verified 77.2 vs 76.2).
 *   Upgraded llama-cpp-python to 0.3.19; deep_reviewer still uses Qwen3.5-122B in-process.
-*   Prefill optimization: `-ub 4096` + `--swa-full` for 4.6x faster Coder-Next prefill. Run `benchmark_prefill.py --warmup` to measure current speeds.
+*   Prefill optimization: `-ub 4096` + `--swa-full` for 4.6x faster Coder-Next prefill. Run `scripts/benchmark_prefill.py --warmup` to measure current speeds.
 *   CUDA 12.8 rebuild fixes broken MMQ kernels on Blackwell (CUDA 13.x compiler bug). Coder-30B Turbo prefill went 145 → 2,386 tok/s (16.5x); see `docs/TUTORIAL.md` for the full agent table.
 *   Two-tier context compaction system (model-generated summary, hard trim) with send-time compression for KV-cache stability.
 *   Session management: named sessions, `/sessions`, `/session`, `/rename`, `/context`.
@@ -96,7 +96,7 @@ This project is a local LLM inference server with a multi-agent CLI client. The 
 
 ### Phase 9: RAG Database Overhaul & Hardening (Apr 2 – Apr 8)
 *   Purged 757K low-quality bulk-ingested code entries from ChromaDB (842K → 85K documents, 3.8 GB → 2.2 GB).
-*   Added `cleanup_memory.py` to remove junk entries (PDF TOC noise, leaked thinking tokens with >50% line-match threshold).
+*   Added `scripts/cleanup_memory.py` to remove junk entries (PDF TOC noise, leaked thinking tokens with >50% line-match threshold).
 *   Added client-side `/ingest-code` command with AST-aware chunking via CodeChunker, replacing the old bulk ingestion script.
 *   Remaining corpus: ~75K agent memories, ~9K markdown docs, ~815 PDF chunks.
 *   Hardened RAG memory system: MD5 content-hash deduplication in `add_memory()`, `max_length=200_000` input validation on the memory endpoint, and `X-Admin-Key` authentication across all client API calls.

@@ -231,14 +231,14 @@ The `POST /v1/memory` endpoint enforces a `max_length=200_000` character limit o
 
 ```bash
 source venv/bin/activate
-python3 rag_utils.py count          # Total document count
-python3 rag_utils.py recent 10      # Last 10 entries
-python3 rag_utils.py inspect <id>   # Full metadata for an entry
+python3 scripts/rag_utils.py count          # Total document count
+python3 scripts/rag_utils.py recent 10      # Last 10 entries
+python3 scripts/rag_utils.py inspect <id>   # Full metadata for an entry
 ```
 
 ### Cleaning junk entries
 
-`cleanup_memory.py` scans for and removes:
+`scripts/cleanup_memory.py` scans for and removes:
 - PDF table-of-contents noise (dotted leader lines)
 - Leaked model thinking tokens — flagged when >50% of lines match thinking patterns (e.g., `<think>`, `Maybe user expects`, `Steps:`)
 - Empty or near-empty documents
@@ -252,4 +252,4 @@ sqlite3 qwen_memory_db/chroma.sqlite3 "VACUUM;"
 
 ### Purging by source pattern
 
-`purge_bulk_code.py` removes all documents whose `source` metadata matches a given pattern. This was used to remove the 757K bulk-ingested code entries.
+`scripts/purge_bulk_code.py` removes all documents whose `source` metadata matches a given pattern. This was used to remove the 757K bulk-ingested code entries.

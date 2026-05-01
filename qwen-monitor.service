@@ -11,7 +11,7 @@ Type=simple
 #     as root to grant: setfacl -m u:keith-merrill:r /sys/class/powercap/intel-rapl:0/energy_uj)
 User=keith-merrill
 WorkingDirectory=/home/keith-merrill/Dev/qwen-server
-ExecStart=/usr/bin/python3 /home/keith-merrill/Dev/qwen-server/monitor_resources.py
+ExecStart=/usr/bin/python3 /home/keith-merrill/Dev/qwen-server/scripts/monitor_resources.py
 Restart=always
 RestartSec=10
 
