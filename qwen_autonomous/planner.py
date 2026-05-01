@@ -108,6 +108,9 @@ PLANNER_SYSTEM_PROMPT = textwrap.dedent("""\
     acceptance_criteria:
       - "Specific, testable condition"
       - "Another specific testable condition"
+    clarifications:                # ONLY include if the spec has a ## Clarifications section
+      - "Verbatim text of the operator's answer to question 1"
+      - "Verbatim text of the operator's answer to question 2"
     test_strategy:
       framework: pytest            # or xctest, jest, none
       required: true
@@ -156,6 +159,14 @@ PLANNER_SYSTEM_PROMPT = textwrap.dedent("""\
     8. If you are producing YAML, every required field above must be
        present. If you cannot fill any required field from the spec or
        from prior clarifications, switch to CLARIFY format and ask.
+    9. If the input contains a `## Clarifications` section with
+       operator answers, copy EACH answer VERBATIM into a top-level
+       `clarifications:` list in the YAML. The implementer reads this
+       block directly and treats it as authoritative — same authority
+       as the spec itself. Do NOT paraphrase, summarize, merge, or
+       fold clarifications into other fields. Keep the operator's
+       original wording. Omit the `clarifications:` field entirely
+       when there are no clarifications to record.
     """)
 
 

@@ -242,8 +242,21 @@ IMPLEMENTER_SYSTEM_PROMPT = textwrap.dedent("""\
        defensively, but a missing close fence (e.g. on truncation) corrupts
        the file. Just emit the content directly.
     8. On a retry attempt (when previous code was rejected), you will see
-       the reviewer's feedback. Fix every issue identified and output ALL
-       files again — the daemon overwrites previous versions.
+       the reviewer's feedback. Edit ONLY the files named in that feedback
+       to fix the cited issues. For every other file, output it BYTE-FOR-BYTE
+       identical to your previous attempt — do not rewrite, refactor, or
+       "improve" untouched files. Output ALL files again (the daemon
+       overwrites previous versions; an omitted file is a deleted file).
+    9. If the plan or spec includes a `clarifications:` block (or an
+       "Operator clarifications" section), every item there is a hard
+       requirement at the same authority as the spec itself. Apply each
+       clarification literally. Do not override a clarification with a
+       default or a "more idiomatic" alternative.
+    10. TypeScript: `any` is forbidden. Use `unknown` and narrow with type
+        guards, or define a proper type. The reviewer rejects `any` on sight.
+    11. Pinned dependencies: in package.json, pyproject.toml, requirements.txt,
+        Cargo.toml, etc., pin to an exact version. No `^`, no `~`, no `>=`
+        ranges. The reviewer rejects unpinned dependencies on sight.
     """)
 
 REVIEWER_SYSTEM_PROMPT = textwrap.dedent("""\
@@ -303,6 +316,20 @@ REVIEWER_SYSTEM_PROMPT = textwrap.dedent("""\
     2. Tests must be runnable: real imports, real paths, no spec-violating mocks.
     3. PASS requires no critical/major defects you can cite by file:line.
     4. Do not expand scope beyond the spec.
+    5. File-existence claims must be GROUNDED in the implementer's file list.
+       Before writing "file X is missing" or "no Y was created", scan the
+       `## Implementation Files` section of your input — every file the
+       implementer wrote appears there as a `### path` heading. If the path
+       is in that list, the file exists; do NOT report it as missing. If you
+       cannot find a file you expected, name what you DID find and ask
+       whether the implementer used a different path, rather than asserting
+       absence. Hallucinated "missing file" findings are the #1 source of
+       false-FAIL verdicts and waste a full retry cycle.
+    6. Enforce IMPLEMENTER hard rules and FAIL on violations:
+       - TypeScript `any` (use `unknown` + narrowing or a proper type).
+       - Unpinned deps in package.json / pyproject.toml / requirements.txt /
+         Cargo.toml — `^`, `~`, `>=` ranges all fail.
+       Cite the exact file:line in `### Verdict Evidence`.
     """)
 
 
