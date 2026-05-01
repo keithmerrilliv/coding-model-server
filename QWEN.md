@@ -3,7 +3,7 @@
 This file is kept short on purpose. For day-to-day state see:
 
 - `README.md` — what the project is, how to install/run, file layout
-- `CONFIGURATION.md` — env vars, agent-config knobs, systemd services
+- `docs/CONFIGURATION.md` — env vars, agent-config knobs, systemd services
 - `~/.claude/.../memory/MEMORY.md` — VRAM budget, calibrations, action items
   (Claude Code's project memory — not committed to this repo)
 
