@@ -32,7 +32,7 @@ def handle_user_command(user_input, history, model, agent_theme):
         print_colored(f"{COLORS['BOLD']}GENERAL COMMANDS:{COLORS['ENDC']}", COLORS['BLUE'])
         print(f"  /help                - Show this help menu")
         print(f"  /exit, /quit         - Exit the CLI and cleanup resources")
-        print(f"  /model <name>        - Switch the active agent (e.g. /model architect)")
+        print(f"  /agent <name>        - Switch the active agent (e.g. /agent architect)")
         print(f"  /clear               - Clear conversation history and start fresh")
         print(f"  /resume              - Resume interrupted multi-agent tasks")
         print(f"  /history             - Show recent command history")
@@ -217,12 +217,12 @@ def handle_user_command(user_input, history, model, agent_theme):
             print_colored("Readline not available - cannot clear command history", COLORS['WARNING'])
         return True, model
 
-    # ── Model switch ──────────────────────────────────────────────────────
-    if user_input.lower().startswith('/model '):
+    # ── Agent switch ──────────────────────────────────────────────────────
+    if user_input.lower().startswith('/agent '):
         parts = user_input.split(' ', 1)
         if len(parts) < 2 or not parts[1].strip():
-            print_colored("Usage: /model <name>", COLORS['FAIL'])
-            print_colored(f"Available models: {', '.join(AGENT_THEMES.keys())}", COLORS['BLUE'])
+            print_colored("Usage: /agent <name>", COLORS['FAIL'])
+            print_colored(f"Available agents: {', '.join(AGENT_THEMES.keys())}", COLORS['BLUE'])
             return True, model
         requested_model = parts[1].strip().lower()
         if requested_model in AGENT_THEMES:

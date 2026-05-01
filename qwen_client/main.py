@@ -136,7 +136,7 @@ def chat(model="implementer", session_name=None):
     )
 
     print_colored(
-        "\nCommands: /help /exit /model /clear /resume /permissions /verbose /context /compact /undo /rename",
+        "\nCommands: /help /exit /agent /clear /resume /permissions /verbose /context /compact /undo /rename",
         COLORS['BLUE']
     )
     if READLINE_AVAILABLE:

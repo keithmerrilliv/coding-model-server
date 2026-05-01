@@ -60,7 +60,7 @@ journalctl -u qwen-server -f   # View logs
 
 ## Agents
 
-Each agent maps to a model configuration and system prompt. Switch with `/model <name>` or `@agent_name message`.
+Each agent maps to a model configuration and system prompt. Switch with `/agent <name>` or `@agent_name message`.
 
 | Agent | Role | Model | Active/Total | Context | KV | ngl | Backend |
 |-------|------|-------|--------------|---------|-----|-----|---------|
@@ -86,7 +86,7 @@ Subprocess models use `--cpu-moe` to keep MoE expert weights on CPU, enabling ne
 |---------|-------------|
 | `/help` | Show all commands and available agents |
 | `/exit`, `/quit` | Exit the CLI |
-| `/model <name>` | Switch agent |
+| `/agent <name>` | Switch agent |
 | `/clear` | Clear conversation history |
 | `/resume` | Resume interrupted multi-agent tasks |
 | `@agent msg` | Switch agent and send message in one go |
