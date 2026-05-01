@@ -426,23 +426,32 @@ Update these after each retrieval step. They help you stay organized and efficie
 """ + MACOS_TOOLKIT
 
     # ── Shared model configs ──
-    # Turbo: Speed-optimized implementer on RTX 5080
-    # Q4_0 KV cache halves cache VRAM vs Q8_0. Bumped ctx 82K→131K (native max).
-    # ngl=30 at 131K Q4_0: 1,475 MiB free (measured 2026-03-30)
+    # Turbo: Speed-optimized implementer on RTX 5080.
+    # Migrated 2026-04-30 from llama_cpp (ngl=30, 131K Q4_0 KV) to llama_server
+    # + cpu_moe. Headroom from cpu_moe redirected to KV-quant upgrade per
+    # feedback_kv_quant_preference: 131K Q4_0 → 131K Q8_0, ub bumped to 4096.
     _CODER_30B_TURBO = _create_model_config(
         'MODEL_PATH_30B_TURBO',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
-        30, 131072, 2048, type_k=2, type_v=2
+        49, 131072, 4096, backend='llama_server',
+        server_extra_args=['--chat-template', 'chatml', '--swa-full'],
+        logit_bias=[[151657, -100.0], [151658, -100.0]],
+        cpu_moe=True, n_ubatch=4096,
     )
 
-    # FAST: Lightweight Q4_K_M for quick implementation tasks (256k native context, moderate GPU)
-    # Alternative to the 80B Next model when speed matters more than quality
-    # Q4_0 KV cache is REQUIRED — Q8_0 OOMs at ngl≥22 with 262K context
-    # ngl=26: 883 MiB free (measured 2026-03-30) | ngl=27: tight | ngl=28: OOM
+    # FAST: Lightweight Q4_K_M for quick implementation tasks.
+    # Migrated 2026-04-30 from llama_cpp (ngl=26, 262K Q4_0 KV) to llama_server
+    # + cpu_moe. Headroom from cpu_moe redirected to KV-quant upgrade per
+    # feedback_kv_quant_preference: traded 262K Q4_0 → 196K Q8_0. ub=4096
+    # matches HD recipe; Q4_K_M weights are lighter than HD's Q8_0 so headroom
+    # should exceed HD's ~1.16 GB free.
     _CODER_30B_FAST = _create_model_config(
         'MODEL_PATH_30B_FAST',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
-        26, 262144, 1024, type_k=2, type_v=2
+        49, 196608, 4096, backend='llama_server',
+        server_extra_args=['--chat-template', 'chatml', '--swa-full'],
+        logit_bias=[[151657, -100.0], [151658, -100.0]],
+        cpu_moe=True, n_ubatch=4096,
     )
 
     # NEXT: Qwen3-Coder-Next-Q8_0 (80B MoE with 3B active params)
