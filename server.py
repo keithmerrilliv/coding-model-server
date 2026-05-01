@@ -10,7 +10,6 @@ import time
 import uuid
 import subprocess
 import logging
-import gc
 import hmac
 import re
 import asyncio
@@ -23,8 +22,6 @@ from fastapi import FastAPI, HTTPException, Request, Header, Depends
 from fastapi.responses import JSONResponse, StreamingResponse
 import signal
 import requests as http_requests
-import llama_cpp
-from llama_cpp import Llama
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 from memory_service import MemoryService
@@ -196,7 +193,7 @@ class IngestRequest(BaseModel):
 # Helper Functions
 # ============================================================================
 
-def _create_model_config(path_env, path_default, n_gpu_layers, n_ctx=32768, n_batch=2048, backend='llama_cpp',
+def _create_model_config(path_env, path_default, n_gpu_layers, n_ctx=32768, n_batch=2048, backend='llama_server',
                          server_extra_args=None, logit_bias=None, type_k=8, type_v=8,
                          repeat_penalty=1.15, repeat_last_n=256, cpu_moe=False, n_ubatch=512):
     """Helper function to create standardized model configurations.
@@ -206,7 +203,7 @@ def _create_model_config(path_env, path_default, n_gpu_layers, n_ctx=32768, n_ba
         type_v: GGML type for KV cache values (8=Q8_0, 2=Q4_0). Default Q8_0.
         repeat_penalty: Penalizes repeated tokens (1.0=off). Lower values help code generation.
         repeat_last_n: Window of recent tokens to apply repeat penalty to (256=windowed, -1=full context).
-        cpu_moe: Keep MoE expert weights on CPU (llama_server only). Allows more attention layers on GPU.
+        cpu_moe: Keep MoE expert weights on CPU. Allows more attention layers on GPU.
         n_ubatch: Physical micro-batch size for prompt processing (default 512).
     """
     config = {
@@ -894,128 +891,11 @@ async def verify_admin_key(
 
 
 # ============================================================================
-# Model Manager
-# ============================================================================
-
-class ModelManager:
-    def __init__(self):
-        self.lock = Lock()
-        self.inference_lock = Lock()
-        self._cached_model = None
-        self._cached_agent: Optional[str] = None
-
-    def unload_model(self):
-        """Release cached model and free VRAM"""
-        with self.lock:
-            if self._cached_model is not None:
-                logger.info("Unloading cached model for %s...", self._cached_agent)
-                del self._cached_model
-                self._cached_model = None
-                self._cached_agent = None
-
-            gc.collect()
-            gc.collect()
-
-            try:
-                import torch
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                    torch.cuda.ipc_collect()
-            except ImportError:
-                pass
-
-            time.sleep(0.5)
-            logger.info("Memory cleanup complete")
-
-    def get_model(self, agent_name: str):
-        """Load the model for the specific agent (LRU-1 cache: reuse if same agent).
-
-        The entire load-or-reuse sequence is serialized under self.lock to prevent
-        two concurrent requests from loading different models simultaneously (OOM risk).
-        Health checks use is_loaded() which doesn't acquire the lock.
-        """
-        if agent_name not in Config.AGENTS:
-            raise ValueError(f"Unknown agent: {agent_name}")
-
-        model_config = Config.AGENTS[agent_name]['model_config']
-        model_path = model_config['path']
-
-        with self.lock:
-            # Cache hit — same agent as last time. Don't touch llama-server.
-            # Old behavior unconditionally shut down llama-server here, which
-            # would SIGTERM in-flight streams when a chat to a llama_cpp
-            # agent landed alongside one to a llama_server agent.
-            if self._cached_model is not None and self._cached_agent == agent_name:
-                logger.info("Reusing cached model for %s", agent_name)
-                return self._cached_model
-
-            # Cache miss — switching to a llama_cpp model. Free VRAM held by
-            # any llama_server subprocess. If there are in-flight requests on
-            # llama-server, wait briefly so we don't kill them mid-stream.
-            if llama_server_manager.is_running():
-                deadline = time.time() + 60  # 1 min cap on the wait
-                while time.time() < deadline and llama_server_manager.has_active_requests():
-                    time.sleep(0.5)
-                if llama_server_manager.has_active_requests():
-                    logger.warning(
-                        "Loading llama_cpp model %s but llama-server still has "
-                        "active requests after 60s; shutting down anyway (VRAM "
-                        "constraint). Some llama-server clients may see 500 errors.",
-                        agent_name,
-                    )
-                llama_server_manager.shutdown()
-
-            # Unload previous llama_cpp model first
-            if self._cached_model is not None:
-                logger.info("Agent switch: unloading %s to load %s", self._cached_agent, agent_name)
-                del self._cached_model
-                self._cached_model = None
-                self._cached_agent = None
-                gc.collect(); gc.collect()
-
-            # Load fresh — held under lock to prevent concurrent OOM
-            logger.info("Loading model for %s: %s", agent_name, model_path)
-            try:
-                model = Llama(
-                    model_path=model_path,
-                    n_ctx=model_config.get('n_ctx', Config.DEFAULT_CONTEXT_SIZE),
-                    n_gpu_layers=model_config.get('n_gpu_layers', 0),
-                    n_threads=Config.DEFAULT_N_THREADS,
-                    n_threads_batch=Config.DEFAULT_N_THREADS_BATCH,
-                    n_batch=model_config.get('n_batch', Config.DEFAULT_N_BATCH),
-                    flash_attn=True,
-                    type_k=model_config.get('type_k'),
-                    type_v=model_config.get('type_v'),
-                    use_mmap=True,
-                    use_mlock=False,
-                    offload_kqv=model_config.get('offload_kqv', True),
-                    rope_scaling_type=model_config.get('rope_scaling_type', -1),
-                    rope_freq_base=model_config.get('rope_freq_base', 0.0),
-                    rope_freq_scale=model_config.get('rope_freq_scale', 0.0),
-                    verbose=False
-                )
-
-                logger.info("Model loaded successfully: %s", model_path)
-                self._cached_model = model
-                self._cached_agent = agent_name
-                return model
-            except Exception as e:
-                logger.error("Failed to load model %s: %s", model_path, e)
-                raise
-
-    def is_loaded(self) -> bool:
-        """Check if a model is currently cached and ready"""
-        return self._cached_model is not None
-
-
-# ============================================================================
 # Llama-Server Subprocess Manager
 # ============================================================================
 
 class LlamaServerManager:
-    """Manages a llama-server subprocess. The default backend for almost all
-    agents — only ``debugger`` and ``fast_implementer`` still use the
-    in-process llama_cpp path."""
+    """Manages the llama-server subprocess that serves all agents."""
 
     LLAMA_SERVER_PORT = 8081
     # Idle timeout — only counts when no requests are active. The watchdog
@@ -1186,8 +1066,6 @@ class LlamaServerManager:
                 logger.info("Model swap: shutting down llama-server for new model")
                 self._shutdown_unlocked()
 
-            # Free VRAM from any llama_cpp model before starting
-            model_manager.unload_model()
             try:
                 self.start(model_config)
             except Exception as e:
@@ -1584,110 +1462,6 @@ class ThinkingStripper:
 
 
 # ============================================================================
-# Prompt Format Helpers
-# ============================================================================
-
-CHATML_START = "<|im_start|>"
-CHATML_END = "<|im_end|>"
-
-
-def build_model_prompt(messages: List[ChatMessage], system_prompt: str, model_path: str) -> str:
-    """Build a ChatML-formatted prompt for Qwen models.
-
-    If the caller already supplied a system message (autonomous mode sends
-    its own role-specific prompts), trust it and skip the server's
-    agent-config system prompt. Otherwise two system blocks land in the
-    ChatML stream with conflicting instructions.
-    """
-    parts = []
-    client_has_system = bool(messages) and messages[0].role == "system"
-    if system_prompt and not client_has_system:
-        parts.append(f"{CHATML_START}system\n{system_prompt}{CHATML_END}\n")
-
-    for msg in messages:
-        parts.append(f"{CHATML_START}{msg.role}\n{msg.content or ''}{CHATML_END}\n")
-
-    parts.append(f"{CHATML_START}assistant\n")
-    return "".join(parts)
-
-
-def get_model_params(max_tokens: int, temperature: float, stream: bool = False,
-                     model_config: dict = None) -> Dict[str, Any]:
-    """Get common model inference parameters.
-
-    Note: repeat_last_n is NOT supported by llama-cpp-python's __call__ API,
-    so it's only passed in the llama_server proxy payloads (proxy_stream/proxy_sync).
-    """
-    return {
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-        "stop": [CHATML_END, CHATML_START, "<|EOT|>", "<|endoftext|>"],
-        "stream": stream,
-        "repeat_penalty": (model_config or {}).get('repeat_penalty', 1.15),
-        "echo": False
-    }
-
-
-def calculate_token_budget(model, messages: List, system_prompt: str, model_path: str,
-                           max_tokens: int, model_id: str) -> tuple:
-    """Calculate token budget and build final prompt with budget guidance.
-
-    Uses 2 tokenizations instead of 3: tokenize the budget guidance template once
-    to estimate its overhead, then tokenize the final prompt once.
-
-    Returns:
-        tuple: (prompt, clamped_max_tokens, n_prompt, error_message)
-               error_message is None on success, or a string describing the error
-    """
-    n_ctx = model.n_ctx()
-
-    # Tokenize budget guidance template once to estimate its overhead
-    budget_guidance_template = Config.TOKEN_BUDGET_GUIDANCE.format(available_tokens=99999)
-    budget_guidance_tokens = len(model.tokenize(budget_guidance_template.encode("utf-8")))
-
-    # Build the final prompt with a placeholder budget
-    preliminary_prompt = build_model_prompt(messages, system_prompt, model_path)
-
-    # Fast path: use char-based estimate (~3.5 chars/token) when clearly within budget.
-    # Only pay for full tokenization when the prompt is close to the context limit.
-    approx_tokens = len(preliminary_prompt) // 3
-    if approx_tokens < n_ctx * 0.5:
-        n_preliminary = approx_tokens
-    else:
-        n_preliminary = len(model.tokenize(preliminary_prompt.encode("utf-8")))
-
-    # Calculate available tokens accounting for budget guidance overhead
-    available = n_ctx - n_preliminary - budget_guidance_tokens
-    if available < 1:
-        error_msg = (f"Prompt ({n_preliminary} tokens) fills the entire context window ({n_ctx}). "
-                     "Reduce conversation history and retry.")
-        return None, 0, n_preliminary, error_msg
-
-    clamped_max = min(max_tokens, available)
-
-    # Build the real prompt with actual budget number.
-    # The token count difference from changing "99999" to the real number is negligible
-    # (a few tokens at most), so we use the estimated n_prompt without re-tokenizing.
-    budget_guidance = Config.TOKEN_BUDGET_GUIDANCE.format(available_tokens=clamped_max)
-    augmented_system_prompt = f"{system_prompt}\n{budget_guidance}"
-    prompt = build_model_prompt(messages, augmented_system_prompt, model_path)
-    n_prompt = n_preliminary + budget_guidance_tokens
-
-    if clamped_max < max_tokens:
-        logger.info(
-            "Clamped max_tokens %d -> %d for %s (prompt~%d, n_ctx=%d)",
-            max_tokens, clamped_max, model_id, n_prompt, n_ctx
-        )
-
-    logger.info(
-        "Token budget injected for %s: budget=%d tokens communicated to model",
-        model_id, clamped_max
-    )
-
-    return prompt, clamped_max, n_prompt, None
-
-
-# ============================================================================
 # Response Builders
 # ============================================================================ 
 
@@ -1749,7 +1523,6 @@ def build_stream_chunk(completion_id: str, model_id: str, content: Optional[str]
 # FastAPI Application
 # ============================================================================ 
 
-model_manager = ModelManager()
 llama_server_manager = LlamaServerManager()
 memory_service = None
 web_search_service = None
@@ -1798,7 +1571,6 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("Server shutting down - unloading models...")
     llama_server_manager.shutdown()
-    model_manager.unload_model()
     if apple_deep_docs_service:
         apple_deep_docs_service.stop()
     logger.info("Server shutdown complete.")
@@ -1874,7 +1646,7 @@ async def health():
     """Health check endpoint"""
     return {
         "status": "healthy",
-        "model_loaded": model_manager.is_loaded(),
+        "model_loaded": llama_server_manager.is_running(),
         "agents": list(Config.AGENTS.keys()),
         "timestamp": datetime.now().isoformat()
     }
@@ -2274,82 +2046,50 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
                     logger.error("Memory retrieval failed: %s", e)
 
         model_config = agent_config['model_config']
-        model_path = model_config['path']
 
-        # Native tool-calling is only wired through the llama-server subprocess
-        # backend in this prototype. The in-process llama_cpp path would need a
-        # separate Jinja-aware integration.
-        if request.tools and model_config.get('backend') != 'llama_server':
-            raise HTTPException(
-                status_code=400,
-                detail=(f"Native tools (request.tools) only supported on llama_server backend; "
-                        f"agent '{request.model}' uses {model_config.get('backend','llama_cpp')}.")
+        llama_server_manager.ensure_running(model_config)
+
+        # Estimate token budget without allocating a giant string just to
+        # measure its length (system_prompt + N messages can be 100K+ chars
+        # on long sessions). Sum lengths instead. Ratio: chars/2.5 is
+        # closer to reality on code-heavy and CJK input than chars/3.5;
+        # underestimating tokens overshoots the budget and silently
+        # truncates mid-stream.
+        est_prompt_chars = len(system_prompt) + sum(
+            len(m.content or '') for m in request.messages
+        )
+        est_prompt_tokens = int(est_prompt_chars / 2.5)
+        n_ctx = model_config.get('n_ctx', 32768)
+        available = max(n_ctx - est_prompt_tokens, 1)
+        clamped_max = min(request.max_tokens, available)
+
+        budget_guidance = Config.TOKEN_BUDGET_GUIDANCE.format(available_tokens=clamped_max)
+        augmented_system = f"{system_prompt}\n{budget_guidance}"
+
+        logger.info(
+            "llama-server request for %s: est_prompt=%d, budget=%d, n_ctx=%d",
+            request.model, est_prompt_tokens, clamped_max, n_ctx
+        )
+
+        if request.stream:
+            return StreamingResponse(
+                llama_server_manager.proxy_stream(
+                    request.messages, augmented_system, request.model,
+                    clamped_max, request.temperature, model_config=model_config,
+                    est_prompt_tokens=est_prompt_tokens,
+                    tools=request.tools, tool_choice=request.tool_choice,
+                    parallel_tool_calls=request.parallel_tool_calls),
+                media_type="text/event-stream"
             )
-
-        # Route by backend
-        if model_config.get('backend') == 'llama_server':
-            # llama-server subprocess backend
-            llama_server_manager.ensure_running(model_config)
-
-            # Estimate token budget without allocating a giant string just to
-            # measure its length (system_prompt + N messages can be 100K+ chars
-            # on long sessions). Sum lengths instead. Ratio: chars/2.5 is
-            # closer to reality on code-heavy and CJK input than chars/3.5;
-            # underestimating tokens overshoots the budget and silently
-            # truncates mid-stream.
-            est_prompt_chars = len(system_prompt) + sum(
-                len(m.content or '') for m in request.messages
-            )
-            est_prompt_tokens = int(est_prompt_chars / 2.5)
-            n_ctx = model_config.get('n_ctx', 32768)
-            available = max(n_ctx - est_prompt_tokens, 1)
-            clamped_max = min(request.max_tokens, available)
-
-            # Inject budget guidance into system prompt
-            budget_guidance = Config.TOKEN_BUDGET_GUIDANCE.format(available_tokens=clamped_max)
-            augmented_system = f"{system_prompt}\n{budget_guidance}"
-
-            logger.info(
-                "llama-server request for %s: est_prompt=%d, budget=%d, n_ctx=%d",
-                request.model, est_prompt_tokens, clamped_max, n_ctx
-            )
-
-            if request.stream:
-                return StreamingResponse(
-                    llama_server_manager.proxy_stream(
-                        request.messages, augmented_system, request.model,
-                        clamped_max, request.temperature, model_config=model_config,
-                        est_prompt_tokens=est_prompt_tokens,
-                        tools=request.tools, tool_choice=request.tool_choice,
-                        parallel_tool_calls=request.parallel_tool_calls),
-                    media_type="text/event-stream"
-                )
-            else:
-                # Run blocking sync inference in thread pool to keep event loop responsive
-                loop = asyncio.get_event_loop()
-                return await loop.run_in_executor(
-                    None,
-                    lambda: llama_server_manager.proxy_sync(
-                        request.messages, augmented_system, request.model,
-                        clamped_max, request.temperature, model_config=model_config,
-                        tools=request.tools, tool_choice=request.tool_choice,
-                        parallel_tool_calls=request.parallel_tool_calls)
-                )
-        else:
-            # Standard llama_cpp path
-            if request.stream:
-                return StreamingResponse(
-                    stream_completion(request.messages, system_prompt, model_path, request.model,
-                                      request.max_tokens, request.temperature, model_config=model_config),
-                    media_type="text/event-stream"
-                )
-            else:
-                loop = asyncio.get_event_loop()
-                return await loop.run_in_executor(
-                    None,
-                    lambda: sync_completion(request.messages, system_prompt, model_path, request.model,
-                                            request.max_tokens, request.temperature, model_config=model_config)
-                )
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None,
+            lambda: llama_server_manager.proxy_sync(
+                request.messages, augmented_system, request.model,
+                clamped_max, request.temperature, model_config=model_config,
+                tools=request.tools, tool_choice=request.tool_choice,
+                parallel_tool_calls=request.parallel_tool_calls)
+        )
 
     except HTTPException:
         raise
@@ -2359,157 +2099,6 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
     except Exception as e:
         logger.error("Error in chat_completions: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
-
-
-def sync_completion(messages: List[ChatMessage], system_prompt: str, model_path: str,
-                    model_id: str, max_tokens: int, temperature: float,
-                    model_config: dict = None) -> Dict[str, Any]:
-    """Generate synchronous completion with token budget awareness"""
-    with model_manager.inference_lock:
-        model = model_manager.get_model(model_id)
-
-        prompt, clamped_max, n_prompt, error_msg = calculate_token_budget(
-            model, messages, system_prompt, model_path, max_tokens, model_id
-        )
-
-        if error_msg:
-            raise HTTPException(status_code=400, detail=error_msg)
-
-        params = get_model_params(clamped_max, temperature, stream=False, model_config=model_config)
-        response = model(prompt, **params)
-
-        text = strip_thinking(response['choices'][0]['text'].strip())
-
-        finish_reason = response['choices'][0].get('finish_reason', 'stop')
-        if not finish_reason:
-            finish_reason = 'stop'
-
-        return build_completion_response(model_id, text, response['usage'],
-                                         finish_reason=finish_reason)
-
-
-STREAM_TTFT_TIMEOUT = 600  # seconds — abort if no token generated within 10 minutes
-
-
-def stream_completion(messages: List[ChatMessage], system_prompt: str, model_path: str,
-                      model_id: str, max_tokens: int, temperature: float,
-                      model_config: dict = None) -> Iterator[str]:
-    """Generate streaming completion with token budget awareness.
-
-    The inference_lock is held for the full duration of streaming intentionally.
-    llama-cpp-python is not thread-safe, so concurrent inference on the same
-    model instance would cause undefined behavior or crashes.
-    """
-    completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
-    finish_reason = "stop"
-    start_time = time.time()
-
-    try:
-        with model_manager.inference_lock:
-                model = model_manager.get_model(model_id)
-
-                prompt, clamped_max, n_prompt, error_msg = calculate_token_budget(
-                    model, messages, system_prompt, model_path, max_tokens, model_id
-                )
-
-                budget_elapsed = time.time() - start_time
-                if budget_elapsed > STREAM_TTFT_TIMEOUT:
-                    logger.error(
-                        "Token budget calculation took %.1fs for %s (prompt=%d tokens) — aborting",
-                        budget_elapsed, model_id, n_prompt
-                    )
-                    error_chunk = {
-                        "error": {
-                            "message": f"Server timeout: prompt tokenization took {budget_elapsed:.0f}s. "
-                                       "Reduce conversation history and retry.",
-                            "type": "context_length_exceeded"
-                        }
-                    }
-                    yield f"data: {json.dumps(error_chunk)}\n\n"
-                    yield "data: [DONE]\n\n"
-                    return
-
-                if error_msg:
-                    error_chunk = {
-                        "error": {
-                            "message": error_msg,
-                            "type": "context_length_exceeded"
-                        }
-                    }
-                    yield f"data: {json.dumps(error_chunk)}\n\n"
-                    yield "data: [DONE]\n\n"
-                    return
-
-                # Emit progress event so client can display prompt size during prefill
-                n_ctx = model.n_ctx()
-                progress_event = {"type": "progress", "stage": "prefill",
-                                  "prompt_tokens": n_prompt, "n_ctx": n_ctx}
-                yield f"data: {json.dumps(progress_event)}\n\n"
-
-                params = get_model_params(clamped_max, temperature, stream=True, model_config=model_config)
-                token_count = 0
-                think_stripper = ThinkingStripper()
-
-                for output in model(prompt, **params):
-                    # TTFT timeout: abort if stuck in prefill
-                    if token_count == 0 and (time.time() - start_time) > STREAM_TTFT_TIMEOUT:
-                        logger.error(
-                            "TTFT timeout (%.0fs) for %s — prompt=%d tokens, aborting",
-                            time.time() - start_time, model_id, n_prompt
-                        )
-                        error_chunk = {
-                            "error": {
-                                "message": f"Server timeout: no tokens generated within {STREAM_TTFT_TIMEOUT}s. "
-                                           "Reduce conversation history and retry.",
-                                "type": "context_length_exceeded"
-                            }
-                        }
-                        yield f"data: {json.dumps(error_chunk)}\n\n"
-                        yield "data: [DONE]\n\n"
-                        return
-
-                    if 'choices' in output and len(output['choices']) > 0:
-                        choice = output['choices'][0]
-                        token = choice.get('text', '')
-                        if token:
-                            filtered = think_stripper.feed(token)
-                            if filtered:
-                                token_count += 1
-                                chunk = build_stream_chunk(completion_id, model_id, content=filtered)
-                                yield f"data: {json.dumps(chunk)}\n\n"
-                        # Capture finish_reason from the last chunk llama-cpp emits
-                        if choice.get('finish_reason'):
-                            finish_reason = choice['finish_reason']
-
-                # Flush any remaining buffered content from the thinking stripper
-                remaining = think_stripper.flush()
-                if remaining:
-                    token_count += 1
-                    chunk = build_stream_chunk(completion_id, model_id, content=remaining)
-                    yield f"data: {json.dumps(chunk)}\n\n"
-
-                # If llama-cpp didn't set a finish_reason but we hit the token limit,
-                # infer "length" so the client knows the response was truncated
-                if finish_reason == "stop" and token_count >= clamped_max:
-                    finish_reason = "length"
-
-                # Always log completion stats for debugging truncation issues
-                logger.info(
-                    "Completion stats for %s: prompt=%d, clamped_max=%d, "
-                    "generated=%d, finish_reason=%s",
-                    model_id, n_prompt, clamped_max, token_count, finish_reason
-                )
-
-        final_chunk = build_stream_chunk(completion_id, model_id, finish=True,
-                                         finish_reason=finish_reason)
-        yield f"data: {json.dumps(final_chunk)}\n\n"
-        yield "data: [DONE]\n\n"
-
-    except Exception as e:
-        logger.error("Error in stream_completion: %s", e, exc_info=True)
-        error_chunk = {"error": {"message": str(e), "type": "server_error"}}
-        yield f"data: {json.dumps(error_chunk)}\n\n"
-        yield "data: [DONE]\n\n"
 
 
 if __name__ == "__main__":
