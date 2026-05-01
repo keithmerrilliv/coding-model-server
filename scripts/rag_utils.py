@@ -16,6 +16,12 @@ Usage:
 
 import sys
 import os
+from pathlib import Path
+
+# Allow lazy `from memory_service import MemoryService` (cmd_test_pdf) to
+# resolve the repo-root module when this script is invoked from scripts/.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import chromadb
 
 PERSIST_DIR = "qwen_memory_db"
