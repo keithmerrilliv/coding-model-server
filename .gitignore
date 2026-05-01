@@ -6,7 +6,7 @@ venv/
 qwen_memory_db/
 qwen_tasks_db/
 qwen_tasks_db.bak.*/
-server.log
+*.log
 tools/
 tools.*.bak/
 .DS_Store
