@@ -556,13 +556,20 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
                 rejection_notes = g.reviewer_notes
                 break
 
-    # Pick the implementer agent from the architect's complexity recommendation.
-    # Falls back to env-default (whatever was bootstrapped on the task) if no
-    # complexity.json exists or the recommendation is invalid.
-    chosen_agent = _select_implementer_agent(spec_dir)
+    # Pick the implementer. Retry 0 honors the architect's complexity-based
+    # recommendation; later retries walk the rotation chain so each attempt
+    # uses a different model family — see project_implementer_rotation.md.
+    # Falling back to task.agent (env-default) when complexity.json is absent
+    # so retries still rotate from a sensible anchor.
+    initial_agent = _select_implementer_agent(spec_dir) or task.agent
+    chosen_agent = _rotation_pick(initial_agent, task.retry_count)
     if chosen_agent and chosen_agent != task.agent:
-        logger.info("spec %s: architect recommendation overrides implementer agent: %r → %r",
-                    spec.id, task.agent, chosen_agent)
+        if task.retry_count == 0:
+            logger.info("spec %s: architect recommendation overrides implementer agent: %r → %r",
+                        spec.id, task.agent, chosen_agent)
+        else:
+            logger.info("spec %s: rotation pick (retry=%d): %r → %r",
+                        spec.id, task.retry_count, task.agent, chosen_agent)
         db.update_task_agent(task.id, chosen_agent)
 
     messages = build_implementer_message(spec_md, design_md,
@@ -900,6 +907,39 @@ def _select_implementer_agent(spec_dir) -> "str | None":
         return rec
     tier = (c.get("tier") or "").strip().lower()
     return TIER_TO_IMPLEMENTER.get(tier)
+
+
+# Rotation chain for implementer retries. Ordered for vendor/family diversity:
+# Qwen3.6 → Qwen3-Coder-Next → GLM (Zhipu) → MiniMax → Qwen3-Coder. With
+# MAX_RETRIES=5 each retry slot 0..4 maps to a distinct model. See
+# project_implementer_rotation.md for the rationale and the ECS abstraction
+# tie-in (this hardcoded list becomes a capability query later).
+_IMPLEMENTER_ROTATION = [
+    "implementer", "deep_implementer", "glm",
+    "m25_implementer", "fast_implementer",
+]
+
+
+def _rotation_pick(initial_agent: "str | None", retry_count: int) -> "str | None":
+    """Advance to the next implementer in the rotation chain on retry.
+
+    Retry 0 returns ``initial_agent`` unchanged — the architect's complexity
+    recommendation wins on first attempt. From retry 1 onward, walks the
+    rotation chain so each retry uses a different model and we get out of
+    any single-model fragility pattern (see
+    project_implementer_revision_fragility.md).
+
+    The chain starts with ``initial_agent`` so retry index N maps to the
+    Nth agent in a stable order; consecutive retries never repeat the same
+    model.
+    """
+    if retry_count == 0 or not initial_agent:
+        return initial_agent
+    if initial_agent in _IMPLEMENTER_ROTATION:
+        chain = [initial_agent] + [a for a in _IMPLEMENTER_ROTATION if a != initial_agent]
+    else:
+        chain = _IMPLEMENTER_ROTATION
+    return chain[retry_count % len(chain)]
 
 
 def _latest_supervisor_feedback(db: Database, spec_id: str,
