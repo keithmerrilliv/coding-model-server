@@ -586,8 +586,46 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
     if isinstance(result, ParseError):
         logger.error("spec %s: implementer response unparseable: %s",
                      spec.id, result.reason)
-        db.update_task_status(task.id, TaskStatus.FAILED)
-        db.update_spec_status(spec.id, SpecStatus.FAILED)
+        if task.retry_count >= MAX_RETRIES:
+            logger.error(
+                "spec %s: parse-failure retry budget exhausted (%d/%d), failing",
+                spec.id, task.retry_count, MAX_RETRIES,
+            )
+            db.update_task_status(task.id, TaskStatus.FAILED)
+            db.update_spec_status(spec.id, SpecStatus.FAILED)
+            return
+        # Engage rotation just like `_legacy_attempt_retry` does on test
+        # failure: create a synthetic rejected code_review gate so the next
+        # tick re-runs `_run_implementer` with a different model from the
+        # rotation chain. Without this, a single unparseable response from
+        # one agent (e.g. glm wrapping its output in markdown headings
+        # instead of <<<FILE:>>> markers) immediately fails the spec — even
+        # though m25_implementer / fast_implementer / etc. would happily
+        # produce the right output. Observed in spec_51b1baee retry-2 on
+        # 2026-05-02; the orchestrator now rotates instead of giving up.
+        synth_gate = db.create_gate(
+            spec_id=spec.id,
+            task_id=task.id,
+            gate_type=GateType.CODE_REVIEW,
+            prompt_md="## Automated parse-failure retry",
+        )
+        feedback = (
+            f"Previous implementer response was unparseable: {result.reason}. "
+            f"Re-emit ALL files. Each one must be wrapped in a complete "
+            f"<<<FILE: path>>> ... <<<END_FILE>>> block — exactly three "
+            f"angle brackets on every opening and closing marker. Do not "
+            f"use markdown code fences, headings, or any other format for "
+            f"file contents; the daemon parses ONLY the marker-delimited "
+            f"blocks."
+        )
+        db.respond_to_gate(synth_gate.id, "rejected", notes=feedback)
+        db.increment_task_retry(task.id)
+        db.update_task_status(task.id, TaskStatus.PENDING)
+        logger.info(
+            "spec %s: implementer parse failed, rotating implementer "
+            "(attempt %d/%d)",
+            spec.id, task.retry_count + 1, MAX_RETRIES,
+        )
         return
 
     # Write all files
