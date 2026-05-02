@@ -198,18 +198,21 @@ PlannerResult = PlannerClarify | PlannerYaml | PlannerError
 
 # ── Parsing ──────────────────────────────────────────────────────────────────
 
+# Marker regexes accept 1-3 brackets on both sides because Qwen-family
+# models output `<<<TAG>>>` / `<<TAG>>` / `<TAG>` non-deterministically
+# (see executor.py for the same fragility on FILE/REVIEW/etc).
 _CLARIFY_RE = re.compile(
-    r"<<<CLARIFY>>>\s*(.*?)\s*<<<END>>>", re.DOTALL | re.IGNORECASE,
+    r"<{1,3}CLARIFY>{1,3}\s*(.*?)\s*<{1,3}END>{1,3}", re.DOTALL | re.IGNORECASE,
 )
 _YAML_RE = re.compile(
-    r"<<<YAML>>>\s*(.*?)\s*<<<END>>>", re.DOTALL | re.IGNORECASE,
+    r"<{1,3}YAML>{1,3}\s*(.*?)\s*<{1,3}END>{1,3}", re.DOTALL | re.IGNORECASE,
 )
 # Fallback for partial/unclosed CLARIFY blocks: planner is non-deterministic
 # and occasionally emits the opener without an explicit <<<END>>>. Accept the
 # tail of the response as the questions block. NOT applied to YAML — a missing
 # END there means structurally malformed output we shouldn't try to recover.
 _CLARIFY_OPEN_ONLY_RE = re.compile(
-    r"<<<CLARIFY>>>\s*(.*)", re.DOTALL | re.IGNORECASE,
+    r"<{1,3}CLARIFY>{1,3}\s*(.*)", re.DOTALL | re.IGNORECASE,
 )
 
 

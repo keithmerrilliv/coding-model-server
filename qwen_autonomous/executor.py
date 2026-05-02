@@ -389,20 +389,28 @@ def call_agent(
 
 
 # ── Response parsers ─────────────────────────────────────────────────────────
+#
+# Marker regexes accept 1-3 brackets on both sides because Qwen-family
+# models output `<<<TAG>>>` / `<<TAG>>` / `<TAG>` non-deterministically
+# (same fragility that the chat client documented for tool tags). A
+# single misplaced bracket on a closing tag would otherwise cause the
+# regex to swallow the entire response into one "file", which is what
+# triggered the spec_51b1baee retry-1 misparse on 2026-05-01.
 
 _DESIGN_RE = re.compile(
-    r"<<<DESIGN>>>\s*(.*?)\s*<<<END>>>", re.DOTALL | re.IGNORECASE,
+    r"<{1,3}DESIGN>{1,3}\s*(.*?)\s*<{1,3}END>{1,3}", re.DOTALL | re.IGNORECASE,
 )
 _COMPLEXITY_RE = re.compile(
-    r"<<<COMPLEXITY>>>\s*(.*?)\s*<<<END_COMPLEXITY>>>",
+    r"<{1,3}COMPLEXITY>{1,3}\s*(.*?)\s*<{1,3}END_COMPLEXITY>{1,3}",
     re.DOTALL | re.IGNORECASE,
 )
 _FILE_RE = re.compile(
-    r"<<<FILE:\s*([^\n>]+?)>>>\s*(.*?)\s*<<<END_FILE>>>",
+    r"<{1,3}FILE:\s*([^\n>]+?)>{1,3}\s*(.*?)\s*<{1,3}END_FILE>{1,3}",
     re.DOTALL | re.IGNORECASE,
 )
 _REVIEW_RE = re.compile(
-    r"<<<REVIEW>>>\s*(.*?)\s*<<<END_REVIEW>>>", re.DOTALL | re.IGNORECASE,
+    r"<{1,3}REVIEW>{1,3}\s*(.*?)\s*<{1,3}END_REVIEW>{1,3}",
+    re.DOTALL | re.IGNORECASE,
 )
 _VERDICT_RE = re.compile(
     r"###\s*Verdict\s*\n+\s*(PASS|FAIL)", re.IGNORECASE,
