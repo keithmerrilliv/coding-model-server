@@ -29,3 +29,9 @@ pyyaml>=6.0
 # The orchestrator daemon falls back to FakeJiraClient if this isn't installed
 # or if JIRA_URL/EMAIL/TOKEN are unset, so it's a soft dependency.
 atlassian-python-api>=4.0.0
+
+# /review command — multi-judge fan-out (Claude + Gemini + local Qwen).
+# Soft deps: if either SDK is missing or the corresponding API key is unset,
+# that judge is skipped with a clear note in the rendered output.
+anthropic>=0.40.0
+google-genai>=1.0.0

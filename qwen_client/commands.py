@@ -45,6 +45,8 @@ def handle_user_command(user_input, history, model, agent_theme):
         print(f"  /compact             - Manually compress conversation history")
         print(f"  /undo                - Revert the last file modification")
         print(f"  /rename <name>       - Rename the current session (migrates file)")
+        print(f"  /review              - Fan out uncommitted git diff to 4 judges")
+        print(f"                         (Claude + Gemini + Qwen reviewer + deep_reviewer)")
         print(f"  /sessions            - List all saved sessions")
         print(f"  /session <name>      - Switch to a named session")
         print(f"  /session new <name>  - Create and switch to a new session")
@@ -239,6 +241,12 @@ def handle_user_command(user_input, history, model, agent_theme):
         history.clear()
         save_chat_history(history, model)
         print_colored("Conversation history cleared. Starting fresh.", COLORS['GREEN'])
+        return True, model
+
+    # ── Multi-judge review of uncommitted diff ────────────────────────────
+    if user_input.lower() == '/review':
+        from qwen_client.review import run_review_command
+        run_review_command()
         return True, model
 
     # ── Resume ────────────────────────────────────────────────────────────
