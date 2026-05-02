@@ -1038,6 +1038,72 @@ class LlamaServerManager:
             self.process = None
             self.current_model_path = None
 
+    def _gpu_free_mib(self) -> Optional[int]:
+        """Query free VRAM (device 0) via nvidia-smi. Returns None on failure.
+
+        Cheap call (~30 ms). Used by the swap-VRAM-release wait below; we
+        deliberately don't hold a long-running NVML handle because the
+        watchdog/teardown threads need this to be reentrant-safe and the
+        cost is negligible.
+        """
+        try:
+            result = subprocess.run(
+                ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=2,
+            )
+            if result.returncode != 0:
+                return None
+            first_line = result.stdout.strip().split("\n")[0].strip()
+            return int(first_line)
+        except (FileNotFoundError, ValueError, subprocess.TimeoutExpired):
+            return None
+
+    def _wait_for_vram_release(self, *, max_wait: float = 8.0, stable_for: float = 0.6) -> None:
+        """Block until free VRAM has stabilized after a model teardown.
+
+        CUDA reclaims VRAM asynchronously: ``process.wait()`` returns when
+        the OS reaps the zombie, but the kernel may still be finalizing the
+        freed allocations for 1-2s after that. If we start the next model
+        immediately, its compute-buffer allocation can OOM even though the
+        old weights are technically freed — we observed this three times
+        on the architect (q36_architect, ~14 GiB resident) → fast_implementer
+        (Coder-30B-A3B, 4.7 GiB compute buffer) swap, with the new process
+        exiting on cudaMalloc failure 0.5-1s into startup.
+
+        Strategy: poll nvidia-smi until two consecutive readings agree
+        within ~50 MiB for at least ``stable_for`` seconds. That's the
+        signal that the kernel has finished its async free work. Bounded
+        by ``max_wait`` so a stuck driver can't hang the swap forever.
+        """
+        deadline = time.time() + max_wait
+        last_free: Optional[int] = None
+        stable_since: Optional[float] = None
+
+        while time.time() < deadline:
+            free_mib = self._gpu_free_mib()
+            if free_mib is None:
+                # nvidia-smi unavailable — fall back to a fixed sleep so the
+                # swap still gets *some* breathing room.
+                time.sleep(2.0)
+                return
+
+            if last_free is not None and abs(free_mib - last_free) <= 50:
+                if stable_since is None:
+                    stable_since = time.time()
+                elif time.time() - stable_since >= stable_for:
+                    logger.info("VRAM stabilized: %d MiB free after teardown", free_mib)
+                    return
+            else:
+                stable_since = None
+
+            last_free = free_mib
+            time.sleep(0.2)
+
+        logger.warning(
+            "VRAM release timeout after %.1fs (last reading: %s MiB) — proceeding with start",
+            max_wait, last_free,
+        )
+
     def shutdown(self):
         """Stop the subprocess gracefully, then force-kill if needed. Thread-safe."""
         with self.lock:
@@ -1062,9 +1128,12 @@ class LlamaServerManager:
                     # Already running with the right model
                     self.last_request_time = time.time()
                     return
-                # Different model — shut down first
+                # Different model — shut down first, then wait for the
+                # GPU's async VRAM release to finish before exec'ing the
+                # new model. See _wait_for_vram_release for the full story.
                 logger.info("Model swap: shutting down llama-server for new model")
                 self._shutdown_unlocked()
+                self._wait_for_vram_release()
 
             try:
                 self.start(model_config)
