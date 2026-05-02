@@ -47,17 +47,34 @@ LimitNOFILE=65536
 # Security hardening — this daemon runs LLM-generated pytest subprocesses, so
 # it is the highest-risk service. Tighten aggressively; broaden ReadWritePaths
 # if your task workspace or repo lives elsewhere.
+#
+# IMPORTANT: several systemd hardening flags conflict with bwrap's user-
+# namespace creation and have been deliberately omitted. The actual
+# isolation for LLM-generated tests comes from bwrap (see
+# qwen_autonomous/executor.py::_wrap_in_sandbox), not from these flags —
+# they harden the *orchestrator process itself*, which only spawns bwrap.
+# Omitted (and why):
+#   - RestrictNamespaces=yes         blocks all namespace creation incl.
+#                                    bwrap's CLONE_NEWUSER
+#   - ProtectKernelTunables=yes      implies SystemCallFilter that blocks
+#                                    unshare-class syscalls bwrap needs
+#   - ProtectClock=yes               seccomp filter that blocks bwrap's
+#                                    clock_* setup
+#   - ProtectHostname=yes            uses a UTS namespace that conflicts
+#                                    with bwrap's --unshare-uts
+#
+# Linux 6.17+ Ubuntu kernels added the `unprivileged_userns` AppArmor
+# profile that traps unprivileged userns creation; bwrap's escape hatch
+# (/etc/apparmor.d/bwrap with `flags=(unconfined) { userns, }`) requires
+# a profile transition, which `NoNewPrivileges=yes` blocks — that flag is
+# also omitted (see comment in [Service] above).
 PrivateTmp=yes
-ProtectKernelTunables=yes
 ProtectKernelLogs=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
-ProtectClock=yes
-ProtectHostname=yes
 ProtectProc=invisible
 RestrictSUIDSGID=yes
 RestrictRealtime=yes
-RestrictNamespaces=yes
 LockPersonality=yes
 ProtectSystem=strict
 ReadWritePaths=/home/keith-merrill/Dev/qwen-server /tmp /var/tmp
