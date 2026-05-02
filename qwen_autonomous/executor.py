@@ -31,6 +31,8 @@ from typing import Optional
 
 import requests
 
+from . import seccomp_filter
+
 # Module-level session: reuses TCP+TLS connections across the
 # architect → implementer → reviewer → supervisor sequence, saving
 # 5-30 ms per call. Keepalive matters most over real network; even
@@ -701,7 +703,11 @@ def _sandbox_available() -> bool:
     return sys.platform.startswith("linux") and shutil.which("bwrap") is not None
 
 
-def _wrap_in_sandbox(cmd: list[str], spec_dir: Path) -> list[str]:
+def _wrap_in_sandbox(
+    cmd: list[str],
+    spec_dir: Path,
+    seccomp_fd: Optional[int] = None,
+) -> list[str]:
     """Wrap `cmd` in a bubblewrap sandbox.
 
     The sandbox denies the LLM-generated tests access to anything outside the
@@ -718,7 +724,11 @@ def _wrap_in_sandbox(cmd: list[str], spec_dir: Path) -> list[str]:
       - `spec_dir` is bound read-write so pytest can create `.pytest_cache`
         and tests can write their own fixtures.
       - `--clearenv` strips inherited env vars — tests see a minimal,
-        predictable environment.
+            predictable environment.
+      - When *seccomp_fd* is provided, bwrap loads a libseccomp BPF denylist
+        from that fd just before exec(), blocking ~50 dangerous syscalls
+        (mount/unshare/setns, ptrace, bpf, io_uring, kexec, keyctl, time
+        manipulation, etc.). See ``seccomp_filter.DENYLIST``.
 
     Tests that legitimately need network or host access won't work under this
     sandbox; set QWEN_ALLOW_UNSANDBOXED_TESTS=1 to opt out at your own risk.
@@ -730,7 +740,7 @@ def _wrap_in_sandbox(cmd: list[str], spec_dir: Path) -> list[str]:
     # invisible inside the sandbox.
     venv_root = Path(sys.executable).absolute().parent.parent
     spec_abs = spec_dir.resolve()
-    return [
+    args = [
         "bwrap",
         "--die-with-parent",
         "--new-session",
@@ -761,8 +771,12 @@ def _wrap_in_sandbox(cmd: list[str], spec_dir: Path) -> list[str]:
         "--ro-bind", str(venv_root), str(venv_root),
         "--bind", str(spec_abs), str(spec_abs),
         "--chdir", str(spec_abs),
-        "--",
-    ] + cmd
+    ]
+    if seccomp_fd is not None:
+        args.extend(["--seccomp", str(seccomp_fd)])
+    args.append("--")
+    args.extend(cmd)
+    return args
 
 
 # Per-framework default timeouts (seconds). Swift/Xcode builds are slow,
@@ -802,6 +816,7 @@ def _run_local_tests(spec_dir: Path, framework: str, timeout: int) -> tuple[bool
     # AppArmor restricting unprivileged user namespaces, which silently
     # makes every bwrap invocation fail with "Operation not permitted"
     # before pytest gets a chance to run).
+    bpf_fd: Optional[int] = None
     if allow_unsandboxed:
         cmd = raw_cmd
         sandbox_mode = "UNSANDBOXED (QWEN_ALLOW_UNSANDBOXED_TESTS=1)"
@@ -810,8 +825,17 @@ def _run_local_tests(spec_dir: Path, framework: str, timeout: int) -> tuple[bool
             "access to this user's environment"
         )
     elif _sandbox_available():
-        cmd = _wrap_in_sandbox(raw_cmd, spec_dir)
-        sandbox_mode = "bwrap"
+        bpf_fd = seccomp_filter.build_seccomp_bpf_fd()
+        cmd = _wrap_in_sandbox(raw_cmd, spec_dir, seccomp_fd=bpf_fd)
+        if bpf_fd is None:
+            sandbox_mode = "bwrap (no seccomp — libseccomp unavailable)"
+            logger.warning(
+                "seccomp filter unavailable; bwrap will run without --seccomp. "
+                "Install python3-seccomp on the host to enable kernel-syscall "
+                "filtering for LLM-generated tests."
+            )
+        else:
+            sandbox_mode = "bwrap+seccomp"
     else:
         msg = (
             "Refusing to run LLM-generated tests: bwrap (bubblewrap) is not "
@@ -845,6 +869,7 @@ def _run_local_tests(spec_dir: Path, framework: str, timeout: int) -> tuple[bool
     try:
         result = subprocess.run(
             cmd, cwd=spec_dir, capture_output=True, text=True, timeout=timeout,
+            pass_fds=(bpf_fd,) if bpf_fd is not None else (),
         )
         stdout = _truncate(result.stdout or "")
         stderr = _truncate(result.stderr or "")
@@ -864,6 +889,12 @@ def _run_local_tests(spec_dir: Path, framework: str, timeout: int) -> tuple[bool
     except Exception as e:
         output = f"Test runner failed: {type(e).__name__}: {e}"
         passed = False
+    finally:
+        if bpf_fd is not None:
+            try:
+                os.close(bpf_fd)
+            except OSError:
+                pass
 
     return passed, output.strip()
 
