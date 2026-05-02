@@ -32,7 +32,17 @@ EnvironmentFile=-/home/keith-merrill/.config/qwen-server/.env
 
 # Resource limits
 LimitNOFILE=65536
-NoNewPrivileges=true
+# NoNewPrivileges intentionally NOT set. With Linux 6.17+ Ubuntu kernels,
+# unprivileged user namespaces are confined under the AppArmor profile
+# `unprivileged_userns` unless a dedicated profile transitions in.
+# /etc/apparmor.d/bwrap exists for that — `flags=(unconfined) { userns, }` —
+# but profile transitions are privilege gains, so NoNewPrivileges=yes
+# blocks them, leaving bwrap stuck in `unprivileged_userns` without
+# CAP_SYS_ADMIN. bwrap then can't mount tmpfs / re-bind /proc and reports
+# "No permissions to create new namespace". Dropping NoNewPrivileges
+# restores the transition so bwrap runs unconfined inside its own userns.
+# The other hardening flags below stay in place; bwrap itself provides
+# the actual LLM-test isolation.
 
 # Security hardening — this daemon runs LLM-generated pytest subprocesses, so
 # it is the highest-risk service. Tighten aggressively; broaden ReadWritePaths
