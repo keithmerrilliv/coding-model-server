@@ -1,0 +1,61 @@
+[Unit]
+Description=Qwen Dashboard (static SPA server)
+# The dashboard polls qwen-server's /v1/* endpoints, but we only need the
+# server to be reachable at request time — not started before the dashboard.
+# Wants= without After= keeps the boot order independent and prevents the
+# dashboard from waiting on CUDA / model load to come up.
+After=network.target
+Wants=qwen-server.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=keith-merrill
+Group=keith-merrill
+WorkingDirectory=/home/keith-merrill/Dev/qwen-server
+ExecStart=/home/keith-merrill/Dev/qwen-server/venv/bin/python scripts/serve_dashboard.py
+Restart=always
+RestartSec=5
+TimeoutStopSec=10
+StandardOutput=journal
+StandardError=journal
+
+# No CUDA, no GPU. Pure static-file server.
+Environment="PYTHONUNBUFFERED=1"
+
+# Bind/port + dashboard root come from .env so operators can change the
+# port without editing this unit. Defaults in serve_dashboard.py:
+#   QWEN_DASHBOARD_HOST=0.0.0.0
+#   QWEN_DASHBOARD_PORT=3001
+#   QWEN_DASHBOARD_ROOT=<repo>/dashboard/dist
+EnvironmentFile=-/home/keith-merrill/Dev/qwen-server/.env
+EnvironmentFile=-/home/keith-merrill/.config/qwen-server/.env
+
+# Resource limits
+LimitNOFILE=4096
+NoNewPrivileges=true
+
+# Security hardening — this service serves static files and has no need
+# for write access anywhere on disk, no kernel surfaces, and no
+# credentials.
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+# No write paths — this process never writes. ProtectSystem=strict makes
+# the entire filesystem read-only by default; we don't need to add any
+# ReadWritePaths.
+
+[Install]
+WantedBy=multi-user.target

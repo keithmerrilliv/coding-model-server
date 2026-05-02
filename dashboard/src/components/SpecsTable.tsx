@@ -51,7 +51,13 @@ const SpecsTable: React.FC = () => {
         </thead>
         <tbody>
           {specs.map((spec) => (
-            <tr key={spec.id} onClick={() => navigate(`/specs/${spec.id}`)}>
+            <tr
+              key={spec.id}
+              onClick={() => navigate(`/specs/${spec.id}`)}
+              tabIndex={0}
+              role="button"
+              aria-label={`Open ${spec.title}`}
+            >
               <td>{spec.title}</td>
               <td><span className={`badge ${getStatusClass(spec.status)}`}>{spec.status}</span></td>
               <td>{new Date(spec.created_at).toLocaleString()}</td>
