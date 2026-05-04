@@ -195,7 +195,8 @@ class IngestRequest(BaseModel):
 
 def _create_model_config(path_env, path_default, n_gpu_layers, n_ctx=32768, n_batch=2048, backend='llama_server',
                          server_extra_args=None, logit_bias=None, type_k=8, type_v=8,
-                         repeat_penalty=1.15, repeat_last_n=256, cpu_moe=False, n_ubatch=512):
+                         repeat_penalty=1.15, repeat_last_n=256, cpu_moe=False, n_ubatch=512,
+                         draft=None):
     """Helper function to create standardized model configurations.
 
     Args:
@@ -205,6 +206,14 @@ def _create_model_config(path_env, path_default, n_gpu_layers, n_ctx=32768, n_ba
         repeat_last_n: Window of recent tokens to apply repeat penalty to (256=windowed, -1=full context).
         cpu_moe: Keep MoE expert weights on CPU. Allows more attention layers on GPU.
         n_ubatch: Physical micro-batch size for prompt processing (default 512).
+        draft: Optional speculative-decode draft. Dict with keys:
+            path (str, required) — same-tokenizer model file
+            n_gpu_layers (int, default 0)
+            n_ctx (int, default same as target)
+            cpu_moe (bool, default False)
+            draft_max (int, default 4)
+            draft_min (int, default 1)
+            draft_p_min (float, default 0.75)
     """
     config = {
         'path': os.getenv(path_env, path_default),
@@ -222,6 +231,8 @@ def _create_model_config(path_env, path_default, n_gpu_layers, n_ctx=32768, n_ba
         config['server_extra_args'] = server_extra_args
     if logit_bias is not None:
         config['logit_bias'] = logit_bias
+    if draft is not None:
+        config['draft'] = draft
     return config
 
 
@@ -514,6 +525,14 @@ Update these after each retrieval step. They help you stay organized and efficie
     # feedback_kv_quant_preference (prefer KV quality over more context).
     # logit_bias bans <tool_call>/</tool_call> tokens (same Qwen3-Coder family as
     # Coder-Next; verify IDs via /tokenize after first load if drift suspected).
+    # Speculative-decode draft was wired and measured 2026-05-03 with
+    # Coder-30B-A3B Q4_K_M as draft (CPU-only, ngld=0, -devd none). Result:
+    # average decode regressed ~18% (5.24 tok/s vs 6.42 baseline) across 5
+    # prompts; acceptance ranged 37-81% but the CPU mem-BW contention between
+    # target's expert evaluation and draft's full forward pass exceeded any
+    # spec-decode gain. Disabled. Future experiments could try a much smaller
+    # base Qwen3 draft (0.6B/1.5B) to cut draft CPU cost — but only if the
+    # vocabulary is verified identical to Qwen3-Coder.
     _QWEN_480B_ULTRA = _create_model_config(
         'MODEL_PATH_480B_ULTRA',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/Qwen3-Coder-480B-A35B-Instruct-UD-Q2_K_XL-00001-of-00004.gguf',
@@ -961,6 +980,35 @@ class LlamaServerManager:
         # MoE models: keep expert weights on CPU, put more attention layers on GPU
         if model_config.get('cpu_moe'):
             cmd.append('--cpu-moe')
+
+        # Speculative decoding: pair a smaller same-tokenizer draft model with
+        # the target. Draft predicts N tokens, target verifies them in a single
+        # forward pass — accepted prefix is free decode. Net win depends on
+        # draft tps and acceptance rate; on cpu_moe targets the draft and
+        # target compete for memory bandwidth, so measure before trusting.
+        draft = model_config.get('draft')
+        if draft:
+            draft_cache_k = self._CACHE_TYPE_NAMES.get(draft.get('type_k', 8), 'q8_0')
+            draft_cache_v = self._CACHE_TYPE_NAMES.get(draft.get('type_v', 8), 'q8_0')
+            cmd.extend([
+                '-md', draft['path'],
+                '-ngld', str(draft.get('n_gpu_layers', 0)),
+                '-cd', str(draft.get('n_ctx', model_config.get('n_ctx', 32768))),
+                '-ctkd', draft_cache_k,
+                '-ctvd', draft_cache_v,
+                '--draft-max', str(draft.get('draft_max', 4)),
+                '--draft-min', str(draft.get('draft_min', 1)),
+                '--draft-p-min', str(draft.get('draft_p_min', 0.75)),
+            ])
+            # Force draft to skip device offload. With ngld=0 the weights are
+            # already CPU-resident, but the graph scheduler inherits CUDA from
+            # the target and tries to allocate a multi-GB compute buffer on
+            # GPU0 — fails when target leaves <1 GB free. `-devd none` means
+            # "don't offload draft to any device" → CPU-only scheduler.
+            device_draft = draft.get('device', 'none')
+            cmd.extend(['-devd', device_draft])
+            if draft.get('cpu_moe'):
+                cmd.append('-cmoed')
 
         # Add model-specific server args (chat template, jinja, etc.)
         extra_args = model_config.get('server_extra_args', ['--chat-template', 'chatml'])
