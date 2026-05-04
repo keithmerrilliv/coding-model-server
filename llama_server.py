@@ -7,6 +7,7 @@ switching agents triggers a model swap.
 import json
 import logging
 import os
+import signal
 import subprocess
 import time
 import uuid
@@ -14,9 +15,13 @@ from threading import Lock, Thread
 from typing import Any, Dict, Iterator, List, Optional
 
 import requests as http_requests
+from fastapi import HTTPException
 
 from config import Config
-from streaming import ThinkingStripper, build_stream_chunk
+from streaming import (
+    ThinkingStripper, build_completion_response,
+    build_stream_chunk, strip_thinking,
+)
 
 logger = logging.getLogger(__name__)
 
