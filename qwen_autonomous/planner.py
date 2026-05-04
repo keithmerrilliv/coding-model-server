@@ -18,6 +18,8 @@ import logging
 import os
 import re
 import textwrap
+
+import yaml
 from dataclasses import dataclass
 from typing import Optional
 
@@ -251,6 +253,24 @@ def parse_planner_response(text: str) -> PlannerResult:
         if not yaml_text:
             return PlannerError(
                 reason="<<<YAML>>> block was empty",
+                raw_response=text,
+            )
+        # Validate before persist. The orchestrator's _process_executing path
+        # calls yaml.safe_load on every tick; a malformed plan turns that into
+        # a tight retry loop (every 5s, indefinitely). Catching here surfaces
+        # the parse error once, on the planner-output boundary, instead. Real
+        # observed failure: Qwen3.6-27B emitted a risk bullet starting with
+        # a literal backtick (- `ares-cli` ...) which is invalid YAML.
+        try:
+            parsed = yaml.safe_load(yaml_text)
+        except yaml.YAMLError as exc:
+            return PlannerError(
+                reason=f"<<<YAML>>> block is not valid YAML: {exc}",
+                raw_response=text,
+            )
+        if not isinstance(parsed, dict):
+            return PlannerError(
+                reason=f"<<<YAML>>> block is not a mapping (got {type(parsed).__name__})",
                 raw_response=text,
             )
         return PlannerYaml(yaml_text=yaml_text, raw_response=text)

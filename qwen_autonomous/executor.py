@@ -25,6 +25,7 @@ import shutil
 import subprocess
 import sys
 import textwrap
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -374,7 +375,28 @@ def call_agent(
     logger.info("calling agent=%s, role=%s, msg_count=%d, max_tokens=%d",
                 agent, role, len(messages), max_tokens)
 
-    resp = _SESSION.post(url, json=payload, headers=headers, timeout=timeout)
+    # Transient-5xx retry. Model-swap CUDA OOM is the dominant cause of 500s
+    # here (VRAM not fully released between models — see
+    # project_model_swap_oom.md): the next process can't allocate its compute
+    # buffer until the kernel finishes reaping the previous CUDA context.
+    # Without this retry, a single transient swap-OOM cancels the whole spec
+    # because _start_task catches Exception → marks task failed → spec
+    # FAILED, with no rotation. Backoff is generous: VRAM release on
+    # Blackwell can take 10-30s after the previous llama-server exits.
+    backoffs = (10.0, 30.0, 60.0)
+    for attempt, delay in enumerate((0.0,) + backoffs):
+        if delay:
+            logger.info("call_agent: retrying after %.0fs (attempt %d/%d)",
+                        delay, attempt + 1, len(backoffs) + 1)
+            time.sleep(delay)
+        resp = _SESSION.post(url, json=payload, headers=headers, timeout=timeout)
+        if resp.status_code < 500 or attempt == len(backoffs):
+            break
+        logger.warning(
+            "call_agent: %d from server (attempt %d/%d, body=%s)",
+            resp.status_code, attempt + 1, len(backoffs) + 1,
+            resp.text[:200].replace("\n", " "),
+        )
     resp.raise_for_status()
     data = resp.json()
 
