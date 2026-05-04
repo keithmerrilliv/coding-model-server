@@ -53,8 +53,17 @@ class _SilenceHealthCheckFilter(logging.Filter):
     Adding the filter from the lifespan startup runs after dictConfig.
     """
     def filter(self, record: logging.LogRecord) -> bool:
-        msg = record.getMessage()
-        return not ('GET /health ' in msg and ' 200 ' in msg)
+        # uvicorn.access record.msg has args (client_addr, method, path,
+        # http_version, status_code). Match by args directly — string-search
+        # against the formatted message is brittle (the format ends with
+        # `%(status_code)s` so getMessage() emits "... 200" with no trailing
+        # space, and the AccessFormatter's "200 OK" rendering only happens
+        # later in the pipeline).
+        args = record.args
+        if not args or len(args) < 5:
+            return True
+        method, path, _http_ver, status = args[1], args[2], args[3], args[4]
+        return not (method == "GET" and path == "/health" and int(status) == 200)
 
 
 # ============================================================================ 
