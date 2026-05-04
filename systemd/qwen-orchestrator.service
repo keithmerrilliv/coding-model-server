@@ -32,59 +32,61 @@ EnvironmentFile=-/home/keith-merrill/.config/qwen-server/.env
 
 # Resource limits
 LimitNOFILE=65536
-# NoNewPrivileges intentionally NOT set. With Linux 6.17+ Ubuntu kernels,
-# unprivileged user namespaces are confined under the AppArmor profile
-# `unprivileged_userns` unless a dedicated profile transitions in.
-# /etc/apparmor.d/bwrap exists for that — `flags=(unconfined) { userns, }` —
-# but profile transitions are privilege gains, so NoNewPrivileges=yes
-# blocks them, leaving bwrap stuck in `unprivileged_userns` without
-# CAP_SYS_ADMIN. bwrap then can't mount tmpfs / re-bind /proc and reports
-# "No permissions to create new namespace". Dropping NoNewPrivileges
-# restores the transition so bwrap runs unconfined inside its own userns.
-# The other hardening flags below stay in place; bwrap itself provides
-# the actual LLM-test isolation.
 
 # Security hardening — this daemon runs LLM-generated pytest subprocesses, so
 # it is the highest-risk service. Tighten aggressively; broaden ReadWritePaths
 # if your task workspace or repo lives elsewhere.
 #
-# IMPORTANT: several systemd hardening flags conflict with bwrap's user-
-# namespace creation and have been deliberately omitted. The actual
-# isolation for LLM-generated tests comes from bwrap (see
-# qwen_autonomous/executor.py::_wrap_in_sandbox), not from these flags —
-# they harden the *orchestrator process itself*, which only spawns bwrap.
-# Omitted (and why):
-#   - RestrictNamespaces=yes         blocks all namespace creation incl.
-#                                    bwrap's CLONE_NEWUSER
-#   - ProtectKernelTunables=yes      implies SystemCallFilter that blocks
-#                                    unshare-class syscalls bwrap needs
-#   - ProtectClock=yes               seccomp filter that blocks bwrap's
-#                                    clock_* setup
-#   - ProtectHostname=yes            uses a UTS namespace that conflicts
-#                                    with bwrap's --unshare-uts
+# IMPORTANT: bwrap's user-namespace mount setup is fragile under systemd
+# isolation on Linux 6.17+ Ubuntu kernels. The actual sandboxing for
+# LLM-generated tests comes from bwrap+seccomp (see
+# qwen_autonomous/executor.py::_wrap_in_sandbox + seccomp_filter.py); the
+# flags below harden the *orchestrator process itself*, which only spawns
+# bwrap. They must NOT interfere with the child userns or bwrap's procfs
+# mount.
 #
-# Linux 6.17+ Ubuntu kernels added the `unprivileged_userns` AppArmor
-# profile that traps unprivileged userns creation; bwrap's escape hatch
-# (/etc/apparmor.d/bwrap with `flags=(unconfined) { userns, }`) requires
-# a profile transition, which `NoNewPrivileges=yes` blocks — that flag is
-# also omitted (see comment in [Service] above).
-PrivateTmp=yes
+# Hardening flags deliberately disabled for bwrap compatibility (validated
+# 2026-05-04 by direct invocation: 4072 pytest tests passed under bwrap+
+# seccomp after these flags were turned off):
+#
+#   - NoNewPrivileges=no           Required so bwrap can profile-transition
+#                                  to /etc/apparmor.d/bwrap (which grants
+#                                  the `userns` cap). Several Protect*
+#                                  flags below would implicitly set NNP=yes,
+#                                  hence the explicit override.
+#   - PrivateTmp=no                systemd's private-tmp setup requires a
+#                                  service mount namespace (MS_PRIVATE
+#                                  propagation) that breaks userns procfs
+#                                  mount.
+#   - ProtectSystem=no             Same — strict read-only rootfs forces a
+#                                  service mount namespace incompatible
+#                                  with bwrap's child mount setup.
+#   - ProtectControlGroups=no      Implies MountAPIVFS=yes which interacts
+#                                  badly with bwrap's --unshare-cgroup.
+#   - ProtectProc=default          `invisible` (hidepid on parent procfs)
+#                                  causes EPERM when child userns mounts a
+#                                  fresh procfs on kernel 6.17+.
+#
+# Hardening flags also omitted (they would block bwrap's namespace setup,
+# unshare-class syscalls, clock setup, or UTS namespace):
+#   - RestrictNamespaces=yes       blocks CLONE_NEWUSER
+#   - ProtectKernelTunables=yes    implicit SystemCallFilter blocks unshare
+#   - ProtectClock=yes             seccomp blocks bwrap's clock_* setup
+#   - ProtectHostname=yes          UTS namespace conflict with --unshare-uts
+NoNewPrivileges=no
+PrivateTmp=no
+ProtectSystem=no
+ProtectControlGroups=no
+ProtectProc=default
 ProtectKernelLogs=yes
 ProtectKernelModules=yes
-ProtectControlGroups=yes
-ProtectProc=invisible
 RestrictSUIDSGID=yes
 RestrictRealtime=yes
 LockPersonality=yes
-ProtectSystem=strict
-ReadWritePaths=/home/keith-merrill/Dev/qwen-server /tmp /var/tmp
 # Block read access to credential / SSH paths in the orchestrator user's
-# home. ProtectSystem=strict + ReadWritePaths already prevent writes
-# outside the workspace, but those flags don't restrict reads. With
-# QWEN_ALLOW_UNSANDBOXED_TESTS=1 (or a sandbox bypass), LLM-generated
-# code running as this UID would otherwise have read access to ssh keys
-# and gnupg material. Belt-and-suspenders since bwrap is the primary
-# isolation; this is the secondary defense.
+# home. With ProtectSystem disabled (above), there's no broad rootfs
+# protection; this is the primary defense for those specific paths if
+# the bwrap sandbox is ever bypassed (e.g. QWEN_ALLOW_UNSANDBOXED_TESTS=1).
 InaccessiblePaths=-/home/keith-merrill/.ssh -/home/keith-merrill/.gnupg -/home/keith-merrill/.aws -/home/keith-merrill/.config/git
 # LLM-generated tests are sandboxed separately via bubblewrap — see
 # qwen_autonomous/executor.py::run_tests. Install `bubblewrap` on the host:

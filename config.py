@@ -265,16 +265,22 @@ Update these after each retrieval step. They help you stay organized and efficie
     # FAST: Lightweight Q4_K_M for quick implementation tasks.
     # Migrated 2026-04-30 from llama_cpp (ngl=26, 262K Q4_0 KV) to llama_server
     # + cpu_moe. Headroom from cpu_moe redirected to KV-quant upgrade per
-    # feedback_kv_quant_preference: traded 262K Q4_0 → 196K Q8_0. ub=4096
-    # matches HD recipe; Q4_K_M weights are lighter than HD's Q8_0 so headroom
-    # should exceed HD's ~1.16 GB free.
+    # feedback_kv_quant_preference: traded 262K Q4_0 → 196K Q8_0.
+    #
+    # 2026-05-04: ub reduced 4096 → 3584. At ub=4096 llama-server projected
+    # 15,312 MiB needed / 14,933 free post-q36_architect-swap → cudaMalloc
+    # OOM, ~400 MiB short. ub=3584 saves ~819 MiB compute buffer (1.6 MiB/
+    # ub × 512), giving ~400 MiB safety margin against fragmentation. Cost:
+    # ~12% prefill batch reduction; on a "fast" implementer that already
+    # rotates first in the chain, prefill speed isn't the binding factor —
+    # OOM-free swap is.
     _CODER_30B_FAST = _create_model_config(
         'MODEL_PATH_30B_FAST',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
-        49, 196608, 4096,
+        49, 196608, 3584,
         server_extra_args=['--chat-template', 'chatml', '--swa-full'],
         logit_bias=[[151657, -100.0], [151658, -100.0]],
-        cpu_moe=True, n_ubatch=4096,
+        cpu_moe=True, n_ubatch=3584,
     )
 
     # NEXT: Qwen3-Coder-Next-Q8_0 (80B MoE with 3B active params)
@@ -411,15 +417,22 @@ Update these after each retrieval step. They help you stay organized and efficie
     #   ngl=48 ctx=262K Q8_0 ub=5120 → 14,260 MiB used, 1,550 free (2nd tune)
     #   ngl=48 ctx=262K Q8_0 ub=6144 → OOM at compute buffer alloc (CUDA -6)
     #   ngl=48 ctx=262K Q8_0 ub=5632 → estimated 15,094 used / 716 free (3rd)
+    #   ngl=48 ctx=262K Q8_0 ub=4608 → estimated 14,427 used / 1,376 free
     # Compute buffer scales 1.63 MiB/ub-unit observed 4096→5120. Pushing
     # beyond ub=5632 exhausts the headroom margin; ub=6144 confirmed OOM.
+    #
+    # 2026-05-04: ub reduced 5632 → 4608. The 716 MiB free at ub=5632 sat
+    # below the 1,200 MiB safety floor and risked transient OOM during
+    # model-swap (observed in spec_fa78ca9c retry-4 deep_reviewer→implementer
+    # swap). ub=4608 buys ~1,670 MiB compute-buffer savings → ~1.4 GiB free,
+    # finally above the safety floor. Trade: ~18% prefill batch reduction.
     _QWEN36_35B = _create_model_config(
         'MODEL_PATH_QWEN36_35B',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf',
-        48, 262144, 5632,
+        48, 262144, 4608,
         server_extra_args=['--jinja', '--reasoning-format', 'none', '--swa-full'],
         type_k=8, type_v=8,
-        cpu_moe=True, n_ubatch=5632,
+        cpu_moe=True, n_ubatch=4608,
         repeat_penalty=1.05,
     )
 

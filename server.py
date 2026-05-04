@@ -37,6 +37,23 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+class _SilenceHealthCheckFilter(logging.Filter):
+    """Drop uvicorn access lines for `GET /health`.
+
+    The dashboard's HealthCard polls /health every 10s; with multiple tabs
+    or LAN clients, the access log floods at ~1 Hz, drowning real ERROR/INFO
+    lines in `journalctl -u qwen-server`. /health is a 200-OK no-op endpoint
+    — no diagnostic value in logging successful hits. Errors and other
+    endpoints are unaffected.
+    """
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        return not ('GET /health ' in msg and ' 200 ' in msg)
+
+
+logging.getLogger("uvicorn.access").addFilter(_SilenceHealthCheckFilter())
+
+
 # ============================================================================ 
 # Pydantic Models for Request/Response Validation
 # ============================================================================ 
