@@ -45,13 +45,16 @@ class _SilenceHealthCheckFilter(logging.Filter):
     lines in `journalctl -u qwen-server`. /health is a 200-OK no-op endpoint
     — no diagnostic value in logging successful hits. Errors and other
     endpoints are unaffected.
+
+    Attached inside the FastAPI lifespan startup hook (not at module load),
+    because `uvicorn.run` calls `logging.config.dictConfig` AFTER importing
+    the app module — and dictConfig explicitly clears any preexisting
+    filters on loggers it reconfigures, which includes `uvicorn.access`.
+    Adding the filter from the lifespan startup runs after dictConfig.
     """
     def filter(self, record: logging.LogRecord) -> bool:
         msg = record.getMessage()
         return not ('GET /health ' in msg and ' 200 ' in msg)
-
-
-logging.getLogger("uvicorn.access").addFilter(_SilenceHealthCheckFilter())
 
 
 # ============================================================================ 
@@ -252,7 +255,11 @@ apple_deep_docs_service = None
 async def lifespan(app: FastAPI):
     """Lifecycle manager for the FastAPI app"""
     global memory_service, web_search_service, apple_deep_docs_service
-    
+
+    # Install /health log filter here, after uvicorn's dictConfig has run.
+    # See _SilenceHealthCheckFilter docstring for why module-load doesn't work.
+    logging.getLogger("uvicorn.access").addFilter(_SilenceHealthCheckFilter())
+
     # Startup
     logger.info("Server starting up...")
     
