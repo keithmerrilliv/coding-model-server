@@ -78,11 +78,20 @@ PrivateTmp=no
 ProtectSystem=no
 ProtectControlGroups=no
 ProtectProc=default
-ProtectKernelLogs=yes
-ProtectKernelModules=yes
-RestrictSUIDSGID=yes
-RestrictRealtime=yes
-LockPersonality=yes
+# 2026-05-04 update: ProtectKernelLogs/ProtectKernelModules/LockPersonality/
+# RestrictRealtime/RestrictSUIDSGID also REMOVED. Each of those installs an
+# implicit SystemCallFilter (per systemd.exec(5)) that is inherited by
+# child processes — including bwrap's child userns. The implicit filter
+# does not block mount(2) directly, but the cumulative restrictions
+# manifest as `bwrap: Can't mount proc on /newroot/proc: Operation not
+# permitted` from inside the systemd service context, even though the
+# same bwrap+seccomp invocation works from a regular shell. Validated
+# 2026-05-04 by direct invocation: 4072 pytest tests passed under
+# bwrap+seccomp from a non-systemd shell. The orchestrator's bwrap+seccomp
+# wrapper (qwen_autonomous/executor.py + seccomp_filter.py) provides all
+# the isolation needed for LLM-generated code; these process-level
+# hardening flags add no defense in the bwrap-isolated path and break
+# the path entirely.
 # Block read access to credential / SSH paths in the orchestrator user's
 # home. With ProtectSystem disabled (above), there's no broad rootfs
 # protection; this is the primary defense for those specific paths if
