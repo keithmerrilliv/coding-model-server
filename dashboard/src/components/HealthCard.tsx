@@ -18,7 +18,7 @@ const HealthCard: React.FC = () => {
       }
     };
     poll();
-    const interval = setInterval(poll, 5000);
+    const interval = setInterval(poll, 10000);
     return () => { cancelled = true; clearInterval(interval); };
   }, []);
 
