@@ -726,6 +726,79 @@ def build_reviewer_message(
     ]
 
 
+SYNTHESIS_SYSTEM_PROMPT = textwrap.dedent("""\
+    You are a code-synthesis agent. Your job is to merge the correct
+    behaviors of multiple prior attempts at the same specification into a
+    single final implementation.
+
+    The rotation chain is designed to elicit DIFFERENT bug profiles from
+    different models — e.g. one attempt nails the type checks but misses
+    edge-case ordering; another nails the structure but misses an
+    isinstance check. Your task is to take the union of the correct parts.
+
+    ## Inputs you'll receive
+    - The original specification + architecture design
+    - Each prior attempt's source code
+    - Each prior attempt's test result summary (which tests passed, which
+      failed). Trust these; they are pytest output, not LLM judgment.
+
+    ## Output rules
+    - Produce a single complete implementation as <<<FILE: path>>>…
+      <<<END_FILE>>> blocks for EVERY file required by the spec. No diffs.
+    - Prefer behaviors that PASSED across multiple attempts.
+    - Where attempts disagree on edge-case handling, choose the version
+      whose tests for that edge case actually passed. If none passed,
+      synthesize a correct version yourself.
+    - Do not introduce new bugs. If you can't decide between two
+      approaches, pick the one with the better overall test pass rate.
+    - Maintain the file/directory layout the architecture design called
+      for; do not invent new structure.
+    - Keep test files (`tests/test_*.py`) — write them yourself if the
+      attempts disagree on which tests should exist. Tests are part of
+      the deliverable.
+    """)
+
+
+def build_synthesis_message(
+    spec_md: str,
+    design_md: str,
+    attempts: list[dict],
+) -> list[dict[str, str]]:
+    """Build a single synthesis prompt that gives the model the full
+    rotation history (code + per-attempt test outcome) and asks for a
+    merged best version.
+
+    Each attempt dict has keys: retry (int), agent (str), test_summary
+    (str — last ~1500 chars of pytest output), files (dict of relpath→content).
+    """
+    parts = [
+        "## Specification\n\n", spec_md,
+        "\n\n## Architecture Design\n\n", design_md,
+        "\n\n## Prior Attempts\n\n",
+    ]
+    for att in attempts:
+        parts.append(
+            f"### Attempt retry={att['retry']} (agent={att['agent']})\n\n"
+        )
+        if att.get("test_summary"):
+            parts.append("#### Test result\n\n```\n")
+            parts.append(att["test_summary"])
+            parts.append("\n```\n\n")
+        for relpath, content in att.get("files", {}).items():
+            parts.append(f"#### {relpath}\n\n```\n{content}\n```\n\n")
+    parts.append(
+        "---\n\n"
+        "Synthesize a single correct implementation by taking the union of "
+        "behaviors that passed tests across the attempts above. Output "
+        "<<<FILE: path>>>…<<<END_FILE>>> blocks for every file required "
+        "by the design. Include test files."
+    )
+    return [
+        {"role": "system", "content": SYNTHESIS_SYSTEM_PROMPT},
+        {"role": "user", "content": "".join(parts)},
+    ]
+
+
 # ── Test runner ──────────────────────────────────────────────────────────────
 
 def _sandbox_available() -> bool:

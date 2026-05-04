@@ -33,6 +33,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shutil
 import signal
 import sys
 import time
@@ -78,6 +79,7 @@ from qwen_autonomous.executor import (
     build_architect_message,
     build_implementer_message,
     build_reviewer_message,
+    build_synthesis_message,
     call_agent,
     parse_architect_response,
     parse_implementer_response,
@@ -542,7 +544,129 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
                 spec.id)
 
 
+# Matches `path/to/file.ext:LINE` — the citation format the reviewer prompt
+# directs the LLM to use in `### Verdict Evidence`. Tolerates 0+ subdirs and
+# any extension so we don't have to enumerate languages.
+_CITE_RE: re.Pattern[str] = re.compile(
+    r'\b((?:[\w\-]+/)*[\w\-]+\.\w+):(\d+)\b'
+)
+
+
+def _verify_review_citations(review_md: str, spec_dir: Path) -> tuple[str, int, int]:
+    """Annotate `path:line` citations in *review_md* that don't resolve to
+    real files in *spec_dir*. Returns (annotated_md, n_checked, n_unverified).
+
+    The reviewer LLM hallucinates ~1/3 of file-existence claims per
+    project_implementer_rotation. Stripping the verdict outright is
+    risky — sometimes the cite is a typo on a real bug — so we keep the
+    LLM's verdict text and append `[unverified — file not in spec dir]`
+    inline after each bogus cite. Human gate sees the discrediting
+    annotations alongside the verdict; downstream synthesis can also
+    weight unverified claims lower.
+
+    Falls back to a no-op if any citation resolves outside spec_dir
+    (path traversal attempts, absolute paths, etc.).
+    """
+    checked = 0
+    unverified = 0
+    spec_root = spec_dir.resolve()
+
+    def _annotate(match: re.Match[str]) -> str:
+        nonlocal checked, unverified
+        path, _line = match.group(1), match.group(2)
+        candidate = (spec_dir / path).resolve()
+        # Refuse to validate paths that escape spec_dir (../etc/passwd-style).
+        try:
+            candidate.relative_to(spec_root)
+        except ValueError:
+            return match.group(0)
+        checked += 1
+        if candidate.is_file():
+            return match.group(0)
+        unverified += 1
+        return f"{match.group(0)} [unverified — file not in spec dir]"
+
+    annotated = _CITE_RE.sub(_annotate, review_md)
+    return annotated, checked, unverified
+
+
+_PRESERVE_ON_RETRY: frozenset[str] = frozenset({
+    # Pipeline inputs / outputs of earlier phases — must persist so the
+    # next implementer sees the same plan + design + complexity decision.
+    "spec.md", "plan.yaml", "design.md", "complexity.json",
+    # Diagnostic artifacts from prior runs. Not used as inputs (rejection
+    # notes come from the gate, not these files), but useful for postmortem.
+    "failure_report.md", "review_report.md", "test_output.txt",
+})
+
+
+def _snapshot_retry(spec_dir: Path, retry_index: int) -> None:
+    """Copy the current state of spec_dir into retry_history/retry_<N>/
+    (excluding retry_history itself). Called BEFORE cleanup so each retry's
+    output is preserved for the synthesis pass.
+    """
+    snap = spec_dir / "retry_history" / f"retry_{retry_index}"
+    snap.mkdir(parents=True, exist_ok=True)
+    for path in spec_dir.iterdir():
+        if path.name == "retry_history":
+            continue
+        target = snap / path.name
+        try:
+            if path.is_dir():
+                shutil.copytree(path, target, dirs_exist_ok=True)
+            else:
+                shutil.copy2(path, target)
+        except OSError as exc:
+            logger.warning("snapshot retry_%d: failed to copy %s: %s",
+                           retry_index, path, exc)
+
+
+def _clean_spec_dir_for_retry(spec_dir: Path, retry_count: int) -> None:
+    """Wipe implementer / reviewer artifacts from spec_dir, keeping the
+    inputs (spec, plan, design) and prior-run diagnostics.
+
+    Snapshots the prior retry's state into retry_history/retry_<N-1>/
+    BEFORE wiping, so the synthesis pass at MAX_RETRIES has the full
+    rotation corpus to work from.
+
+    Why: the orchestrator does not isolate retries — earlier retries leave
+    files (implementer code, reviewer-written pytest tests) behind. When
+    retry-N picks a different file layout than retry-(N-1) (e.g. flat
+    `test_*.py` vs `tests/test_*.py`), pytest sees duplicate module names
+    and aborts collection with `import file mismatch` before any test
+    actually runs. Surfaced 2026-05-04 in spec_099515d1 retry-1; see
+    project_orchestrator_spec_dir_contamination.md.
+
+    Called at the start of _run_implementer for retry_count > 0. retry-0
+    runs against an empty (post-design) spec dir so cleanup is a no-op.
+    """
+    if retry_count == 0:
+        return
+    _snapshot_retry(spec_dir, retry_count - 1)
+    removed = 0
+    for path in spec_dir.iterdir():
+        if path.name in _PRESERVE_ON_RETRY or path.name == "retry_history":
+            continue
+        try:
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+            removed += 1
+        except OSError as exc:
+            logger.warning("spec dir cleanup: failed to remove %s: %s",
+                           path, exc)
+    logger.info(
+        "spec dir cleaned for retry=%d (snapshot retry_%d, %d items removed, %d preserved)",
+        retry_count, retry_count - 1, removed, len(_PRESERVE_ON_RETRY),
+    )
+
+
 def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
+    # Wipe artifacts from earlier retries so the new implementer starts
+    # from a clean slate. No-op on retry-0.
+    _clean_spec_dir_for_retry(spec_dir, task.retry_count)
+
     spec_md = (spec_dir / spec.source_md_path).read_text()
     design_path = spec_dir / "design.md"
     design_md = design_path.read_text() if design_path.exists() else ""
@@ -781,6 +905,23 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
         _write_artifact(spec_dir, rel_path, content)
         db.create_artifact(spec_id=spec.id, task_id=task.id,
                            kind=ArtifactKind.TEST_REPORT, path=rel_path)
+
+    # Anti-hallucination cite-check: verify each `path:line` reference in
+    # the review body against the actual spec dir. Bogus cites are
+    # annotated inline; the verdict is left intact (some hallucinations
+    # are typos on real bugs, so silent veto is too aggressive). Logs
+    # the rate so we can track reviewer reliability over time.
+    annotated_md, n_checked, n_unverified = _verify_review_citations(
+        result.review_md, spec_dir
+    )
+    if n_checked > 0:
+        logger.info(
+            "spec %s: reviewer cite-check %d/%d unverified (%.0f%%)",
+            spec.id, n_unverified, n_checked,
+            100.0 * n_unverified / n_checked,
+        )
+    if n_unverified > 0:
+        result.review_md = annotated_md
 
     # Write review report
     _write_artifact(spec_dir, "review_report.md", result.review_md)
@@ -1191,8 +1332,154 @@ def _attempt_retry(db: Database, spec: Spec, task, failure_detail: str) -> None:
                                legacy_feedback=failure_detail)
 
 
+_SYNTHESIS_AGENT = os.getenv("AUTONOMOUS_SYNTHESIS_AGENT", "deep_reviewer")
+
+
+def _read_retry_attempts(spec_dir: Path) -> list[dict]:
+    """Walk retry_history/ + the current live spec_dir and return one dict
+    per attempt for the synthesis prompt. Each dict carries:
+        retry: int — 0-indexed attempt number
+        agent: str — best-effort guess from the snapshot (or "current")
+        files: dict[relpath, content] — implementer source (no test_*.py)
+        test_summary: str — last ~1500 chars of test_output.txt for that attempt
+    """
+    history = spec_dir / "retry_history"
+    attempts: list[dict] = []
+
+    def _gather(root: Path, retry_index: int) -> dict:
+        files: dict[str, str] = {}
+        test_output = ""
+        for path in root.rglob("*"):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(root)
+            # Skip anything under retry_history — the snapshots from prior
+            # retries are surfaced as separate entries already.
+            if rel.parts and rel.parts[0] == "retry_history":
+                continue
+            name = rel.name
+            # Drop pipeline metadata; keep only deliverable code + tests.
+            if name in {"spec.md", "plan.yaml", "design.md", "complexity.json",
+                        "review_report.md", "failure_report.md"}:
+                continue
+            # Only the spec_dir-level test_output.txt counts (not any
+            # snapshot copy, which we already filtered above).
+            if name == "test_output.txt" and rel.parent == Path():
+                test_output = path.read_text(errors="replace")
+                continue
+            try:
+                files[str(rel)] = path.read_text(errors="replace")
+            except OSError:
+                continue
+        return {
+            "retry": retry_index,
+            "agent": "snapshot",
+            "files": files,
+            "test_summary": test_output[-1500:] if test_output else "",
+        }
+
+    if history.exists():
+        for sub in sorted(history.iterdir()):
+            if not sub.is_dir() or not sub.name.startswith("retry_"):
+                continue
+            try:
+                idx = int(sub.name.split("_", 1)[1])
+            except ValueError:
+                continue
+            attempts.append(_gather(sub, idx))
+
+    # Include the live spec_dir as the latest attempt.
+    live = _gather(spec_dir, retry_index=len(attempts))
+    live["agent"] = "current"
+    if live["files"]:
+        attempts.append(live)
+    return attempts
+
+
+def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
+                   framework: str, framework_opts: dict) -> bool:
+    """MAX_RETRIES escape hatch: synthesize the union of correct behaviors
+    across all rotation attempts, then re-run the test phase against the
+    synthesized output.
+
+    Returns True if synthesis produced output and tests passed; False
+    otherwise. Caller decides what to do with the verdict.
+    """
+    attempts = _read_retry_attempts(spec_dir)
+    if not attempts:
+        logger.warning("spec %s: synthesis skipped — no retry history", spec.id)
+        return False
+
+    spec_md_path = spec_dir / spec.source_md_path
+    design_md_path = spec_dir / "design.md"
+    spec_md = spec_md_path.read_text() if spec_md_path.exists() else ""
+    design_md = design_md_path.read_text() if design_md_path.exists() else ""
+
+    logger.info("spec %s: synthesis from %d attempts via agent=%s",
+                spec.id, len(attempts), _SYNTHESIS_AGENT)
+
+    messages = build_synthesis_message(spec_md, design_md, attempts)
+
+    try:
+        raw = call_agent("implementer", messages, agent=_SYNTHESIS_AGENT,
+                         max_tokens=16000)
+    except Exception as exc:
+        logger.error("spec %s: synthesis call failed: %s", spec.id, exc)
+        return False
+
+    result = parse_implementer_response(raw)
+    if isinstance(result, ParseError):
+        logger.error("spec %s: synthesis response unparseable: %s",
+                     spec.id, result.reason)
+        return False
+
+    db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=impl_task.id,
+                    payload={"role": "synthesizer",
+                             "agent": _SYNTHESIS_AGENT,
+                             "attempts": len(attempts),
+                             "files": len(result.files)})
+
+    # Wipe the live attempt so synthesis doesn't collide with it. Snapshot
+    # first so we keep the corpus.
+    _snapshot_retry(spec_dir, retry_index=len(attempts) - 1
+                    if attempts and attempts[-1]["agent"] == "current"
+                    else len(attempts))
+    for path in spec_dir.iterdir():
+        if path.name in _PRESERVE_ON_RETRY or path.name == "retry_history":
+            continue
+        try:
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+        except OSError:
+            pass
+
+    for rel_path, content in result.files:
+        _write_artifact(spec_dir, rel_path, content)
+        db.create_artifact(spec_id=spec.id, task_id=impl_task.id,
+                           kind=ArtifactKind.CODE, path=rel_path)
+    logger.info("spec %s: synthesis wrote %d files", spec.id, len(result.files))
+
+    tests_passed, test_output = run_tests(spec_dir, framework=framework,
+                                           **framework_opts)
+    try:
+        (spec_dir / "test_output.txt").write_text(test_output)
+    except OSError:
+        pass
+    logger.info("spec %s: synthesis test result: %s (%d chars)",
+                spec.id, "PASS" if tests_passed else "FAIL", len(test_output))
+    return tests_passed
+
+
 def _legacy_attempt_retry(db: Database, spec: Spec, task, failure_detail: str) -> None:
-    """Send the spec back to the implementer for another attempt, or fail."""
+    """Send the spec back to the implementer for another attempt, or fail.
+
+    At MAX_RETRIES exhaustion, attempts a synthesis pass first: merges the
+    union of correct behaviors across all rotation attempts and re-runs
+    the test phase. Only if synthesis also fails does the spec get marked
+    FAILED. See project_autonomous_validation_2026_05_04 for rationale.
+    """
     impl_tasks = db.list_tasks_for_spec_by_role(spec.id, "implementer")
     impl_task = impl_tasks[0] if impl_tasks else None
 
@@ -1203,8 +1490,32 @@ def _legacy_attempt_retry(db: Database, spec: Spec, task, failure_detail: str) -
         return
 
     if impl_task.retry_count >= MAX_RETRIES:
-        logger.error("spec %s: max retries (%d) exhausted, failing",
-                     spec.id, MAX_RETRIES)
+        logger.info("spec %s: max retries (%d) exhausted — attempting synthesis",
+                    spec.id, MAX_RETRIES)
+        # Reconstruct the framework + opts the test phase would have used.
+        # Pulled from plan.yaml (test_strategy block).
+        import yaml as _yaml
+        framework, framework_opts = "pytest", {}
+        try:
+            plan = _yaml.safe_load(spec.normalized_yaml) if spec.normalized_yaml else {}
+            ts = (plan or {}).get("test_strategy") or {}
+            framework = ts.get("framework", "pytest")
+            framework_opts = {
+                k: v for k, v in ts.items()
+                if k not in ("framework", "required")
+            }
+        except Exception as exc:
+            logger.warning("spec %s: synthesis: couldn't parse test_strategy (%s); "
+                           "defaulting to pytest with no opts", spec.id, exc)
+
+        if _run_synthesis(db, spec, impl_task, db.spec_dir(spec.id), framework, framework_opts):
+            logger.info("spec %s: synthesis PASSED — marking spec done", spec.id)
+            db.update_task_status(impl_task.id, TaskStatus.DONE)
+            db.update_task_status(task.id, TaskStatus.DONE)
+            db.update_spec_status(spec.id, SpecStatus.DONE)
+            return
+
+        logger.error("spec %s: synthesis FAILED — marking spec failed", spec.id)
         db.update_task_status(task.id, TaskStatus.FAILED)
         db.update_spec_status(spec.id, SpecStatus.FAILED)
         return
