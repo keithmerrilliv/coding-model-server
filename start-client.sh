@@ -47,4 +47,4 @@ fi
 
 # Start the client
 echo "Starting Qwen Remote Client..."
-$PYTHON_EXE client.py "$@"
+$PYTHON_EXE -m qwen_client "$@"

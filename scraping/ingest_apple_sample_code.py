@@ -11,8 +11,7 @@ import threading
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from code_chunker import CodeChunker
+from qwen_server.code_chunker import CodeChunker
 
 # Server Configuration
 LINUX_SERVER_IP = os.getenv("QWEN_SERVER_IP", "192.168.50.101")

@@ -18,7 +18,7 @@ This project is a local LLM inference server with a multi-agent CLI client. The 
 *   **Modular Client:** Refactored from a monolithic script (`qwen_remote.py`) into a package (`qwen_client/`) with separate modules for orchestration, completion, compaction, commands, history, config, and the agentic layer.
 
 ## 3. Architecture & Technical Configuration
-*   **Server (`server.py`):**
+*   **Server (`src/qwen_server/server.py`):**
     *   FastAPI with OpenAI-compatible endpoints (`/v1/chat/completions`, `/v1/models`, `/v1/memory`).
     *   LRU-1 model cache: only one model loaded at a time, mutual exclusion between backends.
     *   Per-model configs: `n_gpu_layers`, `n_ctx`, `n_batch`, `type_k`/`type_v` (KV cache quantization), `repeat_penalty`, `cpu_moe`, `backend` selection.

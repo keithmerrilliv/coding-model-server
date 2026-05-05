@@ -24,3 +24,8 @@ Library/Caches/qwen-runner/
 # Node / dashboard build artifacts
 node_modules/
 dashboard/dist/
+
+# pip install -e . artifacts
+*.egg-info/
+build/
+dist/

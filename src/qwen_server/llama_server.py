@@ -19,7 +19,7 @@ from typing import Any, Dict, Iterator, List, Optional
 import requests as http_requests
 from fastapi import HTTPException
 
-from config import Config
+from qwen_server.config import Config
 
 
 class InsufficientVramError(RuntimeError):
@@ -38,7 +38,7 @@ _STATE_IDLE = "idle"
 _STATE_STARTING = "starting"
 _STATE_RUNNING = "running"
 _STATE_STOPPING = "stopping"
-from streaming import (
+from qwen_server.streaming import (
     ThinkingStripper, build_completion_response,
     build_stream_chunk, strip_thinking,
 )

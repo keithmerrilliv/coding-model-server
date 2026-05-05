@@ -41,7 +41,7 @@ The old bulk ingestion is replaced by on-demand, structure-aware ingestion via t
 
 ### How it works
 
-`CodeChunker` (`code_chunker.py`) uses tree-sitter to parse source files into ASTs and extract chunks at semantically meaningful boundaries:
+`CodeChunker` (`src/qwen_server/code_chunker.py`) uses tree-sitter to parse source files into ASTs and extract chunks at semantically meaningful boundaries:
 
 ```
 Source file  -->  tree-sitter AST  -->  Walk nodes  -->  Match chunk types  -->  Emit chunks
@@ -180,7 +180,7 @@ BUDGET WARNING: You have used 60/80 retrieval steps. Only 20 steps remain.
 
 ## 4. Server-Side RAG Integration
 
-The server (`server.py`) automatically injects RAG context into every completion request:
+The server (`src/qwen_server/server.py`) automatically injects RAG context into every completion request:
 
 1. Extract the last user message from the conversation
 2. Embed it via `SentenceTransformer('all-MiniLM-L6-v2')` (384-dim, CPU-bound)

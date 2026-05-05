@@ -6,16 +6,16 @@ A local LLM inference server with a multi-agent CLI client. The server provides 
 
 ```
 Client (macOS/Linux)                    Server (Linux + GPU)
-┌──────────────────┐                   ┌──────────────────────────┐
-│ qwen_client/     │  HTTP/SSE         │ server.py (FastAPI)      │
-│  orchestrator.py │◄─────────────────►│  ├─ llama_cpp backend    │
-│  completion.py   │  /v1/chat/        │  │   (in-process)        │
-│  tool_handlers   │  completions      │  ├─ llama_server backend │
-│  compaction.py   │                   │  │   (subprocess :8081)   │
-│  commands.py     │                   │  ├─ memory_service.py    │
-│  history.py      │                   │  │   (ChromaDB + RAG)    │
-└──────────────────┘                   │  └─ web_search_service   │
-                                       └──────────────────────────┘
+┌──────────────────┐                   ┌──────────────────────────────────┐
+│ qwen_client/     │  HTTP/SSE         │ qwen_server.server (FastAPI)     │
+│  orchestrator.py │◄─────────────────►│  ├─ llama_cpp backend            │
+│  completion.py   │  /v1/chat/        │  │   (in-process)                │
+│  tool_handlers   │  completions      │  ├─ llama_server backend         │
+│  compaction.py   │                   │  │   (subprocess :8081)          │
+│  commands.py     │                   │  ├─ memory_service               │
+│  history.py      │                   │  │   (ChromaDB + RAG)            │
+└──────────────────┘                   │  └─ web_search_service           │
+                                       └──────────────────────────────────┘
 ```
 
 **Dual backend** (mostly historical — the in-process path is being retired):
@@ -39,9 +39,14 @@ idle (30-min watchdog; in-flight requests block the kill).
 ```bash
 git clone <repo-url> && cd qwen-server
 ./setup.sh                  # Creates venv, installs dependencies
+pip install -e .            # Install qwen_server / qwen_client / qwen_autonomous
 cp .env.example .env        # Configure IP, ports, model paths
 ./start.sh                  # Starts on port 5000
 ```
+
+The `pip install -e .` step is required after `setup.sh` — it makes the
+three packages under `src/` importable and installs the `qwen-client` /
+`qwen-autonomous` console scripts into the venv.
 
 Or as a systemd service:
 ```bash
@@ -201,37 +206,58 @@ The server exposes an OpenAI-compatible API. When `ADMIN_API_KEY` is set, all en
 
 ## Project Structure
 
+PyPA `src` layout — three packages under `src/`, declared in
+`pyproject.toml`. Run `pip install -e .` after `setup.sh` to install
+them into the venv.
+
 ```
 qwen-server/
-├── server.py              # FastAPI server, model configs, inference
-├── client.py              # Client entry point
-├── tool_handlers.py       # Tool execution, permissions, file ops
-├── memory_service.py      # ChromaDB RAG service
-├── web_search_service.py  # DuckDuckGo web search
-├── qwen_client/           # Modular client package
-│   ├── main.py            #   Chat loop, startup
-│   ├── orchestrator.py    #   Agent loop, tool dispatch
-│   ├── completion.py      #   SSE streaming, retries
-│   ├── compaction.py      #   Context compaction
-│   ├── commands.py        #   Slash command handlers
-│   ├── history.py         #   Session persistence
-│   ├── config.py          #   Configuration, constants
-│   ├── models.py          #   Agent theme management
-│   └── agentic/           #   RAG: scratchpad, planner, budget
-├── qwen_autonomous/       # Autonomous mode task store + agents
-│   ├── db.py              #   SQLite-backed task store (WAL, thread-safe)
-│   ├── models.py          #   Pydantic models (Spec, Task, Gate, Event)
-│   ├── schema.sql         #   DDL for specs, tasks, artifacts, gates, events
-│   ├── planner.py         #   Planner agent (spec → YAML or clarifications)
-│   ├── executor.py        #   Execution agents (architect/implementer/reviewer)
-│   ├── jira_client.py     #   Jira interface (FakeJiraClient + real Atlassian)
-│   └── jira_sync.py       #   Bidirectional sync (SQLite ↔ Jira)
-├── orchestrator_daemon.py # Autonomous mode coordinator (systemd)
-├── qwen-autonomous        # Autonomous mode CLI entry point
-├── tools/                 # llama-server binary + shared libs
-├── scraping/              # Apple documentation scraper
-└── docs/                  # Additional documentation
-    ├── TUTORIAL.md        #   10-stage pipeline tutorial
-    ├── PHASE2_TEST_PLAN.md #  Manual test plan for autonomous mode
-    └── SUMMARY.md         #   Changelog and optimization history
+├── pyproject.toml              # Package metadata, deps, console scripts
+├── src/
+│   ├── qwen_server/            # FastAPI server + orchestrator daemon + shared modules
+│   │   ├── server.py           #   FastAPI app, model configs, inference dispatch
+│   │   ├── llama_server.py     #   llama-server subprocess manager (VRAM coord)
+│   │   ├── orchestrator_daemon.py  # Autonomous mode coordinator (systemd entry)
+│   │   ├── tool_handlers.py    #   Tool execution, permissions, file ops
+│   │   ├── memory_service.py   #   ChromaDB RAG service
+│   │   ├── web_search_service.py
+│   │   ├── server_manager.py   #   Apple Deep Docs MCP handshake
+│   │   ├── streaming.py        #   SSE chunking, ThinkingStripper
+│   │   ├── external_judges.py  #   Claude / Gemini call wrappers (/review + Phase b)
+│   │   ├── config.py           #   Server-side Config + agent definitions
+│   │   ├── metrics.py          #   GPU sampler + request metrics
+│   │   └── code_chunker.py     #   tree-sitter-aware code chunking for RAG
+│   ├── qwen_client/            # Modular chat client package
+│   │   ├── main.py             #   Chat loop, startup
+│   │   ├── __main__.py         #   `python -m qwen_client` entry
+│   │   ├── orchestrator.py     #   Agent loop, tool dispatch
+│   │   ├── completion.py       #   SSE streaming, retries
+│   │   ├── compaction.py       #   Context compaction
+│   │   ├── commands.py         #   Slash command handlers
+│   │   ├── review.py           #   /review multi-judge fan-out
+│   │   ├── autonomous.py       #   `qwen-autonomous` CLI entry
+│   │   ├── history.py          #   Session persistence
+│   │   ├── config.py           #   Client-side configuration, constants
+│   │   ├── models.py           #   Agent theme management
+│   │   └── agentic/            #   RAG: scratchpad, planner, budget
+│   └── qwen_autonomous/        # Autonomous mode task store + agents
+│       ├── db.py               #   SQLite-backed task store (WAL, thread-safe)
+│       ├── models.py           #   Pydantic models (Spec, Task, Gate, Event)
+│       ├── schema.sql          #   DDL for specs, tasks, artifacts, gates, events
+│       ├── planner.py          #   Planner agent (spec → YAML or clarifications)
+│       ├── executor.py         #   Execution agents (architect/implementer/reviewer)
+│       ├── jira_client.py      #   Jira interface (FakeJiraClient + real Atlassian)
+│       └── jira_sync.py        #   Bidirectional sync (SQLite ↔ Jira)
+├── tests/                      # Real dev tests (currently a placeholder)
+├── scripts/                    # Operational scripts (auto-approve, stats, profiling)
+├── systemd/                    # Service units (use `python -m qwen_server.X` ExecStart)
+├── tools/                      # llama-server binary + shared libs
+├── scraping/                   # Apple documentation scraper
+├── dashboard/                  # TypeScript React dashboard
+├── mac_runner/                 # Separate Swift/Xcode test runner service
+└── docs/
+    ├── TUTORIAL.md             #   10-stage pipeline tutorial
+    ├── CONFIGURATION.md        #   Env vars, agent-config knobs, systemd
+    ├── PHASE2_TEST_PLAN.md     #   Manual test plan for autonomous mode
+    └── SUMMARY.md              #   Changelog and optimization history
 ```

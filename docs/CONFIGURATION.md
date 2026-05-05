@@ -124,7 +124,7 @@ in `both` mode).
 
 ## Per-Model Configuration
 
-Each model is defined via `_create_model_config()` in `server.py`:
+Each model is defined via `_create_model_config()` in `src/qwen_server/server.py`:
 
 ```python
 _MY_MODEL = _create_model_config(

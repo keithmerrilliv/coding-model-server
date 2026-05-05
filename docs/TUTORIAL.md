@@ -28,7 +28,7 @@ This creates a Python venv, installs dependencies (FastAPI, llama-cpp-python, Ch
 
 ### 1.2 Download Models
 
-Models are GGUF files from HuggingFace. Download them to any directory and reference the paths in `server.py`. A good starting point is a single small model:
+Models are GGUF files from HuggingFace. Download them to any directory and reference the paths in `src/qwen_server/server.py`. A good starting point is a single small model:
 
 ```bash
 # Example: download Qwen3-Coder-30B (3B active MoE, ~22 GB)
@@ -42,7 +42,7 @@ Set `HF_TOKEN` in your environment for authenticated downloads (unauthenticated 
 
 ### 1.3 Configure Your First Model
 
-Open `server.py` and find the `Config` class. Add a model config:
+Open `src/qwen_server/server.py` and find the `Config` class. Add a model config:
 
 ```python
 _MY_MODEL = _create_model_config(
@@ -110,7 +110,7 @@ Type=simple
 User=your-username
 WorkingDirectory=/path/to/qwen-server
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/path/to/qwen-server/venv/bin/python server.py
+ExecStart=/path/to/qwen-server/venv/bin/python -m qwen_server.server
 Restart=on-failure
 RestartSec=5
 
@@ -211,7 +211,7 @@ This is the OpenAI-compatible chat completions API. The server authenticates via
 
 #### Stage 3: Server-Side Processing
 
-The FastAPI server (`server.py`) receives the request and:
+The FastAPI server (`src/qwen_server/server.py`) receives the request and:
 
 1. **Resolves the agent** — Looks up the model config (path, ngl, n_ctx, backend, etc.) from the `AGENTS` dict.
 2. **Injects few-shot examples** — For short conversations (≤4 messages), format examples are prepended so the model learns the tool marker syntax from "conversation" rather than instructions alone.
@@ -384,7 +384,7 @@ Find GGUF models on HuggingFace. Key factors:
 
 ### 4.2 Add the Model Config
 
-In `server.py`, add a new model config:
+In `src/qwen_server/server.py`, add a new model config:
 
 ```python
 # New model: Example-70B Q4_K_M
@@ -508,7 +508,7 @@ curl -s http://localhost:5000/health
 | Model generates `<tool_call>` | Native tokens not banned | Add `logit_bias` for the token IDs |
 | Agent loops on same file | Write-loop or response-loop | Check logs; reduce `repeat_penalty` for the model |
 | Slow TTFT | Long prompt + SWA model | Use `/compact` to reduce context |
-| "Memory retrieval timed out" | Large ChromaDB | Increase timeout in server.py or prune old memories |
+| "Memory retrieval timed out" | Large ChromaDB | Increase timeout in src/qwen_server/server.py or prune old memories |
 
 ### 5.3 Updating llama-cpp-python
 

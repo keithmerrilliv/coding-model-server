@@ -24,16 +24,16 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 from requests import exceptions as http_requests_exceptions
 
-from config import Config
-from llama_server import InsufficientVramError, LlamaServerManager
-from memory_service import MemoryService
-from metrics import gpu_sampler, request_metrics
-from server_manager import AppleDeepDocsService
-from streaming import (
+from qwen_server.config import Config
+from qwen_server.llama_server import InsufficientVramError, LlamaServerManager
+from qwen_server.memory_service import MemoryService
+from qwen_server.metrics import gpu_sampler, request_metrics
+from qwen_server.server_manager import AppleDeepDocsService
+from qwen_server.streaming import (
     ThinkingStripper, build_completion_response,
     build_stream_chunk, strip_thinking,
 )
-from web_search_service import WebSearchService
+from qwen_server.web_search_service import WebSearchService
 
 # Configure logging
 logging.basicConfig(

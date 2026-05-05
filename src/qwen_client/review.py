@@ -32,7 +32,7 @@ from typing import Optional
 
 import requests
 
-import external_judges
+from qwen_server import external_judges
 from qwen_client.config import COLORS, config, print_colored
 
 

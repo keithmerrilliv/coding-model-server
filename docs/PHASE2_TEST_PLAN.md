@@ -14,13 +14,13 @@ check and what to do if something goes wrong.
       `AUTONOMOUS_IMPLEMENTER_AGENT=deep_implementer`,
       `AUTONOMOUS_REVIEWER_AGENT=deep_reviewer`.
       Code defaults differ (`q36_architect` / `implementer` / `reviewer`); without these overrides you get the lighter default pipeline. Verify the chosen agent names exist server-side:
-      `grep -n "'q36_architect'\\|'deep_implementer'\\|'deep_reviewer'" server.py`
-- [ ] **Restart `orchestrator_daemon.py` after any `.env` edit.** The daemon calls `load_dotenv` once at import; an already-running daemon keeps stale agent names baked in and tasks bootstrap with whatever was in the env at startup. This is what killed `spec_df452c01` (architect bootstrapped as the retired `q35_ultra`, failed in 40s with "agent not found").
+      `grep -n "'q36_architect'\\|'deep_implementer'\\|'deep_reviewer'" src/qwen_server/server.py`
+- [ ] **Restart `qwen_server.orchestrator_daemon` after any `.env` edit.** The daemon calls `load_dotenv` once at import; an already-running daemon keeps stale agent names baked in and tasks bootstrap with whatever was in the env at startup. This is what killed `spec_df452c01` (architect bootstrapped as the retired `q35_ultra`, failed in 40s with "agent not found").
 - [ ] `pyyaml` is installed in the venv (`pip install pyyaml` — needed by the daemon to parse plan YAML)
 - [ ] `pytest` is installed in the venv (`pip install pytest` — the reviewer runs `python3 -m pytest` against generated code; without it every spec dead-ends in the retry loop with "No module named pytest")
 - [ ] `bubblewrap` is installed (`which bwrap` returns a path). LLM-generated tests run inside a `bwrap` sandbox by default; without it, every test run fails fast unless `QWEN_ALLOW_UNSANDBOXED_TESTS=1` is set (not recommended). Install on Debian/Ubuntu: `sudo apt install bubblewrap`.
 - [ ] **Ubuntu 24+ AppArmor restriction check.** Run `sysctl kernel.apparmor_restrict_unprivileged_userns`. If it returns `1`, bwrap will fail every test run with `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted` even though bwrap itself is installed. Two workarounds:
-  - **Per-session (preferred):** export `QWEN_ALLOW_UNSANDBOXED_TESTS=1` before starting `orchestrator_daemon.py`. Tests then run with the daemon's own privileges. The orchestrator already only writes inside `qwen_tasks_db/specs/<spec_id>/`, so for single-user dev machines the security delta is small.
+  - **Per-session (preferred):** export `QWEN_ALLOW_UNSANDBOXED_TESTS=1` before starting `qwen_server.orchestrator_daemon`. Tests then run with the daemon's own privileges. The orchestrator already only writes inside `qwen_tasks_db/specs/<spec_id>/`, so for single-user dev machines the security delta is small.
   - **Host-wide:** `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` (and persist via `/etc/sysctl.d/`). Affects all software using unprivileged user namespaces, not just bwrap. **A proper AppArmor profile for bwrap is the correct long-term fix — see memory `project_bwrap_apparmor.md`.**
 - [ ] No model is currently loaded (or the server is idle) — the test will trigger multiple model swaps
 
@@ -74,7 +74,7 @@ EOF
 cd ~/Dev/qwen-server
 source .env  # load ADMIN_API_KEY etc into shell
 source venv/bin/activate
-python orchestrator_daemon.py
+python -m qwen_server.orchestrator_daemon
 ```
 
 ### 1.3 Submit the spec

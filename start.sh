@@ -55,4 +55,4 @@ export NUMEXPR_NUM_THREADS=$PHYS_CORES
 
 # Start the server
 echo "Starting Qwen Multi-Agent Server (FastAPI)..."
-python server.py
+python -m qwen_server.server

@@ -11,7 +11,7 @@ from qwen_client.history import save_chat_history
 from qwen_client.completion import get_completion
 from qwen_client.compaction import compact_conversation
 from qwen_client.agentic.context import AgenticContext
-from tool_handlers import reset_write_counts
+from qwen_server.tool_handlers import reset_write_counts
 
 # Lazy-bound references set by main.py after tool_handlers.configure()
 _process_remote_commands = None
