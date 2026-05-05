@@ -86,6 +86,27 @@ The planner emits a `test_strategy` map that the daemon forwards to
 | `AUTONOMOUS_REVIEWER_MAX_TOKENS` | `16000` | Token budget for reviewer output. |
 | `AUTONOMOUS_MAX_RETRIES` | `3` | Per-task retry cap before the supervisor escalates. |
 
+### Phase b — adversarial test generation (autonomous mode, opt-in)
+
+After the local Qwen reviewer's tests pass on retry-0, the orchestrator
+optionally calls Gemini to write 3–7 additional `adversarial_test_*.py`
+files targeting edge cases Qwen missed. The combined suite re-runs;
+failure downgrades the verdict and falls through to the implementer
+retry loop with the failing-test output as feedback. Fail-open: a
+Gemini error (key, network, timeout, parse) lets the original PASS
+stand. Reuses `GEMINI_API_KEY` from the `/review` block.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AUTONOMOUS_ADVERSARIAL_TESTS_ENABLED` | `0` | Master switch. Set to `1` to enable. |
+| `AUTONOMOUS_ADVERSARIAL_MODEL` | `gemini-3-pro` | Gemini model used for adversarial test generation. |
+| `AUTONOMOUS_ADVERSARIAL_MAX_TOKENS` | `8000` | Output token cap. Higher than the `/review` default (Gemini is verbose). |
+| `AUTONOMOUS_ADVERSARIAL_TIMEOUT` | `300` | Seconds for the Gemini call. ThreadPoolExecutor enforces it. |
+
+Inspect aggregate stats with `scripts/phase_b_stats.py`. Per-spec
+firings appear in the dashboard's `EventTimeline` as `AGENT_RAN`
+events with `role=adversarial_test_writer`.
+
 ## Per-Model Configuration
 
 Each model is defined via `_create_model_config()` in `server.py`:

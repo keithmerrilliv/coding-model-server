@@ -32,6 +32,7 @@ from typing import Optional
 
 import requests
 
+import external_judges
 from qwen_client.config import COLORS, config, print_colored
 
 
@@ -131,55 +132,11 @@ def get_uncommitted_diff(cwd: Optional[str] = None) -> tuple[Optional[str], Opti
 
 
 # ── Per-judge call sites (each returns a markdown body or raises) ────────────
-
-def _call_claude(diff: str) -> str:
-    api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
-    if not api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY is not set")
-
-    try:
-        import anthropic
-    except ImportError as e:
-        raise RuntimeError(f"anthropic SDK not installed: {e}")
-
-    client = anthropic.Anthropic(api_key=api_key)
-    resp = client.messages.create(
-        model=CLAUDE_MODEL,
-        max_tokens=REVIEW_MAX_TOKENS,
-        system=REVIEW_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": diff}],
-        timeout=REVIEW_TIMEOUT,
-    )
-    parts = []
-    for block in resp.content:
-        if getattr(block, "type", None) == "text":
-            parts.append(block.text)
-    return "".join(parts).strip() or "(empty response)"
-
-
-def _call_gemini(diff: str) -> str:
-    api_key = (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip()
-    if not api_key:
-        raise RuntimeError("GEMINI_API_KEY (or GOOGLE_API_KEY) is not set")
-
-    try:
-        from google import genai
-        from google.genai import types as genai_types
-    except ImportError as e:
-        raise RuntimeError(f"google-genai SDK not installed: {e}")
-
-    client = genai.Client(api_key=api_key)
-    resp = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=diff,
-        config=genai_types.GenerateContentConfig(
-            system_instruction=REVIEW_SYSTEM_PROMPT,
-            max_output_tokens=REVIEW_MAX_TOKENS,
-        ),
-    )
-    text = (resp.text or "").strip()
-    return text or "(empty response)"
-
+#
+# Claude/Gemini calls live in the shared ``external_judges`` module so the
+# autonomous orchestrator can reuse them (Phase b adversarial test-writing).
+# The local Qwen call stays here because it's review-specific (talks to the
+# local server's OpenAI-compatible endpoint, not an external SDK).
 
 def _call_qwen(diff: str, agent: str) -> str:
     """Call a local-server Qwen agent. Used for both reviewer and deep_reviewer."""
@@ -235,9 +192,19 @@ def fan_out_review(diff: str) -> list[JudgeResult]:
     with ThreadPoolExecutor(max_workers=3) as pool:
         futures = {
             pool.submit(_wrap, f"Claude ({CLAUDE_MODEL})", COLORS['CYAN'],
-                        lambda: _call_claude(diff)): "claude",
+                        lambda: external_judges.call_claude(
+                            REVIEW_SYSTEM_PROMPT, diff,
+                            max_tokens=REVIEW_MAX_TOKENS,
+                            timeout=REVIEW_TIMEOUT,
+                            model=CLAUDE_MODEL,
+                        )): "claude",
             pool.submit(_wrap, f"Gemini ({GEMINI_MODEL})", COLORS['BLUE'],
-                        lambda: _call_gemini(diff)): "gemini",
+                        lambda: external_judges.call_gemini(
+                            REVIEW_SYSTEM_PROMPT, diff,
+                            max_tokens=REVIEW_MAX_TOKENS,
+                            timeout=REVIEW_TIMEOUT,
+                            model=GEMINI_MODEL,
+                        )): "gemini",
             pool.submit(_wrap_qwen_pair, diff): "qwen_pair",
         }
         for fut in futures:
@@ -343,20 +310,12 @@ def _pre_flight() -> list[str]:
     the user isn't surprised by missing columns.
     """
     warnings: list[str] = []
-    if not os.getenv("ANTHROPIC_API_KEY", "").strip():
-        warnings.append("ANTHROPIC_API_KEY not set — Claude judge will be skipped.")
-    else:
-        try:
-            import anthropic  # noqa: F401
-        except ImportError:
-            warnings.append("`anthropic` package not installed — Claude judge will be skipped (pip install anthropic).")
-    if not (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip():
-        warnings.append("GEMINI_API_KEY (or GOOGLE_API_KEY) not set — Gemini judge will be skipped.")
-    else:
-        try:
-            import google.genai  # noqa: F401
-        except ImportError:
-            warnings.append("`google-genai` package not installed — Gemini judge will be skipped (pip install google-genai).")
+    ok, reason = external_judges.claude_available()
+    if not ok:
+        warnings.append(f"{reason} — Claude judge will be skipped.")
+    ok, reason = external_judges.gemini_available()
+    if not ok:
+        warnings.append(f"{reason} — Gemini judge will be skipped.")
     return warnings
 
 

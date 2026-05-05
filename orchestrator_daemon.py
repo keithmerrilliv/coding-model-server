@@ -966,6 +966,99 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
                         payload={"passed": tests_passed,
                                  "output_chars": len(test_output)})
 
+    # Phase b: adversarial test generation via Gemini. Fires once per spec,
+    # only when Qwen reviewer's tests pass on retry-0. If Gemini writes any
+    # adversarial tests, we re-run the full suite and a failure here
+    # downgrades the verdict (falls through to the retry branch below).
+    # Fail-open everywhere — if Gemini errors out, the original PASS stands.
+    if (executor.ADVERSARIAL_TESTS_ENABLED
+            and tests_passed
+            and result.verdict == "PASS"
+            and task.retry_count == 0
+            and tests_required):
+        try:
+            adv_files = executor.generate_adversarial_tests(
+                spec_dir, spec_md, design_md, code_files,
+                reviewer_tests=result.test_files,
+                reviewer_test_output=test_output,
+            )
+        except Exception as e:  # noqa: BLE001 — fail-open by design
+            logger.warning(
+                "spec %s: phase-b Gemini call failed (%s: %s); skipping "
+                "adversarial tests, original PASS stands",
+                spec.id, type(e).__name__, e,
+            )
+            adv_files = []
+
+        if adv_files:
+            for path, _ in adv_files:
+                db.create_artifact(spec_id=spec.id, task_id=task.id,
+                                   kind=ArtifactKind.TEST_REPORT, path=path)
+
+            framework_opts = {
+                k: v for k, v in test_strategy.items()
+                if k not in ("framework", "required")
+            }
+            adv_passed, adv_output = run_tests(
+                spec_dir, framework=framework, **framework_opts,
+            )
+            # Re-apply the structural guard on the combined run as well —
+            # an empty/short adversarial output that exits 0 should not
+            # smuggle a hallucinated PASS.
+            if adv_passed:
+                ok, reason = _validate_test_output_structure(adv_output, framework)
+                if not ok:
+                    logger.warning(
+                        "spec %s: phase-b combined test_output failed "
+                        "structural validation (%s); forcing adv_passed=False",
+                        spec.id, reason,
+                    )
+                    adv_passed = False
+                    adv_output = (
+                        f"[orchestrator guard] {reason}\n\n"
+                        f"Combined test runner output:\n{adv_output}"
+                    )
+
+            db.record_event(
+                EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
+                payload={"role": "adversarial_test_writer",
+                         "model": executor.ADVERSARIAL_MODEL,
+                         "tests_added": len(adv_files),
+                         "passed": adv_passed},
+            )
+
+            # Combined run is now canonical — overwrite test_output.txt and
+            # record the rerun outcome so dashboards/audits see the merged
+            # truth, not the Qwen-only first pass.
+            test_output = adv_output
+            tests_passed = adv_passed
+            _write_artifact(spec_dir, "test_output.txt", test_output)
+            db.record_event(EventKind.TEST_RAN, spec_id=spec.id, task_id=task.id,
+                            payload={"passed": tests_passed,
+                                     "output_chars": len(test_output),
+                                     "phase": "post_adversarial"})
+
+            if not adv_passed:
+                logger.info(
+                    "spec %s: phase-b adversarial tests FAILED — falling "
+                    "through to retry branch with combined output",
+                    spec.id,
+                )
+            else:
+                logger.info(
+                    "spec %s: phase-b adversarial tests passed (%d added) — "
+                    "PASS stands", spec.id, len(adv_files),
+                )
+        else:
+            db.record_event(
+                EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
+                payload={"role": "adversarial_test_writer",
+                         "model": executor.ADVERSARIAL_MODEL,
+                         "tests_added": 0,
+                         "passed": None,
+                         "skip_reason": "no_blocks_returned"},
+            )
+
     if tests_passed and result.verdict == "PASS":
         # Everything looks good — create release_approval gate
         db.update_task_status(task.id, TaskStatus.BLOCKED_ON_REVIEW)
@@ -1696,6 +1789,28 @@ def main() -> int:
     db = Database()
     logger.info("task store: %s", db.db_path)
     logger.info("workspace:  %s", db.workspace_root)
+
+    # Phase b pre-flight: if the operator flipped the flag, surface up
+    # front whether the Gemini path will actually fire — otherwise a
+    # missing key only shows up as a runtime warning per spec.
+    adv_ok, adv_reason = executor.adversarial_tests_available()
+    if executor.ADVERSARIAL_TESTS_ENABLED:
+        if adv_ok:
+            logger.info(
+                "phase-b adversarial test generation ENABLED (model=%s, "
+                "max_tokens=%d, timeout=%.0fs)",
+                executor.ADVERSARIAL_MODEL,
+                executor.ADVERSARIAL_MAX_TOKENS,
+                executor.ADVERSARIAL_TIMEOUT,
+            )
+        else:
+            logger.warning(
+                "phase-b adversarial test generation flag is ON but "
+                "Gemini is unavailable (%s) — every spec will fail-open "
+                "to the original PASS. Fix the env or unset "
+                "AUTONOMOUS_ADVERSARIAL_TESTS_ENABLED to silence this.",
+                adv_reason,
+            )
 
     # Spin up the Jira sync worker on its own thread. It shares the same
     # Database instance (SQLite WAL is thread-safe) and runs independently

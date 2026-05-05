@@ -32,6 +32,8 @@ from typing import Optional
 
 import requests
 
+import external_judges
+
 from . import seccomp_filter
 
 # Module-level session: reuses TCP+TLS connections across the
@@ -1132,3 +1134,201 @@ def run_tests(
     logger.info("test result: %s (%d chars output)",
                 "PASS" if passed else "FAIL", len(output))
     return passed, (output or "").strip()
+
+
+# ── Phase b: Adversarial test generation (Gemini) ────────────────────────────
+#
+# Fires once per spec, after the local Qwen reviewer's tests pass on retry-0,
+# before creating the release_approval gate. Gemini is given the spec, design,
+# code, and Qwen's existing tests, and asked to write additional pytest tests
+# that target edge cases Qwen missed. Files land in spec_dir as
+# `adversarial_test_*.py` (separate namespace from Qwen's `test_*.py` so the
+# orchestrator can identify them in retry feedback / cleanup).
+#
+# Disabled by default. Set AUTONOMOUS_ADVERSARIAL_TESTS_ENABLED=1 to opt in.
+# Single-writer design (Gemini only) — no Claude path; user is on Anthropic
+# subscription with no API credits.
+
+ADVERSARIAL_TESTS_ENABLED = os.getenv(
+    "AUTONOMOUS_ADVERSARIAL_TESTS_ENABLED", "0"
+).lower() in ("1", "true", "yes")
+ADVERSARIAL_MAX_TOKENS = int(os.getenv("AUTONOMOUS_ADVERSARIAL_MAX_TOKENS", "8000"))
+ADVERSARIAL_TIMEOUT = float(os.getenv("AUTONOMOUS_ADVERSARIAL_TIMEOUT", "300"))
+ADVERSARIAL_MODEL = os.getenv(
+    "AUTONOMOUS_ADVERSARIAL_MODEL", external_judges.DEFAULT_GEMINI_MODEL
+)
+
+ADVERSARIAL_FILENAME_PREFIX = "adversarial_test_"
+
+
+ADVERSARIAL_TEST_SYSTEM_PROMPT = textwrap.dedent("""\
+    You are an adversarial test-writer. The local reviewer has already
+    written tests and approved this code. Your job: write 3 to 7 additional
+    pytest tests that target edge cases the reviewer's tests miss.
+
+    # What to target
+    - Boundary values: empty inputs, single-element inputs, max-size inputs.
+    - Type edge cases: None, NaN, negative numbers where positive expected.
+    - Concurrent / ordering edge cases when the spec implies order.
+    - Error paths: malformed inputs, missing files, timeout/retry.
+    - Off-by-one in indices, slices, ranges.
+
+    # Hard rules
+
+    1. Test ONLY behaviors the spec requires. If the spec is silent on an
+       edge case, do NOT invent a requirement. Over-specification is the
+       failure mode you must avoid.
+
+       Concrete example of what NOT to test: if the spec asks for a
+       function that returns the sum of a list of ints and is silent on
+       what to do with floats, do NOT add a test that asserts a specific
+       behavior for floats. Skip it.
+
+    2. Output one or more `<<<FILE: adversarial_test_<name>.py>>>` blocks
+       terminated by `<<<END_FILE>>>`. Filenames MUST start with
+       `adversarial_test_` so they don't collide with the reviewer's
+       tests. Any file whose name doesn't start with `adversarial_test_`
+       will be silently dropped by the orchestrator.
+
+    3. Tests must pass on a CORRECT implementation. If you cannot tell
+       whether the spec requires the behavior you want to test, skip it.
+
+    4. Use pytest. Real imports, no mocks beyond what the existing tests
+       already use.
+
+    5. At the top of each test function, add a one-line docstring naming
+       the spec acceptance criterion the test exercises:
+           def test_negative_count():
+               \"\"\"Acceptance: 'rejects negative counts with ValueError'.\"\"\"
+
+    6. If, after careful reading, you conclude the reviewer's tests
+       already cover every edge case the spec requires, output NO file
+       blocks at all. An empty response is the correct answer in that
+       case — do not invent tests for the sake of producing output.
+
+    # Output format
+
+    Either zero file blocks (if no useful adversarial tests exist), or
+    1 to 3 files containing 3-7 test functions total. No prose outside
+    the file blocks.
+    """)
+
+
+def adversarial_tests_available() -> tuple[bool, Optional[str]]:
+    """Pre-flight: (ok, reason_if_not). Used by orchestrator startup logging."""
+    if not ADVERSARIAL_TESTS_ENABLED:
+        return False, "AUTONOMOUS_ADVERSARIAL_TESTS_ENABLED is not set"
+    return external_judges.gemini_available()
+
+
+def build_adversarial_test_message(
+    spec_md: str,
+    design_md: str,
+    code_files: list[tuple[str, str]],
+    reviewer_tests: list[tuple[str, str]],
+    reviewer_test_output: str,
+) -> str:
+    """Assemble the user-content payload for the adversarial test-writer.
+
+    Mirrors the structure of build_reviewer_message but adds the
+    reviewer's tests and the pytest output proving they passed — that's
+    the adversarial framing ("here's what already passes; break it").
+    """
+    code_sections = [f"### {p}\n```\n{c}\n```\n" for p, c in code_files]
+    reviewer_test_sections = [
+        f"### {p}\n```\n{c}\n```\n" for p, c in reviewer_tests
+    ]
+    truncated_test_output = reviewer_test_output[-4000:] if reviewer_test_output else ""
+
+    return (
+        "## Specification\n\n"
+        f"{spec_md}\n\n"
+        "## Architecture Design\n\n"
+        f"{design_md}\n\n"
+        "## Implementation Files (the code under test)\n\n"
+        + "\n".join(code_sections)
+        + "\n## Reviewer's Existing Tests (already pass — do not duplicate)\n\n"
+        + ("\n".join(reviewer_test_sections) if reviewer_test_sections
+           else "(no reviewer tests on disk)\n")
+        + "\n## Reviewer's Test-Run Output (last 4 KB)\n\n"
+        + f"```\n{truncated_test_output}\n```\n\n"
+        + "---\n\n"
+        "Your task: write 3-7 adversarial pytest tests in 1-3 files named "
+        "`adversarial_test_*.py`. Each test must exercise a spec-required "
+        "behavior the reviewer's tests miss. If you find no missing "
+        "coverage, output zero file blocks."
+    )
+
+
+def generate_adversarial_tests(
+    spec_dir: Path,
+    spec_md: str,
+    design_md: str,
+    code_files: list[tuple[str, str]],
+    reviewer_tests: list[tuple[str, str]],
+    reviewer_test_output: str,
+) -> list[tuple[str, str]]:
+    """Call Gemini, parse adversarial-test files, write them to spec_dir.
+
+    Returns the list of (rel_path, content) actually written. An empty
+    list means either Gemini chose to write none (legitimate — see rule
+    6 in the system prompt) or every block had a namespace violation
+    (rejected with a warning log).
+
+    Raises RuntimeError on missing key, missing SDK, or transport error
+    (caller decides whether to fail-open or fail-closed).
+    """
+    user_content = build_adversarial_test_message(
+        spec_md, design_md, code_files, reviewer_tests, reviewer_test_output,
+    )
+
+    logger.info("phase-b: calling Gemini adversarial test-writer "
+                "(model=%s, max_tokens=%d, timeout=%.0fs, %d KiB user)",
+                ADVERSARIAL_MODEL, ADVERSARIAL_MAX_TOKENS,
+                ADVERSARIAL_TIMEOUT, len(user_content) // 1024)
+    raw = external_judges.call_gemini(
+        ADVERSARIAL_TEST_SYSTEM_PROMPT, user_content,
+        max_tokens=ADVERSARIAL_MAX_TOKENS,
+        timeout=ADVERSARIAL_TIMEOUT,
+        model=ADVERSARIAL_MODEL,
+    )
+
+    cleaned = _strip_thinking(raw)
+    matches = _FILE_RE.findall(cleaned)
+    if not matches:
+        logger.info("phase-b: Gemini returned no adversarial test blocks "
+                    "(rule 6 — reviewer coverage deemed sufficient, or "
+                    "empty response)")
+        return []
+
+    written: list[tuple[str, str]] = []
+    for rel_path, content in matches:
+        rel_path = rel_path.strip()
+        # Take just the basename to defang `dir/adversarial_test_x.py`
+        # attempts that might escape the namespace check below. We don't
+        # want adversarial tests in arbitrary subdirs anyway.
+        basename = os.path.basename(rel_path)
+        if not basename.startswith(ADVERSARIAL_FILENAME_PREFIX):
+            logger.warning(
+                "phase-b: rejecting adversarial test with non-conforming "
+                "filename %r (must start with %r)",
+                rel_path, ADVERSARIAL_FILENAME_PREFIX,
+            )
+            continue
+        if not basename.endswith(".py"):
+            logger.warning(
+                "phase-b: rejecting adversarial test with non-.py "
+                "extension %r", rel_path,
+            )
+            continue
+        cleaned_content = _strip_markdown_fence(content)
+        try:
+            _write_artifact(spec_dir, basename, cleaned_content)
+        except ValueError as e:
+            logger.warning("phase-b: rejecting adversarial test %r: %s",
+                           rel_path, e)
+            continue
+        written.append((basename, cleaned_content))
+
+    logger.info("phase-b: wrote %d adversarial test file(s)", len(written))
+    return written
