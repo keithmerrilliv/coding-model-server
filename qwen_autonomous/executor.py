@@ -912,7 +912,17 @@ def _run_local_tests(spec_dir: Path, framework: str, timeout: int) -> tuple[bool
     if framework == "jest":
         raw_cmd = ["npx", "jest", "--no-coverage", "--roots", str(spec_dir)]
     else:
-        raw_cmd = [sys.executable, "-m", "pytest", "-v", "--tb=short", str(spec_dir)]
+        # `--ignore retry_history` keeps pytest from collecting the
+        # snapshot dirs `_snapshot_retry` writes inside spec_dir. Without
+        # it, retry-N picks up `retry_history/retry_0/tests/test_x.py`
+        # alongside the live `tests/test_x.py` and aborts with `import
+        # file mismatch` (same module name, two paths). The retry_history
+        # data is consumed by the synthesis pass directly, never re-run.
+        raw_cmd = [
+            sys.executable, "-m", "pytest", "-v", "--tb=short",
+            "--ignore", str(spec_dir / "retry_history"),
+            str(spec_dir),
+        ]
 
     allow_unsandboxed = os.getenv("QWEN_ALLOW_UNSANDBOXED_TESTS", "").lower() in ("1", "true", "yes")
 

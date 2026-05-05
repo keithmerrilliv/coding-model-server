@@ -27,7 +27,11 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeou
 # ── Defaults (callers may override via the model= kwarg) ─────────────────────
 
 DEFAULT_CLAUDE_MODEL = "claude-sonnet-4-6"
-DEFAULT_GEMINI_MODEL = "gemini-3-pro"
+# Defaults to gemini-2.5-flash because pro models are paid-tier-only on the
+# Gemini API (free tier limit=0 for gemini-3-pro-preview / gemini-2.5-pro).
+# Override via REVIEW_GEMINI_MODEL or AUTONOMOUS_ADVERSARIAL_GEMINI_MODEL once
+# paid billing is configured. gemini-3-pro-preview is the recommended upgrade.
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 
 
 # ── Call sites ───────────────────────────────────────────────────────────────

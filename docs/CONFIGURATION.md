@@ -102,7 +102,7 @@ run; if everything fails the original PASS stands. Reuses
 |----------|---------|-------------|
 | `AUTONOMOUS_ADVERSARIAL_TESTS_ENABLED` | `0` | Master switch. Set to `1` to enable. |
 | `AUTONOMOUS_ADVERSARIAL_PROVIDER` | `gemini` | `gemini`, `claude`, or `both`. See provider-mode notes below. |
-| `AUTONOMOUS_ADVERSARIAL_GEMINI_MODEL` | `gemini-3-pro` | Gemini model used when the provider list includes `gemini`. |
+| `AUTONOMOUS_ADVERSARIAL_GEMINI_MODEL` | `gemini-2.5-flash` | Gemini model used when the provider list includes `gemini`. |
 | `AUTONOMOUS_ADVERSARIAL_CLAUDE_MODEL` | `claude-sonnet-4-6` | Claude model used when the provider list includes `claude`. |
 | `AUTONOMOUS_ADVERSARIAL_MAX_TOKENS` | `8000` | Output token cap per provider call. |
 | `AUTONOMOUS_ADVERSARIAL_TIMEOUT` | `300` | Seconds for each provider call. ThreadPoolExecutor enforces the Gemini-side timeout; the Anthropic SDK enforces its own. |

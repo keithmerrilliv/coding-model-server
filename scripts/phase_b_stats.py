@@ -33,7 +33,10 @@ def _query_events(db_path: Path, since: Optional[str], spec_id: Optional[str]) -
         sys.exit(f"DB not found: {db_path}")
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
-    sql = "SELECT id, spec_id, task_id, kind, payload_json, created_at FROM events WHERE kind = 'AGENT_RAN'"
+    # `kind` is stored as the enum's lowercase value (e.g. 'agent_ran'),
+    # not the Python enum name. LOWER() defends against any accidental
+    # uppercase rows that might exist from older code paths.
+    sql = "SELECT id, spec_id, task_id, kind, payload_json, created_at FROM events WHERE LOWER(kind) = 'agent_ran'"
     args: list = []
     if since:
         sql += " AND created_at >= ?"
