@@ -42,6 +42,24 @@ export interface Gate {
   responded_at: string | null;
 }
 
+export interface Task {
+  id: string;
+  spec_id: string;
+  parent_id: string | null;
+  agent: string;
+  role: string;
+  title: string;
+  description: string | null;
+  status: string;
+  execution_target: string | null;
+  jira_issue_key: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  retry_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface Event {
   id: number;
   spec_id: string;
@@ -57,6 +75,12 @@ export interface SpecDetailResponse {
   open_gates: Gate[];
   task_count: number;
   recent_events: Event[];
+  // All tasks for the spec, including completed retries — used by the
+  // execution-DAG renderer. Defaults to [] for older server versions.
+  tasks?: Task[];
+  // Every gate including closed ones — DAG needs decisions to draw
+  // retry-loop edges. Defaults to [] for older server versions.
+  all_gates?: Gate[];
 }
 
 export interface GateRespondRequest {

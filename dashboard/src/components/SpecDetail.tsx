@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { fetchSpecDetail } from '../api/client';
 import type { SpecDetailResponse } from '../types/api';
 import EventTimeline from './EventTimeline';
+import ExecutionDag from './ExecutionDag';
 import GateActions from './GateActions';
 
 const SpecDetail: React.FC = () => {
@@ -57,6 +58,10 @@ const SpecDetail: React.FC = () => {
         </div>
         <p style={{ marginTop: '8px', color: '#6c757d' }}>Task Count: {detail.task_count}</p>
         <p style={{ fontSize: '12px', color: '#868e96' }}>ID: {detail.spec.id} | Created: {new Date(detail.spec.created_at).toLocaleString()}</p>
+      </div>
+
+      <div className="card">
+        <ExecutionDag detail={detail} />
       </div>
 
       <div className="grid grid-2">

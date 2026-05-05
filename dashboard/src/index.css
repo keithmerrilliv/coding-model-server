@@ -127,3 +127,13 @@ tr:hover { background: #f8f9fa; cursor: pointer; }
 .active-model-draft { margin-top: 12px; padding-top: 10px; border-top: 1px dashed var(--color-border); font-size: 12px; color: #495057; }
 .active-model-draft code { font-family: 'SF Mono', Menlo, monospace; background: #f8f9fa; padding: 1px 6px; border-radius: 3px; margin-left: 6px; }
 .active-model-foot { margin-top: 12px; font-size: 11px; color: #6c757d; text-align: right; }
+/* Execution DAG (Mermaid-rendered flowchart of tasks + gates). */
+.execution-dag { width: 100%; }
+.execution-dag-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.execution-dag-header h3 { margin: 0; }
+.execution-dag-toggle { font-size: 11px; padding: 4px 10px; cursor: pointer; background: none; border: 1px solid var(--color-border); border-radius: 3px; color: var(--color-primary); }
+.execution-dag-toggle:hover { background: #f8f9fa; }
+.execution-dag-svg { overflow-x: auto; padding: 8px 0; }
+.execution-dag-svg svg { max-width: 100%; height: auto; }
+.execution-dag-error { padding: 12px; background: #fff5f5; border: 1px solid #fc8181; border-radius: 4px; color: #c53030; font-family: 'SF Mono', Menlo, monospace; font-size: 12px; }
+.execution-dag-source { background: #1e1e1e; color: #d4d4d4; padding: 12px; border-radius: 4px; overflow-x: auto; font-family: 'SF Mono', Menlo, monospace; font-size: 11px; line-height: 1.4; margin-top: 8px; }

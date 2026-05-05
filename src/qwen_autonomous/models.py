@@ -172,3 +172,11 @@ class SpecSummary(BaseModel):
     open_gates: list[ReviewGate]
     task_count: int
     recent_events: list[Event]
+    # All tasks for the spec (each retry of each role is a separate Task row).
+    # Used by the dashboard to render the execution DAG. Older clients that
+    # ignore this field continue to work; the field is always present.
+    tasks: list[Task] = []
+    # All gates including closed ones. The DAG renderer needs gate decisions
+    # (approved / rejected) to draw retry-loop edges. open_gates above is a
+    # subset. When tasks is empty (legacy callers), this is also empty.
+    all_gates: list[ReviewGate] = []

@@ -892,6 +892,8 @@ def get_autonomous_spec(spec_id: str) -> SpecSummary:
         open_gates=db.list_open_gates(spec_id=spec_id),
         task_count=db.count_tasks_for_spec(spec_id),
         recent_events=db.list_recent_events(spec_id=spec_id, limit=20),
+        tasks=db.list_tasks_for_spec(spec_id),
+        all_gates=db.list_gates_for_spec(spec_id),
     )
 
 
