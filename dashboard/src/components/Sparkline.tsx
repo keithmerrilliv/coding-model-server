@@ -2,6 +2,7 @@ import React from 'react';
 
 interface SparklineProps {
   values: (number | null)[];
+  /** Omit to render at 100% of the parent's width (responsive via SVG viewBox). */
   width?: number;
   height?: number;
   color?: string;
@@ -11,9 +12,13 @@ interface SparklineProps {
   strokeWidth?: number;
 }
 
+// Logical horizontal coordinate space when running in flex mode. The SVG
+// scales this to the container's actual width via preserveAspectRatio="none".
+const FLEX_VIEW_W = 1000;
+
 export const Sparkline: React.FC<SparklineProps> = ({
   values,
-  width = 220,
+  width,
   height = 44,
   color = '#0d6efd',
   fill = false,
@@ -21,13 +26,20 @@ export const Sparkline: React.FC<SparklineProps> = ({
   yMin = 0,
   strokeWidth = 1.5,
 }) => {
-  if (!values.length) return <svg width={width} height={height} aria-hidden="true" />;
+  const flex = width === undefined;
+  const geomW = flex ? FLEX_VIEW_W : width;
+
+  if (!values.length) {
+    return flex
+      ? <svg width="100%" height={height} aria-hidden="true" style={{ display: 'block' }} />
+      : <svg width={width} height={height} aria-hidden="true" />;
+  }
 
   const numeric = values.filter((v): v is number => v != null);
   const dataMax = numeric.length ? Math.max(...numeric) : 1;
   const max = yMax ?? Math.max(dataMax, 1);
   const range = max - yMin || 1;
-  const stepX = width / Math.max(values.length - 1, 1);
+  const stepX = geomW / Math.max(values.length - 1, 1);
 
   const projected: (string | null)[] = values.map((v, i) => {
     if (v == null) return null;
@@ -48,8 +60,20 @@ export const Sparkline: React.FC<SparklineProps> = ({
   }
   if (current.length) segments.push(current);
 
+  // In flex mode, viewBox + preserveAspectRatio="none" lets the geometry
+  // stretch horizontally to fill the container. vector-effect on the strokes
+  // keeps line weight visually constant despite the non-uniform scale.
+  const svgProps = flex
+    ? {
+        width: '100%',
+        height,
+        viewBox: `0 0 ${FLEX_VIEW_W} ${height}`,
+        preserveAspectRatio: 'none' as const,
+      }
+    : { width, height };
+
   return (
-    <svg width={width} height={height} style={{ display: 'block' }}>
+    <svg {...svgProps} style={{ display: 'block' }}>
       {fill && segments.map((seg, i) => {
         const xFirst = seg[0].split(',')[0];
         const xLast = seg[seg.length - 1].split(',')[0];
@@ -71,6 +95,7 @@ export const Sparkline: React.FC<SparklineProps> = ({
           strokeWidth={strokeWidth}
           strokeLinejoin="round"
           strokeLinecap="round"
+          vectorEffect="non-scaling-stroke"
           points={seg.join(' ')}
         />
       ))}

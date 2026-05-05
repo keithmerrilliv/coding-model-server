@@ -99,16 +99,16 @@ const EndpointRow: React.FC<{ ep: EndpointMetric }> = ({ ep }) => {
       </div>
       <div className="endpoint-charts">
         <ChartCol label="req/min" value={String(qpm)} color="#0d6efd">
-          <Sparkline values={counts} color="#0d6efd" fill width={140} height={36} />
+          <Sparkline values={counts} color="#0d6efd" fill height={36} />
         </ChartCol>
         <ChartCol label="p50" value={lastP50 != null ? `${fmt(lastP50, 0)}ms` : '—'} color="#198754">
-          <Sparkline values={p50s} color="#198754" width={140} height={36} />
+          <Sparkline values={p50s} color="#198754" height={36} />
         </ChartCol>
         <ChartCol label="p95" value={lastP95 != null ? `${fmt(lastP95, 0)}ms` : '—'} color="#fd7e14">
-          <Sparkline values={p95s} color="#fd7e14" width={140} height={36} />
+          <Sparkline values={p95s} color="#fd7e14" height={36} />
         </ChartCol>
         <ChartCol label="non-2xx" value={`${non2xxPct}%`} color="#dc3545">
-          <Sparkline values={errors} color="#dc3545" fill width={140} height={36} />
+          <Sparkline values={errors} color="#dc3545" fill height={36} />
         </ChartCol>
       </div>
     </div>
