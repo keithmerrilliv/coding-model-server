@@ -910,13 +910,24 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
     design_path = spec_dir / "design.md"
     design_md = design_path.read_text() if design_path.exists() else ""
 
-    # Gather all code files from implementer artifacts
+    # Gather all code files from implementer artifacts. Binary deliverables
+    # (icons, fonts, etc.) get a placeholder so the reviewer still sees the
+    # path in `## Implementation Files` (preserves rule-5 cite-check and
+    # rule-6 file-list hygiene) without crashing on a UTF-8 decode.
     code_artifacts = [a for a in _list_code_artifacts(db, spec.id)]
     code_files = []
     for art in code_artifacts:
         fpath = spec_dir / art.path
-        if fpath.exists():
-            code_files.append((art.path, fpath.read_text()))
+        if not fpath.exists():
+            continue
+        try:
+            content = fpath.read_text()
+        except UnicodeDecodeError:
+            content = (
+                f"[binary file, {fpath.stat().st_size} bytes — "
+                f"reviewer cannot inspect content]"
+            )
+        code_files.append((art.path, content))
 
     # Detect test framework from the plan
     plan = _yaml.safe_load(spec.normalized_yaml) if spec.normalized_yaml else {}
