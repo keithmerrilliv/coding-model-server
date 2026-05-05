@@ -461,16 +461,23 @@ class ArchitectResult:
 
 @dataclass
 class ImplementerResult:
-    files: list[tuple[str, str]]  # (relative_path, content)
+    files: list[tuple[str, str]]  # (relative_path, content) — deduped last-wins
     raw: str
+    # Paths that appeared more than once in the response. We honor the
+    # last occurrence (treating earlier ones as drafts the model
+    # corrected itself on) and surface the list so the orchestrator can
+    # record a diagnostic event — useful when debugging "why did my file
+    # have content I didn't expect" reports.
+    duplicate_paths: list[str] = field(default_factory=list)
 
 
 @dataclass
 class ReviewerResult:
-    test_files: list[tuple[str, str]]  # (relative_path, content)
+    test_files: list[tuple[str, str]]  # (relative_path, content) — deduped last-wins
     review_md: str
     verdict: str  # "PASS" or "FAIL"
     raw: str
+    duplicate_paths: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -591,20 +598,55 @@ def _strip_markdown_fence(content: str) -> str:
     return content
 
 
+def _dedupe_files_last_wins(
+    pairs: list[tuple[str, str]],
+) -> tuple[list[tuple[str, str]], list[str]]:
+    """Collapse duplicate paths to last-write-wins; return (deduped, dup_paths).
+
+    Implementers occasionally emit multiple <<<FILE: path>>> blocks for the
+    same path — usually a self-correction where the second block is the
+    "real" output. Picking the last occurrence matches that intent, but we
+    surface the duplicates so the orchestrator can log them for debugging
+    "the file's content surprises me" reports.
+    """
+    indexed: dict[str, int] = {}
+    for i, (path, _content) in enumerate(pairs):
+        indexed[path] = i  # last occurrence wins
+    deduped = [pairs[i] for i in sorted(indexed.values())]
+    duplicates = sorted({
+        p for p, _ in pairs if [pp for pp, _ in pairs if pp == p].count(p) > 1
+    })
+    return deduped, duplicates
+
+
 def parse_implementer_response(text: str) -> ImplementerResult | ParseError:
     cleaned = _strip_thinking(text)
     matches = _FILE_RE.findall(cleaned)
     if not matches:
         return ParseError("No <<<FILE: path>>>…<<<END_FILE>>> blocks found", text)
-    files = [(path.strip(), _strip_markdown_fence(content)) for path, content in matches]
-    return ImplementerResult(files=files, raw=text)
+    raw_files = [(path.strip(), _strip_markdown_fence(content)) for path, content in matches]
+    files, duplicates = _dedupe_files_last_wins(raw_files)
+    if duplicates:
+        logger.warning(
+            "implementer response contained duplicate file paths "
+            "(last-write-wins applied): %s",
+            duplicates,
+        )
+    return ImplementerResult(files=files, raw=text, duplicate_paths=duplicates)
 
 
 def parse_reviewer_response(text: str) -> ReviewerResult | ParseError:
     cleaned = _strip_thinking(text)
 
     # Extract test files (same FILE marker as implementer)
-    test_files = [(p.strip(), c) for p, c in _FILE_RE.findall(cleaned)]
+    raw_test_files = [(p.strip(), c) for p, c in _FILE_RE.findall(cleaned)]
+    test_files, dup_paths = _dedupe_files_last_wins(raw_test_files)
+    if dup_paths:
+        logger.warning(
+            "reviewer response contained duplicate test paths "
+            "(last-write-wins applied): %s",
+            dup_paths,
+        )
 
     # Extract review report
     review_match = _REVIEW_RE.search(cleaned)
@@ -638,6 +680,7 @@ def parse_reviewer_response(text: str) -> ReviewerResult | ParseError:
         review_md=review_md,
         verdict=verdict,
         raw=text,
+        duplicate_paths=dup_paths,
     )
 
 

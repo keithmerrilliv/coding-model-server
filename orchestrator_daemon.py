@@ -752,6 +752,17 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
         )
         return
 
+    # Surface duplicate-path collisions as a diagnostic event so the
+    # dashboard timeline (and any "why does this file have unexpected
+    # content" investigation) can see that the model emitted the same
+    # path twice. The parser already deduped via last-write-wins.
+    if result.duplicate_paths:
+        db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
+                        payload={"role": "implementer",
+                                 "anomaly": "duplicate_file_paths",
+                                 "paths": result.duplicate_paths,
+                                 "retry": task.retry_count})
+
     # Write all files
     for rel_path, content in result.files:
         _write_artifact(spec_dir, rel_path, content)
@@ -899,6 +910,13 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
         db.update_task_status(task.id, TaskStatus.FAILED)
         db.update_spec_status(spec.id, SpecStatus.FAILED)
         return
+
+    if result.duplicate_paths:
+        db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
+                        payload={"role": "reviewer",
+                                 "anomaly": "duplicate_test_paths",
+                                 "paths": result.duplicate_paths,
+                                 "retry": task.retry_count})
 
     # Write test files
     for rel_path, content in result.test_files:
