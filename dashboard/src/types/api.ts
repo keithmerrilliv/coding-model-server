@@ -10,6 +10,10 @@ export interface ModelInfo {
   object: string;
   created?: number;
   owned_by?: string;
+  // Human-readable summary the server builds from the agent config
+  // (model name + key params). Always present in current server
+  // responses; optional here for older-server compatibility.
+  description?: string;
 }
 
 export interface ModelListResponse {

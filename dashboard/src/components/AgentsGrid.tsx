@@ -27,7 +27,9 @@ const AgentsGrid: React.FC = () => {
         {models.map((m) => (
           <div key={m.id} style={{ padding: '12px', border: '1px solid var(--color-border)', borderRadius: 'var(--radius)' }}>
             <strong>{m.id}</strong>
-            <p style={{ fontSize: '12px', color: '#6c757d' }}>{m.owned_by || 'N/A'}</p>
+            <p style={{ fontSize: '12px', color: '#6c757d', marginTop: '4px', lineHeight: '1.4' }}>
+              {m.description || m.owned_by || 'N/A'}
+            </p>
           </div>
         ))}
         {models.length === 0 && !error && <p>Loading agents...</p>}
