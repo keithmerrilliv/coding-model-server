@@ -1,10 +1,13 @@
 import React from 'react';
-import { Routes, Route, Navigate } from 'react-router-dom';
+import { Routes, Route, Navigate, NavLink } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import HealthCard from './components/HealthCard';
 import AgentsGrid from './components/AgentsGrid';
 import SpecsTable from './components/SpecsTable';
 import SpecDetail from './components/SpecDetail';
+import GpuPanel from './components/GpuPanel';
+import EndpointMetrics from './components/EndpointMetrics';
+import ActiveModelCard from './components/ActiveModelCard';
 
 const AuthGuard: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { adminKey } = useAuth();
@@ -47,21 +50,38 @@ const LoginForm: React.FC = () => {
 
 const Overview: React.FC = () => (
   <>
+    <ActiveModelCard />
     <HealthCard />
     <AgentsGrid />
   </>
 );
 
+const MetricsPage: React.FC = () => (
+  <>
+    <GpuPanel />
+    <EndpointMetrics />
+  </>
+);
+
 const AppContent: React.FC = () => {
+  const { adminKey } = useAuth();
   return (
     <div className="app-container">
       <header className="app-header">
         <h1>Qwen Multi-Agent Dashboard</h1>
         <LogoutButton />
       </header>
+      {adminKey && (
+        <nav className="app-nav">
+          <NavLink to="/" end>Overview</NavLink>
+          <NavLink to="/metrics">Metrics</NavLink>
+          <NavLink to="/specs">Specs</NavLink>
+        </nav>
+      )}
       <main className="app-main">
         <Routes>
           <Route path="/" element={<AuthGuard><Overview /></AuthGuard>} />
+          <Route path="/metrics" element={<AuthGuard><MetricsPage /></AuthGuard>} />
           <Route path="/specs" element={<AuthGuard><SpecsTable /></AuthGuard>} />
           <Route path="/specs/:id" element={<AuthGuard><SpecDetail /></AuthGuard>} />
           <Route path="*" element={<Navigate to="/" replace />} />

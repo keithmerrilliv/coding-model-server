@@ -7,6 +7,7 @@ import asyncio
 import hmac
 import json
 import logging
+import logging.handlers
 import os
 import sys
 import time
@@ -22,6 +23,7 @@ from pydantic import BaseModel, Field, field_validator
 from config import Config
 from llama_server import LlamaServerManager
 from memory_service import MemoryService
+from metrics import gpu_sampler, request_metrics
 from server_manager import AppleDeepDocsService
 from streaming import (
     ThinkingStripper, build_completion_response,
@@ -37,33 +39,104 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-class _SilenceHealthCheckFilter(logging.Filter):
-    """Drop uvicorn access lines for `GET /health`.
+# Paths the dashboard polls at ~1 Hz. They drown real signal in the main
+# journal but are still useful when debugging dashboard regressions, so we
+# route their access lines to a rotating side-channel file instead of just
+# dropping them. Path settable via QWEN_POLL_ACCESS_LOG; empty disables the
+# side-channel and falls back to silent drop.
+_POLL_ACCESS_PATHS = frozenset({
+    "/health",
+    "/v1/admin/metrics",
+    "/v1/admin/gpu_stats",
+    "/v1/admin/active_model",
+})
+_POLL_ACCESS_LOG_PATH = os.getenv(
+    "QWEN_POLL_ACCESS_LOG", "/tmp/qwen-poll-access.log"
+)
 
-    The dashboard's HealthCard polls /health every 10s; with multiple tabs
-    or LAN clients, the access log floods at ~1 Hz, drowning real ERROR/INFO
-    lines in `journalctl -u qwen-server`. /health is a 200-OK no-op endpoint
-    — no diagnostic value in logging successful hits. Errors and other
-    endpoints are unaffected.
+
+def _build_poll_access_logger() -> Optional[logging.Logger]:
+    """Side-channel logger for noisy 1 Hz dashboard polls.
+
+    Rotating file handler (1 MB × 3 backups) so the file never grows without
+    bound. Returns None when the path is empty (drop without side-channel)
+    or when the handler can't be created (e.g. unwritable directory) — the
+    filter falls back to silent drop in that case.
+    """
+    if not _POLL_ACCESS_LOG_PATH:
+        return None
+    try:
+        handler = logging.handlers.RotatingFileHandler(
+            _POLL_ACCESS_LOG_PATH, maxBytes=1_000_000, backupCount=3,
+        )
+    except OSError as exc:
+        logging.getLogger(__name__).warning(
+            "Could not open poll access log %s: %s — dropping silently",
+            _POLL_ACCESS_LOG_PATH, exc,
+        )
+        return None
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+    ))
+    log = logging.getLogger("qwen.poll_access")
+    log.setLevel(logging.INFO)
+    # propagate=False keeps these out of the root handler chain — the whole
+    # point is to *isolate* poll lines from the main journal.
+    log.propagate = False
+    # Replace any prior handler (lifespan can re-run on reload).
+    for h in list(log.handlers):
+        log.removeHandler(h)
+    log.addHandler(handler)
+    return log
+
+
+class _RoutePollAccessLines(logging.Filter):
+    """Reroute uvicorn access lines for high-frequency dashboard polls.
+
+    When the request matches a path in ``_POLL_ACCESS_PATHS`` and is a
+    successful GET, the access line is forwarded to the side-channel logger
+    (if available) and dropped from the main uvicorn.access pipeline. All
+    other lines (errors, non-poll endpoints) pass through unchanged.
 
     Attached inside the FastAPI lifespan startup hook (not at module load),
     because `uvicorn.run` calls `logging.config.dictConfig` AFTER importing
     the app module — and dictConfig explicitly clears any preexisting
     filters on loggers it reconfigures, which includes `uvicorn.access`.
-    Adding the filter from the lifespan startup runs after dictConfig.
     """
+
+    def __init__(self, side_channel: Optional[logging.Logger]):
+        super().__init__()
+        self.side_channel = side_channel
+
     def filter(self, record: logging.LogRecord) -> bool:
-        # uvicorn.access record.msg has args (client_addr, method, path,
-        # http_version, status_code). Match by args directly — string-search
-        # against the formatted message is brittle (the format ends with
-        # `%(status_code)s` so getMessage() emits "... 200" with no trailing
-        # space, and the AccessFormatter's "200 OK" rendering only happens
-        # later in the pipeline).
+        # uvicorn.access record.args is (client_addr, method, full_path,
+        # http_version, status_code). full_path INCLUDES the query string
+        # (e.g. "/v1/admin/metrics?window_seconds=60"), so we must strip it
+        # before exact-matching — otherwise only /health (which the dashboard
+        # calls with no query) gets caught and the noisier endpoints leak.
+        # Match on args directly; string-search against getMessage() is
+        # brittle since the format ends in `%(status_code)s` and AccessFormatter
+        # rendering ("200 OK") happens later in the pipeline.
         args = record.args
         if not args or len(args) < 5:
             return True
         method, path, _http_ver, status = args[1], args[2], args[3], args[4]
-        return not (method == "GET" and path == "/health" and int(status) == 200)
+        try:
+            status_int = int(status)
+        except (TypeError, ValueError):
+            return True
+        path_only = path.split("?", 1)[0] if isinstance(path, str) else path
+        if method != "GET" or status_int != 200 or path_only not in _POLL_ACCESS_PATHS:
+            return True
+        # Matched a poll endpoint. Forward to side-channel if configured;
+        # always drop from the main pipeline.
+        if self.side_channel is not None:
+            try:
+                self.side_channel.info(record.getMessage())
+            except Exception:
+                # Never let a failing side-channel break access logging.
+                pass
+        return False
 
 
 # ============================================================================ 
@@ -265,9 +338,22 @@ async def lifespan(app: FastAPI):
     """Lifecycle manager for the FastAPI app"""
     global memory_service, web_search_service, apple_deep_docs_service
 
-    # Install /health log filter here, after uvicorn's dictConfig has run.
-    # See _SilenceHealthCheckFilter docstring for why module-load doesn't work.
-    logging.getLogger("uvicorn.access").addFilter(_SilenceHealthCheckFilter())
+    # Install access-log routing here, after uvicorn's dictConfig has run.
+    # See _RoutePollAccessLines docstring for why module-load doesn't work.
+    # Strip any prior copies first — `addFilter` doesn't dedupe, so a
+    # lifespan re-run (test harness, hot reload) would otherwise stack
+    # filters and write duplicates to the side-channel.
+    access_logger = logging.getLogger("uvicorn.access")
+    for existing in list(access_logger.filters):
+        if isinstance(existing, _RoutePollAccessLines):
+            access_logger.removeFilter(existing)
+    poll_log = _build_poll_access_logger()
+    access_logger.addFilter(_RoutePollAccessLines(poll_log))
+
+    # Background nvidia-smi sampler for the dashboard's GPU panel. Polls at
+    # 1 Hz regardless of how many dashboard tabs are watching, so cost is
+    # bounded. No-op on hosts without nvidia-smi.
+    gpu_sampler.start()
 
     # Startup
     logger.info("Server starting up...")
@@ -306,6 +392,7 @@ async def lifespan(app: FastAPI):
     yield
     # Shutdown
     logger.info("Server shutting down - unloading models...")
+    gpu_sampler.stop()
     llama_server_manager.shutdown()
     if apple_deep_docs_service:
         apple_deep_docs_service.stop()
@@ -344,6 +431,48 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["X-Admin-Key", "Authorization", "Content-Type", "Accept"],
 )
+
+
+# Skip recording the metrics endpoints themselves: the dashboard polls
+# them at 1 Hz, which would otherwise dominate the chart and obscure
+# actual workload. Also skip CORS preflights.
+_METRICS_SKIP_PATHS = (
+    "/v1/admin/metrics",
+    "/v1/admin/gpu_stats",
+    "/v1/admin/active_model",
+)
+
+
+@app.middleware("http")
+async def metrics_middleware(request: Request, call_next):
+    if request.method == "OPTIONS":
+        return await call_next(request)
+    path = request.url.path
+    if any(path.startswith(p) for p in _METRICS_SKIP_PATHS):
+        return await call_next(request)
+    start = time.perf_counter()
+    try:
+        response = await call_next(request)
+        status = response.status_code
+    except Exception:
+        # Record the failure as a 500 before re-raising so it shows up
+        # on the error sparkline. The exception handler downstream will
+        # produce the actual response body.
+        duration_ms = (time.perf_counter() - start) * 1000.0
+        route = request.scope.get("route")
+        route_path = getattr(route, "path", path) if route else path
+        subkey = getattr(request.state, "metric_subkey", None)
+        request_metrics.record(request.method, route_path, subkey, duration_ms, 500)
+        raise
+    duration_ms = (time.perf_counter() - start) * 1000.0
+    # Record the matched route template (e.g. /v1/autonomous/specs/{spec_id})
+    # rather than the literal path — keeps cardinality bounded. 404s have
+    # no matched route; fall back to the literal path so they still show.
+    route = request.scope.get("route")
+    route_path = getattr(route, "path", path) if route else path
+    subkey = getattr(request.state, "metric_subkey", None)
+    request_metrics.record(request.method, route_path, subkey, duration_ms, status)
+    return response
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
@@ -702,6 +831,46 @@ def get_spec_events(spec_id: str, limit: int = 100) -> list[dict]:
     return [e.model_dump(mode="json") for e in events]
 
 
+@app.get("/v1/admin/metrics", dependencies=[Depends(verify_admin_key)])
+def admin_metrics(window_seconds: int = 60) -> dict:
+    """Per-endpoint request KPIs over the last `window_seconds` seconds.
+
+    Used by the dashboard's live charts. /v1/chat/completions is split by
+    `agent_id` so each agent gets its own KPI row.
+    """
+    window = max(5, min(window_seconds, 600))
+    return request_metrics.snapshot(window_seconds=window)
+
+
+@app.get("/v1/admin/gpu_stats", dependencies=[Depends(verify_admin_key)])
+def admin_gpu_stats() -> dict:
+    """Rolling buffer of nvidia-smi samples for the dashboard's GPU panel."""
+    return gpu_sampler.snapshot()
+
+
+@app.get("/v1/admin/active_model", dependencies=[Depends(verify_admin_key)])
+def admin_active_model() -> dict:
+    """Snapshot of the currently loaded llama-server child + its config.
+
+    Combines runtime state from LlamaServerManager (which model file is
+    loaded, in-flight count, idle clock) with the agent_config description
+    pulled from Config.AGENTS so the dashboard can render a single panel
+    without having to cross-reference. The agent_id is None when nothing
+    has been served yet (cold start before the first /v1/chat/completions).
+    """
+    snap = llama_server_manager.snapshot()
+    agent_id = snap.get('agent_id')
+    if agent_id and agent_id in Config.AGENTS:
+        agent_cfg = Config.AGENTS[agent_id]
+        snap['agent_description'] = agent_cfg.get('description')
+        snap['agent_executor'] = bool(agent_cfg.get('executor', False))
+    else:
+        snap['agent_description'] = None
+        snap['agent_executor'] = None
+    snap['available_agents'] = list(Config.AGENTS.keys())
+    return snap
+
+
 def _maybe_inject_few_shot(request: ChatCompletionRequest, agent_config: dict) -> None:
     """Prepend Config.FEW_SHOT to request.messages for short executor convos.
 
@@ -787,6 +956,10 @@ def _estimate_and_clamp_tokens(system_prompt: str, messages: List[ChatMessage],
 @app.post("/v1/chat/completions", dependencies=[Depends(verify_admin_key)])
 async def chat_completions(request: ChatCompletionRequest, raw_request: Request):
     """Handle chat completion requests (OpenAI-compatible)"""
+    # Tag this request for the metrics middleware so the dashboard can
+    # split per-endpoint KPIs by agent (architect vs reviewer vs … all
+    # have very different latency profiles; one averaged line is useless).
+    raw_request.state.metric_subkey = request.model
     try:
         if request.model not in Config.AGENTS:
             raise HTTPException(
@@ -808,7 +981,7 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
         system_prompt = await _maybe_inject_rag_context(system_prompt, request)
 
         model_config = agent_config['model_config']
-        llama_server_manager.ensure_running(model_config)
+        llama_server_manager.ensure_running(model_config, agent_id=request.model)
 
         n_ctx = model_config.get('n_ctx', 32768)
         est_prompt_tokens, clamped_max = _estimate_and_clamp_tokens(

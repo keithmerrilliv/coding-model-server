@@ -5,9 +5,19 @@ import type {
   SpecDetailResponse,
   GateRespondRequest,
   ApiResponse,
+  MetricsResponse,
+  GpuStatsResponse,
+  ActiveModelResponse,
 } from '../types/api';
 
-const BASE_URL = import.meta.env.VITE_QWEN_SERVER_URL || 'http://localhost:5000';
+// API host defaults to the same host that served the dashboard, on port 5000.
+// In dev (Vite at localhost:3000) → http://localhost:5000. In production
+// served at http://192.168.50.101:3001 → http://192.168.50.101:5000. On a
+// TV pointed at the LAN dashboard → same. Override with VITE_QWEN_SERVER_URL
+// at build time if the qwen-server lives on a different host or port.
+const BASE_URL =
+  import.meta.env.VITE_QWEN_SERVER_URL ||
+  `${window.location.protocol}//${window.location.hostname}:5000`;
 
 function getAdminKey(): string | null {
   return localStorage.getItem('qwen.adminKey');
@@ -60,4 +70,16 @@ export async function respondToGate(gateId: string, payload: GateRespondRequest)
     method: 'POST',
     body: JSON.stringify(payload),
   });
+}
+
+export async function fetchMetrics(windowSeconds = 60): Promise<ApiResponse<MetricsResponse>> {
+  return request<MetricsResponse>(`/v1/admin/metrics?window_seconds=${windowSeconds}`);
+}
+
+export async function fetchGpuStats(): Promise<ApiResponse<GpuStatsResponse>> {
+  return request<GpuStatsResponse>('/v1/admin/gpu_stats');
+}
+
+export async function fetchActiveModel(): Promise<ApiResponse<ActiveModelResponse>> {
+  return request<ActiveModelResponse>('/v1/admin/active_model');
 }

@@ -50,6 +50,19 @@ class LlamaServerManager:
         self.lock = Lock()
         self.process: Optional[subprocess.Popen] = None
         self.current_model_path: Optional[str] = None
+        # Most recent agent_id passed through ensure_running. Multiple agents
+        # can share a model path (supervisor + q36_architect both use Qwen3.6-27B),
+        # so this is tracked separately from current_model_path — set on every
+        # ensure_running call, not just on the swap.
+        self.current_agent_id: Optional[str] = None
+        self.current_model_config: Optional[dict] = None
+        # Tuple of fields that must match for the running child to be reused.
+        # Path equality alone isn't enough — fast_implementer (n_ctx=196608,
+        # n_ubatch=3584) and debugger (n_ctx=131072, n_ubatch=4096) point at
+        # the same Qwen3-Coder-30B GGUF file, so a path-only check let the
+        # second caller silently keep the first caller's runtime config.
+        self.current_runtime_signature: Optional[tuple] = None
+        self.started_at: Optional[float] = None
         self.last_request_time: float = 0
         # Number of in-flight requests. Watchdog skips the kill while >0.
         # Race-free under CPython's GIL for ±1 increments.
@@ -140,6 +153,9 @@ class LlamaServerManager:
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         )
         self.current_model_path = model_path
+        self.current_model_config = model_config
+        self.current_runtime_signature = self._runtime_signature(model_config)
+        self.started_at = time.time()
 
         # Background thread to drain stdout so the pipe doesn't block
         def _drain_output(proc):
@@ -202,6 +218,10 @@ class LlamaServerManager:
         finally:
             self.process = None
             self.current_model_path = None
+            self.current_model_config = None
+            self.current_agent_id = None
+            self.current_runtime_signature = None
+            self.started_at = None
 
     def _gpu_free_mib(self) -> Optional[int]:
         """Query free VRAM (device 0) via nvidia-smi. Returns None on failure.
@@ -284,28 +304,145 @@ class LlamaServerManager:
         with self.lock:
             return self._active_requests > 0
 
-    def ensure_running(self, model_config: dict):
-        """Ensure llama-server is running with the correct model. Handles model swaps."""
+    @staticmethod
+    def _runtime_signature(mc: dict) -> tuple:
+        """Tuple of fields that materially change llama-server behavior.
+
+        Two agents sharing a path can still need different runtimes
+        (n_ctx, sampler bias, server flags). We compare on the full
+        signature so a swap is forced when any of these differ — even
+        if the underlying GGUF file is identical. ``logit_bias`` and
+        ``draft`` are JSON-serialized for stable comparison; the
+        ordering of these inputs comes from Config so sort_keys is a
+        cheap belt-and-braces guard against future churn.
+        """
+        return (
+            mc.get('path'),
+            mc.get('n_ctx'),
+            mc.get('n_batch'),
+            mc.get('n_ubatch'),
+            mc.get('n_gpu_layers'),
+            mc.get('type_k'),
+            mc.get('type_v'),
+            bool(mc.get('cpu_moe')),
+            json.dumps(mc.get('logit_bias'), sort_keys=True)
+            if mc.get('logit_bias') is not None else None,
+            tuple(mc.get('server_extra_args') or ()),
+            json.dumps(mc.get('draft'), sort_keys=True)
+            if mc.get('draft') is not None else None,
+        )
+
+    def ensure_running(self, model_config: dict, agent_id: Optional[str] = None):
+        """Ensure llama-server is running with the correct model. Handles model swaps.
+
+        ``agent_id`` is recorded so the dashboard can show which logical agent
+        is currently bound to the loaded model. Multiple agent_ids share a
+        single model path, so this is updated on every call, not only on swap.
+
+        Swap detection compares on the full runtime signature, not just on
+        ``path`` — see ``_runtime_signature`` for why path-equality wasn't
+        enough.
+        """
+        signature = self._runtime_signature(model_config)
         with self.lock:
-            model_path = model_config['path']
             if self.process is not None and self.process.poll() is None:
-                if self.current_model_path == model_path:
-                    # Already running with the right model
+                if self.current_runtime_signature == signature:
+                    # Already running with the right runtime
                     self.last_request_time = time.time()
+                    if agent_id is not None:
+                        self.current_agent_id = agent_id
                     return
-                # Different model — shut down first, then wait for the
-                # GPU's async VRAM release to finish before exec'ing the
-                # new model. See _wait_for_vram_release for the full story.
-                logger.info("Model swap: shutting down llama-server for new model")
+                # Runtime drift — even if the GGUF file is the same, n_ctx
+                # / sampler bias / server flags can differ between agents
+                # that share a path. Shut down and reload to honor the new
+                # config. _wait_for_vram_release handles the kernel's async
+                # free.
+                if self.current_model_path == model_config.get('path'):
+                    logger.info(
+                        "Runtime swap (same model file, different config) for %s",
+                        agent_id or '?',
+                    )
+                else:
+                    logger.info("Model swap: shutting down llama-server for new model")
                 self._shutdown_unlocked()
                 self._wait_for_vram_release()
 
             try:
                 self.start(model_config)
+                if agent_id is not None:
+                    self.current_agent_id = agent_id
             except Exception as e:
-                logger.error("Failed to start llama-server for %s: %s", model_path, e)
+                logger.error("Failed to start llama-server for %s: %s",
+                             model_config.get('path'), e)
                 self.current_model_path = None
+                self.current_agent_id = None
+                self.current_model_config = None
+                self.current_runtime_signature = None
+                self.started_at = None
                 raise
+
+    def snapshot(self) -> dict:
+        """Return a JSON-safe view of the current llama-server state.
+
+        Used by the dashboard's ActiveModelCard. Captures the configuration
+        knobs that meaningfully change inference behavior (KV quant, ngl,
+        ub, cpu_moe, draft); skips internals (env, server_extra_args) since
+        they're not actionable at the dashboard level.
+        """
+        with self.lock:
+            running = self.process is not None and self.process.poll() is None
+            if not running:
+                return {
+                    'running': False,
+                    'agent_id': None,
+                    'model_path': None,
+                    'model_basename': None,
+                    'pid': None,
+                    'idle_timeout_s': self.IDLE_TIMEOUT,
+                    'active_requests': self._active_requests,
+                    'last_request_seconds_ago': None,
+                    'uptime_seconds': None,
+                    'config': None,
+                }
+
+            cfg = self.current_model_config or {}
+            draft_summary = None
+            draft = cfg.get('draft')
+            if draft:
+                draft_summary = {
+                    'path': draft.get('path'),
+                    'basename': os.path.basename(draft.get('path', '')) or None,
+                    'n_gpu_layers': draft.get('n_gpu_layers'),
+                    'n_ctx': draft.get('n_ctx'),
+                    'cpu_moe': draft.get('cpu_moe', False),
+                }
+
+            now = time.time()
+            return {
+                'running': True,
+                'agent_id': self.current_agent_id,
+                'model_path': self.current_model_path,
+                'model_basename': os.path.basename(self.current_model_path or '') or None,
+                'pid': self.process.pid if self.process else None,
+                'idle_timeout_s': self.IDLE_TIMEOUT,
+                'active_requests': self._active_requests,
+                'last_request_seconds_ago': (
+                    int(now - self.last_request_time) if self.last_request_time else None
+                ),
+                'uptime_seconds': int(now - self.started_at) if self.started_at else None,
+                'config': {
+                    'n_ctx': cfg.get('n_ctx'),
+                    'n_batch': cfg.get('n_batch'),
+                    'n_ubatch': cfg.get('n_ubatch'),
+                    'n_gpu_layers': cfg.get('n_gpu_layers'),
+                    'cpu_moe': cfg.get('cpu_moe', False),
+                    'cache_type_k': self._CACHE_TYPE_NAMES.get(cfg.get('type_k', 8), 'q8_0'),
+                    'cache_type_v': self._CACHE_TYPE_NAMES.get(cfg.get('type_v', 8), 'q8_0'),
+                    'repeat_penalty': cfg.get('repeat_penalty'),
+                    'repeat_last_n': cfg.get('repeat_last_n'),
+                    'draft': draft_summary,
+                },
+            }
 
     def _start_watchdog(self):
         """Start the idle watchdog thread."""
