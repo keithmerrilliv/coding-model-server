@@ -975,11 +975,25 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
                                  "paths": result.duplicate_paths,
                                  "retry": task.retry_count})
 
-    # Write test files
+    # Write test files. Defensive normalization: a bare `test_*.py` at
+    # spec_dir root gets rewritten to `tests/test_*.py` so reviewer
+    # output doesn't clutter the deliverable. Pytest discovers tests
+    # recursively from spec_dir so this is purely a hygiene step. The
+    # REVIEWER_SYSTEM_PROMPT also asks for `tests/` directly; this is
+    # the belt-and-braces against the same training-prior bypass that
+    # has been observed dropping explicit prompt rules across today's
+    # autonomous runs.
     for rel_path, content in result.test_files:
-        _write_artifact(spec_dir, rel_path, content)
+        normalized = rel_path
+        if "/" not in rel_path and re.match(r"^test_.*\.py$", rel_path):
+            normalized = f"tests/{rel_path}"
+            logger.info(
+                "spec %s: normalizing reviewer test path %r -> %r",
+                spec.id, rel_path, normalized,
+            )
+        _write_artifact(spec_dir, normalized, content)
         db.create_artifact(spec_id=spec.id, task_id=task.id,
-                           kind=ArtifactKind.TEST_REPORT, path=rel_path)
+                           kind=ArtifactKind.TEST_REPORT, path=normalized)
 
     # Anti-hallucination cite-check: verify each `path:line` reference in
     # the review body against the actual spec dir. Bogus cites are

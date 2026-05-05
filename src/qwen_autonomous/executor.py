@@ -284,9 +284,15 @@ REVIEWER_SYSTEM_PROMPT = textwrap.dedent("""\
 
     # Output format
 
-    Test files first (one block per file):
+    Test files first (one block per file). ALWAYS place test files
+    under a `tests/` subdirectory — pytest discovers them recursively
+    so the path doesn't affect execution, but a `tests/` prefix keeps
+    the spec workspace tidy and separates them from implementer
+    deliverables. The orchestrator will rewrite a bare `test_*.py`
+    path to `tests/test_*.py` defensively, but you should emit the
+    correct path yourself:
 
-        <<<FILE: test_something.py>>>
+        <<<FILE: tests/test_something.py>>>
         <complete test file content>
         <<<END_FILE>>>
 
