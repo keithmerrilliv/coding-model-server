@@ -1251,7 +1251,7 @@ if __name__ == "__main__":
         logger.warning("Starting server with configuration errors...")
 
     uvicorn.run(
-        "server:app",
+        "qwen_server.server:app",
         host=Config.HOST,
         port=Config.PORT,
         log_level="info",

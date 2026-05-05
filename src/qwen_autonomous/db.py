@@ -45,7 +45,9 @@ logger = logging.getLogger(__name__)
 # Resolved relative to the repo root unless QWEN_TASKS_DB / QWEN_TASKS_WORKSPACE
 # are set in the environment.
 
-_REPO_ROOT = Path(__file__).resolve().parent.parent
+# This file lives at src/qwen_autonomous/db.py — three parents up reaches
+# the repo root where qwen_tasks_db/ has historically lived.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 DEFAULT_DB_PATH = Path(
     os.getenv("QWEN_TASKS_DB", _REPO_ROOT / "qwen_tasks_db" / "tasks.sqlite")

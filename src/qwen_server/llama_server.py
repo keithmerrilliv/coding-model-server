@@ -123,7 +123,11 @@ class LlamaServerManager:
         ``self.lock`` is only acquired briefly to publish state transitions
         (idle → starting → running) so dashboard readers don't block.
         """
-        tools_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tools')
+        # tools/ lives at the repo root; this file is at src/qwen_server/.
+        tools_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+            'tools',
+        )
         binary = os.path.join(tools_dir, 'llama-server')
 
         if not os.path.isfile(binary):

@@ -24,7 +24,7 @@ from typing import Optional
 import requests
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 
 # ── Server config (mirrors qwen_client/config.py conventions) ────────────────

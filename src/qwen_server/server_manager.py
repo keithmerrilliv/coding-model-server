@@ -27,9 +27,12 @@ class AppleDeepDocsService:
 
     def __init__(self, mcp_path: str = None):
         if mcp_path is None:
-            # Default to tools/appledeepdoc-mcp relative to this script
-            base_dir = os.path.dirname(os.path.abspath(__file__))
-            self.mcp_path = os.path.join(base_dir, "tools", "appledeepdoc-mcp")
+            # Default to tools/appledeepdoc-mcp at the repo root; this file
+            # lives at src/qwen_server/.
+            repo_root = os.path.dirname(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            )
+            self.mcp_path = os.path.join(repo_root, "tools", "appledeepdoc-mcp")
         else:
             self.mcp_path = mcp_path
             
