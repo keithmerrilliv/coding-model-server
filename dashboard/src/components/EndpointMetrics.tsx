@@ -87,6 +87,14 @@ const EndpointRow: React.FC<{ ep: EndpointMetric }> = ({ ep }) => {
   // counts within a 60s window are a direct proxy for requests/min
   const qpm = ep.window_count;
 
+  // Aggregate cumulative breakdown to one tooltip-style line. Empty
+  // when no errors have happened yet — this is intentionally cumulative
+  // (not windowed) so flaky-categories don't disappear when the bucket
+  // window rolls over.
+  const breakdownEntries = Object.entries(ep.error_breakdown ?? {})
+    .filter(([, n]) => n > 0)
+    .sort(([, a], [, b]) => b - a);
+
   return (
     <div className="endpoint-row">
       <div className="endpoint-title">
@@ -95,6 +103,12 @@ const EndpointRow: React.FC<{ ep: EndpointMetric }> = ({ ep }) => {
         {ep.subkey && <span className="endpoint-subkey">[{ep.subkey}]</span>}
         <span className="endpoint-meta">
           {ep.total_count.toLocaleString()} total · last {ep.last_seen_seconds_ago ?? '—'}s ago
+          {breakdownEntries.length > 0 && (
+            <span className="endpoint-breakdown" title="cumulative non-2xx breakdown">
+              {' · '}
+              {breakdownEntries.map(([cat, n]) => `${cat}=${n}`).join(' ')}
+            </span>
+          )}
         </span>
       </div>
       <div className="endpoint-charts">

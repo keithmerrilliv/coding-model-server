@@ -34,8 +34,39 @@ _GPU_RING_SIZE = 120
 _EndpointKey = Tuple[str, str, Optional[str]]
 
 
+def _default_error_category(status: int) -> str:
+    """Status-code-only classification — used when the handler didn't
+    stamp a more specific category on the request.
+
+    Categories are stable strings consumed by the dashboard, so they should
+    only ever be added to, not renamed.
+    """
+    if status in (401, 403):
+        return "4xx_auth"
+    if status == 404:
+        return "4xx_not_found"
+    if status == 429:
+        return "4xx_rate_limit"
+    if 400 <= status < 500:
+        return "4xx_other"
+    if status == 503:
+        return "5xx_unavailable"
+    if status == 504:
+        return "5xx_timeout"
+    if 500 <= status < 600:
+        return "5xx_other"
+    return "other"
+
+
 class RequestMetricsCollector:
-    """Per-(method, path, subkey) ring buffer of recent request samples."""
+    """Per-(method, path, subkey) ring buffer of recent request samples.
+
+    `error_category` is an optional, free-form string the request handler
+    can stamp on the request to override status-code-only classification
+    (e.g. "5xx_proxy_disconnected" vs the generic "5xx_other"). The
+    collector accumulates a per-endpoint counter so the dashboard can
+    show the breakdown next to the aggregate non-2xx rate.
+    """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -44,15 +75,25 @@ class RequestMetricsCollector:
         )
         self._totals: Dict[_EndpointKey, int] = defaultdict(int)
         self._last_seen: Dict[_EndpointKey, float] = {}
+        # Per-endpoint, per-category running count of non-2xx responses.
+        # Categories are derived from status + an optional override the
+        # request handler stamps on request.state.error_category.
+        self._error_breakdown: Dict[_EndpointKey, Dict[str, int]] = (
+            defaultdict(lambda: defaultdict(int))
+        )
 
     def record(self, method: str, path: str, subkey: Optional[str],
-               duration_ms: float, status: int) -> None:
+               duration_ms: float, status: int,
+               error_category: Optional[str] = None) -> None:
         key: _EndpointKey = (method, path, subkey)
         now = time.time()
         with self._lock:
             self._rings[key].append((now, duration_ms, status))
             self._totals[key] += 1
             self._last_seen[key] = now
+            if status >= 400:
+                category = error_category or _default_error_category(status)
+                self._error_breakdown[key][category] += 1
 
     def snapshot(self, window_seconds: int = 60) -> dict:
         """Bucketed summary suitable for direct chart consumption.
@@ -78,6 +119,7 @@ class RequestMetricsCollector:
                     evict.append(key)
                     continue
                 method, path, subkey = key
+                breakdown = dict(self._error_breakdown.get(key, {}))
                 out.append({
                     "method": method,
                     "path": path,
@@ -88,6 +130,7 @@ class RequestMetricsCollector:
                     ),
                     "window_count": len(samples_in_window),
                     "buckets": _build_buckets(samples_in_window, now, window_seconds),
+                    "error_breakdown": breakdown,
                 })
             # Evict idle keys so unbounded 404 / scanner traffic can't grow
             # the dicts forever. Done inside the same lock as the iteration
@@ -96,6 +139,7 @@ class RequestMetricsCollector:
                 self._rings.pop(key, None)
                 self._totals.pop(key, None)
                 self._last_seen.pop(key, None)
+                self._error_breakdown.pop(key, None)
         out.sort(key=lambda e: (
             e["last_seen_seconds_ago"]
             if e["last_seen_seconds_ago"] is not None else 1e9

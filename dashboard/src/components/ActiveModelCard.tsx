@@ -55,16 +55,27 @@ const ActiveModelCard: React.FC = () => {
   );
 
   if (!data.running) {
+    // Show transition states distinctly from "fully idle" — during a
+    // swap the user wants to know the system is busy, not that it's
+    // doing nothing.
+    const stateLabel = data.state === 'starting' ? 'starting up'
+                     : data.state === 'stopping' ? 'shutting down'
+                     : 'no model loaded';
+    const stateBadge = data.state === 'starting' || data.state === 'stopping'
+                     ? 'badge-executing' : 'badge-pending';
     return (
       <div className="card">
         <h2>Active Model</h2>
         <div className="active-model-empty">
-          <span className="badge badge-pending">no model loaded</span>
+          <span className={`badge ${stateBadge}`}>{stateLabel}</span>
           <p style={{ marginTop: 8, color: '#6c757d', fontSize: 13 }}>
-            llama-server is idle. The next chat-completion request will spawn a child process and load a model.
+            {data.state === 'starting' ? 'Loading model into VRAM…'
+             : data.state === 'stopping' ? 'Killing the previous llama-server child to make room for a new one.'
+             : 'llama-server is idle. The next chat-completion request will spawn a child process and load a model.'}
           </p>
           <p style={{ marginTop: 4, color: '#6c757d', fontSize: 12 }}>
             Idle timeout: {data.idle_timeout_s}s · {data.available_agents.length} agents configured
+            {data.chat_in_flight != null && ` · ${data.chat_in_flight}/${data.chat_max_inflight} chat slots`}
           </p>
         </div>
       </div>

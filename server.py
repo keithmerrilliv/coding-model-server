@@ -9,8 +9,11 @@ import json
 import logging
 import logging.handlers
 import os
+import re
 import sys
+import threading
 import time
+import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
@@ -19,9 +22,10 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
+from requests import exceptions as http_requests_exceptions
 
 from config import Config
-from llama_server import LlamaServerManager
+from llama_server import InsufficientVramError, LlamaServerManager
 from memory_service import MemoryService
 from metrics import gpu_sampler, request_metrics
 from server_manager import AppleDeepDocsService
@@ -463,13 +467,92 @@ _METRICS_SKIP_PATHS = (
 )
 
 
+_REQ_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+class AdmissionController:
+    """Bounded counter for concurrent chat completions.
+
+    Caps total in-flight + queued requests. Beyond ``max_total`` the next
+    call is rejected with 503+Retry-After instead of piling up behind
+    ``LlamaServerManager.lock`` — under a retry storm that lock would
+    otherwise queue dozens of waiting threads, each holding open an SSE
+    connection until they get served, exhausting sockets and the
+    autonomous orchestrator's patience.
+
+    The lock here is a threading.Lock (not asyncio.Lock) so ``release`` is
+    safely callable from a streaming-response generator's finally block,
+    which runs in the response thread, not the event loop.
+    """
+
+    def __init__(self, max_total: int):
+        self._max = max_total
+        self._lock = threading.Lock()
+        self._count = 0
+
+    @property
+    def in_flight(self) -> int:
+        return self._count
+
+    @property
+    def max_inflight(self) -> int:
+        return self._max
+
+    def admit_or_503(self, *, retry_after_s: int = 5) -> None:
+        with self._lock:
+            if self._count >= self._max:
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        f"server busy ({self._count} concurrent chat "
+                        f"completions, max {self._max})"
+                    ),
+                    headers={"Retry-After": str(retry_after_s)},
+                )
+            self._count += 1
+
+    def release(self) -> None:
+        with self._lock:
+            self._count = max(self._count - 1, 0)
+
+
+# Total concurrent chat completions admitted. 1 actively running on
+# llama-server + up to (MAX-1) queued behind the manager lock. Beyond
+# that, callers see 503 and back off.
+CHAT_MAX_INFLIGHT = int(os.getenv("QWEN_CHAT_MAX_INFLIGHT", "5"))
+chat_admission = AdmissionController(CHAT_MAX_INFLIGHT)
+
+
+def _assign_req_id(request: Request) -> str:
+    """Echo a client-supplied X-Request-ID if it's safe; otherwise generate.
+
+    The validation regex caps length and rejects exotic chars so a hostile
+    client can't smuggle log-injection payloads through what becomes a log
+    prefix on every line for this request. Generated form: ``req_<8 hex>``.
+    """
+    incoming = request.headers.get("x-request-id", "")
+    if incoming and _REQ_ID_RE.match(incoming):
+        return incoming
+    return f"req_{uuid.uuid4().hex[:8]}"
+
+
 @app.middleware("http")
 async def metrics_middleware(request: Request, call_next):
+    # Correlation ID is set on every request, even ones we skip metrics
+    # for, so the response always echoes X-Request-ID and downstream
+    # handlers can include it in their logs.
+    req_id = _assign_req_id(request)
+    request.state.req_id = req_id
+
     if request.method == "OPTIONS":
-        return await call_next(request)
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = req_id
+        return response
     path = request.url.path
     if any(path.startswith(p) for p in _METRICS_SKIP_PATHS):
-        return await call_next(request)
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = req_id
+        return response
     start = time.perf_counter()
     try:
         response = await call_next(request)
@@ -482,7 +565,10 @@ async def metrics_middleware(request: Request, call_next):
         route = request.scope.get("route")
         route_path = getattr(route, "path", path) if route else path
         subkey = getattr(request.state, "metric_subkey", None)
-        request_metrics.record(request.method, route_path, subkey, duration_ms, 500)
+        category = getattr(request.state, "error_category", None)
+        request_metrics.record(
+            request.method, route_path, subkey, duration_ms, 500, category
+        )
         raise
     duration_ms = (time.perf_counter() - start) * 1000.0
     # Record the matched route template (e.g. /v1/autonomous/specs/{spec_id})
@@ -491,7 +577,11 @@ async def metrics_middleware(request: Request, call_next):
     route = request.scope.get("route")
     route_path = getattr(route, "path", path) if route else path
     subkey = getattr(request.state, "metric_subkey", None)
-    request_metrics.record(request.method, route_path, subkey, duration_ms, status)
+    category = getattr(request.state, "error_category", None)
+    request_metrics.record(
+        request.method, route_path, subkey, duration_ms, status, category
+    )
+    response.headers["X-Request-ID"] = req_id
     return response
 
 @app.exception_handler(HTTPException)
@@ -888,6 +978,8 @@ def admin_active_model() -> dict:
         snap['agent_description'] = None
         snap['agent_executor'] = None
     snap['available_agents'] = list(Config.AGENTS.keys())
+    snap['chat_in_flight'] = chat_admission.in_flight
+    snap['chat_max_inflight'] = chat_admission.max_inflight
     return snap
 
 
@@ -959,14 +1051,39 @@ async def _maybe_inject_rag_context(system_prompt: str, request: ChatCompletionR
 
 
 def _estimate_and_clamp_tokens(system_prompt: str, messages: List[ChatMessage],
-                               n_ctx: int, max_tokens: int) -> tuple[int, int]:
+                               n_ctx: int, max_tokens: int,
+                               tokenize_fn=None,
+                               req_id: str = "req_unknown") -> tuple[int, int]:
     """Estimate prompt tokens and return (est_prompt_tokens, clamped_max_output).
 
-    Sums lengths instead of allocating a concatenated string (system_prompt +
-    N messages can be 100K+ chars). chars/2.5 is closer to reality on
-    code-heavy and CJK input than chars/3.5; underestimating tokens
-    overshoots the budget and silently truncates mid-stream.
+    Two paths:
+    - If ``tokenize_fn`` is supplied (a callable str → int that round-trips
+      to llama-server's /tokenize endpoint), we ask the model's actual
+      tokenizer. This is exact for the message contents and cached for
+      stable prefixes (system prompt, few-shot). A small per-turn fudge
+      covers chat-template wrappers we can't probe directly.
+    - On any /tokenize failure, OR when the manager isn't given, fall back
+      to chars/2.5 — closer to reality on code/CJK than chars/3.5. The
+      estimator is intentionally pessimistic; underestimating overshoots
+      the budget and silently truncates mid-stream.
     """
+    if tokenize_fn is not None:
+        try:
+            content_tokens = tokenize_fn(system_prompt) + sum(
+                tokenize_fn(m.content or '') for m in messages
+            )
+            # Per-turn template overhead — chatml uses <|im_start|>{role}\n
+            # ... <|im_end|>\n which is ~7 tokens per turn including the
+            # system turn. Round up; a few extra is cheaper than overflow.
+            template_overhead = 8 * (len(messages) + 1)
+            return content_tokens + template_overhead, max(
+                min(max_tokens, n_ctx - content_tokens - template_overhead), 1
+            )
+        except Exception as e:
+            logger.warning(
+                "[%s] tokenize round-trip failed (%s) — falling back to chars/2.5",
+                req_id, e,
+            )
     est_prompt_chars = len(system_prompt) + sum(len(m.content or '') for m in messages)
     est_prompt_tokens = int(est_prompt_chars / 2.5)
     available = max(n_ctx - est_prompt_tokens, 1)
@@ -980,8 +1097,23 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
     # split per-endpoint KPIs by agent (architect vs reviewer vs … all
     # have very different latency profiles; one averaged line is useless).
     raw_request.state.metric_subkey = request.model
+    req_id = getattr(raw_request.state, "req_id", "req_unknown")
+
+    # Backpressure: reject early if we're already at capacity. Done before
+    # any expensive setup so a retry storm doesn't spend cycles building
+    # prompts only to block on the manager lock.
+    try:
+        chat_admission.admit_or_503()
+    except HTTPException:
+        raw_request.state.error_category = "5xx_overload"
+        raise
+    # `slot_held` tracks whether we still own the admission slot at function
+    # exit. Streaming responses transfer ownership to the wrapper generator
+    # so the slot is released only when the stream finishes.
+    slot_held = True
     try:
         if request.model not in Config.AGENTS:
+            raw_request.state.error_category = "4xx_unknown_model"
             raise HTTPException(
                 status_code=404,
                 detail=f"Model '{request.model}' not found. Available models: {', '.join(Config.AGENTS.keys())}"
@@ -1005,24 +1137,34 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
 
         n_ctx = model_config.get('n_ctx', 32768)
         est_prompt_tokens, clamped_max = _estimate_and_clamp_tokens(
-            system_prompt, request.messages, n_ctx, request.max_tokens
+            system_prompt, request.messages, n_ctx, request.max_tokens,
+            tokenize_fn=llama_server_manager.tokenize,
+            req_id=req_id,
         )
         budget_guidance = Config.TOKEN_BUDGET_GUIDANCE.format(available_tokens=clamped_max)
         augmented_system = f"{system_prompt}\n{budget_guidance}"
 
         logger.info(
-            "llama-server request for %s: est_prompt=%d, budget=%d, n_ctx=%d",
-            request.model, est_prompt_tokens, clamped_max, n_ctx
+            "[%s] chat_completions agent=%s stream=%s est_prompt=%d budget=%d n_ctx=%d",
+            req_id, request.model, request.stream,
+            est_prompt_tokens, clamped_max, n_ctx
         )
 
         if request.stream:
+            inner = llama_server_manager.proxy_stream(
+                request.messages, augmented_system, request.model,
+                clamped_max, request.temperature, model_config=model_config,
+                est_prompt_tokens=est_prompt_tokens,
+                tools=request.tools, tool_choice=request.tool_choice,
+                parallel_tool_calls=request.parallel_tool_calls,
+                req_id=req_id)
+            # Hand the admission slot to the stream wrapper. The slot is
+            # released when the generator's finally fires — on normal
+            # completion, an internal exception, OR a client disconnect
+            # (FastAPI closes the iterator and triggers GeneratorExit).
+            slot_held = False
             return StreamingResponse(
-                llama_server_manager.proxy_stream(
-                    request.messages, augmented_system, request.model,
-                    clamped_max, request.temperature, model_config=model_config,
-                    est_prompt_tokens=est_prompt_tokens,
-                    tools=request.tools, tool_choice=request.tool_choice,
-                    parallel_tool_calls=request.parallel_tool_calls),
+                _release_slot_on_stream_finish(inner, chat_admission),
                 media_type="text/event-stream"
             )
         loop = asyncio.get_event_loop()
@@ -1032,17 +1174,56 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
                 request.messages, augmented_system, request.model,
                 clamped_max, request.temperature, model_config=model_config,
                 tools=request.tools, tool_choice=request.tool_choice,
-                parallel_tool_calls=request.parallel_tool_calls)
+                parallel_tool_calls=request.parallel_tool_calls,
+                req_id=req_id)
         )
 
     except HTTPException:
         raise
+    except InsufficientVramError as e:
+        # Pre-flight check refused the swap. Tell the client to back off
+        # rather than triggering a CUDA crash loop the way 2026-05-04 did.
+        logger.warning("[%s] insufficient VRAM for swap: %s", req_id, e)
+        raw_request.state.error_category = "5xx_insufficient_vram"
+        raise HTTPException(
+            status_code=503,
+            detail=str(e),
+            headers={"Retry-After": "30"},
+        )
     except FileNotFoundError as e:
-        logger.error("Model file error: %s", e)
+        logger.error("[%s] Model file error: %s", req_id, e)
+        raw_request.state.error_category = "5xx_model_missing"
         raise HTTPException(status_code=503, detail=str(e))
+    except http_requests_exceptions.ConnectionError as e:
+        # llama-server child died or refused the connection. The proxy
+        # already tried whatever recovery it can do; surface the failure
+        # category so the dashboard's error breakdown can split this from
+        # generic 5xxs.
+        logger.error("[%s] llama-server connection error: %s", req_id, e)
+        raw_request.state.error_category = "5xx_proxy_disconnected"
+        raise HTTPException(status_code=502, detail="llama-server unavailable")
     except Exception as e:
-        logger.error("Error in chat_completions: %s", e, exc_info=True)
+        logger.error("[%s] Error in chat_completions: %s", req_id, e, exc_info=True)
+        raw_request.state.error_category = "5xx_internal"
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        # Sync path + early-exit error paths release here. The streaming
+        # path sets slot_held=False after handing the admission slot to
+        # _release_slot_on_stream_finish, so this becomes a no-op.
+        if slot_held:
+            chat_admission.release()
+
+
+def _release_slot_on_stream_finish(inner, admission):
+    """Wrap a streaming chat-completion generator so the admission slot is
+    released exactly once when the stream terminates — whether by normal
+    EOF, exception, or client disconnect (which closes the iterator and
+    raises GeneratorExit through the for-loop)."""
+    try:
+        for chunk in inner:
+            yield chunk
+    finally:
+        admission.release()
 
 
 if __name__ == "__main__":

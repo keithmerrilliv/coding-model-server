@@ -85,6 +85,10 @@ export interface EndpointMetric {
   last_seen_seconds_ago: number | null;
   window_count: number;
   buckets: MetricBucket[];
+  // Cumulative per-category counts for non-2xx responses across the
+  // entire endpoint lifetime (NOT windowed). Categories are stable
+  // strings like "4xx_auth", "5xx_proxy_disconnected".
+  error_breakdown: Record<string, number>;
 }
 
 export interface MetricsResponse {
@@ -138,6 +142,11 @@ export interface ActiveModelConfig {
 
 export interface ActiveModelResponse {
   running: boolean;
+  // State machine for the llama-server child:
+  // "idle" | "starting" | "running" | "stopping". `running` is `state === 'running'`
+  // for backward compat; new UI should prefer `state` so it can render a
+  // distinct "swap in progress" treatment.
+  state: string;
   agent_id: string | null;
   model_path: string | null;
   model_basename: string | null;
@@ -150,4 +159,6 @@ export interface ActiveModelResponse {
   agent_description: string | null;
   agent_executor: boolean | null;
   available_agents: string[];
+  chat_in_flight: number;
+  chat_max_inflight: number;
 }
