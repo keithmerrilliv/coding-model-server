@@ -89,23 +89,38 @@ The planner emits a `test_strategy` map that the daemon forwards to
 ### Phase b — adversarial test generation (autonomous mode, opt-in)
 
 After the local Qwen reviewer's tests pass on retry-0, the orchestrator
-optionally calls Gemini to write 3–7 additional `adversarial_test_*.py`
-files targeting edge cases Qwen missed. The combined suite re-runs;
-failure downgrades the verdict and falls through to the implementer
-retry loop with the failing-test output as feedback. Fail-open: a
-Gemini error (key, network, timeout, parse) lets the original PASS
-stand. Reuses `GEMINI_API_KEY` from the `/review` block.
+optionally calls Gemini and/or Claude to write 3–7 additional
+`adversarial_test_*.py` files targeting edge cases Qwen missed. The
+combined suite re-runs; failure downgrades the verdict and falls
+through to the implementer retry loop with the failing-test output as
+feedback. Fail-open: per-provider errors (key, network, timeout,
+parse) are caught inside the loop and the remaining providers still
+run; if everything fails the original PASS stands. Reuses
+`GEMINI_API_KEY` and `ANTHROPIC_API_KEY` from the `/review` block.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `AUTONOMOUS_ADVERSARIAL_TESTS_ENABLED` | `0` | Master switch. Set to `1` to enable. |
-| `AUTONOMOUS_ADVERSARIAL_MODEL` | `gemini-3-pro` | Gemini model used for adversarial test generation. |
-| `AUTONOMOUS_ADVERSARIAL_MAX_TOKENS` | `8000` | Output token cap. Higher than the `/review` default (Gemini is verbose). |
-| `AUTONOMOUS_ADVERSARIAL_TIMEOUT` | `300` | Seconds for the Gemini call. ThreadPoolExecutor enforces it. |
+| `AUTONOMOUS_ADVERSARIAL_PROVIDER` | `gemini` | `gemini`, `claude`, or `both`. See provider-mode notes below. |
+| `AUTONOMOUS_ADVERSARIAL_GEMINI_MODEL` | `gemini-3-pro` | Gemini model used when the provider list includes `gemini`. |
+| `AUTONOMOUS_ADVERSARIAL_CLAUDE_MODEL` | `claude-sonnet-4-6` | Claude model used when the provider list includes `claude`. |
+| `AUTONOMOUS_ADVERSARIAL_MAX_TOKENS` | `8000` | Output token cap per provider call. |
+| `AUTONOMOUS_ADVERSARIAL_TIMEOUT` | `300` | Seconds for each provider call. ThreadPoolExecutor enforces the Gemini-side timeout; the Anthropic SDK enforces its own. |
+
+Provider-mode notes:
+
+- `gemini` / `claude` (single-provider): files use the
+  `adversarial_test_*.py` namespace.
+- `both`: providers run sequentially with provider-tagged filename
+  prefixes (`adversarial_test_claude_*.py`,
+  `adversarial_test_gemini_*.py`) so neither can overwrite the
+  other. Doubles API cost AND doubles over-specification risk —
+  measure each provider's false-FAIL rate separately first.
 
 Inspect aggregate stats with `scripts/phase_b_stats.py`. Per-spec
 firings appear in the dashboard's `EventTimeline` as `AGENT_RAN`
-events with `role=adversarial_test_writer`.
+events with `role=adversarial_test_writer` (one event per provider
+in `both` mode).
 
 ## Per-Model Configuration
 

@@ -56,9 +56,11 @@ def _query_events(db_path: Path, since: Optional[str], spec_id: Optional[str]) -
             "spec_id": r["spec_id"],
             "task_id": r["task_id"],
             "created_at": r["created_at"],
+            "provider": payload.get("provider"),
             "model": payload.get("model"),
             "tests_added": payload.get("tests_added"),
             "passed": payload.get("passed"),
+            "error": payload.get("error"),
             "skip_reason": payload.get("skip_reason"),
         })
     return out
@@ -77,38 +79,57 @@ def main() -> None:
         print("No phase-b events match the filter.")
         return
 
-    fired = len(events)
-    skipped_no_blocks = sum(1 for e in events if e["skip_reason"] == "no_blocks_returned")
-    wrote_tests = [e for e in events if e["tests_added"] and e["tests_added"] > 0]
-    passed_after_phase_b = sum(1 for e in wrote_tests if e["passed"] is True)
-    failed_after_phase_b = sum(1 for e in wrote_tests if e["passed"] is False)
-    test_count_total = sum(e["tests_added"] or 0 for e in wrote_tests)
     specs_touched = len({e["spec_id"] for e in events})
-    models = Counter(e["model"] for e in events if e["model"])
-
-    print(f"Phase b stats — {fired} firing(s) across {specs_touched} spec(s)")
+    print(f"Phase b stats — {len(events)} provider firing(s) across {specs_touched} spec(s)")
     if args.since:
         print(f"  since: {args.since}")
     if args.spec:
         print(f"  spec:  {args.spec}")
     print()
-    print(f"  Skipped (Gemini decided no new tests):  {skipped_no_blocks}")
-    print(f"  Wrote tests:                            {len(wrote_tests)}")
-    print(f"    Tests written total:                  {test_count_total}")
-    print(f"    Combined run PASSED (PASS stands):    {passed_after_phase_b}")
-    print(f"    Combined run FAILED (retry forced):   {failed_after_phase_b}")
-    print()
-    if models:
-        print("  Models:")
-        for model, n in models.most_common():
-            print(f"    {model}: {n}")
+
+    # Roll up by provider. Older events (pre multi-provider) have
+    # provider=None; bucket them under "unknown" so they're still visible.
+    provider_keys = sorted({e["provider"] or "unknown" for e in events})
+    for provider in provider_keys:
+        bucket = [e for e in events if (e["provider"] or "unknown") == provider]
+        wrote = [e for e in bucket if (e["tests_added"] or 0) > 0]
+        skipped = sum(1 for e in bucket if e["skip_reason"] == "no_blocks_returned")
+        errored = sum(1 for e in bucket if e["error"])
+        passed = sum(1 for e in wrote if e["passed"] is True)
+        failed = sum(1 for e in wrote if e["passed"] is False)
+        tests_total = sum(e["tests_added"] or 0 for e in wrote)
+        models = Counter(e["model"] for e in bucket if e["model"])
+
+        header = f"  Provider: {provider}  ({len(bucket)} firing(s))"
+        print(header)
+        print("  " + "-" * (len(header) - 2))
+        print(f"    Skipped (rule 6 — no new tests needed):  {skipped}")
+        print(f"    Errored (key/SDK/network/timeout):       {errored}")
+        print(f"    Wrote tests:                             {len(wrote)}")
+        print(f"      Files written total:                   {tests_total}")
+        print(f"      Combined run PASSED (PASS stands):     {passed}")
+        print(f"      Combined run FAILED (retry forced):    {failed}")
+        if models:
+            for model, n in models.most_common():
+                print(f"      Model {model}: {n}")
+        if wrote:
+            rate = failed / len(wrote)
+            print(f"      Catch-or-overspecify rate:             {rate:.0%}")
         print()
 
-    if wrote_tests:
-        catch_rate = failed_after_phase_b / len(wrote_tests)
-        print(f"  Catch-or-overspecify rate (failed / wrote_tests): {catch_rate:.0%}")
-        print(f"    Inspect the failed ones case-by-case to classify "
-              f"as real catch vs over-specification.")
+    # Cross-provider summary (only useful in multi-provider mode but
+    # always shown for consistency).
+    all_wrote = [e for e in events if (e["tests_added"] or 0) > 0]
+    if all_wrote:
+        all_passed = sum(1 for e in all_wrote if e["passed"] is True)
+        all_failed = sum(1 for e in all_wrote if e["passed"] is False)
+        print("  Across all providers:")
+        print(f"    Wrote tests events:    {len(all_wrote)}")
+        print(f"    Combined runs passed:  {all_passed}")
+        print(f"    Combined runs failed:  {all_failed}")
+        print()
+        print("  Inspect the failed ones case-by-case to classify "
+              "as real catch vs over-specification.")
 
 
 if __name__ == "__main__":
