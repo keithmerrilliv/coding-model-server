@@ -711,13 +711,30 @@ def build_implementer_message(
     spec_md: str,
     design_md: str,
     rejection_notes: str | None = None,
+    clarifications: list[str] | None = None,
 ) -> list[dict[str, str]]:
-    user_parts = [
+    user_parts: list[str] = []
+    # Clarifications go BEFORE the spec so the implementer reads them as the
+    # first operator-authored content. They're hard requirements at the same
+    # authority as the spec — see IMPLEMENTER_SYSTEM_PROMPT rule 9. Defensive
+    # injection here is the floor: even if the planner forgets to embed them
+    # in plan.yaml, the orchestrator-supplied list still surfaces them.
+    if clarifications:
+        user_parts.append("## Operator clarifications\n\n")
+        user_parts.append(
+            "These answers from the operator are HARD REQUIREMENTS — same "
+            "authority as the spec itself. Apply each item literally; do "
+            "not override with a default or 'more idiomatic' alternative.\n\n"
+        )
+        for i, item in enumerate(clarifications, start=1):
+            user_parts.append(f"{i}. {item}\n")
+        user_parts.append("\n")
+    user_parts.extend([
         "## Specification\n\n",
         spec_md,
         "\n\n## Architecture Design\n\n",
         design_md,
-    ]
+    ])
     if rejection_notes:
         user_parts.extend([
             "\n\n## Previous Attempt — Review Feedback\n\n",

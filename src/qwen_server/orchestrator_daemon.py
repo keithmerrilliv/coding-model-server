@@ -699,6 +699,23 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
     design_path = spec_dir / "design.md"
     design_md = design_path.read_text() if design_path.exists() else ""
 
+    # Pull operator clarifications from plan.yaml so we can prepend them to
+    # the implementer's user message. Belt-and-braces with the planner-side
+    # `clarifications:` YAML embedding: even if the planner is sloppy or the
+    # implementer skips that section of the plan, the orchestrator-supplied
+    # list still lands at the top of the prompt with hard-requirement framing.
+    import yaml as _yaml
+    clarifications: list[str] = []
+    if spec.normalized_yaml:
+        try:
+            plan = _yaml.safe_load(spec.normalized_yaml) or {}
+            raw_clar = plan.get("clarifications") if isinstance(plan, dict) else None
+            if isinstance(raw_clar, list):
+                clarifications = [str(c) for c in raw_clar if c]
+        except _yaml.YAMLError as exc:
+            logger.warning("spec %s: failed to parse plan.yaml for clarifications: %s",
+                           spec.id, exc)
+
     # On retry, include rejection notes from the most recent code_review gate.
     rejection_notes = None
     if task.retry_count > 0:
@@ -725,7 +742,8 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
         db.update_task_agent(task.id, chosen_agent)
 
     messages = build_implementer_message(spec_md, design_md,
-                                         rejection_notes=rejection_notes)
+                                         rejection_notes=rejection_notes,
+                                         clarifications=clarifications)
     raw = call_agent("implementer", messages, agent=chosen_agent)
     result = parse_implementer_response(raw)
 
