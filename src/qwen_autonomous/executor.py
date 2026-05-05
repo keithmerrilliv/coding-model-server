@@ -61,6 +61,15 @@ REVIEWER_MAX_TOKENS = int(os.getenv("AUTONOMOUS_REVIEWER_MAX_TOKENS", "16000"))
 
 MAX_RETRIES = int(os.getenv("AUTONOMOUS_MAX_RETRIES", "5"))
 
+# Architect parse-retry: how many times to re-call the architect when its
+# response can't be parsed for the <<<DESIGN>>> / <<<COMPLEXITY>>> blocks.
+# Total attempts = ARCHITECT_PARSE_RETRIES + 1. Default 2 retries
+# (3 attempts) is enough for stochastic markdown drift; deterministic
+# failures still surface after the cap. Each failed response is
+# persisted to spec_dir as architect_failed_response_attempt<N>.txt
+# for post-mortem.
+ARCHITECT_PARSE_RETRIES = int(os.getenv("AUTONOMOUS_ARCHITECT_PARSE_RETRIES", "2"))
+
 QWEN_SERVER_HOST = os.getenv("QWEN_SERVER_IP", "127.0.0.1")
 QWEN_SERVER_PORT = int(os.getenv("QWEN_SERVER_PORT", "5000"))
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")

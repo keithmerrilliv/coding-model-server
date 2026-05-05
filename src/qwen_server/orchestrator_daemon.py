@@ -496,16 +496,44 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
     spec_md = (spec_dir / spec.source_md_path).read_text()
     messages = build_architect_message(spec_md)
 
-    raw = call_agent("architect", messages)
-    result = parse_architect_response(raw)
+    # Architect output is structured (<<<DESIGN>>> / <<<COMPLEXITY>>> blocks).
+    # The model occasionally drifts and returns prose without the markers; one
+    # such miss used to fail the whole spec. We now retry the call up to
+    # ARCHITECT_PARSE_RETRIES times before giving up. Each failed response is
+    # persisted alongside spec.md so the post-mortem isn't blind.
+    max_attempts = executor.ARCHITECT_PARSE_RETRIES + 1
+    result = None
+    for attempt in range(1, max_attempts + 1):
+        raw = call_agent("architect", messages)
+        result = parse_architect_response(raw)
+        db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
+                        payload={"role": "architect",
+                                 "result_kind": type(result).__name__,
+                                 "attempt": attempt})
+        if not isinstance(result, ParseError):
+            if attempt > 1:
+                logger.info("spec %s: architect parsed cleanly on attempt %d/%d",
+                            spec.id, attempt, max_attempts)
+            break
 
-    db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
-                    payload={"role": "architect",
-                             "result_kind": type(result).__name__})
+        # ParseError — persist the raw response and either retry or give up.
+        try:
+            (spec_dir / f"architect_failed_response_attempt{attempt}.txt").write_text(
+                f"# parse error: {result.reason}\n\n{raw}"
+            )
+        except OSError as e:
+            logger.warning("spec %s: could not persist failed architect "
+                           "response (attempt %d): %s", spec.id, attempt, e)
+        logger.warning(
+            "spec %s: architect parse failed attempt %d/%d: %s",
+            spec.id, attempt, max_attempts, result.reason,
+        )
 
     if isinstance(result, ParseError):
-        logger.error("spec %s: architect response unparseable: %s",
-                     spec.id, result.reason)
+        logger.error("spec %s: architect exhausted %d parse-retry attempt(s); "
+                     "spec FAILED. Raw responses persisted as "
+                     "architect_failed_response_attempt*.txt",
+                     spec.id, max_attempts)
         db.update_task_status(task.id, TaskStatus.FAILED)
         db.update_spec_status(spec.id, SpecStatus.FAILED)
         return
