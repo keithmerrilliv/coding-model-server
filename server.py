@@ -44,12 +44,30 @@ logger = logging.getLogger(__name__)
 # route their access lines to a rotating side-channel file instead of just
 # dropping them. Path settable via QWEN_POLL_ACCESS_LOG; empty disables the
 # side-channel and falls back to silent drop.
-_POLL_ACCESS_PATHS = frozenset({
+_POLL_ACCESS_EXACT = frozenset({
     "/health",
     "/v1/admin/metrics",
     "/v1/admin/gpu_stats",
     "/v1/admin/active_model",
 })
+# Prefixes for parameterized poll endpoints — the dashboard's SpecDetail
+# page polls /v1/autonomous/specs/{spec_id} and /v1/autonomous/gates?spec_id=…
+# every ~15s, which exact-match can't catch. We match `path == prefix` OR
+# `path.startswith(prefix + "/")` so a future `/v1/autonomous/specsfoo`
+# (404 anyway) doesn't accidentally get silenced.
+_POLL_ACCESS_PREFIXES = (
+    "/v1/autonomous/specs",
+    "/v1/autonomous/gates",
+)
+
+
+def _is_poll_access_path(path: str) -> bool:
+    if path in _POLL_ACCESS_EXACT:
+        return True
+    return any(
+        path == p or path.startswith(p + "/")
+        for p in _POLL_ACCESS_PREFIXES
+    )
 _POLL_ACCESS_LOG_PATH = os.getenv(
     "QWEN_POLL_ACCESS_LOG", "/tmp/qwen-poll-access.log"
 )
@@ -126,7 +144,9 @@ class _RoutePollAccessLines(logging.Filter):
         except (TypeError, ValueError):
             return True
         path_only = path.split("?", 1)[0] if isinstance(path, str) else path
-        if method != "GET" or status_int != 200 or path_only not in _POLL_ACCESS_PATHS:
+        if method != "GET" or status_int != 200 or not isinstance(path_only, str):
+            return True
+        if not _is_poll_access_path(path_only):
             return True
         # Matched a poll endpoint. Forward to side-channel if configured;
         # always drop from the main pipeline.

@@ -104,7 +104,10 @@ tr:hover { background: #f8f9fa; cursor: pointer; }
 .http-patch { background: #e2e3e5; color: #41464b; }
 .http-options { background: #e2e3e5; color: #41464b; }
 
-.endpoint-charts { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+/* minmax(120px, 1fr) keeps the 4-column layout on wide screens but floors
+   each column at 120px — below ~516px the row overflows horizontally
+   instead of collapsing the label/value head into illegible noise. */
+.endpoint-charts { display: grid; grid-template-columns: repeat(4, minmax(120px, 1fr)); gap: 12px; }
 .chart-col { display: flex; flex-direction: column; }
 .chart-col-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 2px; font-size: 11px; }
 .chart-col-label { color: #6c757d; text-transform: uppercase; letter-spacing: 0.5px; }

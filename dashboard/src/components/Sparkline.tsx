@@ -29,10 +29,20 @@ export const Sparkline: React.FC<SparklineProps> = ({
   const flex = width === undefined;
   const geomW = flex ? FLEX_VIEW_W : width;
 
+  // Shared SVG props so empty-state and populated branches behave identically
+  // under flex sizing — without `viewBox` an empty SVG with width="100%" can
+  // collapse to 0 width inside CSS grid cells on some browsers (older Safari).
+  const svgProps = flex
+    ? {
+        width: '100%' as const,
+        height,
+        viewBox: `0 0 ${FLEX_VIEW_W} ${height}`,
+        preserveAspectRatio: 'none' as const,
+      }
+    : { width, height };
+
   if (!values.length) {
-    return flex
-      ? <svg width="100%" height={height} aria-hidden="true" style={{ display: 'block' }} />
-      : <svg width={width} height={height} aria-hidden="true" />;
+    return <svg {...svgProps} aria-hidden="true" style={{ display: 'block' }} />;
   }
 
   const numeric = values.filter((v): v is number => v != null);
@@ -49,29 +59,44 @@ export const Sparkline: React.FC<SparklineProps> = ({
     return `${x.toFixed(1)},${y.toFixed(1)}`;
   });
 
-  const segments: string[][] = [];
+  const rawSegments: string[][] = [];
   let current: string[] = [];
   for (const p of projected) {
     if (p == null) {
-      if (current.length) { segments.push(current); current = []; }
+      if (current.length) { rawSegments.push(current); current = []; }
     } else {
       current.push(p);
     }
   }
-  if (current.length) segments.push(current);
+  if (current.length) rawSegments.push(current);
 
-  // In flex mode, viewBox + preserveAspectRatio="none" lets the geometry
-  // stretch horizontally to fill the container. vector-effect on the strokes
-  // keeps line weight visually constant despite the non-uniform scale.
-  const svgProps = flex
-    ? {
-        width: '100%',
-        height,
-        viewBox: `0 0 ${FLEX_VIEW_W} ${height}`,
-        preserveAspectRatio: 'none' as const,
-      }
-    : { width, height };
+  // SVG polyline/polygon renders nothing for a single point. Expand any
+  // singleton segment into a 2-point horizontal stub so the chart actually
+  // appears on the first tick of a new bucket window or when an isolated
+  // sample is surrounded by nulls.
+  const segments = rawSegments.map(seg => {
+    if (seg.length !== 1) return seg;
+    const [xs, ys] = seg[0].split(',');
+    if (values.length === 1) {
+      // Single-value chart: span the full geometry so the line communicates
+      // "the value is X" across the whole chart area.
+      return [`0,${ys}`, `${geomW.toFixed(1)},${ys}`];
+    }
+    // Otherwise an isolated mid-array point — emit a one-bucket-wide stub
+    // centered on the point so it stays local. Clamp to the viewport so the
+    // ends don't stick outside the SVG.
+    const x = parseFloat(xs);
+    const half = stepX / 2;
+    const x1 = Math.max(x - half, 0).toFixed(1);
+    const x2 = Math.min(x + half, geomW).toFixed(1);
+    return [`${x1},${ys}`, `${x2},${ys}`];
+  });
 
+  // svgProps was computed above so the empty-state and populated branches
+  // share the exact same sizing/viewBox. In flex mode, viewBox +
+  // preserveAspectRatio="none" stretches the geometry to fill the container;
+  // vector-effect="non-scaling-stroke" on each stroke keeps the line weight
+  // visually constant despite the non-uniform scaling.
   return (
     <svg {...svgProps} style={{ display: 'block' }}>
       {fill && segments.map((seg, i) => {
