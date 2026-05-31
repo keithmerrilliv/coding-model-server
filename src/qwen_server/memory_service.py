@@ -13,7 +13,7 @@ except ImportError:
     PdfReader = None
 
 try:
-    from code_chunker import CodeChunker
+    from qwen_server.code_chunker import CodeChunker
     _chunker = CodeChunker()
 except ImportError:
     _chunker = None

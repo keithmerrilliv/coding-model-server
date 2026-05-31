@@ -7,6 +7,8 @@ import requests
 
 from qwen_client.config import config, COLORS, print_colored
 
+_SESSION = requests.Session()
+
 logger = logging.getLogger(__name__)
 
 COMPACTION_PROMPT = """\
