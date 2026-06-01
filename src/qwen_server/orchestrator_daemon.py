@@ -575,8 +575,14 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
 # Matches `path/to/file.ext:LINE` — the citation format the reviewer prompt
 # directs the LLM to use in `### Verdict Evidence`. Tolerates 0+ subdirs and
 # any extension so we don't have to enumerate languages.
+#
+# The extension must contain at least one letter (`\w*[A-Za-z]\w*`) and the
+# match cannot follow `://`, so `host.tld:port` / `IP:port` inside a URL is no
+# longer mistaken for a `path/file.ext:line` citation. Observed false positive:
+# `http://192.168.50.101:3001/` matched `50.101:3001` and got annotated
+# mid-URL, logging a spurious "100% unverified" on clean reviews.
 _CITE_RE: re.Pattern[str] = re.compile(
-    r'\b((?:[\w\-]+/)*[\w\-]+\.\w+):(\d+)\b'
+    r'(?<!://)\b((?:[\w\-]+/)*[\w\-]+\.\w*[A-Za-z]\w*):(\d+)\b'
 )
 
 

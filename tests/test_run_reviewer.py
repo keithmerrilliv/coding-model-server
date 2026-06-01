@@ -121,6 +121,43 @@ def test_review_report_artifact_written(db, spec_and_task):
     assert ArtifactKind.REVIEW_REPORT in kinds
 
 
+class TestVerifyReviewCitations:
+    """The cite-check regex must treat URLs / IP:port as non-citations.
+
+    Regression: `http://192.168.50.101:3001/` matched `50.101:3001` as a
+    `file.ext:line` cite, annotating mid-URL and logging a spurious 100%
+    unverified rate on clean reviews.
+    """
+
+    def test_url_with_ip_port_is_not_a_citation(self, tmp_path):
+        md = "Evidence: server runs at http://192.168.50.101:3001/ and works."
+        annotated, checked, unverified = d._verify_review_citations(md, tmp_path)
+        assert checked == 0          # nothing looked like a cite
+        assert unverified == 0
+        assert annotated == md       # URL left untouched, no mid-string annotation
+
+    def test_hostname_port_is_not_a_citation(self, tmp_path):
+        md = "See http://example.com:8080/path for the dashboard."
+        annotated, checked, _ = d._verify_review_citations(md, tmp_path)
+        assert checked == 0
+        assert annotated == md
+
+    def test_real_missing_cite_is_annotated(self, tmp_path):
+        md = "Bug at src/converter.py:42 — off-by-one."
+        annotated, checked, unverified = d._verify_review_citations(md, tmp_path)
+        assert checked == 1          # real path:line cite detected
+        assert unverified == 1       # file doesn't exist in the empty spec dir
+        assert "[unverified — file not in spec dir]" in annotated
+
+    def test_real_existing_cite_not_annotated(self, tmp_path):
+        (tmp_path / "converter.py").write_text("x = 1\n")
+        md = "Looks fine at converter.py:1."
+        annotated, checked, unverified = d._verify_review_citations(md, tmp_path)
+        assert checked == 1
+        assert unverified == 0
+        assert "unverified" not in annotated
+
+
 def test_parse_error_persists_raw_and_fails(db, spec_and_task):
     # Guards a latent bug: the parse-error branch referenced result.text, but
     # ParseError only has .reason/.raw — it would AttributeError exactly when
