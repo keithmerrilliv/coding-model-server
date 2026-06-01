@@ -5,9 +5,8 @@ import logging
 
 import requests
 
-from qwen_client.config import config, COLORS, print_colored
-
-_SESSION = requests.Session()
+from qwen_client.config import COLORS, print_colored
+from qwen_client.http import post_chat_completion
 
 logger = logging.getLogger(__name__)
 
@@ -128,23 +127,17 @@ def compact_conversation(history, model, agent_theme=None, keep_recent=4, reason
     formatted = _format_messages_for_summary(old_messages)
     prompt_content = f"{COMPACTION_PROMPT}\n\n--- Conversation to summarize ---\n{formatted}"
 
-    payload = {
-        "model": model,
-        "messages": [{"role": "user", "content": prompt_content}],
-        "stream": False,
-        "max_tokens": 2000,
-        "temperature": 0.3,
-    }
-
     try:
         print_colored(
             f"  [{reason}] Generating conversation summary ({len(old_messages)} messages)...",
             COLORS['BLUE']
         )
-        resp = _SESSION.post(
-            config.API_URL, json=payload,
-            headers={"Content-Type": "application/json", **config.auth_headers},
+        resp = post_chat_completion(
+            model,
+            [{"role": "user", "content": prompt_content}],
             timeout=120,
+            max_tokens=2000,
+            temperature=0.3,
         )
         if resp.status_code != 200:
             logger.error("Compaction request failed: %d %s", resp.status_code, resp.text[:200])

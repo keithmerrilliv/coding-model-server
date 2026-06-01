@@ -30,10 +30,9 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeou
 from dataclasses import dataclass
 from typing import Optional
 
-import requests
-
 from qwen_server import external_judges
-from qwen_client.config import COLORS, config, print_colored
+from qwen_client.config import COLORS, print_colored
+from qwen_client.http import post_chat_completion
 
 
 # ── Configuration (env-overridable) ──────────────────────────────────────────
@@ -140,22 +139,17 @@ def get_uncommitted_diff(cwd: Optional[str] = None) -> tuple[Optional[str], Opti
 
 def _call_qwen(diff: str, agent: str) -> str:
     """Call a local-server Qwen agent. Used for both reviewer and deep_reviewer."""
-    headers = {"Content-Type": "application/json"}
-    if config.ADMIN_API_KEY:
-        headers["X-Admin-Key"] = config.ADMIN_API_KEY
-
-    payload = {
-        "model": agent,
-        "messages": [
+    resp = post_chat_completion(
+        agent,
+        [
             {"role": "system", "content": REVIEW_SYSTEM_PROMPT},
             {"role": "user", "content": diff},
         ],
-        "max_tokens": REVIEW_MAX_TOKENS,
-        "temperature": 0.2,
-        "stream": False,
-        "skip_memory": True,
-    }
-    resp = requests.post(config.API_URL, json=payload, headers=headers, timeout=REVIEW_TIMEOUT)
+        timeout=REVIEW_TIMEOUT,
+        max_tokens=REVIEW_MAX_TOKENS,
+        temperature=0.2,
+        skip_memory=True,
+    )
     resp.raise_for_status()
     data = resp.json()
     try:
