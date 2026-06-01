@@ -17,6 +17,8 @@ server_stats.csv*
 # Local-only artifacts that should not land in the repo
 .claude/
 audit_report.md
+recovered/
+.pytest_cache/
 
 # Mac-runner local caches (should never be in the repo)
 Library/Caches/qwen-runner/
