@@ -903,20 +903,16 @@ def _validate_test_output_structure(test_output: str, framework: str) -> tuple[b
     return True, ""
 
 
-def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
-    import yaml as _yaml
+def _collect_reviewer_code_files(db: Database, spec_id: str,
+                                 spec_dir) -> list[tuple[str, str]]:
+    """Gather implementer code artifacts as (path, content) for the reviewer.
 
-    spec_md = (spec_dir / spec.source_md_path).read_text()
-    design_path = spec_dir / "design.md"
-    design_md = design_path.read_text() if design_path.exists() else ""
-
-    # Gather all code files from implementer artifacts. Binary deliverables
-    # (icons, fonts, etc.) get a placeholder so the reviewer still sees the
-    # path in `## Implementation Files` (preserves rule-5 cite-check and
-    # rule-6 file-list hygiene) without crashing on a UTF-8 decode.
-    code_artifacts = [a for a in _list_code_artifacts(db, spec.id)]
+    Binary deliverables (icons, fonts, etc.) get a placeholder so the reviewer
+    still sees the path in `## Implementation Files` (preserves rule-5
+    cite-check and rule-6 file-list hygiene) without crashing on a UTF-8 decode.
+    """
     code_files = []
-    for art in code_artifacts:
+    for art in _list_code_artifacts(db, spec_id):
         fpath = spec_dir / art.path
         if not fpath.exists():
             continue
@@ -928,6 +924,181 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
                 f"reviewer cannot inspect content]"
             )
         code_files.append((art.path, content))
+    return code_files
+
+
+def _run_tests_with_guard(spec_id, spec_dir, framework, test_strategy, *,
+                          output_label, fail_log):
+    """Run the suite and apply the Layer-1 anti-hallucination structural guard.
+
+    A runner that exits 0 with no parseable summary line short-circuited
+    (sandbox error, no tests collected, output truncation); trusting the
+    subprocess returncode alone let a hallucinated PASS propagate while the
+    tests never executed (the bwrap/AppArmor case). An output that doesn't match
+    the framework's summary shape is forced to FAIL.
+
+    Returns (passed, output). No DB/artifact side effects — callers persist with
+    phase-specific payloads. ``output_label`` / ``fail_log`` keep the persisted
+    text and log line identical to each call site's original wording.
+    """
+    # Pass through framework-specific options from the planner's test_strategy
+    # (repo, scheme, destination, etc. for Swift/Xcode via the mac-runner).
+    framework_opts = {
+        k: v for k, v in test_strategy.items()
+        if k not in ("framework", "required")
+    }
+    passed, output = run_tests(spec_dir, framework=framework, **framework_opts)
+    if passed:
+        ok, reason = _validate_test_output_structure(output, framework)
+        if not ok:
+            logger.warning(fail_log, spec_id, reason)
+            passed = False
+            output = (
+                f"[orchestrator guard] {reason}\n\n"
+                f"{output_label}\n{output}"
+            )
+    return passed, output
+
+
+def _run_reviewer_tests(db: Database, spec: Spec, task, spec_dir,
+                        framework, test_strategy):
+    """Run the reviewer's tests, apply the structural guard, and persist.
+
+    Returns (tests_passed, test_output); writes test_output.txt and a TEST_RAN
+    event as side effects.
+    """
+    tests_passed, test_output = _run_tests_with_guard(
+        spec.id, spec_dir, framework, test_strategy,
+        output_label="Original test runner output:",
+        fail_log=("spec %s: test_output failed structural validation (%s); "
+                  "forcing tests_passed=False to block hallucinated PASS"),
+    )
+    _write_artifact(spec_dir, "test_output.txt", test_output)
+    db.record_event(EventKind.TEST_RAN, spec_id=spec.id, task_id=task.id,
+                    payload={"passed": tests_passed,
+                             "output_chars": len(test_output)})
+    return tests_passed, test_output
+
+
+def _run_reviewer_adversarial(db: Database, spec: Spec, task, spec_dir,
+                              framework, test_strategy, spec_md, design_md,
+                              code_files, result, test_output):
+    """Phase b: adversarial test generation via Gemini and/or Claude.
+
+    Fires once per spec, only when the Qwen reviewer's tests pass on retry-0
+    (the caller gates entry). Each configured provider runs sequentially; if any
+    write tests we re-run the full suite and a failure downgrades the verdict
+    (the caller's retry branch picks it up). Fail-open everywhere — per-provider
+    exceptions are caught inside generate_adversarial_tests, and the try/except
+    here catches anything else (resolve errors, loop bugs) so the original PASS
+    stands.
+
+    Returns (tests_passed, test_output): the inputs unchanged unless an
+    adversarial rerun supersedes them.
+    """
+    tests_passed = True
+    try:
+        adv_results = executor.generate_adversarial_tests(
+            spec_dir, spec_md, design_md, code_files,
+            reviewer_tests=result.test_files,
+            reviewer_test_output=test_output,
+        )
+    except Exception as e:  # noqa: BLE001 — fail-open by design
+        logger.warning(
+            "spec %s: phase-b dispatch failed (%s: %s); skipping "
+            "adversarial tests, original PASS stands",
+            spec.id, type(e).__name__, e,
+        )
+        adv_results = []
+
+    all_adv_files = [
+        (path, content)
+        for r in adv_results
+        for (path, content) in r.files_written
+    ]
+
+    if all_adv_files:
+        for path, _content in all_adv_files:
+            db.create_artifact(spec_id=spec.id, task_id=task.id,
+                               kind=ArtifactKind.TEST_REPORT, path=path)
+
+        adv_passed, adv_output = _run_tests_with_guard(
+            spec.id, spec_dir, framework, test_strategy,
+            output_label="Combined test runner output:",
+            fail_log=("spec %s: phase-b combined test_output failed "
+                      "structural validation (%s); forcing adv_passed=False"),
+        )
+
+        # One AGENT_RAN event per provider so the stats script can
+        # attribute false-FAILs back to a specific model. `passed` is
+        # the combined-run outcome — same value across providers in a
+        # given firing, but each event stays self-contained for
+        # querying.
+        for r in adv_results:
+            db.record_event(
+                EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
+                payload={"role": "adversarial_test_writer",
+                         "provider": r.provider,
+                         "model": r.model,
+                         "tests_added": len(r.files_written),
+                         "passed": adv_passed if r.files_written else None,
+                         "error": r.error,
+                         "skip_reason": ("no_blocks_returned"
+                                         if r.skipped else None)},
+            )
+
+        # Combined run is now canonical — overwrite test_output.txt and
+        # record the rerun outcome so dashboards/audits see the merged
+        # truth, not the Qwen-only first pass.
+        test_output = adv_output
+        tests_passed = adv_passed
+        _write_artifact(spec_dir, "test_output.txt", test_output)
+        db.record_event(EventKind.TEST_RAN, spec_id=spec.id, task_id=task.id,
+                        payload={"passed": tests_passed,
+                                 "output_chars": len(test_output),
+                                 "phase": "post_adversarial"})
+
+        providers_summary = ", ".join(
+            f"{r.provider}={len(r.files_written)}" for r in adv_results
+        )
+        if not adv_passed:
+            logger.info(
+                "spec %s: phase-b adversarial tests FAILED (%s) — "
+                "falling through to retry branch with combined output",
+                spec.id, providers_summary,
+            )
+        else:
+            logger.info(
+                "spec %s: phase-b adversarial tests passed (%s) — "
+                "PASS stands", spec.id, providers_summary,
+            )
+    else:
+        # No provider produced files — record per-provider so we can
+        # still distinguish "all skipped (rule 6)" from "all errored".
+        for r in adv_results:
+            db.record_event(
+                EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
+                payload={"role": "adversarial_test_writer",
+                         "provider": r.provider,
+                         "model": r.model,
+                         "tests_added": 0,
+                         "passed": None,
+                         "error": r.error,
+                         "skip_reason": ("no_blocks_returned"
+                                         if r.skipped else None)},
+            )
+
+    return tests_passed, test_output
+
+
+def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
+    import yaml as _yaml
+
+    spec_md = (spec_dir / spec.source_md_path).read_text()
+    design_path = spec_dir / "design.md"
+    design_md = design_path.read_text() if design_path.exists() else ""
+
+    code_files = _collect_reviewer_code_files(db, spec.id, spec_dir)
 
     # Detect test framework from the plan
     plan = _yaml.safe_load(spec.normalized_yaml) if spec.normalized_yaml else {}
@@ -959,7 +1130,7 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
         # is opaque after the fact.
         try:
             (spec_dir / "reviewer_failed_response.txt").write_text(
-                f"# parse error: {result.reason}\n\n{result.text}"
+                f"# parse error: {result.reason}\n\n{result.raw}"
             )
         except OSError as e:
             logger.warning("spec %s: could not persist failed reviewer "
@@ -1021,160 +1192,21 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
     tests_passed = True
     test_output = ""
     if tests_required and result.test_files:
-        # Pass through framework-specific options from the planner's test_strategy
-        # (repo, scheme, destination, etc. for Swift/Xcode via the mac-runner).
-        framework_opts = {
-            k: v for k, v in test_strategy.items()
-            if k not in ("framework", "required")
-        }
-        tests_passed, test_output = run_tests(
-            spec_dir, framework=framework, **framework_opts,
+        tests_passed, test_output = _run_reviewer_tests(
+            db, spec, task, spec_dir, framework, test_strategy,
         )
-        # Layer 1 (anti-hallucination guard): a test runner that exits 0 with
-        # no parseable summary line means the runner short-circuited (sandbox
-        # error, no tests collected, output truncation). Trusting the
-        # subprocess returncode alone let a "Reviewer verdict: PASS"
-        # propagate while pytest never executed (the bwrap/AppArmor case).
-        # If the output doesn't match the framework's summary shape, force
-        # FAIL — even when subprocess.returncode was 0.
-        if tests_passed:
-            ok, reason = _validate_test_output_structure(test_output, framework)
-            if not ok:
-                logger.warning(
-                    "spec %s: test_output failed structural validation (%s); "
-                    "forcing tests_passed=False to block hallucinated PASS",
-                    spec.id, reason,
-                )
-                tests_passed = False
-                test_output = (
-                    f"[orchestrator guard] {reason}\n\n"
-                    f"Original test runner output:\n{test_output}"
-                )
-        _write_artifact(spec_dir, "test_output.txt", test_output)
-        db.record_event(EventKind.TEST_RAN, spec_id=spec.id, task_id=task.id,
-                        payload={"passed": tests_passed,
-                                 "output_chars": len(test_output)})
 
-    # Phase b: adversarial test generation via Gemini and/or Claude. Fires
-    # once per spec, only when Qwen reviewer's tests pass on retry-0. Each
-    # configured provider runs sequentially; if any of them write tests we
-    # re-run the full suite and a failure downgrades the verdict (falls
-    # through to the retry branch below). Fail-open everywhere — per-
-    # provider exceptions are caught inside generate_adversarial_tests, and
-    # the outer try/except below catches anything else (resolve errors,
-    # bugs in the loop, etc.) so the original PASS stands.
+    # Phase b: adversarial test generation. Gated to retry-0 PASS runs; the
+    # heavy lifting (and its fail-open handling) lives in the helper.
     if (executor.ADVERSARIAL_TESTS_ENABLED
             and tests_passed
             and result.verdict == "PASS"
             and task.retry_count == 0
             and tests_required):
-        try:
-            adv_results = executor.generate_adversarial_tests(
-                spec_dir, spec_md, design_md, code_files,
-                reviewer_tests=result.test_files,
-                reviewer_test_output=test_output,
-            )
-        except Exception as e:  # noqa: BLE001 — fail-open by design
-            logger.warning(
-                "spec %s: phase-b dispatch failed (%s: %s); skipping "
-                "adversarial tests, original PASS stands",
-                spec.id, type(e).__name__, e,
-            )
-            adv_results = []
-
-        all_adv_files = [
-            (path, content)
-            for r in adv_results
-            for (path, content) in r.files_written
-        ]
-
-        if all_adv_files:
-            for path, _content in all_adv_files:
-                db.create_artifact(spec_id=spec.id, task_id=task.id,
-                                   kind=ArtifactKind.TEST_REPORT, path=path)
-
-            framework_opts = {
-                k: v for k, v in test_strategy.items()
-                if k not in ("framework", "required")
-            }
-            adv_passed, adv_output = run_tests(
-                spec_dir, framework=framework, **framework_opts,
-            )
-            # Re-apply the structural guard on the combined run as well —
-            # an empty/short adversarial output that exits 0 should not
-            # smuggle a hallucinated PASS.
-            if adv_passed:
-                ok, reason = _validate_test_output_structure(adv_output, framework)
-                if not ok:
-                    logger.warning(
-                        "spec %s: phase-b combined test_output failed "
-                        "structural validation (%s); forcing adv_passed=False",
-                        spec.id, reason,
-                    )
-                    adv_passed = False
-                    adv_output = (
-                        f"[orchestrator guard] {reason}\n\n"
-                        f"Combined test runner output:\n{adv_output}"
-                    )
-
-            # One AGENT_RAN event per provider so the stats script can
-            # attribute false-FAILs back to a specific model. `passed` is
-            # the combined-run outcome — same value across providers in a
-            # given firing, but each event stays self-contained for
-            # querying.
-            for r in adv_results:
-                db.record_event(
-                    EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
-                    payload={"role": "adversarial_test_writer",
-                             "provider": r.provider,
-                             "model": r.model,
-                             "tests_added": len(r.files_written),
-                             "passed": adv_passed if r.files_written else None,
-                             "error": r.error,
-                             "skip_reason": ("no_blocks_returned"
-                                             if r.skipped else None)},
-                )
-
-            # Combined run is now canonical — overwrite test_output.txt and
-            # record the rerun outcome so dashboards/audits see the merged
-            # truth, not the Qwen-only first pass.
-            test_output = adv_output
-            tests_passed = adv_passed
-            _write_artifact(spec_dir, "test_output.txt", test_output)
-            db.record_event(EventKind.TEST_RAN, spec_id=spec.id, task_id=task.id,
-                            payload={"passed": tests_passed,
-                                     "output_chars": len(test_output),
-                                     "phase": "post_adversarial"})
-
-            providers_summary = ", ".join(
-                f"{r.provider}={len(r.files_written)}" for r in adv_results
-            )
-            if not adv_passed:
-                logger.info(
-                    "spec %s: phase-b adversarial tests FAILED (%s) — "
-                    "falling through to retry branch with combined output",
-                    spec.id, providers_summary,
-                )
-            else:
-                logger.info(
-                    "spec %s: phase-b adversarial tests passed (%s) — "
-                    "PASS stands", spec.id, providers_summary,
-                )
-        else:
-            # No provider produced files — record per-provider so we can
-            # still distinguish "all skipped (rule 6)" from "all errored".
-            for r in adv_results:
-                db.record_event(
-                    EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
-                    payload={"role": "adversarial_test_writer",
-                             "provider": r.provider,
-                             "model": r.model,
-                             "tests_added": 0,
-                             "passed": None,
-                             "error": r.error,
-                             "skip_reason": ("no_blocks_returned"
-                                             if r.skipped else None)},
-                )
+        tests_passed, test_output = _run_reviewer_adversarial(
+            db, spec, task, spec_dir, framework, test_strategy,
+            spec_md, design_md, code_files, result, test_output,
+        )
 
     if tests_passed and result.verdict == "PASS":
         # Everything looks good — create release_approval gate
@@ -1232,17 +1264,12 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
 
 def _list_artifact_summaries(db: Database, spec_id: str) -> list[dict]:
     """Compact summary of all artifacts on disk — for the supervisor context."""
-    rows = db._conn().execute(
-        "SELECT kind, path FROM artifacts WHERE spec_id = ? ORDER BY created_at",
-        (spec_id,),
-    ).fetchall()
     spec_dir = db.spec_dir(spec_id)
     out = []
-    for r in rows:
-        path = r["path"]
-        full = spec_dir / path
+    for art in db.list_artifacts(spec_id):
+        full = spec_dir / art.path
         size = full.stat().st_size if full.exists() else None
-        item = {"kind": r["kind"], "path": path}
+        item = {"kind": art.kind.value, "path": art.path}
         if size is not None:
             item["bytes"] = size
         out.append(item)
@@ -1848,23 +1875,7 @@ def _legacy_handle_gate_rejection(db: Database, spec: Spec, task, gate) -> None:
 
 def _list_code_artifacts(db: Database, spec_id: str):
     """Return all CODE artifacts for a spec (for feeding to the reviewer)."""
-    # We need to query artifacts by kind — add inline since we don't
-    # have a dedicated db method yet.
-    rows = db._conn().execute(
-        "SELECT * FROM artifacts WHERE spec_id = ? AND kind = ? "
-        "ORDER BY created_at",
-        (spec_id, ArtifactKind.CODE.value),
-    ).fetchall()
-    from qwen_autonomous.models import Artifact
-    from qwen_autonomous.db import _parse_iso
-    return [
-        Artifact(
-            id=r["id"], spec_id=r["spec_id"], task_id=r["task_id"],
-            kind=ArtifactKind(r["kind"]), path=r["path"],
-            sha256=r["sha256"], created_at=_parse_iso(r["created_at"]),
-        )
-        for r in rows
-    ]
+    return db.list_artifacts(spec_id, kind=ArtifactKind.CODE)
 
 
 def _build_jira_client() -> JiraClient:
