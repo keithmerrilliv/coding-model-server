@@ -384,6 +384,22 @@ class Database:
             path=path, sha256=sha256, created_at=now,
         )
 
+    def list_artifacts(self, spec_id: str,
+                       kind: Optional[ArtifactKind] = None) -> list[Artifact]:
+        """All artifacts for a spec, oldest first; optionally filtered by kind."""
+        if kind is None:
+            rows = self._conn().execute(
+                "SELECT * FROM artifacts WHERE spec_id = ? ORDER BY created_at",
+                (spec_id,),
+            ).fetchall()
+        else:
+            rows = self._conn().execute(
+                "SELECT * FROM artifacts WHERE spec_id = ? AND kind = ? "
+                "ORDER BY created_at",
+                (spec_id, kind.value),
+            ).fetchall()
+        return [_row_to_artifact(r) for r in rows]
+
     # ── review gates ─────────────────────────────────────────────────────────
 
     def create_gate(self, *, spec_id: str, gate_type: GateType, prompt_md: str,
@@ -611,6 +627,18 @@ def _row_to_task(row: sqlite3.Row) -> Task:
         retry_count=row["retry_count"],
         created_at=_parse_iso(row["created_at"]),
         updated_at=_parse_iso(row["updated_at"]),
+    )
+
+
+def _row_to_artifact(row: sqlite3.Row) -> Artifact:
+    return Artifact(
+        id=row["id"],
+        spec_id=row["spec_id"],
+        task_id=row["task_id"],
+        kind=ArtifactKind(row["kind"]),
+        path=row["path"],
+        sha256=row["sha256"],
+        created_at=_parse_iso(row["created_at"]),
     )
 
 
