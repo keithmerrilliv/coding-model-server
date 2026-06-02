@@ -144,8 +144,8 @@ class TestReadWrite:
 
     def test_write_loop_detection(self, tmp_path):
         f = tmp_path / "loop.txt"
-        # _MAX_WRITES_PER_FILE writes are allowed; beyond that it refuses.
-        for _ in range(th._MAX_WRITES_PER_FILE):
+        # MAX_WRITES_PER_FILE writes are allowed; beyond that it refuses.
+        for _ in range(th.state.MAX_WRITES_PER_FILE):
             th.write_file_content(f"{f}\nx")
         blocked = th.write_file_content(f"{f}\nx")
         # Refusal returns None (so the orchestrator stops), per the handler.

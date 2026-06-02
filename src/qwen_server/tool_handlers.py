@@ -27,31 +27,9 @@ try:
 except ImportError:
     Syntax = None
 
-
-# Module-level references set by configure()
-_config = None
-_colors = None
-_print_colored = None
-_logger = None
-_temp_tracker = None  # dict with 'add' function (the only key consumed here)
-_external_handlers = None  # dict with save_memory, web_search, etc.
-
-# Extended state (set via configure **kwargs)
-_rich_console = None
-_permission_mode = 'default'  # 'default' | 'acceptEdits' | 'yolo'
-_verbose_mode = True  # True=full output, False=compact one-liners
-
-# Checkpoint state for /undo
-_CHECKPOINT_DIR = os.path.expanduser("~/.qwen_checkpoints")
-_checkpoint_stack = []  # List of (original_path, checkpoint_path, timestamp)
-_MAX_CHECKPOINTS = 20
-
-# Write-loop detection: {normalized_path: write_count}
-_write_counts = {}
-# Separate counter for shell-write redirects so a real path literally named
-# "__shell_writes__" can't collide with the global counter.
-_shell_write_count = 0
-_MAX_WRITES_PER_FILE = 3
+# Shared runtime dependencies + counters. configure() populates the injected
+# fields; handlers read/write state.* (see tool_state.ToolState).
+from qwen_server.tool_state import state
 
 # ---------------------------------------------------------------------------
 # Safety: protected paths, dangerous commands, deny rules
@@ -139,9 +117,8 @@ def _check_deny_rules(command):
 
 def reset_write_counts():
     """Clear per-file and shell-write counters between tasks."""
-    global _shell_write_count
-    _write_counts.clear()
-    _shell_write_count = 0
+    state.write_counts.clear()
+    state.shell_write_count = 0
 
 
 def configure(config, colors, print_colored_fn, logger_inst, temp_tracker, external_handlers, **kwargs):
@@ -158,29 +135,25 @@ def configure(config, colors, print_colored_fn, logger_inst, temp_tracker, exter
             'ingest_url_content' mapping to their respective functions.
         **kwargs: Extended options — rich_console, permission_mode, verbose_mode.
     """
-    global _config, _colors, _print_colored, _logger, _temp_tracker, _external_handlers
-    global _rich_console, _permission_mode, _verbose_mode
-    _config = config
-    _colors = colors
-    _print_colored = print_colored_fn
-    _logger = logger_inst
-    _temp_tracker = temp_tracker
-    _external_handlers = external_handlers
-    _rich_console = kwargs.get('rich_console', None)
-    _permission_mode = kwargs.get('permission_mode', getattr(config, 'PERMISSION_MODE', 'default'))
-    _verbose_mode = kwargs.get('verbose_mode', getattr(config, 'VERBOSE_MODE', True))
+    state.config = config
+    state.colors = colors
+    state.print_colored = print_colored_fn
+    state.logger = logger_inst
+    state.temp_tracker = temp_tracker
+    state.external_handlers = external_handlers
+    state.rich_console = kwargs.get('rich_console', None)
+    state.permission_mode = kwargs.get('permission_mode', getattr(config, 'PERMISSION_MODE', 'default'))
+    state.verbose_mode = kwargs.get('verbose_mode', getattr(config, 'VERBOSE_MODE', True))
 
 
 def set_permission_mode(mode):
     """Update permission mode at runtime (called by /permissions command)."""
-    global _permission_mode
-    _permission_mode = mode
+    state.permission_mode = mode
 
 
 def set_verbose_mode(mode):
     """Update verbose mode at runtime (called by /verbose command)."""
-    global _verbose_mode
-    _verbose_mode = mode
+    state.verbose_mode = mode
 
 
 def _should_auto_approve(tool_name):
@@ -198,11 +171,11 @@ def _should_auto_approve(tool_name):
     yolo mode AND the env opt-in to silently execute. Without the opt-in
     yolo still prompts for shell, even though it auto-approves edits.
     """
-    if _permission_mode == 'yolo':
+    if state.permission_mode == 'yolo':
         if tool_name == 'REMOTE_EXEC':
             return os.getenv('ALLOW_REMOTE_EXEC_YOLO', '').lower() in ('1', 'true', 'yes')
         return True
-    if _permission_mode == 'acceptEdits':
+    if state.permission_mode == 'acceptEdits':
         # Auto-approve everything EXCEPT shell commands
         return tool_name != 'REMOTE_EXEC'
     return False  # 'default' — prompt for everything
@@ -258,21 +231,21 @@ def _display_diff(old_text, new_text, filepath):
         tofile=f"b/{filepath}",
     ))
     if not diff_lines:
-        _print_colored("   (no changes)", _colors['CYAN'])
+        state.print_colored("   (no changes)", state.colors['CYAN'])
         return
 
     diff_text = ''.join(diff_lines)
-    if _rich_console:
-        _rich_console.print(Syntax(diff_text, "diff", theme="monokai", word_wrap=True))
+    if state.rich_console:
+        state.rich_console.print(Syntax(diff_text, "diff", theme="monokai", word_wrap=True))
     else:
         for line in diff_lines:
             line = line.rstrip('\n')
             if line.startswith('+'):
-                _print_colored(line, _colors['GREEN'])
+                state.print_colored(line, state.colors['GREEN'])
             elif line.startswith('-'):
-                _print_colored(line, _colors['FAIL'])
+                state.print_colored(line, state.colors['FAIL'])
             elif line.startswith('@@'):
-                _print_colored(line, _colors['CYAN'])
+                state.print_colored(line, state.colors['CYAN'])
             else:
                 print(line)
 
@@ -281,29 +254,29 @@ def _create_checkpoint(filepath):
     """Backup a file before modification for /undo support."""
     if not os.path.exists(filepath):
         return
-    os.makedirs(_CHECKPOINT_DIR, exist_ok=True)
+    os.makedirs(state.CHECKPOINT_DIR, exist_ok=True)
     path_hash = hashlib.md5(filepath.encode()).hexdigest()[:8]
     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
     basename = os.path.basename(filepath)
     checkpoint_name = f"{path_hash}_{ts}_{basename}"
-    checkpoint_path = os.path.join(_CHECKPOINT_DIR, checkpoint_name)
+    checkpoint_path = os.path.join(state.CHECKPOINT_DIR, checkpoint_name)
     shutil.copy2(filepath, checkpoint_path)
-    _checkpoint_stack.append((filepath, checkpoint_path, ts))
+    state.checkpoint_stack.append((filepath, checkpoint_path, ts))
     # FIFO cleanup
-    while len(_checkpoint_stack) > _MAX_CHECKPOINTS:
-        _, old_path, _ = _checkpoint_stack.pop(0)
+    while len(state.checkpoint_stack) > state.MAX_CHECKPOINTS:
+        _, old_path, _ = state.checkpoint_stack.pop(0)
         try:
             os.remove(old_path)
         except OSError:
             pass
-    _logger.info("Checkpoint created: %s", checkpoint_path)
+    state.logger.info("Checkpoint created: %s", checkpoint_path)
 
 
 def undo_last_checkpoint():
     """Restore the most recently checkpointed file. Called by /undo command."""
-    if not _checkpoint_stack:
+    if not state.checkpoint_stack:
         return "No checkpoints available to undo."
-    original_path, checkpoint_path, ts = _checkpoint_stack.pop()
+    original_path, checkpoint_path, ts = state.checkpoint_stack.pop()
     if not os.path.exists(checkpoint_path):
         return f"Checkpoint file missing: {checkpoint_path}"
     shutil.copy2(checkpoint_path, original_path)
@@ -355,7 +328,7 @@ def parse_command_safely(command: str) -> List[str]:
     if not command:
         raise ValueError("Command cannot be empty after trimming")
 
-    if not _config.ALLOW_SHELL_MODE:
+    if not state.config.ALLOW_SHELL_MODE:
         dangerous_chars = ['|', '&', ';', '$', '`', '\n', '>', '<', '(', ')', '*', '?', '[', ']']
         if any(char in command for char in dangerous_chars):
             raise ValueError(
@@ -401,7 +374,7 @@ def expand_paths_in_args(command_args: List[str]) -> List[str]:
 
 def is_command_allowed(command_args: List[str]) -> tuple:
     """Check if command is allowed based on whitelist"""
-    if not _config.COMMAND_WHITELIST:
+    if not state.config.COMMAND_WHITELIST:
         return True, "No whitelist configured (all commands allowed)"
 
     if not command_args:
@@ -413,15 +386,15 @@ def is_command_allowed(command_args: List[str]) -> tuple:
     if '..' in base_command:
         return False, f"Command '{base_command}' contains path traversal ('..') which is not allowed"
 
-    if base_command in _config.COMMAND_WHITELIST:
+    if base_command in state.config.COMMAND_WHITELIST:
         return True, f"Command '{base_command}' is whitelisted"
 
     if '/' in base_command:
         base_name = os.path.basename(base_command)
-        if base_name in _config.COMMAND_WHITELIST:
+        if base_name in state.config.COMMAND_WHITELIST:
             return True, f"Command '{base_name}' is whitelisted"
 
-    return False, f"Command '{base_command}' not in whitelist: {', '.join(_config.COMMAND_WHITELIST)}"
+    return False, f"Command '{base_command}' not in whitelist: {', '.join(state.config.COMMAND_WHITELIST)}"
 
 
 def chunk_large_output(content, chunk_size=None, overlap=None):
@@ -438,9 +411,9 @@ def chunk_large_output(content, chunk_size=None, overlap=None):
     """
     # Use config values if not provided
     if chunk_size is None:
-        chunk_size = _config.CHUNK_SIZE
+        chunk_size = state.config.CHUNK_SIZE
     if overlap is None:
-        overlap = _config.CHUNK_OVERLAP
+        overlap = state.config.CHUNK_OVERLAP
 
     if len(content) <= chunk_size:
         return {
@@ -509,9 +482,9 @@ def get_chunk_for_display(content, chunk_idx=None, chunk_size=None, overlap=None
     """
     # Use config values if not provided
     if chunk_size is None:
-        chunk_size = _config.CHUNK_SIZE
+        chunk_size = state.config.CHUNK_SIZE
     if overlap is None:
-        overlap = _config.CHUNK_OVERLAP
+        overlap = state.config.CHUNK_OVERLAP
 
     chunk_result = chunk_large_output(content, chunk_size, overlap)
 
@@ -562,10 +535,10 @@ def execute_remote_command(command, chunk_output=True):
 
     # Validate input
     if not command or not isinstance(command, str):
-        _logger.warning("Invalid command received: %s", command)
+        state.logger.warning("Invalid command received: %s", command)
         return "Error: Invalid command - command must be a non-empty string"
 
-    _logger.info("Executing command: %s", command)
+    state.logger.info("Executing command: %s", command)
 
     # Detect and block shell-based file writes that bypass WRITE_FILE loop detection.
     # Agents use 'python3 -c "open(...).write()"' or heredocs to circumvent.
@@ -574,77 +547,76 @@ def execute_remote_command(command, chunk_output=True):
         command
     )
     if _shell_write_match:
-        global _shell_write_count
-        _shell_write_count += 1
-        if _shell_write_count > _MAX_WRITES_PER_FILE:
-            over = _shell_write_count - _MAX_WRITES_PER_FILE
-            msg = (f"Shell file write BLOCKED ({_shell_write_count - 1} attempts). "
+        state.shell_write_count += 1
+        if state.shell_write_count > state.MAX_WRITES_PER_FILE:
+            over = state.shell_write_count - state.MAX_WRITES_PER_FILE
+            msg = (f"Shell file write BLOCKED ({state.shell_write_count - 1} attempts). "
                    f"Do NOT use python open(), cat <<, sed -i, or > to write files. "
                    f"You MUST use <<<WRITE_FILE>>>path\\ncontent or <<<EDIT_FILE>>> instead.")
-            _logger.warning(msg)
-            _print_colored(f"\n[Shell write blocked] {msg}", _colors['FAIL'])
+            state.logger.warning(msg)
+            state.print_colored(f"\n[Shell write blocked] {msg}", state.colors['FAIL'])
             if over > 2:
                 return None  # Hard stop — agent won't learn, break the loop
             return msg  # Return feedback so agent learns to switch approach
-        _print_colored(f"\nAgent is writing files via shell instead of <<<WRITE_FILE>>>.", _colors['WARNING'])
-        _print_colored(f"   This bypasses diff preview and loop detection. ({_shell_write_count}/{_MAX_WRITES_PER_FILE})", _colors['WARNING'])
+        state.print_colored(f"\nAgent is writing files via shell instead of <<<WRITE_FILE>>>.", state.colors['WARNING'])
+        state.print_colored(f"   This bypasses diff preview and loop detection. ({state.shell_write_count}/{state.MAX_WRITES_PER_FILE})", state.colors['WARNING'])
 
-    _print_colored(f"\nAgent wants to run command: {command}", _colors['WARNING'])
+    state.print_colored(f"\nAgent wants to run command: {command}", state.colors['WARNING'])
 
     # Deny rules — unconditionally blocked, no prompt
     denied, deny_reason = _check_deny_rules(command)
     if denied:
-        _print_colored(f"   DENIED: {deny_reason} — this operation is blocked.", _colors['FAIL'])
-        _logger.warning("Command denied by deny rule: %s — %s", command[:100], deny_reason)
+        state.print_colored(f"   DENIED: {deny_reason} — this operation is blocked.", state.colors['FAIL'])
+        state.logger.warning("Command denied by deny rule: %s — %s", command[:100], deny_reason)
         return f"Command denied: {deny_reason}. This operation is not allowed."
 
-    if _config.ALLOW_SHELL_MODE:
-        _print_colored(f"   Shell mode enabled (less safe)", _colors['WARNING'])
+    if state.config.ALLOW_SHELL_MODE:
+        state.print_colored(f"   Shell mode enabled (less safe)", state.colors['WARNING'])
     else:
-        _print_colored(f"   Safe mode (shell=False)", _colors['GREEN'])
+        state.print_colored(f"   Safe mode (shell=False)", state.colors['GREEN'])
 
     try:
-        if not _config.ALLOW_SHELL_MODE:
+        if not state.config.ALLOW_SHELL_MODE:
             command_args = parse_command_safely(command)
             allowed, msg = is_command_allowed(command_args)
             if not allowed:
-                _print_colored(f"   {msg}", _colors['FAIL'])
-                _logger.warning("Command rejected: %s - %s", command, msg)
+                state.print_colored(f"   {msg}", state.colors['FAIL'])
+                state.logger.warning("Command rejected: %s - %s", command, msg)
                 return f"Command rejected: {msg}"
-            _print_colored(f"   {msg}", _colors['GREEN'])
+            state.print_colored(f"   {msg}", state.colors['GREEN'])
     except ValueError as e:
-        _print_colored(f"   {str(e)}", _colors['FAIL'])
-        _logger.error("Command validation failed: %s - %s", command, str(e))
+        state.print_colored(f"   {str(e)}", state.colors['FAIL'])
+        state.logger.error("Command validation failed: %s - %s", command, str(e))
         return f"Command validation failed: {str(e)}"
     except Exception as e:
-        _print_colored(f"   Unexpected error during command validation: {str(e)}", _colors['FAIL'])
-        _logger.error("Unexpected error during command validation: %s - %s", command, str(e), exc_info=True)
+        state.print_colored(f"   Unexpected error during command validation: {str(e)}", state.colors['FAIL'])
+        state.logger.error("Unexpected error during command validation: %s - %s", command, str(e), exc_info=True)
         return f"Command validation failed with unexpected error: {str(e)}"
 
     # Dangerous command detection — prompts even in yolo mode
     is_dangerous, danger_reason = _check_dangerous_command(command)
     if is_dangerous:
-        _print_colored(f"   DANGEROUS: {danger_reason}", _colors['FAIL'])
+        state.print_colored(f"   DANGEROUS: {danger_reason}", state.colors['FAIL'])
         try:
-            choice = input(f"{_colors['BOLD']}Allow DANGEROUS command? [y/N] > {_colors['ENDC']}")
+            choice = input(f"{state.colors['BOLD']}Allow DANGEROUS command? [y/N] > {state.colors['ENDC']}")
         except (EOFError, KeyboardInterrupt):
             return "User cancelled dangerous command."
         if choice.lower() != 'y':
-            _logger.info("Dangerous command denied by user: %s — %s", command[:100], danger_reason)
+            state.logger.info("Dangerous command denied by user: %s — %s", command[:100], danger_reason)
             return f"User denied dangerous command ({danger_reason})."
     elif _should_auto_approve('REMOTE_EXEC'):
-        _print_colored(f"   Auto-approved ({_permission_mode} mode)", _colors['GREEN'])
-        _logger.info("Auto-approving command (%s mode): %s", _permission_mode, command)
+        state.print_colored(f"   Auto-approved ({state.permission_mode} mode)", state.colors['GREEN'])
+        state.logger.info("Auto-approving command (%s mode): %s", state.permission_mode, command)
         choice = 'y'
     else:
         try:
-            choice = input(f"{_colors['BOLD']}Allow? [y/N] > {_colors['ENDC']}")
+            choice = input(f"{state.colors['BOLD']}Allow? [y/N] > {state.colors['ENDC']}")
         except (EOFError, KeyboardInterrupt):
-            _logger.info("Command execution cancelled by user: %s", command)
+            state.logger.info("Command execution cancelled by user: %s", command)
             return "User cancelled command execution."
 
         if choice.lower() != 'y':
-            _logger.info("Command denied by user: %s", command)
+            state.logger.info("Command denied by user: %s", command)
             return "User denied command execution."
 
     try:
@@ -652,25 +624,25 @@ def execute_remote_command(command, chunk_output=True):
         # We keep it if output is large so the agent can inspect it later
         with tempfile.NamedTemporaryFile(mode='w+', delete=False, prefix='qwen_cmd_', suffix='.log') as tmp:
             tmp_path = tmp.name
-        _temp_tracker['add'](tmp_path)
+        state.temp_tracker['add'](tmp_path)
 
         # Run process redirecting stdout/stderr to the temp file
         try:
-            if _config.ALLOW_SHELL_MODE:
-                _logger.debug("Running command in shell mode: %s", command)
+            if state.config.ALLOW_SHELL_MODE:
+                state.logger.debug("Running command in shell mode: %s", command)
                 with open(tmp_path, 'w') as f:
-                    result = subprocess.run(command, shell=True, stdout=f, stderr=subprocess.STDOUT, text=True, errors='replace', timeout=_config.COMMAND_TIMEOUT)
+                    result = subprocess.run(command, shell=True, stdout=f, stderr=subprocess.STDOUT, text=True, errors='replace', timeout=state.config.COMMAND_TIMEOUT)
             else:
                 command_args = parse_command_safely(command)
                 command_args = expand_paths_in_args(command_args)
-                _logger.debug("Running command in safe mode: %s", command_args)
+                state.logger.debug("Running command in safe mode: %s", command_args)
                 with open(tmp_path, 'w') as f:
-                    result = subprocess.run(command_args, shell=False, stdout=f, stderr=subprocess.STDOUT, text=True, errors='replace', timeout=_config.COMMAND_TIMEOUT)
+                    result = subprocess.run(command_args, shell=False, stdout=f, stderr=subprocess.STDOUT, text=True, errors='replace', timeout=state.config.COMMAND_TIMEOUT)
         except subprocess.TimeoutExpired:
-            _logger.error("Command timed out: %s", command[:100])
-            return f"Error: Command timed out after {_config.COMMAND_TIMEOUT} seconds. Command: {command[:100]}..."
+            state.logger.error("Command timed out: %s", command[:100])
+            return f"Error: Command timed out after {state.config.COMMAND_TIMEOUT} seconds. Command: {command[:100]}..."
         except Exception as e:
-            _logger.error("Error running command subprocess: %s - %s", command[:100], str(e))
+            state.logger.error("Error running command subprocess: %s - %s", command[:100], str(e))
             return f"Error running command subprocess: {str(e)}. Command: {command[:100]}..."
 
         # Analyze output file
@@ -678,21 +650,21 @@ def execute_remote_command(command, chunk_output=True):
             with open(tmp_path, 'r', errors='replace') as f:
                 content = f.read()
         except IOError as e:
-            _logger.error("Error reading command output: %s", str(e))
+            state.logger.error("Error reading command output: %s", str(e))
             return f"Error reading command output: {str(e)}"
 
         output_len = len(content)
-        _logger.info("Command executed successfully, output length: %d", output_len)
+        state.logger.info("Command executed successfully, output length: %d", output_len)
 
         # Use chunked processing if output is large and chunking is enabled
-        if chunk_output and output_len > _config.CHUNK_THRESHOLD:  # Same threshold as original
-            _logger.debug("Using chunked output for command with %d characters", output_len)
-            final_output = get_chunk_for_display(content, chunk_size=_config.CHUNK_SIZE, overlap=_config.CHUNK_OVERLAP, log_path=tmp_path)
+        if chunk_output and output_len > state.config.CHUNK_THRESHOLD:  # Same threshold as original
+            state.logger.debug("Using chunked output for command with %d characters", output_len)
+            final_output = get_chunk_for_display(content, chunk_size=state.config.CHUNK_SIZE, overlap=state.config.CHUNK_OVERLAP, log_path=tmp_path)
 
             # Store chunk info in a way that can be accessed later if needed
             chunk_info_path = tmp_path + '.chunks'
-            _temp_tracker['add'](chunk_info_path)
-            chunk_result = chunk_large_output(content, chunk_size=_config.CHUNK_SIZE, overlap=_config.CHUNK_OVERLAP)
+            state.temp_tracker['add'](chunk_info_path)
+            chunk_result = chunk_large_output(content, chunk_size=state.config.CHUNK_SIZE, overlap=state.config.CHUNK_OVERLAP)
 
             # Save chunk metadata for potential later retrieval
             try:
@@ -704,17 +676,17 @@ def execute_remote_command(command, chunk_output=True):
                         'file_path': tmp_path
                     }, f)
             except IOError as e:
-                _print_colored(f"Warning: Could not save chunk metadata: {str(e)}", _colors['WARNING'])
-                _logger.warning("Could not save chunk metadata: %s", str(e))
+                state.print_colored(f"Warning: Could not save chunk metadata: {str(e)}", state.colors['WARNING'])
+                state.logger.warning("Could not save chunk metadata: %s", str(e))
 
             return final_output
 
         # If it fits in one go, just return it
-        _logger.debug("Returning command output directly, length: %d", len(content) if content else 0)
+        state.logger.debug("Returning command output directly, length: %d", len(content) if content else 0)
         return content if content else "(empty output)"
 
     except Exception as e:
-        _logger.error("Error executing command: %s", str(e), exc_info=True)
+        state.logger.error("Error executing command: %s", str(e), exc_info=True)
         return f"Error executing command: {str(e)}"
 
 
@@ -737,7 +709,7 @@ def read_file_content(path):
             return f"Error: File too large ({size} bytes). Use head/tail via shell or read specific lines."
 
         output = f"File: {path}\nContent:\n{content}"
-        if len(output) > _config.CHUNK_THRESHOLD:
+        if len(output) > state.config.CHUNK_THRESHOLD:
             return get_chunk_for_display(output, log_path=full_path)
         return output
     except Exception as e:
@@ -769,13 +741,13 @@ def write_file_content(payload):
         norm_path = os.path.normpath(full_path)
 
         # Write-loop detection: prevent agent from rewriting the same file endlessly
-        _write_counts[norm_path] = _write_counts.get(norm_path, 0) + 1
-        if _write_counts[norm_path] > _MAX_WRITES_PER_FILE:
+        state.write_counts[norm_path] = state.write_counts.get(norm_path, 0) + 1
+        if state.write_counts[norm_path] > state.MAX_WRITES_PER_FILE:
             msg = (f"WRITE_FILE refused: '{os.path.basename(path)}' has been written "
-                   f"{_write_counts[norm_path] - 1} times already this session. "
+                   f"{state.write_counts[norm_path] - 1} times already this session. "
                    f"This looks like a loop. Move on to the next task.")
-            _logger.warning(msg)
-            _print_colored(f"\n[Loop detected] {msg}", _colors['FAIL'])
+            state.logger.warning(msg)
+            state.print_colored(f"\n[Loop detected] {msg}", state.colors['FAIL'])
             # Return None — NOT a refusal message. Returning a message causes the
             # orchestrator to treat it as tool output and continue the loop forever.
             return None
@@ -784,27 +756,27 @@ def write_file_content(payload):
         parent_dir = os.path.dirname(full_path)
         if parent_dir and not os.path.exists(parent_dir):
             os.makedirs(parent_dir, exist_ok=True)
-            _logger.info("Created directory: %s", parent_dir)
+            state.logger.info("Created directory: %s", parent_dir)
 
         # Protected path check — always prompts regardless of permission mode
         protected, protect_reason = _is_protected_path(full_path)
         if protected:
-            _print_colored(f"\nAgent wants to write file: {full_path}", _colors['FAIL'])
-            _print_colored(f"   WARNING: {protect_reason}", _colors['FAIL'])
-            _print_colored(f"   Protected path — requires explicit approval.", _colors['FAIL'])
+            state.print_colored(f"\nAgent wants to write file: {full_path}", state.colors['FAIL'])
+            state.print_colored(f"   WARNING: {protect_reason}", state.colors['FAIL'])
+            state.print_colored(f"   Protected path — requires explicit approval.", state.colors['FAIL'])
             try:
-                choice = input(f"{_colors['BOLD']}Allow write to PROTECTED path? [y/N] > {_colors['ENDC']}")
+                choice = input(f"{state.colors['BOLD']}Allow write to PROTECTED path? [y/N] > {state.colors['ENDC']}")
             except (EOFError, KeyboardInterrupt):
                 return "User cancelled write to protected path."
             if choice.lower() != 'y':
-                _logger.info("Write to protected path denied: %s — %s", full_path, protect_reason)
+                state.logger.info("Write to protected path denied: %s — %s", full_path, protect_reason)
                 return f"Denied: {protect_reason}"
 
-        _logger.info("Writing file: %s (%s bytes)", full_path, len(content))
+        state.logger.info("Writing file: %s (%s bytes)", full_path, len(content))
 
         # Show diff if overwriting existing file, else preview
-        _print_colored(f"\nAgent wants to write file: {full_path}", _colors['WARNING'])
-        _print_colored(f"   Content size: {len(content)} bytes", _colors['WARNING'])
+        state.print_colored(f"\nAgent wants to write file: {full_path}", state.colors['WARNING'])
+        state.print_colored(f"   Content size: {len(content)} bytes", state.colors['WARNING'])
 
         if os.path.exists(full_path):
             try:
@@ -814,27 +786,27 @@ def write_file_content(payload):
             except Exception:
                 pass  # Fall through to preview if diff fails
         else:
-            _print_colored(f"   (new file)", _colors['CYAN'])
+            state.print_colored(f"   (new file)", state.colors['CYAN'])
             preview_lines = content.split('\n')[:5]
             preview = '\n'.join(preview_lines)
             total_lines = content.count('\n') + 1
             if len(preview_lines) < total_lines:
                 preview += f"\n... ({total_lines} total lines)"
-            _print_colored(f"   Preview:\n{preview[:500]}", _colors['CYAN'])
+            state.print_colored(f"   Preview:\n{preview[:500]}", state.colors['CYAN'])
 
         if _should_auto_approve('WRITE_FILE'):
-            _print_colored(f"   Auto-approved ({_permission_mode} mode)", _colors['GREEN'])
-            _logger.info("Auto-approving file write (%s mode): %s", _permission_mode, full_path)
+            state.print_colored(f"   Auto-approved ({state.permission_mode} mode)", state.colors['GREEN'])
+            state.logger.info("Auto-approving file write (%s mode): %s", state.permission_mode, full_path)
             choice = 'y'
         else:
             try:
-                choice = input(f"{_colors['BOLD']}Allow write? [y/N] > {_colors['ENDC']}")
+                choice = input(f"{state.colors['BOLD']}Allow write? [y/N] > {state.colors['ENDC']}")
             except (EOFError, KeyboardInterrupt):
-                _logger.info("File write cancelled by user: %s", full_path)
+                state.logger.info("File write cancelled by user: %s", full_path)
                 return "User cancelled file write."
 
             if choice.lower() != 'y':
-                _logger.info("File write denied by user: %s", full_path)
+                state.logger.info("File write denied by user: %s", full_path)
                 return "User denied file write."
 
         # Checkpoint before overwriting
@@ -844,13 +816,13 @@ def write_file_content(payload):
         with open(full_path, 'w', encoding='utf-8') as f:
             f.write(content)
 
-        _logger.info("File written successfully: %s", full_path)
+        state.logger.info("File written successfully: %s", full_path)
         return f"Successfully wrote {len(content)} bytes to {path}"
 
     except PermissionError as e:
         return f"Error: Permission denied writing to {path}: {str(e)}"
     except Exception as e:
-        _logger.error("Error writing file %s: %s", path, str(e))
+        state.logger.error("Error writing file %s: %s", path, str(e))
         return f"Error writing file: {str(e)}"
 
 
@@ -909,14 +881,14 @@ def edit_file_content(payload):
         # Protected path check
         protected, protect_reason = _is_protected_path(full_path)
         if protected:
-            _print_colored(f"\nAgent wants to edit file: {full_path}", _colors['FAIL'])
-            _print_colored(f"   WARNING: {protect_reason}", _colors['FAIL'])
+            state.print_colored(f"\nAgent wants to edit file: {full_path}", state.colors['FAIL'])
+            state.print_colored(f"   WARNING: {protect_reason}", state.colors['FAIL'])
             try:
-                choice = input(f"{_colors['BOLD']}Allow edit of PROTECTED path? [y/N] > {_colors['ENDC']}")
+                choice = input(f"{state.colors['BOLD']}Allow edit of PROTECTED path? [y/N] > {state.colors['ENDC']}")
             except (EOFError, KeyboardInterrupt):
                 return "User cancelled edit of protected path."
             if choice.lower() != 'y':
-                _logger.info("Edit of protected path denied: %s — %s", full_path, protect_reason)
+                state.logger.info("Edit of protected path denied: %s — %s", full_path, protect_reason)
                 return f"Denied: {protect_reason}"
 
         # Read current file content
@@ -944,15 +916,15 @@ def edit_file_content(payload):
             new_text = _sanitize_generated_content(match.group(2).strip('\n'))
 
             if old_text not in content:
-                _logger.warning("EDIT_FILE: old_text not found in %s: %s...", path, old_text[:100])
+                state.logger.warning("EDIT_FILE: old_text not found in %s: %s...", path, old_text[:100])
                 return f"Error: Text to replace not found in file. Searched for:\n{old_text[:200]}"
 
             # Count occurrences
             occurrences = content.count(old_text)
             if occurrences > 1:
-                _logger.warning("EDIT_FILE: Multiple occurrences (%s) of old_text in %s", occurrences, path)
+                state.logger.warning("EDIT_FILE: Multiple occurrences (%s) of old_text in %s", occurrences, path)
                 # Still proceed but warn
-                _print_colored(f"   Warning: Found {occurrences} occurrences, replacing all", _colors['WARNING'])
+                state.print_colored(f"   Warning: Found {occurrences} occurrences, replacing all", state.colors['WARNING'])
 
             content = content.replace(old_text, new_text)
             replacements_made += occurrences
@@ -961,26 +933,26 @@ def edit_file_content(payload):
             return "Error: No changes made - old text may not match exactly"
 
         # Show unified diff
-        _print_colored(f"\nAgent wants to edit file: {full_path}", _colors['WARNING'])
-        _print_colored(f"   Replacements: {replacements_made}", _colors['CYAN'])
+        state.print_colored(f"\nAgent wants to edit file: {full_path}", state.colors['WARNING'])
+        state.print_colored(f"   Replacements: {replacements_made}", state.colors['CYAN'])
         old_lines = original_content.split('\n')
         new_lines = content.split('\n')
-        _print_colored(f"   Lines: {len(old_lines)} -> {len(new_lines)}", _colors['CYAN'])
+        state.print_colored(f"   Lines: {len(old_lines)} -> {len(new_lines)}", state.colors['CYAN'])
         _display_diff(original_content, content, path)
 
         if _should_auto_approve('EDIT_FILE'):
-            _print_colored(f"   Auto-approved ({_permission_mode} mode)", _colors['GREEN'])
-            _logger.info("Auto-approving file edit (%s mode): %s", _permission_mode, full_path)
+            state.print_colored(f"   Auto-approved ({state.permission_mode} mode)", state.colors['GREEN'])
+            state.logger.info("Auto-approving file edit (%s mode): %s", state.permission_mode, full_path)
             choice = 'y'
         else:
             try:
-                choice = input(f"{_colors['BOLD']}Allow edit? [y/N] > {_colors['ENDC']}")
+                choice = input(f"{state.colors['BOLD']}Allow edit? [y/N] > {state.colors['ENDC']}")
             except (EOFError, KeyboardInterrupt):
-                _logger.info("File edit cancelled by user: %s", full_path)
+                state.logger.info("File edit cancelled by user: %s", full_path)
                 return "User cancelled file edit."
 
             if choice.lower() != 'y':
-                _logger.info("File edit denied by user: %s", full_path)
+                state.logger.info("File edit denied by user: %s", full_path)
                 return "User denied file edit."
 
         # Checkpoint before editing
@@ -990,11 +962,11 @@ def edit_file_content(payload):
         with open(full_path, 'w', encoding='utf-8') as f:
             f.write(content)
 
-        _logger.info("File edited successfully: %s (%s replacements)", full_path, replacements_made)
+        state.logger.info("File edited successfully: %s (%s replacements)", full_path, replacements_made)
         return f"Successfully edited {path}: {replacements_made} replacement(s) made"
 
     except Exception as e:
-        _logger.error("Error editing file %s: %s", path, str(e))
+        state.logger.error("Error editing file %s: %s", path, str(e))
         return f"Error editing file: {str(e)}"
 
 
@@ -1047,7 +1019,7 @@ def list_directory(path):
         return result
 
     except Exception as e:
-        _logger.error("Error listing directory %s: %s", path, str(e))
+        state.logger.error("Error listing directory %s: %s", path, str(e))
         return f"Error listing directory: {str(e)}"
 
 
@@ -1106,7 +1078,7 @@ def glob_files(pattern):
         return "\n".join(result_lines)
 
     except Exception as e:
-        _logger.error("Error in glob %s: %s", pattern, str(e))
+        state.logger.error("Error in glob %s: %s", pattern, str(e))
         return f"Error in glob: {str(e)}"
 
 
@@ -1237,7 +1209,7 @@ def grep_search(payload):
         return header + "\n" + "\n".join(results)
 
     except Exception as e:
-        _logger.error("Error in grep search: %s", str(e))
+        state.logger.error("Error in grep search: %s", str(e))
         return f"Error in search: {str(e)}"
 
 
@@ -1314,12 +1286,12 @@ def process_remote_commands(response_text: str) -> Optional[str]:
         'LIST_DIR':       lambda arg: list_directory(arg),
         'GLOB':           lambda arg: glob_files(arg),
         'GREP':           lambda arg: grep_search(arg),
-        'SAVE_MEMORY':    lambda arg: _external_handlers['save_memory'](arg.strip()),
-        'WEB_SEARCH':     lambda arg: _external_handlers['web_search'](arg.strip()),
-        'CUPERTINO':      lambda arg: _external_handlers['handle_cupertino_search'](arg.strip()),
-        'APPLE_DEEP_DOCS': lambda arg: _external_handlers['handle_apple_deep_docs'](arg.strip()),
+        'SAVE_MEMORY':    lambda arg: state.external_handlers['save_memory'](arg.strip()),
+        'WEB_SEARCH':     lambda arg: state.external_handlers['web_search'](arg.strip()),
+        'CUPERTINO':      lambda arg: state.external_handlers['handle_cupertino_search'](arg.strip()),
+        'APPLE_DEEP_DOCS': lambda arg: state.external_handlers['handle_apple_deep_docs'](arg.strip()),
         'INGEST_PDF':     lambda arg: ingest_pdf_content(arg),
-        'DEEP_INGEST':    lambda arg: _external_handlers['ingest_url_content'](arg.strip()),
+        'DEEP_INGEST':    lambda arg: state.external_handlers['ingest_url_content'](arg.strip()),
     }
 
     # Build regex from known tags so internal markers (<<<OLD>>>, <<<NEW>>>) are not
@@ -1351,8 +1323,8 @@ def process_remote_commands(response_text: str) -> Optional[str]:
         content = match.group(4).strip()
 
         if (open_brackets, close_brackets) not in _VALID_BRACKETS:
-            if _logger:
-                _logger.warning(
+            if state.logger:
+                state.logger.warning(
                     "Rejecting malformed tool marker: %s%s%s — expected one of "
                     "<<<TAG>>>, <TAG>>>, or <TAG>",
                     open_brackets, tag, close_brackets
@@ -1386,10 +1358,10 @@ def process_remote_commands(response_text: str) -> Optional[str]:
                 continue  # Handler silently refused (e.g., write-loop detection)
             if result:
                 # In compact mode, show one-liner to user but keep full result for history
-                if not _verbose_mode:
+                if not state.verbose_mode:
                     summary = _compact_summary(tag, arg, result)
                     if summary:
-                        _print_colored(summary, _colors['CYAN'])
+                        state.print_colored(summary, state.colors['CYAN'])
                 res_str = f"[Command {i+1}] {result}"
                 results.append(res_str)
                 total_len += len(res_str)
@@ -1471,10 +1443,10 @@ def ingest_pdf_content(payload):
                 "content": encoded_content
             }
 
-            upload_url = f"http://{_config.LINUX_SERVER_IP}:5000/v1/files/upload"
-            _print_colored(f"Uploading {local_path} to server...", _colors['CYAN'])
+            upload_url = f"http://{state.config.LINUX_SERVER_IP}:5000/v1/files/upload"
+            state.print_colored(f"Uploading {local_path} to server...", state.colors['CYAN'])
 
-            response = requests.post(upload_url, json=upload_payload, timeout=_config.LONG_REQUEST_TIMEOUT)
+            response = requests.post(upload_url, json=upload_payload, timeout=state.config.LONG_REQUEST_TIMEOUT)
             if response.status_code != 200:
                 return f"Error uploading file: {response.text}"
 
@@ -1484,15 +1456,15 @@ def ingest_pdf_content(payload):
             if not server_path:
                 return "Error: Upload succeeded but no path returned"
 
-            _print_colored(f"File uploaded to server: {server_path}", _colors['GREEN'])
+            state.print_colored(f"File uploaded to server: {server_path}", state.colors['GREEN'])
 
             # Now ingest the uploaded file
-            result = _external_handlers['ingest_pdf'](server_path)
+            result = state.external_handlers['ingest_pdf'](server_path)
             return result
         else:
             # This is a server-side file path - ingest directly
-            result = _external_handlers['ingest_pdf'](path)
+            result = state.external_handlers['ingest_pdf'](path)
             return result
     except Exception as e:
-        _logger.error("Error ingesting PDF %s: %s", path, str(e))
+        state.logger.error("Error ingesting PDF %s: %s", path, str(e))
         return f"Error ingesting PDF: {str(e)}"
