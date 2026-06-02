@@ -56,6 +56,15 @@ sudo systemctl start qwen-server
 journalctl -u qwen-server -f   # View logs
 ```
 
+After pulling code or editing a `systemd/*.service` unit, redeploy the running
+services (syncs units, reloads, restarts server → orchestrator → dashboard in
+order, waits for `/health`):
+```bash
+sudo bash scripts/redeploy.sh
+```
+No reinstall needed — the venv is an editable install, so a restart picks up
+code changes. The script backs up the installed units before overwriting.
+
 ### Client (macOS or Linux)
 
 ```bash
