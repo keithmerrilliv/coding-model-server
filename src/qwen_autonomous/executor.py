@@ -59,6 +59,18 @@ ARCHITECT_MAX_TOKENS = int(os.getenv("AUTONOMOUS_ARCHITECT_MAX_TOKENS", "8000"))
 IMPLEMENTER_MAX_TOKENS = int(os.getenv("AUTONOMOUS_IMPLEMENTER_MAX_TOKENS", "16000"))
 REVIEWER_MAX_TOKENS = int(os.getenv("AUTONOMOUS_REVIEWER_MAX_TOKENS", "16000"))
 
+# Dynamic implementer output budget. The single-call implementer must emit
+# EVERY file in one response, so a large multi-file spec needs far more output
+# headroom than a small one. A fixed cap is wrong both ways: it truncates big
+# specs (the trailing file loses its <<<END_FILE>>>, the reviewer reports it as
+# a false "missing file" FAIL, and the retry truncates at the same spot) and
+# wastes latency budgeting 16k for a two-file job. We scale max_tokens by the
+# number of files the design enumerates, clamped to
+# [IMPLEMENTER_MAX_TOKENS (floor), IMPLEMENTER_MAX_TOKENS_CEILING].
+IMPLEMENTER_MAX_TOKENS_CEILING = int(os.getenv("AUTONOMOUS_IMPLEMENTER_MAX_TOKENS_CEILING", "48000"))
+IMPLEMENTER_TOKENS_PER_FILE = int(os.getenv("AUTONOMOUS_IMPLEMENTER_TOKENS_PER_FILE", "1500"))
+IMPLEMENTER_TOKENS_BASE = int(os.getenv("AUTONOMOUS_IMPLEMENTER_TOKENS_BASE", "4000"))
+
 MAX_RETRIES = int(os.getenv("AUTONOMOUS_MAX_RETRIES", "5"))
 
 # Architect parse-retry: how many times to re-call the architect when its
@@ -128,6 +140,44 @@ def _write_artifact(spec_dir: Path, rel_path: str, content: str) -> Path:
 
 def role_to_agent(role: str) -> str:
     return ROLE_TO_AGENT.get(role, IMPLEMENTER_AGENT)
+
+
+# ── Dynamic implementer output budget ────────────────────────────────────────
+
+_DESIGN_FILE_PATH_RE = re.compile(
+    r"[\w./-]+\.(?:ts|tsx|js|jsx|mjs|cjs|json|py|rs|go|java|kt|swift|"
+    r"c|h|cc|cpp|hpp|css|scss|html|md|toml|yaml|yml|sh|sql|proto)\b"
+)
+
+
+def estimate_design_file_count(design_md: str) -> int:
+    """Count the distinct file paths a design document enumerates.
+
+    A cheap proxy for how much code the implementer must emit. Matches tokens
+    that look like a path with a known code/config extension — in the File
+    Structure tree, the outputs list, or prose — and de-dupes them. Used only
+    to size the implementer's output budget (see implementer_max_tokens_for),
+    so an over- or under-count just nudges the clamp, never breaks correctness.
+    """
+    paths = set()
+    for m in _DESIGN_FILE_PATH_RE.finditer(design_md or ""):
+        p = m.group(0).strip("./")
+        if p:
+            paths.add(p)
+    return len(paths)
+
+
+def implementer_max_tokens_for(design_md: str) -> int:
+    """Output-token budget for the implementer, scaled to the design's size.
+
+    ``clamp(BASE + files * PER_FILE, IMPLEMENTER_MAX_TOKENS, CEILING)``. The
+    floor is the legacy fixed value, so small specs behave exactly as before;
+    large multi-file specs get the headroom that prevents single-call
+    truncation.
+    """
+    n = estimate_design_file_count(design_md)
+    est = IMPLEMENTER_TOKENS_BASE + n * IMPLEMENTER_TOKENS_PER_FILE
+    return max(IMPLEMENTER_MAX_TOKENS, min(IMPLEMENTER_MAX_TOKENS_CEILING, est))
 
 
 # ── Complexity → implementer tier mapping ────────────────────────────────────
@@ -358,12 +408,21 @@ def call_agent(
     agent: str | None = None,
     max_tokens: int | None = None,
     timeout: float | None = None,
+    meta: Optional[dict] = None,
 ) -> str:
     """Call an agent via the qwen-server inference API.
 
     Returns the raw content string from the model's response.
     Raises on transport or HTTP errors so the caller can decide
     whether to retry or fail.
+
+    If *meta* is provided, it is populated with response metadata the caller
+    can inspect after the call:
+      - ``meta["finish_reason"]``: the model's stop reason ("stop", "length", …)
+      - ``meta["truncated"]``: True when finish_reason == "length", i.e. the
+        output hit ``max_tokens`` and was cut off mid-stream. The implementer
+        path uses this to emit an OUTPUT_TRUNCATED event instead of letting a
+        half-written file surface as a bogus reviewer "missing file" FAIL.
     """
     agent = agent or role_to_agent(role)
     max_tokens = max_tokens or ROLE_TO_MAX_TOKENS.get(role, 8000)
@@ -392,6 +451,20 @@ def call_agent(
         raise RuntimeError(
             f"Server response missing choices/content: {e}"
         ) from e
+
+    if meta is not None:
+        try:
+            fr = (data["choices"][0].get("finish_reason") or "").lower()
+        except (KeyError, IndexError, AttributeError):
+            fr = ""
+        meta["finish_reason"] = fr or None
+        meta["truncated"] = fr == "length"
+        if meta["truncated"]:
+            logger.warning(
+                "agent=%s role=%s OUTPUT TRUNCATED (finish_reason=length) at "
+                "max_tokens=%d — response was cut off mid-stream",
+                agent, role, max_tokens,
+            )
 
     return content
 
@@ -956,14 +1029,25 @@ def _run_local_tests(spec_dir: Path, framework: str, timeout: int) -> tuple[bool
     if framework == "jest":
         raw_cmd = ["npx", "jest", "--no-coverage", "--roots", str(spec_dir)]
     else:
-        # `--ignore retry_history` keeps pytest from collecting the
-        # snapshot dirs `_snapshot_retry` writes inside spec_dir. Without
-        # it, retry-N picks up `retry_history/retry_0/tests/test_x.py`
-        # alongside the live `tests/test_x.py` and aborts with `import
-        # file mismatch` (same module name, two paths). The retry_history
-        # data is consumed by the synthesis pass directly, never re-run.
+        # `--import-mode=importlib`: import each test module by its full path
+        # instead of pytest's default 'prepend' mode, which keys modules by
+        # basename and inserts the test's dir on sys.path. Under 'prepend',
+        # two test files that share a basename in different dirs (e.g.
+        # `tests/test_spec.py` + `ParamountDemo/tests/test_spec.py`, or flat
+        # vs nested across retries) collide and abort collection with
+        # `import file mismatch` BEFORE any test runs — every retry then
+        # FAILs on a harness artefact, not the code (killed spec_031e0aaa on
+        # 2026-06-02). importlib imports by path, so duplicate basenames
+        # coexist; it supersedes the fragile reviewer-test path normalization
+        # as the real guard against this class of failure.
+        #
+        # `--ignore retry_history` still keeps pytest out of the
+        # `_snapshot_retry` dirs so a retry's tests aren't double-collected
+        # against the live ones (the snapshots feed the synthesis pass, not
+        # a re-run).
         raw_cmd = [
             sys.executable, "-m", "pytest", "-v", "--tb=short",
+            "--import-mode=importlib",
             "--ignore", str(spec_dir / "retry_history"),
             str(spec_dir),
         ]

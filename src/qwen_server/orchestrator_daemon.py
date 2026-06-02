@@ -156,6 +156,34 @@ def _latest_gate_of_type(db: Database, spec_id: str,
     return gates[-1] if gates else None
 
 
+def _note_truncation(db: Database, spec: Spec, task, role: str,
+                     meta: dict, max_tokens: int) -> None:
+    """Record an OUTPUT_TRUNCATED event when an agent response hit max_tokens.
+
+    ``meta`` is the dict ``call_agent`` populated. A finish_reason of "length"
+    means the model was cut off mid-output — for the implementer/synthesizer
+    that usually leaves the last ``<<<FILE>>>`` block unterminated, which the
+    reviewer then reports as a (phantom) "missing file" FAIL. Surfacing
+    truncation as its own event lets the operator see the real cause instead
+    of chasing the false negative, and gives the stats layer a signal to tune
+    the budget against.
+    """
+    if not meta.get("truncated"):
+        return
+    db.record_event(
+        EventKind.OUTPUT_TRUNCATED,
+        spec_id=spec.id,
+        task_id=getattr(task, "id", None),
+        payload={"role": role, "max_tokens": max_tokens,
+                 "finish_reason": meta.get("finish_reason")},
+    )
+    logger.warning(
+        "spec %s: %s output truncated at max_tokens=%d (finish_reason=length) "
+        "— raise the budget or reduce the spec's file count",
+        spec.id, role, max_tokens,
+    )
+
+
 # ── State machine handlers ───────────────────────────────────────────────────
 
 def _process_pending_plan(db: Database, spec: Spec) -> None:
@@ -504,7 +532,9 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
     max_attempts = executor.ARCHITECT_PARSE_RETRIES + 1
     result = None
     for attempt in range(1, max_attempts + 1):
-        raw = call_agent("architect", messages)
+        meta: dict = {}
+        raw = call_agent("architect", messages, meta=meta)
+        _note_truncation(db, spec, task, "architect", meta, executor.ARCHITECT_MAX_TOKENS)
         result = parse_architect_response(raw)
         db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
                         payload={"role": "architect",
@@ -750,7 +780,20 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
     messages = build_implementer_message(spec_md, design_md,
                                          rejection_notes=rejection_notes,
                                          clarifications=clarifications)
-    raw = call_agent("implementer", messages, agent=chosen_agent)
+    # Size the output budget to the design. The implementer emits every file in
+    # ONE response, so a large multi-file spec needs more headroom than the
+    # legacy fixed cap — which truncated big specs (the trailing file lost its
+    # <<<END_FILE>>>, the reviewer false-FAILed it as missing, the retry
+    # truncated at the same spot). Small specs are unchanged (clamped to floor).
+    impl_max_tokens = executor.implementer_max_tokens_for(design_md)
+    logger.info(
+        "spec %s: implementer output budget=%d tokens (design enumerates ~%d files)",
+        spec.id, impl_max_tokens, executor.estimate_design_file_count(design_md),
+    )
+    meta: dict = {}
+    raw = call_agent("implementer", messages, agent=chosen_agent,
+                     max_tokens=impl_max_tokens, meta=meta)
+    _note_truncation(db, spec, task, "implementer", meta, impl_max_tokens)
     result = parse_implementer_response(raw)
 
     db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
@@ -1121,7 +1164,9 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
     messages = build_reviewer_message(spec_md, design_md, code_files,
                                        test_framework=framework,
                                        rejection_notes=rejection_notes)
-    raw = call_agent("reviewer", messages)
+    meta: dict = {}
+    raw = call_agent("reviewer", messages, meta=meta)
+    _note_truncation(db, spec, task, "reviewer", meta, executor.REVIEWER_MAX_TOKENS)
     result = parse_reviewer_response(raw)
 
     db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
@@ -1663,12 +1708,19 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
 
     messages = build_synthesis_message(spec_md, design_md, attempts)
 
+    # Synthesis merges every attempt's files into one final response — the same
+    # single-call emit-everything constraint as the implementer, so it gets the
+    # same design-scaled budget instead of the old hardcoded 16000 (which made
+    # the merge step the most truncation-prone call in the pipeline).
+    synth_max_tokens = executor.implementer_max_tokens_for(design_md)
+    meta: dict = {}
     try:
         raw = call_agent("implementer", messages, agent=_SYNTHESIS_AGENT,
-                         max_tokens=16000)
+                         max_tokens=synth_max_tokens, meta=meta)
     except Exception as exc:
         logger.error("spec %s: synthesis call failed: %s", spec.id, exc)
         return False
+    _note_truncation(db, spec, impl_task, "synthesizer", meta, synth_max_tokens)
 
     result = parse_implementer_response(raw)
     if isinstance(result, ParseError):

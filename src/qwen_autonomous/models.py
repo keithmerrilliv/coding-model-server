@@ -70,6 +70,7 @@ class EventKind(str, Enum):
     GATE_RESPONDED = "gate_responded"
     PLANNER_RAN = "planner_ran"
     AGENT_RAN = "agent_ran"              # architect/implementer/reviewer completed
+    OUTPUT_TRUNCATED = "output_truncated"  # an agent response hit max_tokens (finish_reason=length)
     TEST_RAN = "test_ran"                # subprocess test execution completed
     DAEMON_TICK = "daemon_tick"          # heartbeat for liveness checks
     SUPERVISOR_DECISION = "supervisor_decision"  # meta-orchestrator transition
