@@ -366,7 +366,7 @@ The server runs a ChromaDB vector database with SentenceTransformer embeddings (
 
 - **Save**: `<<<SAVE_MEMORY>>>` marker or `/ingest` command (content-hash dedup prevents duplicates)
 - **Retrieve**: Automatic — top-K similar documents injected into system prompt
-- **Storage**: `qwen_memory_db/` directory (SQLite + HNSW index)
+- **Storage**: `memory_db/` directory (SQLite + HNSW index)
 - **Auth**: All memory API calls use `X-Admin-Key` when `ADMIN_API_KEY` is configured
 
 For details on the database cleanup (842K to 85K documents), AST-aware code chunking, and the agentic query layer (classifier, budget, scratchpad, planner, confidence gate), see [RAG_UPDATES.md](RAG_UPDATES.md).
@@ -494,7 +494,7 @@ journalctl -u qwen-server -f
 nvidia-smi
 
 # RAG database size
-du -sh qwen_memory_db/
+du -sh memory_db/
 
 # Active model
 curl -s http://localhost:5000/health
@@ -537,19 +537,19 @@ After upgrading, models that previously needed `llama_server` backend may work w
 source venv/bin/activate
 python3 -c "
 import chromadb
-c = chromadb.PersistentClient(path='qwen_memory_db')
+c = chromadb.PersistentClient(path='memory_db')
 for col in c.list_collections():
     print(f'{col.name}: {col.count():,} documents')
 "
 
 # Reclaim disk space (run when server is stopped)
-sqlite3 qwen_memory_db/chroma.sqlite3 "VACUUM;"
+sqlite3 memory_db/chroma.sqlite3 "VACUUM;"
 ```
 
 ### 5.5 Backup
 
 Back up these directories:
-- `qwen_memory_db/` — RAG vector database
+- `memory_db/` — RAG vector database
 - `~/.qwen_sessions/` — Chat session history
 - `~/.qwen_checkpoints/` — File modification undo history
 - `.env` — Configuration

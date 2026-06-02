@@ -247,7 +247,7 @@ python3 scripts/rag_utils.py inspect <id>   # Full metadata for an entry
 
 ```bash
 # Stop the server first
-sqlite3 qwen_memory_db/chroma.sqlite3 "VACUUM;"
+sqlite3 memory_db/chroma.sqlite3 "VACUUM;"
 ```
 
 ### Purging by source pattern

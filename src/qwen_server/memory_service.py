@@ -32,7 +32,7 @@ PDF_CHUNK_OVERLAP = int(os.getenv('PDF_CHUNK_OVERLAP', '200'))
 
 
 class MemoryService:
-    def __init__(self, persist_directory: str = "qwen_memory_db"):
+    def __init__(self, persist_directory: str = "memory_db"):
         self.persist_directory = persist_directory
         self._collection = None
         self._embedding_model = None

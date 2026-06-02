@@ -18,7 +18,7 @@ import sys
 import argparse
 import sqlite3
 
-DB_PATH = "qwen_memory_db/chroma.sqlite3"
+DB_PATH = "memory_db/chroma.sqlite3"
 BATCH_SIZE = 500
 
 
@@ -116,7 +116,7 @@ def cleanup(dry_run=True, vacuum=False):
 
     print(f"Deleting {len(embedding_ids):,} documents via ChromaDB API...")
     import chromadb
-    client = chromadb.PersistentClient(path="qwen_memory_db")
+    client = chromadb.PersistentClient(path="memory_db")
     col = client.get_collection("qwen_agent_memory")
 
     for i in range(0, len(embedding_ids), BATCH_SIZE):

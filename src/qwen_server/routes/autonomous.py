@@ -1,6 +1,6 @@
 """Autonomous-mode HTTP routes: spec ingest, task store, review gates.
 
-State lives in qwen_tasks_db/tasks.sqlite via qwen_autonomous.Database. The
+State lives in tasks_db/tasks.sqlite via qwen_autonomous.Database. The
 orchestrator daemon (qwen-orchestrator.service) reads/writes the same database
 to drive planning and gate processing — these endpoints are the public HTTP face
 of that store. The Database singleton is obtained from runtime.get_autonomous_db.

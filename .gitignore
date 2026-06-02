@@ -3,9 +3,9 @@ __pycache__/
 *$py.class
 venv/
 .env
-qwen_memory_db/
-qwen_tasks_db/
-qwen_tasks_db.bak.*/
+memory_db/
+tasks_db/
+tasks_db.bak.*/
 *.log
 tools/
 tools.*.bak/
