@@ -98,8 +98,11 @@ def _is_protected_path(filepath):
 
 # Shell patterns that get extra warnings even in yolo mode
 DANGEROUS_PATTERNS = [
-    # rm with recursive flag (with or without -f)
-    (re.compile(r'\brm\s+(-[a-zA-Z]*r|-R|--recursive)\b'), "recursive delete"),
+    # rm with a recursive flag, in any cluster position: -r, -rf, -fr, -Rf, etc.
+    # The earlier `-[a-zA-Z]*r` only matched clusters ENDING in r, so the most
+    # common form `rm -rf` (ends in f) slipped the warning. Mirror the deny
+    # rule's `-[a-zA-Z]*r[a-zA-Z]*` so r anywhere in the cluster is caught.
+    (re.compile(r'\brm\s+(-[a-zA-Z]*r[a-zA-Z]*|--recursive)\b'), "recursive delete"),
     (re.compile(r'\bsudo\b'), "elevated privileges"),
     (re.compile(r'\bchmod\s+[0-7]*777\b'), "world-writable permissions"),
     (re.compile(r'\bchown\b'), "ownership change"),
