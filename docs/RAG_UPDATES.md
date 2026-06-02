@@ -2,7 +2,7 @@
 
 This document describes the recent overhaul of the RAG (Retrieval-Augmented Generation) system powering the multi-agent server. The changes span database quality, ingestion strategy, and the client-side agentic query layer.
 
-**Related docs:** [TUTORIAL.md](TUTORIAL.md) (Section 3.5: RAG Memory System), [README.md](../README.md) (API section), [SUMMARY.md](SUMMARY.md)
+**Related docs:** [TUTORIAL.md](TUTORIAL.md) (Section 3.5: RAG Memory System), [README.md](../README.md) (API section)
 
 ---
 

@@ -7,27 +7,25 @@ A local LLM inference server with a multi-agent CLI client. The server provides 
 ```
 Client (macOS/Linux)                    Server (Linux + GPU)
 ┌──────────────────┐                   ┌──────────────────────────────────┐
-│ qwen_client/     │  HTTP/SSE         │ qwen_server.server (FastAPI)     │
-│  orchestrator.py │◄─────────────────►│  ├─ llama_cpp backend            │
-│  completion.py   │  /v1/chat/        │  │   (in-process)                │
-│  tool_handlers   │  completions      │  ├─ llama_server backend         │
-│  compaction.py   │                   │  │   (subprocess :8081)          │
-│  commands.py     │                   │  ├─ memory_service               │
-│  history.py      │                   │  │   (ChromaDB + RAG)            │
-└──────────────────┘                   │  └─ web_search_service           │
-                                       └──────────────────────────────────┘
+│ src/qwen_client/ │  HTTP/SSE         │ qwen_server.server (FastAPI :5000)│
+│  main.py         │◄─────────────────►│  ├─ llama_server backend          │
+│  orchestrator.py │  /v1/chat/        │  │   (llama-server subprocess)    │
+│  completion.py   │  completions      │  ├─ tool_handlers (server-side)   │
+│  compaction.py   │                   │  ├─ memory_service                │
+│  commands.py     │                   │  │   (ChromaDB + RAG)             │
+│  history.py      │                   │  └─ web_search_service            │
+└──────────────────┘                   └──────────────────────────────────┘
 ```
 
-**Dual backend** (mostly historical — the in-process path is being retired):
-Almost all agents now run on the `llama_server` subprocess with `--cpu-moe`,
-which puts attention sublayers on GPU and keeps MoE experts on CPU. Two
-agents (`debugger`, `fast_implementer`) still use the in-process
-`llama_cpp` path; both are scheduled for migration.
+**Single backend**: Every agent runs on a `llama-server` subprocess, almost
+all with `--cpu-moe` — attention sublayers on GPU, MoE expert weights on CPU,
+so `ngl` can push nearly all attention layers onto a 16 GB card. The old
+in-process `llama_cpp` backend was retired in April 2026; `server.py` now
+routes solely through `LlamaServerManager` (`llama_server.py`).
 
-**VRAM coordination**: Only one model is loaded at a time. When a request
-for a llama_cpp-backed agent lands while a llama_server stream is in
-flight, the loader waits up to 60s for the in-flight request to drain
-before shutting the subprocess down.
+**VRAM coordination**: Only one model is loaded at a time. A model swap waits
+for any in-flight request to drain (and for the GPU to actually release VRAM)
+before launching the next subprocess, so concurrent agent switches don't OOM.
 
 **On-demand loading**: Models load when first requested and unload when
 idle (30-min watchdog; in-flight requests block the kill).
@@ -71,8 +69,8 @@ Each agent maps to a model configuration and system prompt. Switch with `/agent 
 |-------|------|-------|--------------|---------|-----|-----|---------|
 | `implementer` | Default implementation | Qwen3.6-35B-A3B UD-Q4_K_M | 3B/35B | 262K | Q8_0 | 48 cpu_moe | subprocess |
 | `deep_implementer` | Deep reasoning | Coder-Next Q8_0 | 3B/80B | 256K | Q8_0 | 48 cpu_moe | subprocess |
-| `fast_implementer` | Fast implementation | Coder-30B Q4_K_M | 3B/30B | 256K | Q4_0 | 26 | in-process |
-| `debugger` | Debugging | Coder-30B Q4_K_M | 3B/30B | 131K | Q4_0 | 34 | in-process |
+| `fast_implementer` | Fast implementation | Coder-30B Q4_K_M | 3B/30B | 256K | Q4_0 | 26 | subprocess |
+| `debugger` | Debugging | Coder-30B Q4_K_M | 3B/30B | 131K | Q4_0 | 30 | subprocess |
 | `reviewer` | Code review | Coder-30B Q8_0 | 3B/30B | 196K | Q8_0 | 49 cpu_moe | subprocess |
 | `deep_reviewer` | Deep judgment | Qwen3.5-122B-A10B Q4_K_M | 10B/122B | **256K** | Q8_0 | 49 cpu_moe | subprocess |
 | `architect` | System design | Coder-480B Q2_K_XL | 35B/480B | 32K | Q8_0 | 63 cpu_moe | subprocess |
@@ -185,7 +183,7 @@ python qwen-autonomous events <spec_id>
 
 **Orchestrator daemon:** Runs as a separate systemd unit (`qwen-orchestrator.service`). Polls the SQLite task store, calls agents via the inference API, runs tests via subprocess. Independent of the interactive client.
 
-See `docs/PHASE2_TEST_PLAN.md` for the full manual test procedure.
+See `docs/TUTORIAL.md` for an end-to-end walkthrough of the pipeline.
 
 ## API
 
@@ -256,8 +254,8 @@ qwen-server/
 ├── dashboard/                  # TypeScript React dashboard
 ├── mac_runner/                 # Separate Swift/Xcode test runner service
 └── docs/
-    ├── TUTORIAL.md             #   10-stage pipeline tutorial
+    ├── TUTORIAL.md             #   End-to-end pipeline tutorial
     ├── CONFIGURATION.md        #   Env vars, agent-config knobs, systemd
-    ├── PHASE2_TEST_PLAN.md     #   Manual test plan for autonomous mode
-    └── SUMMARY.md              #   Changelog and optimization history
+    ├── RAG_UPDATES.md          #   RAG database + agentic query layer
+    └── XCODEGEN_GUIDE.md       #   Xcode project generation (mac_runner)
 ```
