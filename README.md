@@ -36,15 +36,16 @@ idle (30-min watchdog; in-flight requests block the kill).
 
 ```bash
 git clone <repo-url> && cd qwen-server
-./setup.sh                  # Creates venv, installs dependencies
-pip install -e .            # Install qwen_server / qwen_client / qwen_autonomous
-cp .env.example .env        # Configure IP, ports, model paths
+./setup.sh                  # Creates venv, runs `pip install -e .`, sets up .env
+cp .env.example .env        # (setup.sh does this too; edit IP, ports, model paths)
 ./start.sh                  # Starts on port 5000
 ```
 
-The `pip install -e .` step is required after `setup.sh` — it makes the
-three packages under `src/` importable and installs the `qwen-client` /
-`qwen-autonomous` console scripts into the venv.
+Dependencies live in `pyproject.toml` (single source of truth). `setup.sh`
+runs `pip install -e .`, which installs the core deps, makes the three `src/`
+packages importable, and wires the `qwen-client` / `qwen-autonomous` console
+scripts. For the client's optional niceties (rich output, scraping) add the
+extra: `pip install -e '.[client]'`.
 
 Or as a systemd service:
 ```bash

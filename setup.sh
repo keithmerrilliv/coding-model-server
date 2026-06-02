@@ -36,9 +36,13 @@ source venv/bin/activate
 echo "Upgrading pip..."
 pip install --upgrade pip
 
-# Install dependencies
-echo "Installing dependencies from requirements.txt..."
-pip install -r requirements.txt
+# Install dependencies + the three src/ packages in one step. pyproject.toml
+# is the single source of truth for dependencies; `-e .` installs the core
+# deps and makes qwen_server / qwen_client / qwen_autonomous importable plus
+# wires the qwen-client / qwen-autonomous console scripts. Add the client
+# extras (rich, beautifulsoup4) with `pip install -e '.[client]'`.
+echo "Installing dependencies and packages (pip install -e .)..."
+pip install -e .
 
 # Setup external tools (MCPs)
 echo ""

@@ -1,37 +1,8 @@
-# Qwen Multi-Agent Server
-
-# Model inference
-llama-cpp-python>=0.3.20
-transformers>=5.1.0
-huggingface-hub>=1.4.0
-
-# Web server (FastAPI)
-fastapi>=0.128.1
-uvicorn[standard]>=0.40.0
-requests>=2.32.3
-python-dotenv>=1.0.1
-
-# RAG / memory
-chromadb==1.4.1
-sentence-transformers==5.2.2
-pypdf>=5.1.0
-
-# Code chunking (tree-sitter)
-tree_sitter_languages
-
-# Web search
-ddgs>=9.10.0
-
-# Autonomous mode
-pyyaml>=6.0
-
-# Autonomous mode — Jira sync (optional)
-# The orchestrator daemon falls back to FakeJiraClient if this isn't installed
-# or if JIRA_URL/EMAIL/TOKEN are unset, so it's a soft dependency.
-atlassian-python-api>=4.0.0
-
-# /review command — multi-judge fan-out (Claude + Gemini + local Qwen).
-# Soft deps: if either SDK is missing or the corresponding API key is unset,
-# that judge is skipped with a clear note in the rendered output.
-anthropic>=0.40.0
-google-genai>=1.0.0
+# Dependencies are declared in pyproject.toml (single source of truth).
+#
+# Install the server + all three src/ packages with:
+#     pip install -e .
+#
+# This file is kept only as a pointer for `pip install -r` muscle memory; it
+# intentionally has no pinned packages so it can't drift from pyproject.
+-e .
