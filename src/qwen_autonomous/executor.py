@@ -25,7 +25,6 @@ import shutil
 import subprocess
 import sys
 import textwrap
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -35,6 +34,7 @@ import requests
 from qwen_server import external_judges
 
 from . import seccomp_filter
+from ._http import post_chat_completion
 
 # Module-level session: reuses TCP+TLS connections across the
 # architect → implementer → reviewer → supervisor sequence, saving
@@ -69,10 +69,6 @@ MAX_RETRIES = int(os.getenv("AUTONOMOUS_MAX_RETRIES", "5"))
 # persisted to spec_dir as architect_failed_response_attempt<N>.txt
 # for post-mortem.
 ARCHITECT_PARSE_RETRIES = int(os.getenv("AUTONOMOUS_ARCHITECT_PARSE_RETRIES", "2"))
-
-QWEN_SERVER_HOST = os.getenv("QWEN_SERVER_IP", "127.0.0.1")
-QWEN_SERVER_PORT = int(os.getenv("QWEN_SERVER_PORT", "5000"))
-ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
 
 ROLE_TO_AGENT = {
     "architect": ARCHITECT_AGENT,
@@ -373,47 +369,20 @@ def call_agent(
     max_tokens = max_tokens or ROLE_TO_MAX_TOKENS.get(role, 8000)
     timeout = timeout or ROLE_TO_TIMEOUT.get(role, 1800)
 
-    url = f"http://{QWEN_SERVER_HOST}:{QWEN_SERVER_PORT}/v1/chat/completions"
-    headers = {"Content-Type": "application/json"}
-    if ADMIN_API_KEY:
-        headers["X-Admin-Key"] = ADMIN_API_KEY
-
-    payload = {
-        "model": agent,
-        "messages": messages,
-        "max_tokens": max_tokens,
-        "temperature": 0.2,
-        "stream": False,
-        # Opt out of server-side RAG: chat-memory injection is noise for
-        # autonomous structured prompts (specs, designs, code blocks).
-        "skip_memory": True,
-    }
-
     logger.info("calling agent=%s, role=%s, msg_count=%d, max_tokens=%d",
                 agent, role, len(messages), max_tokens)
 
-    # Transient-5xx retry. Model-swap CUDA OOM is the dominant cause of 500s
-    # here (VRAM not fully released between models — see
-    # project_model_swap_oom.md): the next process can't allocate its compute
-    # buffer until the kernel finishes reaping the previous CUDA context.
-    # Without this retry, a single transient swap-OOM cancels the whole spec
-    # because _start_task catches Exception → marks task failed → spec
-    # FAILED, with no rotation. Backoff is generous: VRAM release on
-    # Blackwell can take 10-30s after the previous llama-server exits.
-    backoffs = (10.0, 30.0, 60.0)
-    for attempt, delay in enumerate((0.0,) + backoffs):
-        if delay:
-            logger.info("call_agent: retrying after %.0fs (attempt %d/%d)",
-                        delay, attempt + 1, len(backoffs) + 1)
-            time.sleep(delay)
-        resp = _SESSION.post(url, json=payload, headers=headers, timeout=timeout)
-        if resp.status_code < 500 or attempt == len(backoffs):
-            break
-        logger.warning(
-            "call_agent: %d from server (attempt %d/%d, body=%s)",
-            resp.status_code, attempt + 1, len(backoffs) + 1,
-            resp.text[:200].replace("\n", " "),
-        )
+    # retry_5xx=True: model-swap CUDA OOM is the dominant cause of 500s here
+    # (VRAM not fully released between models — see project_model_swap_oom.md):
+    # the next process can't allocate its compute buffer until the kernel
+    # reaps the previous CUDA context. Without this retry a single transient
+    # swap-OOM cancels the whole spec (_start_task catches Exception → task
+    # failed → spec FAILED, no rotation). The generous backoff schedule lives
+    # in _http._BACKOFFS (Blackwell VRAM release takes 10-30s after exit).
+    resp = post_chat_completion(
+        agent, messages, timeout=timeout, max_tokens=max_tokens,
+        temperature=0.2, retry_5xx=True,
+    )
     resp.raise_for_status()
     data = resp.json()
 

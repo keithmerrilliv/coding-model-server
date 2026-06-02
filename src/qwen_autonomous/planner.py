@@ -23,9 +23,7 @@ import yaml
 from dataclasses import dataclass
 from typing import Optional
 
-import requests
-
-_SESSION = requests.Session()
+from qwen_autonomous._http import post_chat_completion
 
 logger = logging.getLogger(__name__)
 
@@ -33,9 +31,6 @@ logger = logging.getLogger(__name__)
 # ── Configuration ────────────────────────────────────────────────────────────
 
 PLANNER_AGENT = os.getenv("AUTONOMOUS_PLANNER_AGENT", "q36_architect")
-QWEN_SERVER_HOST = os.getenv("QWEN_SERVER_IP", "127.0.0.1")
-QWEN_SERVER_PORT = int(os.getenv("QWEN_SERVER_PORT", "5000"))
-ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
 PLANNER_TIMEOUT = float(os.getenv("AUTONOMOUS_PLANNER_TIMEOUT", "900"))  # 15 min
 PLANNER_MAX_TOKENS = int(os.getenv("AUTONOMOUS_PLANNER_MAX_TOKENS", "4000"))
 
@@ -353,31 +348,22 @@ def call_planner(
     distinguish "model said something we couldn't parse" from "couldn't
     reach the server at all". Parse failures return a PlannerError.
     """
-    url = f"http://{QWEN_SERVER_HOST}:{QWEN_SERVER_PORT}/v1/chat/completions"
-    headers = {"Content-Type": "application/json"}
-    if ADMIN_API_KEY:
-        headers["X-Admin-Key"] = ADMIN_API_KEY
-
     user_msg = build_user_message(spec_markdown, clarifications)
-
-    payload = {
-        "model": agent,
-        "messages": [
-            {"role": "system", "content": PLANNER_SYSTEM_PROMPT},
-            {"role": "user", "content": user_msg},
-        ],
-        "max_tokens": PLANNER_MAX_TOKENS,
-        "temperature": 0.2,        # low — we want consistent structured output
-        "stream": False,
-        # Opt out of server-side RAG (see executor.py call_agent).
-        "skip_memory": True,
-    }
 
     logger.info("planner: calling agent=%s, spec_chars=%d, clarifications=%d",
                 agent, len(spec_markdown),
                 len(clarifications) if clarifications else 0)
 
-    resp = _SESSION.post(url, json=payload, headers=headers, timeout=timeout)
+    resp = post_chat_completion(
+        agent,
+        [
+            {"role": "system", "content": PLANNER_SYSTEM_PROMPT},
+            {"role": "user", "content": user_msg},
+        ],
+        timeout=timeout,
+        max_tokens=PLANNER_MAX_TOKENS,
+        temperature=0.2,           # low — we want consistent structured output
+    )
     resp.raise_for_status()
     data = resp.json()
 

@@ -20,9 +20,9 @@ import os
 from dataclasses import dataclass
 from typing import Literal, Optional, TypedDict
 
-import requests
+import requests  # for requests.RequestException in callers below
 
-_SESSION = requests.Session()
+from qwen_autonomous._http import post_chat_completion
 
 logger = logging.getLogger("orchestrator.supervisor")
 
@@ -35,10 +35,6 @@ SUPERVISOR_MAX_TOKENS = int(os.getenv("AUTONOMOUS_SUPERVISOR_MAX_TOKENS", "1500"
 MAX_SUPERVISOR_TRANSITIONS = int(
     os.getenv("AUTONOMOUS_MAX_SUPERVISOR_TRANSITIONS", "8")
 )
-
-QWEN_SERVER_HOST = os.getenv("QWEN_SERVER_IP", "127.0.0.1")
-QWEN_SERVER_PORT = int(os.getenv("QWEN_SERVER_PORT", "5000"))
-ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
 
 
 # ── Types ────────────────────────────────────────────────────────────────────
@@ -301,26 +297,15 @@ def format_context_message(ctx: SupervisorContext) -> str:
 
 def _post_completion(messages: list[dict]) -> dict:
     """POST to the qwen-server inference API with forced tool-calling."""
-    url = f"http://{QWEN_SERVER_HOST}:{QWEN_SERVER_PORT}/v1/chat/completions"
-    headers = {"Content-Type": "application/json"}
-    if ADMIN_API_KEY:
-        headers["X-Admin-Key"] = ADMIN_API_KEY
-
-    payload = {
-        "model": SUPERVISOR_AGENT,
-        "messages": messages,
-        "max_tokens": SUPERVISOR_MAX_TOKENS,
-        "temperature": 0.1,
-        "stream": False,
-        "tools": [DECIDE_TOOL_SCHEMA],
-        "tool_choice": {"type": "function", "function": {"name": "decide"}},
-        # Server-side RAG would inject chat-memory context that's pure noise
-        # for a meta-decision agent reasoning over structured outcomes.
-        "skip_memory": True,
-    }
-
-    resp = _SESSION.post(url, json=payload, headers=headers,
-                         timeout=SUPERVISOR_TIMEOUT)
+    resp = post_chat_completion(
+        SUPERVISOR_AGENT,
+        messages,
+        timeout=SUPERVISOR_TIMEOUT,
+        max_tokens=SUPERVISOR_MAX_TOKENS,
+        temperature=0.1,
+        tools=[DECIDE_TOOL_SCHEMA],
+        tool_choice={"type": "function", "function": {"name": "decide"}},
+    )
     resp.raise_for_status()
     return resp.json()
 
