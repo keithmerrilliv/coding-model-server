@@ -42,7 +42,7 @@ logger = logging.getLogger("qwen_client")
 
 def _configure_tool_handlers():
     """Wire up tool_handlers.py with all its dependencies."""
-    import tool_handlers
+    from qwen_server import tool_handlers
 
     tool_handlers.configure(
         config=config,
