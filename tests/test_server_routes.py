@@ -78,3 +78,32 @@ def test_openapi_schema_builds():
     r = client.get("/openapi.json")
     assert r.status_code == 200
     assert r.json()["info"]["title"]
+
+
+def test_lifespan_publishes_services_to_runtime():
+    """Guard the runtime.services indirection introduced by the split.
+
+    Routes read runtime.services.memory at call-time, populated by the app
+    lifespan. This drives the full path: lifespan publishes a (stubbed)
+    service, and a route reads it and returns its result. Heavy inits are
+    mocked so no ChromaDB / MCP subprocess / GPU sampler is touched.
+    """
+    from unittest import mock
+
+    import qwen_server.server as srv
+    from qwen_server import runtime
+
+    fake_mem = mock.Mock()
+    fake_mem.search_memory.return_value = [{"text": "hit"}]
+    with mock.patch.object(srv, "MemoryService", return_value=fake_mem), \
+            mock.patch.object(srv, "WebSearchService", return_value=mock.Mock()), \
+            mock.patch.object(srv, "AppleDeepDocsService") as ADD, \
+            mock.patch.object(srv.gpu_sampler, "start"), \
+            mock.patch.object(srv.gpu_sampler, "stop"), \
+            mock.patch.object(runtime.llama_server_manager, "shutdown"):
+        ADD.return_value.start.return_value = False
+        with TestClient(srv.app) as lifespan_client:  # context form runs lifespan
+            assert runtime.services.memory is fake_mem
+            r = lifespan_client.post("/v1/memory/search", json={"query": "x"})
+            assert r.status_code == 200
+            assert r.json() == {"results": [{"text": "hit"}]}
