@@ -1,10 +1,18 @@
-"""Tests for LlamaServerManager._build_server_args.
+"""Tests for LlamaServerManager._build_server_args and start().
 
 The argv builder was extracted from start() precisely so it could be tested
 without spawning a subprocess. These pin the flag generation: base flags,
 cache-type mapping, the cpu_moe toggle, the optional speculative-decode draft
 block, and the server_extra_args default.
+
+test_start_executes_post_popen_body is a regression guard: the argv extraction
+left an orphaned `model_path` reference in start() (NameError at runtime, missed
+by the isolated builder tests because they never ran start()). This drives
+start() through its post-Popen body with the subprocess + health poll mocked.
 """
+import os
+from unittest import mock
+
 import pytest
 
 from qwen_server.llama_server import LlamaServerManager
@@ -118,3 +126,38 @@ def test_extra_args_override(mgr):
     })
     assert "--jinja" in cmd and "--swa-full" in cmd
     assert "--chat-template" not in cmd  # override replaces the default
+
+
+def test_start_executes_post_popen_body(mgr, monkeypatch, tmp_path):
+    """Drive start() through its full post-Popen body without a real subprocess.
+
+    Regression guard: the _build_server_args extraction orphaned a `model_path`
+    name in start() (NameError), which the isolated builder tests above could not
+    catch because they never executed start(). Here we make the binary check
+    pass, stub Popen + the stdout drain + the /health poll, and assert start()
+    runs clean and records current_model_path from the config.
+    """
+    model_config = {"path": "/models/m.gguf", "n_gpu_layers": 1, "n_ctx": 4096}
+
+    # 1) binary existence check -> always true
+    monkeypatch.setattr(os.path, "isfile", lambda p: True)
+
+    # 2) fake process: alive (poll None), drainable stdout
+    fake_proc = mock.Mock()
+    fake_proc.poll.return_value = None
+    fake_proc.stdout.readline.side_effect = lambda: b""  # drain loop exits immediately
+    monkeypatch.setattr("qwen_server.llama_server.subprocess.Popen",
+                        lambda *a, **k: fake_proc)
+
+    # 3) /health returns 200 on first poll
+    healthy = mock.Mock(status_code=200)
+    monkeypatch.setattr("qwen_server.llama_server.http_requests.get",
+                        lambda *a, **k: healthy)
+
+    # 4) don't spin up the real idle watchdog thread
+    monkeypatch.setattr(mgr, "_start_watchdog", lambda: None)
+
+    mgr.start(model_config)  # would raise NameError before the fix
+
+    assert mgr.current_model_path == "/models/m.gguf"
+    assert mgr.process is fake_proc

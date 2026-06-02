@@ -226,7 +226,7 @@ class LlamaServerManager:
         )
         with self.lock:
             self.process = process
-            self.current_model_path = model_path
+            self.current_model_path = model_config['path']
             self.current_model_config = model_config
             self.current_runtime_signature = self._runtime_signature(model_config)
             self.started_at = time.time()
