@@ -220,7 +220,7 @@ qwen-server/
 │   │   ├── tool_handlers.py    #   Tool execution, permissions, file ops
 │   │   ├── memory_service.py   #   ChromaDB RAG service
 │   │   ├── web_search_service.py
-│   │   ├── server_manager.py   #   Apple Deep Docs MCP handshake
+│   │   ├── mcp_service.py      #   Apple Deep Docs MCP client (JSON-RPC handshake)
 │   │   ├── streaming.py        #   SSE chunking, ThinkingStripper
 │   │   ├── external_judges.py  #   Claude / Gemini call wrappers (/review + Phase b)
 │   │   ├── config.py           #   Server-side Config + agent definitions

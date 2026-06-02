@@ -114,33 +114,21 @@ class LlamaServerManager:
         self._watchdog_thread: Optional[Thread] = None
         self._watchdog_running = False
 
-    def start(self, model_config: dict):
-        """Spawn llama-server with the given model config, wait for /health.
+    def _build_server_args(self, binary: str, model_config: dict) -> list[str]:
+        """Build the llama-server argv from a model config.
 
-        Caller responsibility: hold ``self._swap_lock`` for the duration of
-        this call. We do NOT hold ``self.lock`` during the multi-second
-        subprocess spawn or the up-to-120-second /health poll loop;
-        ``self.lock`` is only acquired briefly to publish state transitions
-        (idle → starting → running) so dashboard readers don't block.
+        Pure function of (binary, model_config) — no subprocess side effects —
+        so it's unit-testable in isolation. Covers base flags, the optional
+        ``cpu_moe`` toggle, the optional speculative-decode ``draft`` block,
+        and per-model ``server_extra_args`` (chat template, jinja, etc.).
         """
-        # tools/ lives at the repo root; this file is at src/qwen_server/.
-        tools_dir = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-            'tools',
-        )
-        binary = os.path.join(tools_dir, 'llama-server')
-
-        if not os.path.isfile(binary):
-            raise FileNotFoundError(f"llama-server binary not found: {binary}")
-
-        model_path = model_config['path']
         # Map GGML type_k/type_v integers to llama-server flag strings
         cache_k = self._CACHE_TYPE_NAMES.get(model_config.get('type_k', 8), 'q8_0')
         cache_v = self._CACHE_TYPE_NAMES.get(model_config.get('type_v', 8), 'q8_0')
 
         cmd = [
             binary,
-            '-m', model_path,
+            '-m', model_config['path'],
             '-ngl', str(model_config.get('n_gpu_layers', 0)),
             '-c', str(model_config.get('n_ctx', 32768)),
             '-b', str(model_config.get('n_batch', 2048)),
@@ -198,6 +186,29 @@ class LlamaServerManager:
         # Add model-specific server args (chat template, jinja, etc.)
         extra_args = model_config.get('server_extra_args', ['--chat-template', 'chatml'])
         cmd.extend(extra_args)
+
+        return cmd
+
+    def start(self, model_config: dict):
+        """Spawn llama-server with the given model config, wait for /health.
+
+        Caller responsibility: hold ``self._swap_lock`` for the duration of
+        this call. We do NOT hold ``self.lock`` during the multi-second
+        subprocess spawn or the up-to-120-second /health poll loop;
+        ``self.lock`` is only acquired briefly to publish state transitions
+        (idle → starting → running) so dashboard readers don't block.
+        """
+        # tools/ lives at the repo root; this file is at src/qwen_server/.
+        tools_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+            'tools',
+        )
+        binary = os.path.join(tools_dir, 'llama-server')
+
+        if not os.path.isfile(binary):
+            raise FileNotFoundError(f"llama-server binary not found: {binary}")
+
+        cmd = self._build_server_args(binary, model_config)
 
         env = os.environ.copy()
         env['LD_LIBRARY_PATH'] = tools_dir + ':' + env.get('LD_LIBRARY_PATH', '')

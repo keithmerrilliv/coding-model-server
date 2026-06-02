@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-Apple Deep Docs MCP Server Manager
-Provides a unified interface for both the server and the CLI.
+Apple Deep Docs MCP client.
+
+Manages the Apple Deep Docs MCP server subprocess (JSON-RPC over stdio) and
+exposes a unified interface used by both the FastAPI server and a small CLI.
+Named mcp_service to reflect that it's an MCP *client*, not a manager of this
+project's own server.
 """
 
 import subprocess
@@ -274,12 +278,12 @@ if __name__ == "__main__":
             print(f"Server running: {service.is_running}")
         elif sys.argv[1] == "call":
             if len(sys.argv) < 3:
-                print("Usage: python server_manager.py call <tool_name> [args_json]")
+                print("Usage: python -m qwen_server.mcp_service call <tool_name> [args_json]")
             else:
                 tool = sys.argv[2]
                 args = json.loads(sys.argv[3]) if len(sys.argv) > 3 else {}
                 print(service.call_tool(tool, args))
         else:
-            print("Usage: python server_manager.py [start|stop|status|call]")
+            print("Usage: python -m qwen_server.mcp_service [start|stop|status|call]")
     else:
-        print("Usage: python server_manager.py [start|stop|status|call]")
+        print("Usage: python -m qwen_server.mcp_service [start|stop|status|call]")

@@ -28,7 +28,7 @@ from qwen_server.config import Config
 from qwen_server.llama_server import InsufficientVramError, LlamaServerManager
 from qwen_server.memory_service import MemoryService
 from qwen_server.metrics import gpu_sampler, request_metrics
-from qwen_server.server_manager import AppleDeepDocsService
+from qwen_server.mcp_service import AppleDeepDocsService
 from qwen_server.streaming import (
     ThinkingStripper, build_completion_response,
     build_stream_chunk, strip_thinking,
