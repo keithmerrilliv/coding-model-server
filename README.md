@@ -1,5 +1,7 @@
 # Qwen Multi-Agent Server
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 A local LLM inference server with a multi-agent CLI client. The server provides an OpenAI-compatible API backed by llama.cpp, supporting multiple model configurations with automatic VRAM management. The client is an agentic coding assistant that can execute shell commands, read/write files, search codebases, and manage long-running tasks.
 
 ## Architecture
@@ -260,3 +262,7 @@ qwen-server/
     ├── RAG_UPDATES.md          #   RAG database + agentic query layer
     └── XCODEGEN_GUIDE.md       #   Xcode project generation (mac_runner)
 ```
+
+## License
+
+[MIT](LICENSE) © Keith Merrill
