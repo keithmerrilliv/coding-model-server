@@ -78,13 +78,17 @@ from qwen_autonomous.executor import (
     _write_artifact,
     build_architect_message,
     build_implementer_message,
+    build_manifest_message,
+    build_per_file_message,
     build_reviewer_message,
     build_synthesis_message,
     call_agent,
     parse_architect_response,
     parse_implementer_response,
+    parse_manifest_response,
     parse_reviewer_response,
     run_tests,
+    summarize_written_files,
 )
 from qwen_autonomous import supervisor as _supervisor
 
@@ -726,6 +730,130 @@ def _clean_spec_dir_for_retry(spec_dir: Path, retry_count: int) -> None:
     )
 
 
+# ── Implementation generation: single-call vs manifest/per-file (#4) ──────────
+
+def _generate_implementation(
+    db: Database, spec: Spec, task, spec_dir,
+    spec_md: str, design_md: str, chosen_agent: "str | None",
+    clarifications: list, rejection_notes: "str | None",
+) -> "ImplementerResult | ParseError":
+    """Produce the implementation for a spec.
+
+    Large designs go file-by-file via a manifest (no single-call output
+    ceiling); small designs use the legacy one-shot call. Both return an
+    ImplementerResult (list of (path, content)) or a ParseError, which the
+    caller handles identically (rotation retry on ParseError).
+    """
+    n_files = executor.estimate_design_file_count(design_md)
+    if executor.use_manifest_mode(design_md):
+        logger.info("spec %s: manifest mode (design enumerates ~%d files >= "
+                    "threshold %d)", spec.id, n_files, executor.MANIFEST_FILE_THRESHOLD)
+        return _generate_via_manifest(
+            db, spec, task, spec_dir, spec_md, design_md,
+            chosen_agent, clarifications, rejection_notes,
+        )
+
+    # Single-call path: one response with every file, budget scaled to the design.
+    messages = build_implementer_message(
+        spec_md, design_md, rejection_notes=rejection_notes,
+        clarifications=clarifications,
+    )
+    impl_max_tokens = executor.implementer_max_tokens_for(design_md)
+    logger.info("spec %s: single-call implementer budget=%d tokens (~%d files)",
+                spec.id, impl_max_tokens, n_files)
+    meta: dict = {}
+    raw = call_agent("implementer", messages, agent=chosen_agent,
+                     max_tokens=impl_max_tokens, meta=meta)
+    _note_truncation(db, spec, task, "implementer", meta, impl_max_tokens)
+    return parse_implementer_response(raw)
+
+
+def _generate_via_manifest(
+    db: Database, spec: Spec, task, spec_dir,
+    spec_md: str, design_md: str, chosen_agent: "str | None",
+    clarifications: list, rejection_notes: "str | None",
+) -> "ImplementerResult | ParseError":
+    """Manifest → per-file generation. One manifest call, then one bounded call
+    per file, accumulating written-file interface summaries for consistency."""
+    # 1. Manifest call.
+    meta: dict = {}
+    manifest_raw = call_agent(
+        "implementer", build_manifest_message(spec_md, design_md, clarifications),
+        agent=chosen_agent, max_tokens=executor.MANIFEST_MAX_TOKENS, meta=meta,
+    )
+    _note_truncation(db, spec, task, "manifest", meta, executor.MANIFEST_MAX_TOKENS)
+    manifest = parse_manifest_response(manifest_raw)
+    if isinstance(manifest, ParseError):
+        logger.warning("spec %s: manifest parse failed (%s) — rotating",
+                       spec.id, manifest.reason)
+        return manifest  # propagate → caller's rotation retry
+    db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
+                    payload={"role": "manifest", "files": len(manifest.entries),
+                             "paths": [e.path for e in manifest.entries]})
+    logger.info("spec %s: manifest = %d files: %s", spec.id,
+                len(manifest.entries), ", ".join(e.path for e in manifest.entries))
+
+    # 2. One bounded call per file, in the manifest's dependency order.
+    written: list[tuple[str, str]] = []
+    failures: list[str] = []
+    for entry in manifest.entries:
+        content = _generate_one_file(
+            db, spec, task, spec_md, design_md, manifest.entries, entry,
+            written, chosen_agent, clarifications, rejection_notes,
+        )
+        if content is None:
+            failures.append(entry.path)
+            logger.warning("spec %s: per-file generation failed for %s",
+                           spec.id, entry.path)
+            continue
+        written.append((entry.path, content))
+
+    if failures:
+        db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
+                        payload={"role": "manifest", "anomaly": "per_file_failures",
+                                 "paths": failures})
+    if not written:
+        return ParseError(
+            f"manifest mode produced no usable files "
+            f"({len(failures)} per-file failures)", manifest.raw,
+        )
+    logger.info("spec %s: manifest mode wrote %d/%d files (%d failed)",
+                spec.id, len(written), len(manifest.entries), len(failures))
+    return ImplementerResult(files=written, raw=manifest.raw)
+
+
+def _generate_one_file(
+    db: Database, spec: Spec, task, spec_md: str, design_md: str,
+    manifest_entries: list, entry, written: list, chosen_agent: "str | None",
+    clarifications: list, rejection_notes: "str | None",
+) -> "str | None":
+    """Generate a single file's content, with bounded parse-retries. Returns the
+    content (associated with the manifest's canonical path) or None on failure."""
+    written_summary = summarize_written_files(written)
+    for attempt in range(executor.PER_FILE_PARSE_RETRIES + 1):
+        meta: dict = {}
+        raw = call_agent(
+            "implementer",
+            build_per_file_message(spec_md, design_md, manifest_entries, entry,
+                                   written_summary, clarifications, rejection_notes),
+            agent=chosen_agent, max_tokens=executor.PER_FILE_MAX_TOKENS, meta=meta,
+        )
+        _note_truncation(db, spec, task, f"per-file:{entry.path}", meta,
+                         executor.PER_FILE_MAX_TOKENS)
+        parsed = parse_implementer_response(raw)
+        if isinstance(parsed, ParseError) or not parsed.files:
+            continue
+        # Enforce the manifest path: take the block whose path matches (by full
+        # path or basename), else the first block the model emitted.
+        target_base = os.path.basename(entry.path)
+        for p, c in parsed.files:
+            pp = p.strip().lstrip("/")
+            if pp == entry.path or os.path.basename(pp) == target_base:
+                return c
+        return parsed.files[0][1]
+    return None
+
+
 def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
     # Wipe artifacts from earlier retries so the new implementer starts
     # from a clean slate. No-op on retry-0.
@@ -777,24 +905,13 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
                         spec.id, task.retry_count, task.agent, chosen_agent)
         db.update_task_agent(task.id, chosen_agent)
 
-    messages = build_implementer_message(spec_md, design_md,
-                                         rejection_notes=rejection_notes,
-                                         clarifications=clarifications)
-    # Size the output budget to the design. The implementer emits every file in
-    # ONE response, so a large multi-file spec needs more headroom than the
-    # legacy fixed cap — which truncated big specs (the trailing file lost its
-    # <<<END_FILE>>>, the reviewer false-FAILed it as missing, the retry
-    # truncated at the same spot). Small specs are unchanged (clamped to floor).
-    impl_max_tokens = executor.implementer_max_tokens_for(design_md)
-    logger.info(
-        "spec %s: implementer output budget=%d tokens (design enumerates ~%d files)",
-        spec.id, impl_max_tokens, executor.estimate_design_file_count(design_md),
+    # Generate the implementation — either as one call (small designs) or
+    # file-by-file via a manifest (large designs). Both return an
+    # ImplementerResult (list of files) or a ParseError handled identically below.
+    result = _generate_implementation(
+        db, spec, task, spec_dir, spec_md, design_md,
+        chosen_agent, clarifications, rejection_notes,
     )
-    meta: dict = {}
-    raw = call_agent("implementer", messages, agent=chosen_agent,
-                     max_tokens=impl_max_tokens, meta=meta)
-    _note_truncation(db, spec, task, "implementer", meta, impl_max_tokens)
-    result = parse_implementer_response(raw)
 
     db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
                     payload={"role": "implementer",
@@ -857,6 +974,17 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
                                  "anomaly": "duplicate_file_paths",
                                  "paths": result.duplicate_paths,
                                  "retry": task.retry_count})
+
+    # Deterministically pin boilerplate (package.json dependency ranges) so the
+    # single most mechanical reviewer FAIL — unpinned deps — never depends on the
+    # model getting it right. See executor.normalize_boilerplate (#3).
+    normalized, norm_notes = executor.normalize_boilerplate(result.files)
+    if norm_notes:
+        result.files = normalized
+        for note in norm_notes:
+            logger.info("spec %s: boilerplate normalized — %s", spec.id, note)
+        db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
+                        payload={"role": "implementer", "normalized": norm_notes})
 
     # Write all files
     for rel_path, content in result.files:

@@ -18,6 +18,7 @@ structured output, not as built-in tool calls.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -72,6 +73,19 @@ IMPLEMENTER_TOKENS_PER_FILE = int(os.getenv("AUTONOMOUS_IMPLEMENTER_TOKENS_PER_F
 IMPLEMENTER_TOKENS_BASE = int(os.getenv("AUTONOMOUS_IMPLEMENTER_TOKENS_BASE", "4000"))
 
 MAX_RETRIES = int(os.getenv("AUTONOMOUS_MAX_RETRIES", "5"))
+
+# Manifest mode (#4): for large multi-file specs, generate a file MANIFEST first,
+# then one bounded call per file — removing the single-call output ceiling that
+# truncates big repos. (A 29-file design overran even a 47,500-token budget; see
+# project_qwen_autonomous_output_token_fix.) Mode selection:
+#   auto     — manifest mode when the design enumerates >= threshold files (default)
+#   manifest — always manifest mode
+#   single   — always the legacy one-shot call
+IMPLEMENTER_MODE = os.getenv("AUTONOMOUS_IMPLEMENTER_MODE", "auto").lower()
+MANIFEST_FILE_THRESHOLD = int(os.getenv("AUTONOMOUS_MANIFEST_FILE_THRESHOLD", "8"))
+MANIFEST_MAX_TOKENS = int(os.getenv("AUTONOMOUS_MANIFEST_MAX_TOKENS", "4000"))
+PER_FILE_MAX_TOKENS = int(os.getenv("AUTONOMOUS_PER_FILE_MAX_TOKENS", "8000"))
+PER_FILE_PARSE_RETRIES = int(os.getenv("AUTONOMOUS_PER_FILE_PARSE_RETRIES", "2"))
 
 # Architect parse-retry: how many times to re-call the architect when its
 # response can't be parsed for the <<<DESIGN>>> / <<<COMPLEXITY>>> blocks.
@@ -803,6 +817,298 @@ def build_implementer_message(
         {"role": "system", "content": IMPLEMENTER_SYSTEM_PROMPT},
         {"role": "user", "content": "".join(user_parts)},
     ]
+
+
+# ── Manifest mode (#4): manifest → per-file generation ───────────────────────
+#
+# The single-call implementer must emit the whole repo in one response, capped by
+# max_tokens. For large designs that truncates. Manifest mode splits it:
+#   1. one cheap call returns the FILE MANIFEST (paths + purpose + exports, in
+#      dependency order) — bounded output, no code;
+#   2. one bounded call per file emits just that file, given the design, the full
+#      manifest, and summaries of the already-written files (for cross-file
+#      consistency). Total output is unbounded; each call stays small.
+
+MANIFEST_SYSTEM_PROMPT = textwrap.dedent("""\
+    You are the IMPLEMENTER in its planning step. Given the specification and the
+    architecture design, output the FILE MANIFEST: the exact list of files you
+    will create. You write NO code in this step.
+
+    # Output format
+
+    Respond with EXACTLY ONE block. No preamble, no prose outside the markers.
+
+    <<<MANIFEST>>>
+    relative/path/one.ext | one-line purpose | key exports / types / functions
+    relative/path/two.ext | one-line purpose | key exports
+    ...
+    <<<END_MANIFEST>>>
+
+    # Rules
+    1. One file per line, fields separated by ` | ` (space-pipe-space):
+       `path | purpose | exports`. The exports field may be empty but keep the
+       two separators.
+    2. DEPENDENCY ORDER: list shared contracts / type modules FIRST, then code
+       that imports them, then entrypoints, then config and docs LAST. A file
+       must come after everything it imports.
+    3. List EVERY file the design calls for — source, config (package.json,
+       tsconfig, etc.) and docs (README). Do not skip "trivial" files.
+    4. Paths are relative to the project workspace root (no leading /).
+    5. No code, no markdown fences, no commentary — only the manifest block.
+    """)
+
+PER_FILE_SYSTEM_PROMPT = textwrap.dedent("""\
+    You are the IMPLEMENTER writing ONE file of a larger project. You are given
+    the spec, the architecture design, the full file manifest, and summaries of
+    the files already written. Produce the COMPLETE content of the single
+    requested file, consistent with the design and the existing files.
+
+    # Output format
+
+    Respond with EXACTLY ONE file block, nothing else:
+
+    <<<FILE: relative/path/to/file.ext>>>
+    <complete file content — the ENTIRE file, not a diff or snippet>
+    <<<END_FILE>>>
+
+    # Rules
+    1. Output ONLY the one requested file, at the exact path given. Never emit
+       another file or wrap the content in markdown ``` fences.
+    2. Stay consistent with the already-written files: import the exports they
+       actually provide; do not invent symbols or alternate signatures.
+    3. TypeScript: `any` is forbidden — use `unknown` + narrowing or a real type.
+    4. Pin dependencies to exact versions (no `^`, `~`, `>=`) in any manifest file.
+    5. Write complete, working content — no TODO placeholders, no elisions.
+    """)
+
+
+@dataclass
+class ManifestEntry:
+    path: str
+    purpose: str
+    exports: str = ""
+
+
+@dataclass
+class ManifestResult:
+    entries: list[ManifestEntry]
+    raw: str
+
+
+_MANIFEST_RE = re.compile(
+    r"<{1,3}MANIFEST>{1,3}\s*(.*?)\s*<{1,3}END_MANIFEST>{1,3}",
+    re.DOTALL | re.IGNORECASE,
+)
+# Leading list markers ("1.", "- ", "* ") the model sometimes prefixes.
+_LIST_MARKER_RE = re.compile(r"^\s*(?:\d+[.)]|[-*])\s*")
+# Interface-bearing lines (imports + declarations) for the written-file summary.
+_SIGNATURE_RE = re.compile(
+    r"^\s*(?:export|import|from|def|class|func|function|interface|type|enum|"
+    r"public|pub|impl|trait|struct|module)\b"
+)
+
+
+def parse_manifest_response(text: str) -> ManifestResult | ParseError:
+    cleaned = _strip_thinking(text)
+    m = _MANIFEST_RE.search(cleaned)
+    if not m:
+        return ParseError("No <<<MANIFEST>>>…<<<END_MANIFEST>>> block found", text)
+    entries: list[ManifestEntry] = []
+    seen: set[str] = set()
+    for line in m.group(1).splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = [p.strip() for p in line.split("|")]
+        path = _LIST_MARKER_RE.sub("", parts[0]).strip().strip("`").lstrip("/").strip()
+        if not path:
+            continue
+        purpose = parts[1] if len(parts) > 1 else ""
+        exports = parts[2] if len(parts) > 2 else ""
+        if path in seen:
+            continue
+        seen.add(path)
+        entries.append(ManifestEntry(path=path, purpose=purpose, exports=exports))
+    if not entries:
+        return ParseError("<<<MANIFEST>>> block contained no file entries", text)
+    return ManifestResult(entries=entries, raw=text)
+
+
+def use_manifest_mode(design_md: str) -> bool:
+    """Whether to generate this design file-by-file rather than in one call."""
+    if IMPLEMENTER_MODE == "manifest":
+        return True
+    if IMPLEMENTER_MODE == "single":
+        return False
+    return estimate_design_file_count(design_md) >= MANIFEST_FILE_THRESHOLD
+
+
+def summarize_written_files(
+    files: list[tuple[str, str]],
+    *,
+    max_sig_lines: int = 24,
+    max_total_chars: int = 12000,
+) -> str:
+    """Compact interface summary of already-written files for the per-file prompt.
+
+    Emits each file's import/declaration lines (its public surface) rather than
+    full bodies, so later files can import real symbols without the prompt
+    ballooning. Bounded in both per-file line count and total size.
+    """
+    if not files:
+        return "(none yet — this is the first file)"
+    sections: list[str] = []
+    total = 0
+    for path, content in files:
+        sig_lines: list[str] = []
+        for ln in content.splitlines():
+            if _SIGNATURE_RE.match(ln):
+                sig_lines.append(ln.rstrip())
+                if len(sig_lines) >= max_sig_lines:
+                    break
+        body = "\n".join(sig_lines) if sig_lines else "(no exported symbols detected)"
+        section = f"### {path}\n{body}"
+        if total + len(section) > max_total_chars:
+            sections.append("… (further files omitted from summary)")
+            break
+        sections.append(section)
+        total += len(section)
+    return "\n\n".join(sections)
+
+
+def build_manifest_message(
+    spec_md: str,
+    design_md: str,
+    clarifications: list[str] | None = None,
+) -> list[dict[str, str]]:
+    parts: list[str] = []
+    if clarifications:
+        parts.append("## Operator clarifications (hard requirements)\n\n")
+        for i, item in enumerate(clarifications, start=1):
+            parts.append(f"{i}. {item}\n")
+        parts.append("\n")
+    parts.extend([
+        "## Specification\n\n", spec_md,
+        "\n\n## Architecture Design\n\n", design_md,
+        "\n\n---\n\nProduce the FILE MANIFEST for this project. Output exactly one "
+        "<<<MANIFEST>>>…<<<END_MANIFEST>>> block, files in dependency order.",
+    ])
+    return [
+        {"role": "system", "content": MANIFEST_SYSTEM_PROMPT},
+        {"role": "user", "content": "".join(parts)},
+    ]
+
+
+def build_per_file_message(
+    spec_md: str,
+    design_md: str,
+    manifest: list[ManifestEntry],
+    target: ManifestEntry,
+    written_summary: str,
+    clarifications: list[str] | None = None,
+    rejection_notes: str | None = None,
+) -> list[dict[str, str]]:
+    manifest_block = "\n".join(
+        f"- {e.path} — {e.purpose}" + (f"  [exports: {e.exports}]" if e.exports else "")
+        for e in manifest
+    )
+    parts: list[str] = []
+    if clarifications:
+        parts.append("## Operator clarifications (hard requirements)\n\n")
+        for i, item in enumerate(clarifications, start=1):
+            parts.append(f"{i}. {item}\n")
+        parts.append("\n")
+    parts.extend([
+        "## Specification\n\n", spec_md,
+        "\n\n## Architecture Design\n\n", design_md,
+        "\n\n## File Manifest (the full project)\n\n", manifest_block,
+        "\n\n## Files already written (their interfaces)\n\n", written_summary,
+        f"\n\n---\n\nWrite ONLY this one file now:\n\n"
+        f"**{target.path}** — {target.purpose}\n",
+    ])
+    if target.exports:
+        parts.append(f"\nExpected exports / contents: {target.exports}\n")
+    if rejection_notes:
+        parts.extend([
+            "\n## Reviewer feedback to address in this file\n\n",
+            rejection_notes, "\n",
+        ])
+    parts.append(
+        f"\nOutput exactly one <<<FILE: {target.path}>>> … <<<END_FILE>>> block."
+    )
+    return [
+        {"role": "system", "content": PER_FILE_SYSTEM_PROMPT},
+        {"role": "user", "content": "".join(parts)},
+    ]
+
+
+# ── Deterministic boilerplate normalization (#3) ─────────────────────────────
+#
+# Some boilerplate the reviewer checks is fully deterministic — there is exactly
+# one correct form — so it should not ride on stochastic generation. The reviewer
+# rejects unpinned dependencies (`^`, `~`, `>=` ranges) on sight, and that is the
+# single most common, most mechanical FAIL. We pin them ourselves after
+# generation rather than hoping every implementer model gets it right every time.
+
+def pin_version(spec: str) -> str:
+    """Pin a single dependency version spec to an exact version.
+
+    `^1.2.3` / `~1.2.3` / `>=1.2.3` → `1.2.3`. Leaves already-exact versions,
+    and non-semver specs (URLs, `workspace:*`, `*`, git refs) untouched.
+    """
+    s = spec.strip()
+    if s[:1] in "^~><=":
+        stripped = s.lstrip("^~><= ")
+        if stripped[:1].isdigit():  # only pin when a concrete version remains
+            return stripped
+    return s
+
+
+def _pin_package_json(content: str) -> tuple[str, int]:
+    try:
+        data = json.loads(content)
+    except ValueError:
+        return content, 0  # not valid JSON — leave it for the reviewer to flag
+    if not isinstance(data, dict):
+        return content, 0
+    changed = 0
+    for key in ("dependencies", "devDependencies",
+                "peerDependencies", "optionalDependencies"):
+        deps = data.get(key)
+        if not isinstance(deps, dict):
+            continue
+        for name, ver in list(deps.items()):
+            if isinstance(ver, str):
+                pinned = pin_version(ver)
+                if pinned != ver:
+                    deps[name] = pinned
+                    changed += 1
+    if changed == 0:
+        return content, 0
+    return json.dumps(data, indent=2) + "\n", changed
+
+
+def normalize_boilerplate(
+    files: list[tuple[str, str]],
+) -> tuple[list[tuple[str, str]], list[str]]:
+    """Deterministically fix boilerplate the reviewer checks. Returns the
+    (possibly rewritten) file list and a list of human-readable change notes.
+
+    Currently: exact-pin dependency ranges in every package.json.
+    """
+    out: list[tuple[str, str]] = []
+    notes: list[str] = []
+    for path, content in files:
+        if os.path.basename(path) == "package.json":
+            new_content, changed = _pin_package_json(content)
+            if changed:
+                notes.append(
+                    f"{path}: pinned {changed} dependency range(s) to exact versions"
+                )
+                out.append((path, new_content))
+                continue
+        out.append((path, content))
+    return out, notes
 
 
 def build_reviewer_message(
