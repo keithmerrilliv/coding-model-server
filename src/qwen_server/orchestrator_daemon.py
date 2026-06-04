@@ -31,6 +31,7 @@ calling each agent. It must NOT serve HTTP itself.
 from __future__ import annotations
 
 import logging
+import json
 import os
 import re
 import shutil
@@ -768,14 +769,148 @@ def _generate_implementation(
     return parse_implementer_response(raw)
 
 
+def _persist_manifest(spec_dir, entries) -> None:
+    """Write manifest.json so a later retry can reuse the file set and regenerate
+    only the reviewer-cited files (targeted retry, #4b)."""
+    try:
+        data = [{"path": e.path, "purpose": e.purpose, "exports": e.exports}
+                for e in entries]
+        (spec_dir / "manifest.json").write_text(json.dumps(data, indent=2))
+    except OSError as exc:
+        logger.warning("could not persist manifest.json: %s", exc)
+
+
+def _load_prior_manifest_run(spec_dir, retry_count: int):
+    """Load the previous attempt's manifest + file contents from its snapshot.
+
+    Returns (entries, {path: content}) for a targeted retry, or None when no
+    usable prior manifest is available (e.g. the prior attempt used single-call
+    mode, or the snapshot is missing). The snapshot for attempt N-1 lives at
+    ``retry_history/retry_<N-1>/`` (written by _clean_spec_dir_for_retry before
+    the wipe)."""
+    snap = spec_dir / "retry_history" / f"retry_{retry_count - 1}"
+    mpath = snap / "manifest.json"
+    if not mpath.is_file():
+        return None
+    try:
+        data = json.loads(mpath.read_text())
+        entries = [executor.ManifestEntry(path=d["path"], purpose=d.get("purpose", ""),
+                                          exports=d.get("exports", ""))
+                   for d in data]
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        logger.warning("targeted retry: failed to load prior manifest.json: %s", exc)
+        return None
+    prior_files: dict = {}
+    for e in entries:
+        fp = snap / e.path
+        if fp.is_file():
+            try:
+                prior_files[e.path] = fp.read_text()
+            except OSError:
+                pass
+    if not entries or not prior_files:
+        return None
+    return entries, prior_files
+
+
+def _parse_cited_paths(rejection_notes: str, known_paths) -> set:
+    """Manifest file paths the reviewer cited in its rejection notes.
+
+    Matches a known path in full (``ParamountDemo/server/resolver.ts``) or by
+    basename as a whole token (so ``resolver.ts:129`` resolves too)."""
+    cited = set()
+    for path in known_paths:
+        if path in rejection_notes:
+            cited.add(path)
+            continue
+        base = os.path.basename(path)
+        if base and re.search(r"(?<![\w./-])" + re.escape(base) + r"(?![\w])",
+                              rejection_notes):
+            cited.add(path)
+    return cited
+
+
+def _build_from_manifest(
+    db, spec, task, spec_md, design_md, entries, chosen_agent,
+    clarifications, rejection_notes, *, prior_files, only, raw,
+) -> "ImplementerResult | ParseError":
+    """Produce every file in the manifest, in dependency order.
+
+    When *only* is a set of paths (targeted retry), files NOT in it are reused
+    verbatim from *prior_files*; the cited files are regenerated with the
+    reviewer feedback. When *only* is None, every file is generated."""
+    written: list = []
+    failures: list = []
+    generated = 0
+    for entry in entries:
+        if only is not None and entry.path not in only and prior_files \
+                and entry.path in prior_files:
+            content = prior_files[entry.path]  # reuse prior — not cited
+        else:
+            content = _generate_one_file(
+                db, spec, task, spec_md, design_md, entries, entry,
+                written, chosen_agent, clarifications, rejection_notes,
+            )
+            generated += 1
+        if content is None:
+            failures.append(entry.path)
+            logger.warning("spec %s: per-file generation failed for %s",
+                           spec.id, entry.path)
+            continue
+        written.append((entry.path, content))
+
+    if failures:
+        db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
+                        payload={"role": "manifest", "anomaly": "per_file_failures",
+                                 "paths": failures})
+    if not written:
+        return ParseError(
+            f"manifest mode produced no usable files ({len(failures)} failures)", raw)
+    logger.info("spec %s: manifest build wrote %d/%d files "
+                "(%d generated, %d reused, %d failed)", spec.id, len(written),
+                len(entries), generated, len(written) - generated, len(failures))
+    return ImplementerResult(files=written, raw=raw)
+
+
 def _generate_via_manifest(
     db: Database, spec: Spec, task, spec_dir,
     spec_md: str, design_md: str, chosen_agent: "str | None",
     clarifications: list, rejection_notes: "str | None",
 ) -> "ImplementerResult | ParseError":
-    """Manifest → per-file generation. One manifest call, then one bounded call
-    per file, accumulating written-file interface summaries for consistency."""
-    # 1. Manifest call.
+    """Manifest → per-file generation.
+
+    On a retry with reviewer feedback (#4b), reuse the prior attempt's manifest
+    and regenerate ONLY the cited files (reusing the rest from the snapshot),
+    skipping the manifest call and the untouched files. Otherwise do a full
+    generation: one manifest call, then one bounded call per file."""
+    retry_count = getattr(task, "retry_count", 0) or 0
+
+    # ── Targeted retry: regenerate only the reviewer-cited files (#4b) ─────────
+    if retry_count > 0 and rejection_notes:
+        prior = _load_prior_manifest_run(spec_dir, retry_count)
+        if prior is not None:
+            entries, prior_files = prior
+            cited = _parse_cited_paths(rejection_notes, {e.path for e in entries})
+            if cited:
+                logger.info("spec %s: targeted retry — regenerating %d/%d cited "
+                            "files: %s", spec.id, len(cited), len(entries),
+                            ", ".join(sorted(cited)))
+                db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
+                                payload={"role": "manifest", "mode": "targeted_retry",
+                                         "regenerated": sorted(cited),
+                                         "reused": len(entries) - len(cited)})
+                result = _build_from_manifest(
+                    db, spec, task, spec_md, design_md, entries, chosen_agent,
+                    clarifications, rejection_notes,
+                    prior_files=prior_files, only=cited, raw="targeted-retry",
+                )
+                if not isinstance(result, ParseError):
+                    _persist_manifest(spec_dir, entries)
+                return result
+            logger.info("spec %s: targeted retry wanted but no cited files matched "
+                        "the manifest — full regeneration", spec.id)
+
+    # ── Full generation: manifest call + per-file ─────────────────────────────
     meta: dict = {}
     manifest_raw = call_agent(
         "implementer", build_manifest_message(spec_md, design_md, clarifications),
@@ -793,33 +928,14 @@ def _generate_via_manifest(
     logger.info("spec %s: manifest = %d files: %s", spec.id,
                 len(manifest.entries), ", ".join(e.path for e in manifest.entries))
 
-    # 2. One bounded call per file, in the manifest's dependency order.
-    written: list[tuple[str, str]] = []
-    failures: list[str] = []
-    for entry in manifest.entries:
-        content = _generate_one_file(
-            db, spec, task, spec_md, design_md, manifest.entries, entry,
-            written, chosen_agent, clarifications, rejection_notes,
-        )
-        if content is None:
-            failures.append(entry.path)
-            logger.warning("spec %s: per-file generation failed for %s",
-                           spec.id, entry.path)
-            continue
-        written.append((entry.path, content))
-
-    if failures:
-        db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
-                        payload={"role": "manifest", "anomaly": "per_file_failures",
-                                 "paths": failures})
-    if not written:
-        return ParseError(
-            f"manifest mode produced no usable files "
-            f"({len(failures)} per-file failures)", manifest.raw,
-        )
-    logger.info("spec %s: manifest mode wrote %d/%d files (%d failed)",
-                spec.id, len(written), len(manifest.entries), len(failures))
-    return ImplementerResult(files=written, raw=manifest.raw)
+    result = _build_from_manifest(
+        db, spec, task, spec_md, design_md, manifest.entries, chosen_agent,
+        clarifications, rejection_notes,
+        prior_files=None, only=None, raw=manifest.raw,
+    )
+    if not isinstance(result, ParseError):
+        _persist_manifest(spec_dir, manifest.entries)
+    return result
 
 
 def _generate_one_file(

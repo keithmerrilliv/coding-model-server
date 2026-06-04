@@ -4,6 +4,7 @@ Exercise _generate_via_manifest / _generate_implementation with call_agent
 mocked, against a throwaway DB. No network, no spec-dir reads (spec_md/design_md
 are passed in; generation returns content, the caller writes it).
 """
+import json
 from unittest import mock
 
 import pytest
@@ -109,3 +110,72 @@ def test_dispatch_single_vs_manifest(db, spec_task):
         assert isinstance(res, ImplementerResult)
         assert len(res.files) == 20
         assert ca.call_count == 21  # 1 manifest + 20 files
+
+
+# ── #4b: targeted retries (regenerate only reviewer-cited files) ──────────────
+
+def _seed_prior_snapshot(spec_dir, files):
+    """Write a retry_history/retry_0 snapshot: manifest.json + the given files."""
+    snap = spec_dir / "retry_history" / "retry_0"
+    snap.mkdir(parents=True, exist_ok=True)
+    manifest = [{"path": p, "purpose": "x", "exports": ""} for p, _ in files]
+    (snap / "manifest.json").write_text(json.dumps(manifest))
+    for p, content in files:
+        fp = snap / p
+        fp.parent.mkdir(parents=True, exist_ok=True)
+        fp.write_text(content)
+
+
+def _retry(db, task):
+    db.increment_task_retry(task.id)
+    return db.get_task(task.id)
+
+
+def test_targeted_retry_regenerates_only_cited(db, spec_task):
+    spec, task, spec_dir = spec_task
+    _seed_prior_snapshot(spec_dir, [
+        ("shared/t.ts", "export type T = number; // OLD"),
+        ("client/m.ts", "import { T } from './t'; // OLD"),
+    ])
+    task = _retry(db, task)  # retry_count -> 1
+    rej = "### Verdict Evidence\n- major client/m.ts:1 - broken import"
+    new_m = "<<<FILE: client/m.ts>>>\nimport { T } from './t'; // FIXED\n<<<END_FILE>>>"
+    with mock.patch.object(d, "call_agent", side_effect=[new_m]) as ca:
+        res = d._generate_via_manifest(db, spec, task, spec_dir, "S", "D",
+                                       "implementer", [], rej)
+    assert isinstance(res, ImplementerResult)
+    fm = dict(res.files)
+    assert "FIXED" in fm["client/m.ts"]            # cited file regenerated
+    assert "OLD" in fm["shared/t.ts"]              # uncited file reused from snapshot
+    assert ca.call_count == 1                      # ONLY the cited file — no manifest call
+    assert (spec_dir / "manifest.json").exists()   # re-persisted for the next retry
+
+
+def test_targeted_retry_falls_back_to_full_when_no_snapshot(db, spec_task):
+    spec, task, spec_dir = spec_task
+    task = _retry(db, task)  # retry 1, but no retry_history snapshot exists
+    with mock.patch.object(d, "call_agent", side_effect=[MANIFEST, FILE_T, FILE_M]) as ca:
+        res = d._generate_via_manifest(db, spec, task, spec_dir, "S", "D",
+                                       "implementer", [], "- client/m.ts:1 - broken")
+    assert isinstance(res, ImplementerResult)
+    assert ca.call_count == 3  # full regen: manifest + 2 files
+
+
+def test_targeted_retry_falls_back_when_nothing_cited(db, spec_task):
+    spec, task, spec_dir = spec_task
+    _seed_prior_snapshot(spec_dir, [("shared/t.ts", "old"), ("client/m.ts", "old")])
+    task = _retry(db, task)
+    with mock.patch.object(d, "call_agent", side_effect=[MANIFEST, FILE_T, FILE_M]) as ca:
+        res = d._generate_via_manifest(db, spec, task, spec_dir, "S", "D",
+                                       "implementer", [], "Generic failure, no file paths.")
+    assert isinstance(res, ImplementerResult)
+    assert ca.call_count == 3  # full regen (nothing matched the manifest)
+
+
+def test_parse_cited_paths_full_and_basename():
+    known = {"App/server/resolver.ts", "App/client/probe.ts", "shared/t.ts"}
+    notes = ("### Verdict Evidence\n- resolver.ts:129 - as any\n"
+             "- App/client/probe.ts:7 - any\nunrelated note about anything else")
+    cited = d._parse_cited_paths(notes, known)
+    assert cited == {"App/server/resolver.ts", "App/client/probe.ts"}
+    assert "shared/t.ts" not in cited  # 'anything' must not match 't.ts'
