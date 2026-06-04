@@ -406,9 +406,16 @@ REVIEWER_SYSTEM_PROMPT = textwrap.dedent("""\
        absence. Hallucinated "missing file" findings are the #1 source of
        false-FAIL verdicts and waste a full retry cycle.
     6. Enforce IMPLEMENTER hard rules and FAIL on violations:
-       - TypeScript `any` (use `unknown` + narrowing or a proper type).
+       - TypeScript `any` TYPE (use `unknown` + narrowing or a proper type).
+         Use the "Authoritative `any`-type scan" in your input as the ONLY
+         source of truth for this rule — it already strips comments, string
+         literals, and identifiers. The word "any" in a comment
+         (`// handle any error`) or a string (`'hdr.any'`) is NOT a violation,
+         and you must NOT substring-search the source for "any". If that scan
+         lists zero usages, the no-`any` rule PASSES — do not FAIL it.
        - Unpinned deps in package.json / pyproject.toml / requirements.txt /
-         Cargo.toml — `^`, `~`, `>=` ranges all fail.
+         Cargo.toml — `^`, `~`, `>=` ranges all fail. (package.json dep ranges
+         are auto-pinned before you see the code, so they should already be exact.)
        Cite the exact file:line in `### Verdict Evidence`.
     """)
 
@@ -1111,6 +1118,91 @@ def normalize_boilerplate(
     return out, notes
 
 
+# ── Deterministic TypeScript `any`-type scan (for the reviewer) ──────────────
+#
+# The reviewer's model-written no-`any` test was a naive substring grep that
+# false-FAILed on the word "any" in comments and string literals (e.g.
+# `// handle any error`, `id: 'hdr.any'`) — killing otherwise-good runs. We scan
+# the source ourselves — stripping comments and string/template literals, then
+# matching `any` only in TYPE position — and hand the reviewer the authoritative
+# list so its verdict rests on real violations, not text coincidences.
+
+def _blank_ts_comments_and_strings(src: str) -> str:
+    """Replace comment and string/template-literal CONTENT with spaces, keeping
+    newlines so line numbers are preserved. A small hand-rolled scanner — enough
+    to stop `any` inside comments/strings from matching the type regex."""
+    out: list[str] = []
+    i, n = 0, len(src)
+    state: Optional[str] = None  # 'line' | 'block' | "'" | '"' | '`'
+    while i < n:
+        c = src[i]
+        nxt = src[i + 1] if i + 1 < n else ""
+        if state is None:
+            if c == "/" and nxt == "/":
+                state = "line"; out.append("  "); i += 2; continue
+            if c == "/" and nxt == "*":
+                state = "block"; out.append("  "); i += 2; continue
+            if c in "'\"`":
+                state = c; out.append(" "); i += 1; continue
+            out.append(c); i += 1; continue
+        if state == "line":
+            if c == "\n":
+                state = None; out.append("\n")
+            else:
+                out.append(" ")
+            i += 1; continue
+        if state == "block":
+            if c == "*" and nxt == "/":
+                state = None; out.append("  "); i += 2; continue
+            out.append("\n" if c == "\n" else " "); i += 1; continue
+        # inside a string / template literal
+        if c == "\\":
+            out.append("  "); i += 2; continue  # skip the escaped char
+        if c == state:
+            state = None; out.append(" "); i += 1; continue
+        out.append("\n" if c == "\n" else " "); i += 1; continue
+    return "".join(out)
+
+
+# `any` used as a TYPE: annotation, cast, generic arg, array, union, intersection.
+_ANY_TYPE_RE = re.compile(
+    r":\s*any\b"                 # : any
+    r"|\bas\s+any\b"             # as any
+    r"|<\s*any\b"                # <any  (generic / cast open)
+    r"|\bany\s*\[\]"             # any[]
+    r"|\bany\s*>"                # any>  (generic close)
+    r"|,\s*any\b"                # , any (generic arg)
+    r"|\|\s*any\b|\bany\s*\|"    # union with any
+    r"|&\s*any\b|\bany\s*&"      # intersection with any
+)
+
+
+def find_any_type_violations(source: str) -> list[tuple[int, str]]:
+    """Real TypeScript `any`-TYPE usages in *source*, as (line_no, line_text).
+
+    Comments and string/template literals are excluded first, so "any" inside a
+    comment, a string, or an identifier (e.g. 'hdr.any', `// handle any error`)
+    is NOT reported — only the `any` type itself.
+    """
+    blanked = _blank_ts_comments_and_strings(source)
+    orig = source.splitlines()
+    out: list[tuple[int, str]] = []
+    for idx, line in enumerate(blanked.splitlines()):
+        if _ANY_TYPE_RE.search(line):
+            out.append((idx + 1, orig[idx] if idx < len(orig) else ""))
+    return out
+
+
+def scan_any_violations(files: list[tuple[str, str]]) -> list[str]:
+    """`any`-type violations across the TS source files, as 'path:line: text'."""
+    results: list[str] = []
+    for path, content in files:
+        if path.endswith((".ts", ".tsx")) and not path.endswith(".d.ts"):
+            for ln, text in find_any_type_violations(content):
+                results.append(f"{path}:{ln}: {text.strip()[:120]}")
+    return results
+
+
 def build_reviewer_message(
     spec_md: str,
     design_md: str,
@@ -1121,6 +1213,28 @@ def build_reviewer_message(
     file_sections = []
     for path, content in code_files:
         file_sections.append(f"### {path}\n```\n{content}\n```\n")
+
+    # Hand the reviewer a deterministic, comment/string-aware `any`-type scan so
+    # its no-`any` verdict can't false-FAIL on the word "any" in a comment or
+    # string literal (the spec_5a87fd64 failure).
+    any_scan = scan_any_violations(code_files)
+    if any_scan:
+        any_section = (
+            "\n## Authoritative `any`-type scan\n\n"
+            "These are the ONLY real TypeScript `any` TYPE usages in the source — "
+            "comments, string literals, and identifiers are already excluded. Base "
+            "your no-`any` verdict (and any test you write) strictly on THIS list; "
+            "do NOT substring-search the source for the word \"any\":\n\n"
+            + "\n".join(f"- {v}" for v in any_scan) + "\n"
+        )
+    else:
+        any_section = (
+            "\n## Authoritative `any`-type scan\n\n"
+            "No real `any` TYPE usages found (comments, strings, and identifiers "
+            "excluded). Do NOT FAIL the no-`any` rule: the word \"any\" inside a "
+            "comment or string literal (e.g. `// handle any error`, `'hdr.any'`) "
+            "is NOT a violation.\n"
+        )
 
     retry_block = ""
     if rejection_notes:
@@ -1141,6 +1255,7 @@ def build_reviewer_message(
             f"{design_md}\n\n"
             "## Implementation Files\n\n"
             + "\n".join(file_sections)
+            + any_section
             + retry_block
             + f"\n\n---\n\n"
             f"Test framework: {test_framework}\n\n"
