@@ -435,13 +435,16 @@ Update these after each retrieval step. They help you stay organized and efficie
     # model-swap (observed in spec_fa78ca9c retry-4 deep_reviewer→implementer
     # swap). ub=4608 buys ~1,670 MiB compute-buffer savings → ~1.4 GiB free,
     # finally above the safety floor. Trade: ~18% prefill batch reduction.
+    # Expert-offload tuned 2026-06-03: 262K->64K ctx + n_cpu_moe=26 (22 of 48
+    # expert layers on the RTX 5080): measured +30% decode (51->66 tok/s) at 64K,
+    # ~1.7 GB VRAM free. See project_llama_server_build_perf.
     _QWEN36_35B = _create_model_config(
         'MODEL_PATH_QWEN36_35B',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf',
-        48, 262144, 4608,
+        48, 65536, 4608,
         server_extra_args=['--jinja', '--reasoning-format', 'none', '--swa-full'],
         type_k=8, type_v=8,
-        cpu_moe=True, n_ubatch=4608,
+        cpu_moe=True, n_cpu_moe=26, n_ubatch=4608,
         repeat_penalty=1.05,
     )
 
@@ -485,13 +488,16 @@ Update these after each retrieval step. They help you stay organized and efficie
     # KV at 82K Q4_0: 1,164 MiB (47 GPU layers). 12,228 MiB free at ngl=47.
     # Bumping to 262K Q4_0: ~3,713 MiB KV → ~8.5 GB free. Fits easily.
     # KV cache upgraded Q4_0→Q8_0 (9 GB free at Q4_0 — plenty for 2x cache size)
+    # Expert-offload tuned 2026-06-03: 262K->64K ctx + n_cpu_moe=20 (27 of 47
+    # expert layers on the RTX 5080): measured +74% decode (37->64 tok/s) at 64K,
+    # ~1.7 GB VRAM free (GLM's smaller experts offload further than the others).
     _GLM47_FLASH = _create_model_config(
         'MODEL_PATH_GLM47_FLASH',
         '/home/keith-merrill/.lmstudio/models/unsloth/GLM-4.7-Flash-GGUF/GLM-4.7-Flash-Q4_K_M.gguf',
-        47, 262144, 2048,
+        47, 65536, 2048,
         server_extra_args=['--jinja', '--reasoning-format', 'none'],
         n_ubatch=2048,
-        cpu_moe=True,
+        cpu_moe=True, n_cpu_moe=20,
     )
 
     # ── Few-shot example injected for executor agents ──
