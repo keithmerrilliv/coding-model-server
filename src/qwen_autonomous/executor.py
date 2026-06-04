@@ -83,8 +83,11 @@ MAX_RETRIES = int(os.getenv("AUTONOMOUS_MAX_RETRIES", "5"))
 #   single   — always the legacy one-shot call
 IMPLEMENTER_MODE = os.getenv("AUTONOMOUS_IMPLEMENTER_MODE", "auto").lower()
 MANIFEST_FILE_THRESHOLD = int(os.getenv("AUTONOMOUS_MANIFEST_FILE_THRESHOLD", "8"))
-MANIFEST_MAX_TOKENS = int(os.getenv("AUTONOMOUS_MANIFEST_MAX_TOKENS", "4000"))
-PER_FILE_MAX_TOKENS = int(os.getenv("AUTONOMOUS_PER_FILE_MAX_TOKENS", "8000"))
+# Defaults raised from 4000/8000 after validation runs: a 24-file manifest
+# overran 4000, and substantial single files (resolver/probe/player/ui) overran
+# 8000 on retries that thread rejection notes. See project_qwen_autonomous_output_token_fix.
+MANIFEST_MAX_TOKENS = int(os.getenv("AUTONOMOUS_MANIFEST_MAX_TOKENS", "8000"))
+PER_FILE_MAX_TOKENS = int(os.getenv("AUTONOMOUS_PER_FILE_MAX_TOKENS", "16000"))
 PER_FILE_PARSE_RETRIES = int(os.getenv("AUTONOMOUS_PER_FILE_PARSE_RETRIES", "2"))
 
 # Architect parse-retry: how many times to re-call the architect when its
