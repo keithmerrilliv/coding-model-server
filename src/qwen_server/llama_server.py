@@ -150,8 +150,15 @@ class LlamaServerManager:
             '--cache-reuse', '256',
         ]
 
-        # MoE models: keep expert weights on CPU, put more attention layers on GPU
-        if model_config.get('cpu_moe'):
+        # MoE models: keep expert weights off the GPU. `n_cpu_moe` (preferred)
+        # keeps only the first N layers' experts on CPU and runs the rest on the
+        # GPU (--n-cpu-moe), which is much faster for decode than --cpu-moe (all
+        # experts on CPU) when VRAM allows. Falls back to --cpu-moe for configs
+        # that don't set n_cpu_moe, so untouched models are unaffected.
+        n_cpu_moe = model_config.get('n_cpu_moe')
+        if n_cpu_moe is not None:
+            cmd.extend(['--n-cpu-moe', str(n_cpu_moe)])
+        elif model_config.get('cpu_moe'):
             cmd.append('--cpu-moe')
 
         # Speculative decoding: pair a smaller same-tokenizer draft model with

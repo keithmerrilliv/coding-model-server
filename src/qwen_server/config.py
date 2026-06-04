@@ -13,8 +13,8 @@ from qwen_autonomous.supervisor import SYSTEM_PROMPT as _SUPERVISOR_SYSTEM_PROMP
 
 def _create_model_config(path_env, path_default, n_gpu_layers, n_ctx=32768, n_batch=2048,
                          server_extra_args=None, logit_bias=None, type_k=8, type_v=8,
-                         repeat_penalty=1.15, repeat_last_n=256, cpu_moe=False, n_ubatch=512,
-                         draft=None):
+                         repeat_penalty=1.15, repeat_last_n=256, cpu_moe=False,
+                         n_cpu_moe=None, n_ubatch=512, draft=None):
     """Helper function to create standardized model configurations.
 
     Args:
@@ -22,7 +22,10 @@ def _create_model_config(path_env, path_default, n_gpu_layers, n_ctx=32768, n_ba
         type_v: GGML type for KV cache values (8=Q8_0, 2=Q4_0). Default Q8_0.
         repeat_penalty: Penalizes repeated tokens (1.0=off). Lower values help code generation.
         repeat_last_n: Window of recent tokens to apply repeat penalty to (256=windowed, -1=full context).
-        cpu_moe: Keep MoE expert weights on CPU. Allows more attention layers on GPU.
+        cpu_moe: Keep ALL MoE expert weights on CPU. Allows more attention layers on GPU.
+        n_cpu_moe: Keep only the first N layers' MoE experts on CPU, rest on GPU
+            (llama-server --n-cpu-moe). Overrides cpu_moe when set. Lower N => more
+            experts on GPU => faster decode, bounded by VRAM (KV competes for it).
         n_ubatch: Physical micro-batch size for prompt processing (default 512).
         draft: Optional speculative-decode draft. Dict with keys:
             path (str, required) — same-tokenizer model file
@@ -43,6 +46,7 @@ def _create_model_config(path_env, path_default, n_gpu_layers, n_ctx=32768, n_ba
         'repeat_penalty': repeat_penalty,
         'repeat_last_n': repeat_last_n,
         'cpu_moe': cpu_moe,
+        'n_cpu_moe': n_cpu_moe,
     }
     if server_extra_args is not None:
         config['server_extra_args'] = server_extra_args
@@ -274,13 +278,18 @@ Update these after each retrieval step. They help you stay organized and efficie
     # ~12% prefill batch reduction; on a "fast" implementer that already
     # rotates first in the chain, prefill speed isn't the binding factor —
     # OOM-free swap is.
+    # Expert-offload tuned 2026-06-03: --cpu-moe (all experts on CPU) was decode-
+    # bound on the AVX2 CPU. Trading 192K->64K context frees VRAM to push 24 of 48
+    # expert layers onto the RTX 5080 via n_cpu_moe=26 — measured +59% decode
+    # (37 -> ~59 tok/s) at 64K with ~1.5 GB VRAM headroom (-ncmoe 24 = +70% but
+    # only 0.85 GB free). See project_llama_server_build_perf.
     _CODER_30B_FAST = _create_model_config(
         'MODEL_PATH_30B_FAST',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
-        49, 196608, 3584,
+        49, 65536, 3584,
         server_extra_args=['--chat-template', 'chatml', '--swa-full'],
         logit_bias=[[151657, -100.0], [151658, -100.0]],
-        cpu_moe=True, n_ubatch=3584,
+        cpu_moe=True, n_cpu_moe=26, n_ubatch=3584,
     )
 
     # NEXT: Qwen3-Coder-Next-Q8_0 (80B MoE with 3B active params)

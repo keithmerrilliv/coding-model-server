@@ -88,6 +88,19 @@ def test_cpu_moe_toggle(mgr):
     assert "--cpu-moe" not in mgr._build_server_args("/b", {"path": "/m.gguf"})
 
 
+def test_n_cpu_moe_emits_flag_and_overrides_cpu_moe(mgr):
+    # n_cpu_moe -> --n-cpu-moe N (partial expert offload to GPU)
+    args = mgr._build_server_args("/b", {"path": "/m.gguf", "n_cpu_moe": 26})
+    assert "--n-cpu-moe" in args
+    assert args[args.index("--n-cpu-moe") + 1] == "26"
+    # n_cpu_moe takes precedence over cpu_moe (no bare --cpu-moe emitted)
+    both = mgr._build_server_args("/b", {"path": "/m.gguf", "cpu_moe": True, "n_cpu_moe": 26})
+    assert "--n-cpu-moe" in both and "--cpu-moe" not in both
+    # absent -> neither offload flag
+    none = mgr._build_server_args("/b", {"path": "/m.gguf"})
+    assert "--n-cpu-moe" not in none and "--cpu-moe" not in none
+
+
 def test_no_draft_flags_when_absent(mgr):
     cmd = mgr._build_server_args("/b", {"path": "/m.gguf"})
     assert "-md" not in cmd
