@@ -465,13 +465,25 @@ Update these after each retrieval step. They help you stay organized and efficie
     # 64 attention layers; dense (no cpu_moe possible). 16 GB VRAM forces
     # partial GPU offload. Per-layer cost ~280 MiB (245 weight + 36 KV at
     # 131K Q4_0). Pushed ngl 20→36→40 across two iterations.
-    # Measured 2026-04-24 at ngl=36: 13,513 MiB used, 2,297 free. Bumped
-    # to ngl=40 (estimated ~14,640 used / ~1,170 free).
+    # Measured 2026-04-24 at ngl=36: 13,513 MiB used, 2,297 free.
+    #
+    # MTP wired 2026-06-05: model -> unsloth/Qwen3.6-27B-MTP-GGUF (Q4_K_M with the
+    # native multi-token-prediction head embedded, +0.29 GB) + `--spec-type
+    # draft-mtp --spec-draft-n-max 2`. The dense 27B decodes slowly (~24 of 64
+    # layers on CPU); MTP ~doubles it. Measured on build 5343f45 with the prod
+    # global flags (lookup-cache + cache-reuse, no conflict): baseline 8.3 tok/s
+    # -> MTP 14.1 tok/s decode = ~1.7x, ~85% draft acceptance on structured output.
+    # ngl dropped 40->38 to fit the MTP head: 14,522 MiB / ~1,287 free (above this
+    # agent's swap floor). ngl=40 is OOM-tight (714 free); ngl=36 is safer
+    # (1,754 free / 13.5 tok/s) if swap-OOMs appear. Quality is lossless (verified
+    # tokens == base model). Used by q36_architect + supervisor. See
+    # [[project_mtp_test_scope]] / [[project_llama_server_upgrade]].
     _QWEN36_27B = _create_model_config(
         'MODEL_PATH_QWEN36_27B',
-        '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3.6-27B-GGUF/Qwen3.6-27B-Q4_K_M.gguf',
-        40, 131072, 2048,
-        server_extra_args=['--jinja', '--reasoning-format', 'none', '--swa-full'],
+        '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3.6-27B-MTP-GGUF/Qwen3.6-27B-Q4_K_M.gguf',
+        38, 131072, 2048,
+        server_extra_args=['--jinja', '--reasoning-format', 'none', '--swa-full',
+                           '--spec-type', 'draft-mtp', '--spec-draft-n-max', '2'],
         type_k=2, type_v=2,
         n_ubatch=2048,
     )
