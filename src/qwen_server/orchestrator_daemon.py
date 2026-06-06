@@ -175,17 +175,23 @@ def _note_truncation(db: Database, spec: Spec, task, role: str,
     """
     if not meta.get("truncated"):
         return
+    agent = meta.get("agent")
     db.record_event(
         EventKind.OUTPUT_TRUNCATED,
         spec_id=spec.id,
         task_id=getattr(task, "id", None),
-        payload={"role": role, "max_tokens": max_tokens,
+        payload={"role": role, "agent": agent, "max_tokens": max_tokens,
                  "finish_reason": meta.get("finish_reason")},
     )
+    # NB: raising the budget is usually the WRONG fix. A model that hits
+    # max_tokens on a small file is generating degenerately (e.g. a reasoning
+    # model exhausting the budget inside <think>) — a bigger budget just feeds a
+    # longer loop. Check `agent` first; the per-file path now rotates instead.
     logger.warning(
-        "spec %s: %s output truncated at max_tokens=%d (finish_reason=length) "
-        "— raise the budget or reduce the spec's file count",
-        spec.id, role, max_tokens,
+        "spec %s: agent=%s %s output truncated at max_tokens=%d "
+        "(finish_reason=length) — possible degenerate generation; check the "
+        "agent before raising the budget",
+        spec.id, agent, role, max_tokens,
     )
 
 
@@ -861,7 +867,9 @@ def _build_from_manifest(
 
     if failures:
         db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
-                        payload={"role": "manifest", "anomaly": "per_file_failures",
+                        payload={"role": "manifest",
+                                 "agent": chosen_agent or executor.role_to_agent("implementer"),
+                                 "anomaly": "per_file_failures",
                                  "paths": failures})
     if not written:
         return ParseError(
@@ -897,6 +905,7 @@ def _generate_via_manifest(
                             ", ".join(sorted(cited)))
                 db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
                                 payload={"role": "manifest", "mode": "targeted_retry",
+                                         "agent": chosen_agent or executor.role_to_agent("implementer"),
                                          "regenerated": sorted(cited),
                                          "reused": len(entries) - len(cited)})
                 result = _build_from_manifest(
@@ -923,7 +932,9 @@ def _generate_via_manifest(
                        spec.id, manifest.reason)
         return manifest  # propagate → caller's rotation retry
     db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
-                    payload={"role": "manifest", "files": len(manifest.entries),
+                    payload={"role": "manifest",
+                             "agent": chosen_agent or executor.role_to_agent("implementer"),
+                             "files": len(manifest.entries),
                              "paths": [e.path for e in manifest.entries]})
     logger.info("spec %s: manifest = %d files: %s", spec.id,
                 len(manifest.entries), ", ".join(e.path for e in manifest.entries))
@@ -956,6 +967,15 @@ def _generate_one_file(
         )
         _note_truncation(db, spec, task, f"per-file:{entry.path}", meta,
                          executor.PER_FILE_MAX_TOKENS)
+        if meta.get("truncated"):
+            # Degenerate generation: the model burned the whole budget without
+            # finishing the file. Retrying the SAME model just truncates again
+            # ~5.5 min later, so don't spend the remaining parse-retries on it —
+            # bail now and let the caller rotate to the next implementer.
+            logger.warning("spec %s: per-file:%s truncated (agent=%s) — skipping "
+                           "remaining parse-retries to advance rotation",
+                           spec.id, entry.path, meta.get("agent"))
+            return None
         parsed = parse_implementer_response(raw)
         if isinstance(parsed, ParseError) or not parsed.files:
             continue

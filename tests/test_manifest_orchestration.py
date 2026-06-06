@@ -86,6 +86,42 @@ def test_per_file_retry_then_success(db, spec_task):
     assert ca.call_count == 3  # manifest + 1 failed + 1 retry
 
 
+def test_per_file_truncation_bails_and_records_agent(db, spec_task):
+    # A truncated per-file response is degenerate (e.g. a reasoning model burning
+    # the budget inside <think>). Retrying the SAME model just truncates again, so
+    # the orchestrator must bail after ONE attempt — not burn PER_FILE_PARSE_RETRIES
+    # — and the OUTPUT_TRUNCATED event must carry the agent for attribution.
+    spec, task, spec_dir = spec_task
+    manifest = "<<<MANIFEST>>>\nshared/t.ts | types | T\n<<<END_MANIFEST>>>"
+    calls = {"n": 0}
+
+    def fake_call(role, messages, *, agent=None, max_tokens=None,
+                  meta=None, timeout=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return manifest                        # manifest call: clean
+        if meta is not None:                        # per-file call: truncated
+            meta["agent"] = agent
+            meta["finish_reason"] = "length"
+            meta["truncated"] = True
+        return "<<<FILE: shared/t.ts>>>\nexport type T = "  # cut off mid-stream
+
+    with mock.patch.object(executor, "PER_FILE_PARSE_RETRIES", 2):
+        with mock.patch.object(d, "call_agent", side_effect=fake_call) as ca:
+            res = d._generate_via_manifest(db, spec, task, spec_dir, "S", "D",
+                                           "glm", [], None)
+    # no usable files → ParseError → caller rotates to the next implementer
+    assert isinstance(res, ParseError)
+    # manifest + exactly ONE per-file attempt (bailed instead of burning retries)
+    assert ca.call_count == 2
+    # observability: the truncation event attributes the model
+    evs = db.list_events_by_kind(spec_id=spec.id, kind=d.EventKind.OUTPUT_TRUNCATED)
+    assert evs, "expected an OUTPUT_TRUNCATED event"
+    payload = json.loads(evs[0].payload_json)
+    assert payload["agent"] == "glm"
+    assert payload["role"] == "per-file:shared/t.ts"
+
+
 def test_dispatch_single_vs_manifest(db, spec_task):
     spec, task, spec_dir = spec_task
     small = "## Files\nonly/one.ts"

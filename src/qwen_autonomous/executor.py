@@ -477,6 +477,7 @@ def call_agent(
         ) from e
 
     if meta is not None:
+        meta["agent"] = agent  # resolved model — lets callers attribute events
         try:
             fr = (data["choices"][0].get("finish_reason") or "").lower()
         except (KeyError, IndexError, AttributeError):
