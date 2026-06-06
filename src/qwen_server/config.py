@@ -438,13 +438,26 @@ Update these after each retrieval step. They help you stay organized and efficie
     # Expert-offload tuned 2026-06-03: 262K->64K ctx + n_cpu_moe=26 (22 of 48
     # expert layers on the RTX 5080): measured +30% decode (51->66 tok/s) at 64K,
     # ~1.7 GB VRAM free. See project_llama_server_build_perf.
+    # Re-tuned 2026-06-05 after llama-server upgrade d132f22->5343f45 (CUDA 12.8):
+    # the new binary is ~2.7 GB more VRAM-efficient, so n_cpu_moe=26 measured 4.4 GB
+    # free on 5343f45. Swept n_cpu_moe on the new binary (decode tok/s @ peak free):
+    #   26->68.7@4431 | 22->76.3@2575 | 20->77.8@1646 | 19->81.0@1182 | 18->83.4@719 | <=14 OOM.
+    # n_cpu_moe=22 is the knee: +11% decode vs 26 with 2.5 GB free (well above the
+    # ~1.4 GB swap floor). 21/20 add ~0 decode; 19/18 add +18/+21% but drop under the
+    # swap floor and risk the spec_fa78ca9c-style swap OOM.
+    # CHOSE 18 (user override 2026-06-05): max decode (+21%, 83.4 tok/s) accepting
+    # OOM risk. Only ~719 MiB free at peak — BELOW the ~1.4 GB swap floor. Steady-state
+    # is fine (KV is pre-allocated for full 64K), but model-swaps INTO the implementer
+    # from a large resident model (deep_reviewer/architect) may OOM before the old VRAM
+    # releases. The real de-risk is fixing [[project_model_swap_oom]] (free-before-spawn
+    # barrier); until then expect occasional swap-OOM retries. See [[project_llama_server_upgrade]].
     _QWEN36_35B = _create_model_config(
         'MODEL_PATH_QWEN36_35B',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf',
         48, 65536, 4608,
         server_extra_args=['--jinja', '--reasoning-format', 'none', '--swa-full'],
         type_k=8, type_v=8,
-        cpu_moe=True, n_cpu_moe=26, n_ubatch=4608,
+        cpu_moe=True, n_cpu_moe=18, n_ubatch=4608,
         repeat_penalty=1.05,
     )
 
