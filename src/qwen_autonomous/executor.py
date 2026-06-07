@@ -52,6 +52,20 @@ ARCHITECT_AGENT = os.getenv("AUTONOMOUS_ARCHITECT_AGENT", "q36_architect")
 IMPLEMENTER_AGENT = os.getenv("AUTONOMOUS_IMPLEMENTER_AGENT", "implementer")
 REVIEWER_AGENT = os.getenv("AUTONOMOUS_REVIEWER_AGENT", "reviewer")
 
+# Design review (#3): a pre-implementation LLM critique of the architect's design.
+# Uses the light/fast `reviewer` (Coder-30B) by default — design input is small,
+# and turnaround matters. Bounded + fail-open in the orchestrator.
+DESIGN_REVIEW_ENABLED = os.getenv("AUTONOMOUS_DESIGN_REVIEW", "1").lower() not in ("0", "false", "no")
+DESIGN_REVIEW_AGENT = os.getenv("AUTONOMOUS_DESIGN_REVIEW_AGENT", "reviewer")
+DESIGN_REVIEW_MAX_TOKENS = int(os.getenv("AUTONOMOUS_DESIGN_REVIEW_MAX_TOKENS", "8000"))
+DESIGN_REVIEW_MAX_REVISIONS = int(os.getenv("AUTONOMOUS_DESIGN_REVIEW_MAX_REVISIONS", "1"))
+
+# Robustness: how many times to re-run the reviewer when its output is
+# truncated/unparseable before treating it as a soft FAIL (→ supervisor/retry)
+# instead of failing the whole spec. The 122B reviewer's degenerate truncation
+# is intermittent, so one re-run often recovers it.
+REVIEWER_PARSE_RETRIES = int(os.getenv("AUTONOMOUS_REVIEWER_PARSE_RETRIES", "1"))
+
 ARCHITECT_TIMEOUT = float(os.getenv("AUTONOMOUS_ARCHITECT_TIMEOUT", "2700"))
 IMPLEMENTER_TIMEOUT = float(os.getenv("AUTONOMOUS_IMPLEMENTER_TIMEOUT", "1800"))
 REVIEWER_TIMEOUT = float(os.getenv("AUTONOMOUS_REVIEWER_TIMEOUT", "2700"))
@@ -213,7 +227,7 @@ TIER_TO_IMPLEMENTER = {
 }
 
 ALLOWED_IMPLEMENTER_AGENTS = {
-    "fast_implementer", "implementer", "deep_implementer", "m25_implementer", "glm",
+    "fast_implementer", "implementer", "deep_implementer", "m25_implementer",
 }
 
 
@@ -254,7 +268,7 @@ ARCHITECT_SYSTEM_PROMPT = textwrap.dedent("""\
 
     <<<COMPLEXITY>>>
     Tier: <low|medium|high|extreme>
-    Recommended agent: <fast_implementer|implementer|deep_implementer|m25_implementer|glm>
+    Recommended agent: <fast_implementer|implementer|deep_implementer|m25_implementer>
     Justification: <one or two sentences citing concrete signals — file count,
     language count, algorithmic depth, integration surface, edge-case density,
     test surface — that drove the tier and agent choice>
@@ -277,7 +291,10 @@ ARCHITECT_SYSTEM_PROMPT = textwrap.dedent("""\
 
     # Rules
 
-    1. Be prescriptive. The implementer follows your design exactly.
+    1. Be prescriptive about interfaces, file structure, data shapes, and
+       INVARIANTS — the implementer follows your design exactly. (But see rule 8
+       on formulas: "exactly" is a liability when the thing you prescribe is
+       wrong.)
     2. Specify exact file paths relative to the project workspace root.
     3. Keep it concise — the implementer needs clarity, not prose.
     4. Do NOT write implementation code. That is the implementer's job.
@@ -285,6 +302,18 @@ ARCHITECT_SYSTEM_PROMPT = textwrap.dedent("""\
     6. Every acceptance criterion from the spec must appear in your checklist.
     7. Pick the LOWEST tier that fits — do not over-allocate compute. A `high`
        agent for a `low` job wastes time and VRAM; the inverse causes failures.
+    8. Specify INVARIANTS, not unverified formulas. When a component has
+       algorithmic content, state the PROPERTIES the implementation must satisfy
+       (e.g. "all N items map to distinct positions", "output(t) != output(t+1)",
+       "result is sorted ascending") rather than a concrete formula you have not
+       verified. A wrong formula in the design propagates verbatim into the code
+       AND the tests — the whole pipeline then faithfully builds the bug. A
+       stated invariant, by contrast, gets independently tested. Only prescribe
+       an exact formula when you are certain it is correct and it is the
+       simplest way to convey the requirement.
+    9. Make the Acceptance Criteria Checklist TESTABLE: restate each criterion
+       as a concrete assertion (specific inputs → expected output / property)
+       so the reviewer can turn it directly into a test.
     """)
 
 IMPLEMENTER_SYSTEM_PROMPT = textwrap.dedent("""\
@@ -768,16 +797,101 @@ def parse_reviewer_response(text: str) -> ReviewerResult | ParseError:
 
 # ── User message builders ───────────────────────────────────────────────────
 
-def build_architect_message(spec_md: str) -> list[dict[str, str]]:
+def build_architect_message(spec_md: str,
+                            rejection_notes: str | None = None) -> list[dict[str, str]]:
+    user_parts: list[str] = []
+    # On a re-run (design-review rejection or supervisor design-revision), the
+    # prior design led to the failure below. The implementer builds the design
+    # faithfully, so a recurring failure means the DESIGN is wrong/under-specified
+    # — fix it here rather than regenerating the same document.
+    if rejection_notes:
+        user_parts.append(
+            "## Your prior design was rejected — revise it\n\n"
+            "A previous version of THIS design produced the problem below. The "
+            "implementer follows your design exactly, so the defect is in the "
+            "DESIGN, not the code. Find the flawed or under-specified part, fix "
+            "it, and where the failure encodes a missing INVARIANT, state that "
+            "invariant explicitly (rule 8). Do not simply re-emit the same design.\n\n"
+            f"{rejection_notes.strip()}\n\n---\n\n"
+        )
+    user_parts.append(
+        "## Specification\n\n"
+        f"{spec_md}\n\n---\n\n"
+        "Your task: produce a complete architecture design for this project. "
+        "Output exactly one <<<DESIGN>>>…<<<END>>> block as instructed."
+    )
     return [
         {"role": "system", "content": ARCHITECT_SYSTEM_PROMPT},
+        {"role": "user", "content": "\n".join(user_parts)},
+    ]
+
+
+DESIGN_REVIEW_SYSTEM_PROMPT = textwrap.dedent("""\
+    You are a DESIGN REVIEWER. You are given a specification and a proposed
+    design document (produced by an architect). Find defects in the DESIGN
+    before any code is written: the implementer follows the design exactly, so a
+    flaw here becomes a bug in every implementation and even in the tests.
+
+    Check, in priority order:
+    - CORRECTNESS: are any prescribed algorithms or formulas wrong, or stated so
+      concretely that a faithful implementation would fail the spec's own
+      acceptance criteria? Actively look for a counterexample — pick boundary
+      inputs (max sizes, zero, repetition, collisions, wrap-around) and trace
+      whether the design still satisfies each criterion. If you can construct an
+      input where a prescribed formula violates a stated criterion, that is a
+      FAIL, and you must give that input.
+    - COVERAGE: does the design address EVERY acceptance criterion in the spec?
+      Name any criterion with no corresponding design element.
+    - TESTABILITY: are the acceptance criteria stated as concrete, testable
+      assertions? Flag vague ones.
+    - SCOPE: does the design add or drop scope versus the spec?
+
+    Respond with EXACTLY this format and nothing else:
+
+    <<<DESIGN_REVIEW>>>
+    VERDICT: PASS or FAIL
+    <if FAIL: a concrete, numbered list of defects. For each, name the flaw, the
+    criterion/algorithm it affects, a counterexample input where relevant, and
+    what the architect must change. Be specific enough that the architect can fix
+    the design from your notes alone.>
+    <<<END_DESIGN_REVIEW>>>
+
+    Default to PASS if the design is sound. Do NOT fail for style or wording —
+    only for defects that would cause the implementation to miss the spec.
+    """)
+
+
+def build_design_review_message(spec_md: str, design_md: str) -> list[dict[str, str]]:
+    return [
+        {"role": "system", "content": DESIGN_REVIEW_SYSTEM_PROMPT},
         {"role": "user", "content": (
             "## Specification\n\n"
             f"{spec_md}\n\n---\n\n"
-            "Your task: produce a complete architecture design for this project. "
-            "Output exactly one <<<DESIGN>>>…<<<END>>> block as instructed."
+            "## Proposed design\n\n"
+            f"{design_md}\n\n---\n\n"
+            "Review the design for defects that would make the implementation "
+            "miss the spec. Output exactly one "
+            "<<<DESIGN_REVIEW>>>…<<<END_DESIGN_REVIEW>>> block."
         )},
     ]
+
+
+def parse_design_review(raw: str) -> tuple[str, str]:
+    """Parse a design-review response into ('PASS'|'FAIL', notes).
+
+    Fail-OPEN: if the verdict can't be found, return ('PASS', '') so a flaky or
+    malformed review never blocks the pipeline. Brackets are matched 1-3 wide to
+    tolerate the same marker drift the other parsers handle.
+    """
+    m = re.search(r"<{1,3}DESIGN_REVIEW>{1,3}(.*?)<{1,3}(?:END_DESIGN_REVIEW|END)>{1,3}",
+                  raw, re.DOTALL | re.IGNORECASE)
+    body = m.group(1) if m else raw
+    vm = re.search(r"VERDICT:\s*(PASS|FAIL)", body, re.IGNORECASE)
+    if not vm:
+        return "PASS", ""
+    if vm.group(1).upper() == "PASS":
+        return "PASS", ""
+    return "FAIL", body[vm.end():].strip()
 
 
 def build_implementer_message(

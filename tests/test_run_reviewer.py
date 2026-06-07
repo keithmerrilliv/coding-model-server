@@ -158,10 +158,13 @@ class TestVerifyReviewCitations:
         assert "unverified" not in annotated
 
 
-def test_parse_error_persists_raw_and_fails(db, spec_and_task):
+def test_parse_error_persists_raw_and_retries(db, spec_and_task):
     # Guards a latent bug: the parse-error branch referenced result.text, but
     # ParseError only has .reason/.raw — it would AttributeError exactly when
     # an operator needs the failed-response dump.
+    # Also pins the robustness fix: a single unparseable/truncated review must
+    # NOT kill the spec — it re-runs the reviewer (the 122B reviewer's
+    # degenerate truncation is intermittent).
     spec, task, spec_dir = spec_and_task
     perr = ParseError(reason="no <<<REVIEW>>> block", raw="garbage model output")
     with mock.patch.object(d, "call_agent", return_value="raw"), \
@@ -172,5 +175,25 @@ def test_parse_error_persists_raw_and_fails(db, spec_and_task):
     dump = spec_dir / "reviewer_failed_response.txt"
     assert dump.exists()
     assert "garbage model output" in dump.read_text()
-    assert db.get_task(task.id).status is TaskStatus.FAILED
+    # First failure re-runs the reviewer rather than failing the spec.
+    assert db.get_task(task.id).status is TaskStatus.PENDING
+    assert db.get_spec(spec.id).status is SpecStatus.EXECUTING
     assert db.list_open_gates(spec.id) == []
+
+
+def test_parse_error_soft_fails_to_retry_when_exhausted(db, spec_and_task):
+    # When reviewer re-runs are exhausted, an unparseable review becomes a soft
+    # FAIL routed through _attempt_retry (supervisor → implementer/design) — NOT
+    # a direct spec failure (the old behavior that killed specs on one truncation).
+    spec, task, spec_dir = spec_and_task
+    perr = ParseError(reason="truncated", raw="...")
+    with mock.patch.object(d.executor, "REVIEWER_PARSE_RETRIES", 0), \
+            mock.patch.object(d, "call_agent", return_value="raw"), \
+            mock.patch.object(d, "build_reviewer_message", return_value=[]), \
+            mock.patch.object(d, "parse_reviewer_response", return_value=perr), \
+            mock.patch.object(d, "_attempt_retry") as attempt:
+        d._run_reviewer(db, spec, task, spec_dir)
+
+    attempt.assert_called_once()
+    # _run_reviewer itself must not have hard-failed the spec.
+    assert db.get_spec(spec.id).status is SpecStatus.EXECUTING

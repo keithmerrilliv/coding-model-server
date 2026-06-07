@@ -520,14 +520,13 @@ Update these after each retrieval step. They help you stay organized and efficie
         'MODEL_PATH_GLM47_FLASH',
         '/home/keith-merrill/.lmstudio/models/unsloth/GLM-4.7-Flash-GGUF/GLM-4.7-Flash-Q4_K_M.gguf',
         47, 65536, 2048,
-        # --reasoning-budget 0: end thinking immediately. GLM-4.7 is a reasoning
-        # model; as a per-file implementer it burned the entire token budget
-        # inside <think> for even tiny files and never emitted code (every
-        # per-file call truncated at max_tokens — see the 13/13 attribution on
-        # spec_0770ab32). A non-thinking GLM that emits code beats a thinking
-        # GLM that emits nothing; it's a retry-rotation slot, not the primary.
-        server_extra_args=['--jinja', '--reasoning-format', 'none',
-                           '--reasoning-budget', '0'],
+        # NB: --reasoning-budget 0 was tried here to stop GLM-4.7 burning the
+        # whole budget inside <think> as an implementer — it does NOT work: GLM
+        # still streams reasoning as plain text (template swallows the opening
+        # <think> but the prose leaks into content) and truncates. GLM was
+        # therefore dropped from the implementer rotation (see
+        # _IMPLEMENTER_ROTATION). This agent config is retained for ad-hoc use.
+        server_extra_args=['--jinja', '--reasoning-format', 'none'],
         n_ubatch=2048,
         cpu_moe=True, n_cpu_moe=20,
     )

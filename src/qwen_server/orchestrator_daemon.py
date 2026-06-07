@@ -421,6 +421,11 @@ _ROLE_TO_GATE_TYPE = {
     "reviewer": GateType.RELEASE_APPROVAL,
 }
 
+# Worker roles in pipeline order. Used to reset downstream tasks when an earlier
+# role is retried — e.g. a supervisor design-revision (retry→architect) must also
+# re-run the implementer + reviewer, else the revised design is never built.
+_ROLE_ORDER = {"architect": 0, "implementer": 1, "reviewer": 2}
+
 
 def _process_executing(db: Database, spec: Spec) -> None:
     """Drive a spec through its task DAG while it's in EXECUTING state.
@@ -533,7 +538,12 @@ def _start_task(db: Database, spec: Spec, task) -> None:
 
 def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
     spec_md = (spec_dir / spec.source_md_path).read_text()
-    messages = build_architect_message(spec_md)
+    # On a re-run (design-review rejection #3, or supervisor design-revision #4),
+    # feed the failure back so the architect fixes the design instead of
+    # regenerating the same document.
+    rejection_notes = (_latest_architect_feedback(db, spec, spec_dir)
+                       if task.retry_count > 0 else None)
+    messages = build_architect_message(spec_md, rejection_notes=rejection_notes)
 
     # Architect output is structured (<<<DESIGN>>> / <<<COMPLEXITY>>> blocks).
     # The model occasionally drifts and returns prose without the markers; one
@@ -595,6 +605,26 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
                     spec.id, result.complexity.get("tier"),
                     result.complexity.get("recommended_agent"))
 
+    # Design review (#3): critique the design BEFORE implementation, since the
+    # implementer follows it exactly. Bounded by the architect retry budget and
+    # fail-open (a flaky review never blocks). On a substantive FAIL, bounce back
+    # to the architect with the notes instead of building a known-flawed design.
+    if (executor.DESIGN_REVIEW_ENABLED
+            and task.retry_count < executor.DESIGN_REVIEW_MAX_REVISIONS):
+        verdict, notes = _run_design_review(db, spec, task, spec_dir,
+                                            spec_md, result.design_md)
+        if verdict == "FAIL" and notes:
+            logger.info("spec %s: design review REJECTED the design — revising "
+                        "(architect retry %d)", spec.id, task.retry_count + 1)
+            try:
+                (spec_dir / "design_review_feedback.md").write_text(notes)
+            except OSError as e:
+                logger.warning("spec %s: could not persist design-review feedback: %s",
+                               spec.id, e)
+            db.increment_task_retry(task.id)
+            db.update_task_status(task.id, TaskStatus.PENDING)
+            return
+
     # Create design_approval gate
     db.update_task_status(task.id, TaskStatus.BLOCKED_ON_REVIEW)
     db.create_gate(
@@ -611,6 +641,67 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
     )
     logger.info("spec %s: architect done, design_approval gate created",
                 spec.id)
+
+
+def _latest_architect_feedback(db: Database, spec: Spec, spec_dir: Path) -> "str | None":
+    """Feedback for an architect re-run, combining the two sources:
+      * design_review_feedback.md — the design-review rejection (#3), consumed
+        once (deleted after reading so it doesn't bleed into a later cycle).
+      * the supervisor's design-revision directive (#4), from the decision log.
+    Returns the combined notes, or None when there's nothing to inject."""
+    parts: list[str] = []
+    fb_file = spec_dir / "design_review_feedback.md"
+    if fb_file.is_file():
+        try:
+            parts.append(fb_file.read_text())
+        except OSError:
+            pass
+        try:
+            fb_file.unlink()
+        except OSError:
+            pass
+    sup = _latest_supervisor_feedback(db, spec.id, target_role="architect")
+    if sup:
+        parts.append(sup)
+    combined = "\n\n".join(p.strip() for p in parts if p and p.strip())
+    return combined or None
+
+
+def _run_design_review(db: Database, spec: Spec, task, spec_dir,
+                       spec_md: str, design_md: str) -> "tuple[str, str]":
+    """LLM critique of the architect's design before implementation (#3).
+
+    Returns (verdict, notes) with verdict in {"PASS","FAIL"}. FAIL-OPEN: any
+    transport error, truncation, or unparseable verdict returns ("PASS", "") so
+    a flaky review never blocks the pipeline. Uses the light/fast design-review
+    agent (Coder-30B by default) for turnaround."""
+    meta: dict = {}
+    try:
+        raw = call_agent(
+            "reviewer",
+            executor.build_design_review_message(spec_md, design_md),
+            agent=executor.DESIGN_REVIEW_AGENT,
+            max_tokens=executor.DESIGN_REVIEW_MAX_TOKENS,
+            meta=meta,
+        )
+    except Exception as exc:  # transport/HTTP — never let it kill the spec
+        logger.warning("spec %s: design review call failed (%s) — proceeding "
+                       "without it", spec.id, exc)
+        return "PASS", ""
+    if meta.get("truncated"):
+        logger.warning("spec %s: design review truncated (agent=%s) — proceeding "
+                       "without it", spec.id, meta.get("agent"))
+        return "PASS", ""
+    verdict, notes = executor.parse_design_review(raw)
+    db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
+                    payload={"role": "design_review", "agent": meta.get("agent"),
+                             "verdict": verdict})
+    try:
+        (spec_dir / "design_review.md").write_text(f"VERDICT: {verdict}\n\n{raw}")
+    except OSError:
+        pass
+    logger.info("spec %s: design review verdict=%s", spec.id, verdict)
+    return verdict, notes
 
 
 # Matches `path/to/file.ext:LINE` — the citation format the reviewer prompt
@@ -1438,8 +1529,8 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
                              "result_kind": type(result).__name__})
 
     if isinstance(result, ParseError):
-        logger.error("spec %s: reviewer response unparseable: %s",
-                     spec.id, result.reason)
+        logger.error("spec %s: reviewer response unparseable%s: %s", spec.id,
+                     " (truncated)" if meta.get("truncated") else "", result.reason)
         # Persist the raw response so the operator can post-mortem the
         # parse failure. Without this, ~10 minutes of reviewer compute
         # is opaque after the fact.
@@ -1450,8 +1541,29 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
         except OSError as e:
             logger.warning("spec %s: could not persist failed reviewer "
                            "response: %s", spec.id, e)
-        db.update_task_status(task.id, TaskStatus.FAILED)
-        db.update_spec_status(spec.id, SpecStatus.FAILED)
+        # Robustness (#2): a truncated/unparseable review must NOT instakill the
+        # spec (it used to mark spec FAILED here, bypassing the supervisor). The
+        # 122B reviewer's degenerate truncation is intermittent, so re-run the
+        # reviewer a bounded number of times; on persistent failure treat it as a
+        # soft FAIL and route through the normal retry path (supervisor →
+        # implementer retry / design revision / abort).
+        if task.retry_count < executor.REVIEWER_PARSE_RETRIES:
+            db.increment_task_retry(task.id)
+            db.update_task_status(task.id, TaskStatus.PENDING)
+            logger.warning("spec %s: re-running reviewer after unparseable output "
+                           "(attempt %d/%d)", spec.id, task.retry_count + 1,
+                           executor.REVIEWER_PARSE_RETRIES)
+            return
+        logger.error("spec %s: reviewer unparseable after %d attempt(s) — treating "
+                     "as soft FAIL and routing to retry", spec.id,
+                     task.retry_count + 1)
+        _attempt_retry(
+            db, spec, task,
+            f"The reviewer could not produce a parseable review after "
+            f"{task.retry_count + 1} attempt(s) (likely truncation: {result.reason}). "
+            f"The implementation was NOT actually reviewed — re-examine the code, "
+            f"or revise the design if the spec is hard to satisfy.",
+        )
         return
 
     if result.duplicate_paths:
@@ -1641,12 +1753,13 @@ def _select_implementer_agent(spec_dir) -> "str | None":
 
 
 # Rotation chain for implementer retries. Ordered for vendor/family diversity:
-# Qwen3.6 → Qwen3-Coder-Next → GLM (Zhipu) → MiniMax → Qwen3-Coder. With
-# MAX_RETRIES=5 each retry slot 0..4 maps to a distinct model. See
-# project_implementer_rotation.md for the rationale and the ECS abstraction
-# tie-in (this hardcoded list becomes a capability query later).
+# Qwen3.6 → Qwen3-Coder-Next → MiniMax → Qwen3-Coder. GLM (Zhipu) was removed
+# 2026-06-07: as a reasoning model it burns the per-file/manifest budget on
+# reasoning (even with --reasoning-budget 0, which it ignores — see config.py)
+# and truncates without emitting usable code. See project_implementer_rotation.md
+# and project_glm_perfile_truncation.md for the evidence.
 _IMPLEMENTER_ROTATION = [
-    "implementer", "deep_implementer", "glm",
+    "implementer", "deep_implementer",
     "m25_implementer", "fast_implementer",
 ]
 
@@ -1769,9 +1882,18 @@ def _retry_role_with_feedback(db: Database, spec: Spec, target_role: str,
 
     db.increment_task_retry(target.id)
     db.update_task_status(target.id, TaskStatus.PENDING)
-    if current_task.id != target.id:
-        # Reset downstream task too so it re-runs after target completes
-        db.update_task_status(current_task.id, TaskStatus.PENDING)
+    # Reset EVERY downstream task so the chain re-runs against the target's new
+    # output. Retrying the architect must also reset the implementer (and
+    # reviewer): otherwise the revised design is never re-implemented and the
+    # reviewer would judge stale code against a new design. (Previously only the
+    # current_task was reset, leaving the implementer DONE on an architect retry.)
+    target_rank = _ROLE_ORDER.get(target_role, 0)
+    for t in db.list_tasks_for_spec(spec.id):
+        if t.id == target.id:
+            continue
+        if (_ROLE_ORDER.get(t.role, 99) > target_rank
+                and t.status not in (TaskStatus.PENDING, TaskStatus.SKIPPED)):
+            db.update_task_status(t.id, TaskStatus.PENDING)
     logger.info("spec %s: supervisor retry %s (attempt %d/%d)",
                 spec.id, target_role, target.retry_count + 1, MAX_RETRIES)
 

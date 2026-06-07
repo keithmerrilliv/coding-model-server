@@ -118,3 +118,30 @@ def test_build_per_file_message_targets_one_file():
     assert "<<<FILE: client/m.ts>>>" in u
     assert "shared/t.ts" in u            # manifest + written summary present
     assert "fix the import" in u         # rejection feedback threaded
+
+
+# ── parse_design_review (#3) ─────────────────────────────────────────────────
+
+def test_parse_design_review_pass():
+    raw = "<<<DESIGN_REVIEW>>>\nVERDICT: PASS\n<<<END_DESIGN_REVIEW>>>"
+    assert executor.parse_design_review(raw) == ("PASS", "")
+
+
+def test_parse_design_review_fail_carries_notes():
+    raw = ("<<<DESIGN_REVIEW>>>\nVERDICT: FAIL\n"
+           "1. count=20 collapses to 5 columns — state the distinct-column invariant.\n"
+           "<<<END_DESIGN_REVIEW>>>")
+    verdict, notes = executor.parse_design_review(raw)
+    assert verdict == "FAIL"
+    assert "distinct-column" in notes
+
+
+def test_parse_design_review_failopen_on_garbage():
+    # No verdict marker → fail-open to PASS so a malformed review never blocks.
+    assert executor.parse_design_review("the design looks fine to me") == ("PASS", "")
+
+
+def test_parse_design_review_tolerates_bracket_drift():
+    raw = "<DESIGN_REVIEW>\nVERDICT: FAIL\nbroken\n<END_DESIGN_REVIEW>"
+    verdict, notes = executor.parse_design_review(raw)
+    assert verdict == "FAIL" and "broken" in notes

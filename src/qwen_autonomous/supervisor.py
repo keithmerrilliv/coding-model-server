@@ -185,12 +185,23 @@ Decision policy:
 1. SUCCESS path. If the phase succeeded and produced sound artifacts, choose \
 `advance`. This is the default; do not retry working code.
 
-2. RETRY vs REPLAN. The distinction matters and you must get it right.
-   - `retry` is for *local* defects: a flaky test, a missing import, one wrong \
-function, a misread spec line. The same role's next attempt can plausibly fix it.
-   - `replan` is for *structural* defects: the design is wrong, the wrong \
-framework was chosen, the task decomposition itself is incoherent. Retrying the \
-implementer cannot recover a broken plan — it will just produce more wrong code.
+2. RETRY vs REVISE-DESIGN vs REPLAN. Three escalation levels — pick the right one.
+   - `retry` with target_role=implementer (or reviewer) is for *local* defects: \
+a flaky test, a missing import, one wrong function, a misread spec line. The \
+same role's next attempt can plausibly fix it.
+   - `retry` with target_role=architect is for *design* defects. If the SAME \
+test/assertion keeps failing across multiple implementer attempts — ESPECIALLY \
+across different implementer models — the implementers are faithfully building a \
+wrong or under-specified DESIGN; retrying the implementer again only yields more \
+wrong code. Re-run the architect so it fixes the design (e.g. states the \
+invariant the failing test encodes); the implementer then rebuilds against the \
+corrected design. This is the surgical fix for "every model fails the same \
+assertion," and you should reach for it BEFORE exhausting the implementer's \
+retry budget on a recurring failure. Put the concrete failing behavior in \
+`feedback_to_inject` so the architect knows what to fix.
+   - `replan` is for *structural* defects above the design level: wrong \
+framework, incoherent task decomposition. Heavier than retry→architect; prefer \
+retry→architect when only the design's content is wrong.
 
 3. CLARIFICATION. If progress is blocked on missing user intent that no agent \
 can resolve (ambiguous spec, conflicting requirements, unspecified API target), \

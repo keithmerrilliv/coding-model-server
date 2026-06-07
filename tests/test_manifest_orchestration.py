@@ -12,7 +12,8 @@ import pytest
 import qwen_server.orchestrator_daemon as d
 from qwen_autonomous import executor
 from qwen_autonomous.db import Database
-from qwen_autonomous.executor import ImplementerResult, ParseError
+from qwen_autonomous.executor import ArchitectResult, ImplementerResult, ParseError
+from qwen_autonomous.models import GateType, TaskStatus
 
 
 @pytest.fixture
@@ -215,3 +216,61 @@ def test_parse_cited_paths_full_and_basename():
     cited = d._parse_cited_paths(notes, known)
     assert cited == {"App/server/resolver.ts", "App/client/probe.ts"}
     assert "shared/t.ts" not in cited  # 'anything' must not match 't.ts'
+
+
+def test_retry_architect_resets_downstream_tasks(db):
+    # Supervisor design-revision (retry→architect) must reset the implementer AND
+    # reviewer to PENDING — else the revised design is never re-implemented and
+    # the reviewer judges stale code against a new design.
+    spec = db.create_spec(title="demo", source_md_path="spec.md")
+    a = db.create_task(spec_id=spec.id, agent="q36_architect", role="architect", title="a")
+    i = db.create_task(spec_id=spec.id, agent="implementer", role="implementer", title="i")
+    r = db.create_task(spec_id=spec.id, agent="reviewer", role="reviewer", title="r")
+    for t in (a, i, r):
+        db.update_task_status(t.id, TaskStatus.DONE)
+    reviewer = db.get_task(r.id)  # retry originates at the reviewer (test failure)
+    d._retry_role_with_feedback(db, db.get_spec(spec.id), "architect",
+                                "the design's formula is wrong", current_task=reviewer)
+    assert db.get_task(a.id).status is TaskStatus.PENDING
+    assert db.get_task(i.id).status is TaskStatus.PENDING   # <-- the fix
+    assert db.get_task(r.id).status is TaskStatus.PENDING
+    assert db.get_task(a.id).retry_count == 1
+
+
+def _architect_spec(db):
+    spec = db.create_spec(title="demo", source_md_path="spec.md")
+    spec_dir = db.spec_dir(spec.id)
+    (spec_dir / "spec.md").write_text("# spec\nbuild a thing")
+    task = db.create_task(spec_id=spec.id, agent="q36_architect", role="architect", title="a")
+    return db.get_spec(spec.id), db.get_task(task.id), spec_dir
+
+
+def test_run_architect_design_review_reject_revises(db):
+    # A FAIL design review bounces back to the architect with feedback instead of
+    # creating the design-approval gate (#3).
+    spec, task, spec_dir = _architect_spec(db)
+    ares = ArchitectResult(design_md="# design", raw="x",
+                           complexity={"tier": "low", "recommended_agent": "fast_implementer"})
+    with mock.patch.object(d, "call_agent", return_value="raw"), \
+            mock.patch.object(d, "parse_architect_response", return_value=ares), \
+            mock.patch.object(executor, "parse_design_review",
+                              return_value=("FAIL", "the formula collapses for count=20")):
+        d._run_architect(db, spec, task, spec_dir)
+    assert db.get_task(task.id).status is TaskStatus.PENDING
+    assert db.get_task(task.id).retry_count == 1
+    assert "collapses" in (spec_dir / "design_review_feedback.md").read_text()
+    assert db.list_open_gates(spec.id) == []   # design rejected — no gate yet
+
+
+def test_run_architect_design_review_pass_creates_gate(db):
+    # A PASS design review proceeds to the design-approval gate (#3).
+    spec, task, spec_dir = _architect_spec(db)
+    ares = ArchitectResult(design_md="# design", raw="x",
+                           complexity={"tier": "low", "recommended_agent": "fast_implementer"})
+    with mock.patch.object(d, "call_agent", return_value="raw"), \
+            mock.patch.object(d, "parse_architect_response", return_value=ares), \
+            mock.patch.object(executor, "parse_design_review", return_value=("PASS", "")):
+        d._run_architect(db, spec, task, spec_dir)
+    assert db.get_task(task.id).status is TaskStatus.BLOCKED_ON_REVIEW
+    gates = db.list_open_gates(spec.id)
+    assert len(gates) == 1 and gates[0].gate_type is GateType.DESIGN_APPROVAL
