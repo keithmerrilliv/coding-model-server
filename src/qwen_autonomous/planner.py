@@ -34,6 +34,17 @@ PLANNER_AGENT = os.getenv("AUTONOMOUS_PLANNER_AGENT", "q36_architect")
 PLANNER_TIMEOUT = float(os.getenv("AUTONOMOUS_PLANNER_TIMEOUT", "900"))  # 15 min
 PLANNER_MAX_TOKENS = int(os.getenv("AUTONOMOUS_PLANNER_MAX_TOKENS", "4000"))
 
+# How many times to RE-ISSUE the planner request when the model's output is
+# unparseable (bad YAML, missing/duplicate markers) before giving up. Mirrors
+# executor.REVIEWER_PARSE_RETRIES: structure errors are intermittent at temp 0.2,
+# so a re-roll usually recovers — and the orchestrator turns a PlannerError into
+# spec FAILED, so a single bad token used to hard-kill the whole spec. Real
+# observed kill: q36_architect emitted `notes: Out-of-scope: CLI wrapper...`,
+# where the unquoted `: ` parsed as a nested mapping ("mapping values are not
+# allowed here"). Only PlannerError re-rolls; PlannerClarify/PlannerYaml are
+# valid outcomes and are never retried.
+PLANNER_PARSE_RETRIES = int(os.getenv("AUTONOMOUS_PLANNER_PARSE_RETRIES", "1"))
+
 
 # ── System prompt ────────────────────────────────────────────────────────────
 
@@ -335,25 +346,15 @@ def build_user_message(
 
 # ── Inference ────────────────────────────────────────────────────────────────
 
-def call_planner(
-    spec_markdown: str,
-    clarifications: list[tuple[str, str]] | None = None,
+def _call_planner_once(
+    user_msg: str,
     *,
-    agent: str = PLANNER_AGENT,
-    timeout: float = PLANNER_TIMEOUT,
+    agent: str,
+    timeout: float,
 ) -> PlannerResult:
-    """Send the spec to the planner agent and parse the response.
-
-    Raises requests.RequestException on transport failures so callers can
-    distinguish "model said something we couldn't parse" from "couldn't
-    reach the server at all". Parse failures return a PlannerError.
-    """
-    user_msg = build_user_message(spec_markdown, clarifications)
-
-    logger.info("planner: calling agent=%s, spec_chars=%d, clarifications=%d",
-                agent, len(spec_markdown),
-                len(clarifications) if clarifications else 0)
-
+    """One planner inference + parse. Raises requests.RequestException on
+    transport failure (so the retry loop in call_planner does NOT swallow
+    transport errors — only parse failures re-roll)."""
     resp = post_chat_completion(
         agent,
         [
@@ -363,6 +364,7 @@ def call_planner(
         timeout=timeout,
         max_tokens=PLANNER_MAX_TOKENS,
         temperature=0.2,           # low — we want consistent structured output
+        retry_5xx=True,            # transient 5xx (e.g. mid model-swap) shouldn't kill planning
     )
     resp.raise_for_status()
     data = resp.json()
@@ -375,13 +377,55 @@ def call_planner(
             raw_response=str(data)[:2000],
         )
 
-    result = parse_planner_response(content)
+    return parse_planner_response(content)
+
+
+def call_planner(
+    spec_markdown: str,
+    clarifications: list[tuple[str, str]] | None = None,
+    *,
+    agent: str = PLANNER_AGENT,
+    timeout: float = PLANNER_TIMEOUT,
+    parse_retries: int | None = None,
+) -> PlannerResult:
+    """Send the spec to the planner agent and parse the response.
+
+    Raises requests.RequestException on transport failures so callers can
+    distinguish "model said something we couldn't parse" from "couldn't
+    reach the server at all".
+
+    Parse failures return a PlannerError — but only after re-issuing the
+    request up to ``parse_retries`` times (default PLANNER_PARSE_RETRIES). LLM
+    structure errors (invalid YAML, missing/duplicate markers) are intermittent
+    at temp 0.2, and the orchestrator turns a PlannerError into spec FAILED, so
+    a single garbled emission would otherwise hard-kill the spec. Valid results
+    (PlannerYaml / PlannerClarify) short-circuit the loop immediately.
+    """
+    user_msg = build_user_message(spec_markdown, clarifications)
+    if parse_retries is None:
+        parse_retries = PLANNER_PARSE_RETRIES
+
+    logger.info("planner: calling agent=%s, spec_chars=%d, clarifications=%d",
+                agent, len(spec_markdown),
+                len(clarifications) if clarifications else 0)
+
+    result: PlannerResult = PlannerError(reason="planner not called", raw_response="")
+    for attempt in range(parse_retries + 1):
+        result = _call_planner_once(user_msg, agent=agent, timeout=timeout)
+        if not isinstance(result, PlannerError):
+            break
+        if attempt < parse_retries:
+            logger.warning(
+                "planner: unparseable output (%s) — re-rolling (attempt %d/%d)",
+                result.reason, attempt + 2, parse_retries + 1)
+
     if isinstance(result, PlannerYaml):
         logger.info("planner: produced YAML (%d bytes)", len(result.yaml_text))
     elif isinstance(result, PlannerClarify):
         logger.info("planner: needs clarification (%d questions)",
                     len(result.questions))
     else:
-        logger.warning("planner: unparseable response (%s)", result.reason)
+        logger.warning("planner: unparseable response after %d attempt(s) (%s)",
+                       parse_retries + 1, result.reason)
 
     return result
