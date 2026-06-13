@@ -473,15 +473,18 @@ Update these after each retrieval step. They help you stay organized and efficie
     # layers on CPU); MTP ~doubles it. Measured on build 5343f45 with the prod
     # global flags (lookup-cache + cache-reuse, no conflict): baseline 8.3 tok/s
     # -> MTP 14.1 tok/s decode = ~1.7x, ~85% draft acceptance on structured output.
-    # ngl dropped 40->38 to fit the MTP head: 14,522 MiB / ~1,287 free (above this
-    # agent's swap floor). ngl=40 is OOM-tight (714 free); ngl=36 is safer
-    # (1,754 free / 13.5 tok/s) if swap-OOMs appear. Quality is lossless (verified
-    # tokens == base model). Used by q36_architect + supervisor. See
-    # [[project_mtp_test_scope]] / [[project_llama_server_upgrade]].
+    # ngl=36 (was 40->38->36): 1,754 free / 13.5 tok/s decode. ngl=40 OOM-tight
+    # (714 free); ngl=38 (1,287 free) CRASHED the autonomous architect-revision
+    # pass — design-review (#3) swaps back to q36 AND the larger r1 prompt
+    # (design + review feedback ~4.6K tok) OOM'd the prefill compute buffer
+    # (SIGABRT rc=-6; spec_b956e1c9, 2026-06-13 — see [[project_model_swap_oom]]).
+    # 36 restores the headroom that pass needs (~−0.6 tok/s decode is worth it).
+    # Quality lossless (verified tokens == base model). Used by q36_architect +
+    # supervisor. See [[project_mtp_test_scope]] / [[project_llama_server_upgrade]].
     _QWEN36_27B = _create_model_config(
         'MODEL_PATH_QWEN36_27B',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3.6-27B-MTP-GGUF/Qwen3.6-27B-Q4_K_M.gguf',
-        38, 131072, 2048,
+        36, 131072, 2048,
         server_extra_args=['--jinja', '--reasoning-format', 'none', '--swa-full',
                            '--spec-type', 'draft-mtp', '--spec-draft-n-max', '2'],
         type_k=2, type_v=2,
