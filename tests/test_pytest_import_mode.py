@@ -10,7 +10,7 @@ runs, so every retry FAILed on a harness artefact rather than the code.
 by full path so duplicate basenames coexist. This test fails (collection error,
 `passed is False`) without that flag and passes with it.
 """
-from qwen_autonomous import executor
+from coding_model_autonomous import executor
 
 
 def test_run_local_tests_tolerates_duplicate_test_basenames(tmp_path, monkeypatch):
@@ -25,7 +25,7 @@ def test_run_local_tests_tolerates_duplicate_test_basenames(tmp_path, monkeypatc
     # Run unsandboxed so the regression doesn't depend on bwrap being present
     # in the dev/CI environment — we're exercising the pytest invocation, not
     # the sandbox.
-    monkeypatch.setenv("QWEN_ALLOW_UNSANDBOXED_TESTS", "1")
+    monkeypatch.setenv("CODING_MODEL_ALLOW_UNSANDBOXED_TESTS", "1")
 
     passed, output = executor._run_local_tests(spec_dir, "pytest", 60)
 

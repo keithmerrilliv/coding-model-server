@@ -6,7 +6,7 @@ guard the two stripping paths the rest of the system relies on:
   * ``ThinkingStripper`` for token-by-token streaming, where a tag may be split
     across chunk boundaries and a partial-tag tail is held back until ``flush``
 """
-from qwen_server.streaming import ThinkingStripper, strip_thinking
+from coding_model_server.streaming import ThinkingStripper, strip_thinking
 
 
 class TestStripThinking:

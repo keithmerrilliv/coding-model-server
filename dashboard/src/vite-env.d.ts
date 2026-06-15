@@ -1,7 +1,7 @@
 /// <reference types="vite/client" />
 
 interface ImportMetaEnv {
-  readonly VITE_QWEN_SERVER_URL: string;
+  readonly VITE_CODING_MODEL_SERVER_URL: string;
 }
 
 interface ImportMeta {

@@ -1,4 +1,4 @@
-"""Mac-side HTTP runner for qwen-server autonomous specs.
+"""Mac-side HTTP runner for coding-model-server autonomous specs.
 
 Accepts test-run requests from the Linux orchestrator over a loopback-only
 HTTP endpoint, materializes a git worktree of a registered repo, applies the

@@ -28,7 +28,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("mac_runner.server")
 
-app = FastAPI(title="qwen mac-runner", version="0.1.0")
+app = FastAPI(title="coding-model mac-runner", version="0.1.0")
 
 
 class PatchFile(BaseModel):
@@ -63,7 +63,7 @@ async def verify_runner_key(x_runner_key: Optional[str] = Header(None)) -> None:
     if not Config.API_KEY:
         if Config.ALLOW_UNAUTH:
             return
-        raise HTTPException(500, "runner misconfigured: QWEN_RUNNER_API_KEY is empty")
+        raise HTTPException(500, "runner misconfigured: CODING_MODEL_RUNNER_API_KEY is empty")
     if not x_runner_key or not hmac.compare_digest(x_runner_key, Config.API_KEY):
         raise HTTPException(401, "invalid or missing runner key")
 
@@ -143,9 +143,9 @@ def main() -> None:
 
     if not Config.API_KEY and not Config.ALLOW_UNAUTH:
         logger.error(
-            "QWEN_RUNNER_API_KEY is not set. All test-run endpoints would be "
-            "unauthenticated. Set it in ~/.config/qwen-runner/.env, or set "
-            "QWEN_RUNNER_ALLOW_UNAUTH=1 to explicitly permit (dev only)."
+            "CODING_MODEL_RUNNER_API_KEY is not set. All test-run endpoints would be "
+            "unauthenticated. Set it in ~/.config/coding-model-runner/.env, or set "
+            "CODING_MODEL_RUNNER_ALLOW_UNAUTH=1 to explicitly permit (dev only)."
         )
         sys.exit(1)
 

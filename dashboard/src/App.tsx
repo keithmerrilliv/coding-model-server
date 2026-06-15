@@ -68,7 +68,7 @@ const AppContent: React.FC = () => {
   return (
     <div className="app-container">
       <header className="app-header">
-        <h1>Qwen Multi-Agent Dashboard</h1>
+        <h1>Coding Model Multi-Agent Dashboard</h1>
         <LogoutButton />
       </header>
       {adminKey && (

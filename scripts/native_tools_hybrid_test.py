@@ -37,7 +37,7 @@ TOOLS = [{
 }]
 
 payload = {
-    "model": "glm",
+    "model": "native_implementer",
     "messages": [{
         "role": "user",
         "content": (

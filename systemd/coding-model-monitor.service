@@ -1,0 +1,34 @@
+[Unit]
+Description=Coding Model Resource Monitor (Power & DB Size)
+After=network.target
+
+[Service]
+Type=simple
+# Run as the owning user, not root. monitor_resources.py only needs:
+#   - nvidia-smi (works as any user)
+#   - read access to /sys/class/powercap/*/energy_uj (may require `chmod g+r`
+#     or adding the user to a group with read access; alternatively run once
+#     as root to grant: setfacl -m u:keith-merrill:r /sys/class/powercap/intel-rapl:0/energy_uj)
+User=keith-merrill
+WorkingDirectory=/home/keith-merrill/Dev/coding-model-server
+ExecStart=/usr/bin/python3 /home/keith-merrill/Dev/coding-model-server/scripts/monitor_resources.py
+Restart=always
+RestartSec=10
+
+# Security hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+ProtectSystem=strict
+ReadWritePaths=%h/Dev/coding-model-server
+
+[Install]
+WantedBy=multi-user.target

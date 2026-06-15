@@ -1,4 +1,4 @@
-# Qwen Server — Project Notes
+# Coding Model Server — Project Notes
 
 This file is kept short on purpose. For day-to-day state see:
 
@@ -10,11 +10,11 @@ This file is kept short on purpose. For day-to-day state see:
 ## Architecture in one paragraph
 
 Three packages under `src/`, installed via `pip install -e .`:
-`qwen_server` (FastAPI inference server + orchestrator daemon +
-shared modules), `qwen_client` (chat client), `qwen_autonomous`
+`coding_model_server` (FastAPI inference server + orchestrator daemon +
+shared modules), `coding_model_client` (chat client), `coding_model_autonomous`
 (autonomous task store + agents). The server runs as
-`python -m qwen_server.server`; the orchestrator as
-`python -m qwen_server.orchestrator_daemon` (both via systemd).
+`python -m coding_model_server.server`; the orchestrator as
+`python -m coding_model_server.orchestrator_daemon` (both via systemd).
 Most agents run on the `llama_server` subprocess backend with
 `--cpu-moe` (attention sublayers on GPU, experts on CPU);
 `debugger` and `fast_implementer` still use the in-process
@@ -28,13 +28,13 @@ bwrap-sandboxed test execution and Jira sync.
 ## When to look elsewhere
 
 - Modifying agent VRAM tuning → `MEMORY.md`'s VRAM Budget section + the
-  per-agent `_create_model_config` calls in `src/qwen_server/server.py`.
+  per-agent `_create_model_config` calls in `src/coding_model_server/server.py`.
 - Adding a new agent → mirror the closest existing pattern in
-  `src/qwen_server/server.py`'s `Config.AGENTS`; bump `AUTONOMOUS_*_AGENT`
-  env in `~/.config/qwen-server/.env` if it should be the autonomous
+  `src/coding_model_server/server.py`'s `Config.AGENTS`; bump `AUTONOMOUS_*_AGENT`
+  env in `~/.config/coding-model-server/.env` if it should be the autonomous
   default.
-- Sandbox / security → `qwen-orchestrator.service`,
-  `src/qwen_autonomous/executor.py::_run_local_tests`, and
+- Sandbox / security → `coding-model-orchestrator.service`,
+  `src/coding_model_autonomous/executor.py::_run_local_tests`, and
   `~/.claude/.../memory/project_security_actionables.md`.
 - Anything else → `git log --grep '<keyword>'` is usually faster than
   documentation.

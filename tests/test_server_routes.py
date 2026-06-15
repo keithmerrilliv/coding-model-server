@@ -12,7 +12,7 @@ routes plus the route table itself.
 """
 from fastapi.testclient import TestClient
 
-from qwen_server.server import app
+from coding_model_server.server import app
 
 client = TestClient(app)
 
@@ -90,8 +90,8 @@ def test_lifespan_publishes_services_to_runtime():
     """
     from unittest import mock
 
-    import qwen_server.server as srv
-    from qwen_server import runtime
+    import coding_model_server.server as srv
+    from coding_model_server import runtime
 
     fake_mem = mock.Mock()
     fake_mem.search_memory.return_value = [{"text": "hit"}]

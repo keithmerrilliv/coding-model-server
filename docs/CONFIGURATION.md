@@ -2,7 +2,7 @@
 
 ## Environment Variables
 
-Set in `~/.config/qwen-server/.env` (preferred; keeps secrets out of the repo)
+Set in `~/.config/coding-model-server/.env` (preferred; keeps secrets out of the repo)
 or in a repo-local `.env` for dev. Loaded by startup scripts and systemd units.
 
 ### Server
@@ -10,30 +10,30 @@ or in a repo-local `.env` for dev. Loaded by startup scripts and systemd units.
 |----------|---------|-------------|
 | `PORT` | `5000` | Server listen port |
 | `HOST` | `127.0.0.1` | Server bind address. Set to `0.0.0.0` only if you need LAN access **and** have a strong `ADMIN_API_KEY`. |
-| `ADMIN_API_KEY` | *(required)* | API key for authentication. The server refuses to start without it unless `QWEN_ALLOW_UNAUTH=1` is set. |
-| `QWEN_ALLOW_UNAUTH` | *(unset)* | Set to `1` to permit unauthenticated operation (local dev only — never on a LAN-exposed instance). |
-| `QWEN_ENV_FILE` | *(unset)* | Override the .env path loaded by `start.sh` / `start-client.sh`. |
-| `QWEN_ALLOW_UNSANDBOXED_TESTS` | *(unset)* | Set to `1` to run LLM-generated tests without the bubblewrap sandbox. Not recommended — tests then execute with the orchestrator's own privileges. Install `bubblewrap` (`apt install bubblewrap`) instead. |
+| `ADMIN_API_KEY` | *(required)* | API key for authentication. The server refuses to start without it unless `CODING_MODEL_ALLOW_UNAUTH=1` is set. |
+| `CODING_MODEL_ALLOW_UNAUTH` | *(unset)* | Set to `1` to permit unauthenticated operation (local dev only — never on a LAN-exposed instance). |
+| `CODING_MODEL_ENV_FILE` | *(unset)* | Override the .env path loaded by `bin/start.sh` / `bin/start-client.sh`. |
+| `CODING_MODEL_ALLOW_UNSANDBOXED_TESTS` | *(unset)* | Set to `1` to run LLM-generated tests without the bubblewrap sandbox. Not recommended — tests then execute with the orchestrator's own privileges. Install `bubblewrap` (`apt install bubblewrap`) instead. |
 | `LLAMA_SERVER_REQUEST_TIMEOUT` | `2700` | Max seconds for a single llama-server inference call. Must be ≥ the longest `AUTONOMOUS_*_TIMEOUT` so the inner request doesn't fail before the outer role budget. |
 | `ALLOW_REMOTE_EXEC_YOLO` | *(unset)* | Defense-in-depth: even in `PERMISSION_MODE=yolo`, `<<<REMOTE_EXEC>>>` shell commands still prompt unless this is set to `1`. Two opt-ins must compromise (yolo flag + this env) before LLM-emitted shell runs silently. |
 | `CORS_ORIGINS` | `localhost,127.0.0.1` | CSV of allowed CORS origins. Must include port (e.g. `http://localhost:3000`) for browser dashboards. `allow_credentials` is automatically disabled when `*` is in the list. |
 | `INGEST_ALLOWED_DIR` | *(unset)* | Directory under which `/v1/memory/ingest` accepts paths (in addition to system temp). Realpath-resolved before the prefix check, so symlinks can't escape. |
 | `MAC_RUNNER_URL` | `http://127.0.0.1:5050` | Where the orchestrator dispatches `swift_test` / `xcodebuild_test` jobs. Default assumes an SSH reverse tunnel from the Mac. |
-| `MAC_RUNNER_API_KEY` | *(empty)* | Shared secret — must match `QWEN_RUNNER_API_KEY` in the Mac runner's `~/.config/qwen-runner/.env`. |
+| `MAC_RUNNER_API_KEY` | *(empty)* | Shared secret — must match `CODING_MODEL_RUNNER_API_KEY` in the Mac runner's `~/.config/coding-model-runner/.env`. |
 
 ### Mac runner (`mac_runner/`, runs on macOS)
 
-Variables loaded from `~/.config/qwen-runner/.env`.
+Variables loaded from `~/.config/coding-model-runner/.env`.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `QWEN_RUNNER_API_KEY` | *(required)* | Shared secret with the orchestrator's `MAC_RUNNER_API_KEY`. Runner refuses to start without it unless `QWEN_RUNNER_ALLOW_UNAUTH=1`. |
-| `QWEN_RUNNER_HOST` | `127.0.0.1` | Bind address. Keep as loopback; use SSH reverse tunnel from the Linux box. |
-| `QWEN_RUNNER_PORT` | `5050` | Bind port. |
-| `QWEN_RUNNER_WORKTREE_ROOT` | `~/Library/Caches/qwen-runner/worktrees` | Where per-spec git worktrees are materialized. |
-| `QWEN_RUNNER_DERIVED_DATA` | `~/Library/Caches/qwen-runner/DerivedData` | Shared xcodebuild DerivedData across runs (speeds up incremental builds). |
-| `QWEN_RUNNER_REPOS_FILE` | `~/.config/qwen-runner/repos.yml` | Symbolic-name → absolute-path map; the runner refuses any repo not listed here. |
-| `QWEN_RUNNER_ALLOW_UNAUTH` | *(unset)* | Set to `1` to let the runner start without an API key (dev only). |
+| `CODING_MODEL_RUNNER_API_KEY` | *(required)* | Shared secret with the orchestrator's `MAC_RUNNER_API_KEY`. Runner refuses to start without it unless `CODING_MODEL_RUNNER_ALLOW_UNAUTH=1`. |
+| `CODING_MODEL_RUNNER_HOST` | `127.0.0.1` | Bind address. Keep as loopback; use SSH reverse tunnel from the Linux box. |
+| `CODING_MODEL_RUNNER_PORT` | `5050` | Bind port. |
+| `CODING_MODEL_RUNNER_WORKTREE_ROOT` | `~/Library/Caches/coding-model-runner/worktrees` | Where per-spec git worktrees are materialized. |
+| `CODING_MODEL_RUNNER_DERIVED_DATA` | `~/Library/Caches/coding-model-runner/DerivedData` | Shared xcodebuild DerivedData across runs (speeds up incremental builds). |
+| `CODING_MODEL_RUNNER_REPOS_FILE` | `~/.config/coding-model-runner/repos.yml` | Symbolic-name → absolute-path map; the runner refuses any repo not listed here. |
+| `CODING_MODEL_RUNNER_ALLOW_UNAUTH` | *(unset)* | Set to `1` to let the runner start without an API key (dev only). |
 
 ### Planner `test_strategy` block
 
@@ -63,7 +63,7 @@ The planner emits a `test_strategy` map that the daemon forwards to
 ### Client
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `QWEN_SERVER_IP` | `192.168.50.101` | Server IP address |
+| `CODING_MODEL_SERVER_IP` | `192.168.50.101` | Server IP address |
 | `PERMISSION_MODE` | `default` | `default` / `acceptEdits` / `yolo` |
 | `ALLOW_SHELL_MODE` | `true` | Allow pipes, redirects, and shell features |
 | `COMMAND_WHITELIST` | *(none)* | CSV of allowed commands (empty = all allowed) |
@@ -71,8 +71,8 @@ The planner emits a `test_strategy` map that the daemon forwards to
 ### Autonomous mode (orchestrator)
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `AUTONOMOUS_PLANNER_AGENT` | `q36_architect` | Agent that runs the spec → YAML planner step. |
-| `AUTONOMOUS_ARCHITECT_AGENT` | `q36_architect` | Agent for the design phase. |
+| `AUTONOMOUS_PLANNER_AGENT` | `dense_architect` | Agent that runs the spec → YAML planner step. |
+| `AUTONOMOUS_ARCHITECT_AGENT` | `dense_architect` | Agent for the design phase. |
 | `AUTONOMOUS_IMPLEMENTER_AGENT` | `implementer` | Default implementer; the architect can recommend a tier-specific override per spec. |
 | `AUTONOMOUS_REVIEWER_AGENT` | `reviewer` | Reviewer agent; usually overridden to `deep_reviewer` in `.env`. |
 | `AUTONOMOUS_SUPERVISOR_AGENT` | `supervisor` | Meta-orchestrator that decides retry / fail / replan paths. |
@@ -88,9 +88,9 @@ The planner emits a `test_strategy` map that the daemon forwards to
 
 ### Phase b — adversarial test generation (autonomous mode, opt-in)
 
-After the local Qwen reviewer's tests pass on retry-0, the orchestrator
+After the local Coding Model reviewer's tests pass on retry-0, the orchestrator
 optionally calls Gemini and/or Claude to write 3–7 additional
-`adversarial_test_*.py` files targeting edge cases Qwen missed. The
+`adversarial_test_*.py` files targeting edge cases Coding Model missed. The
 combined suite re-runs; failure downgrades the verdict and falls
 through to the implementer retry loop with the failing-test output as
 feedback. Fail-open: per-provider errors (key, network, timeout,
@@ -124,7 +124,7 @@ in `both` mode).
 
 ## Per-Model Configuration
 
-Each model is defined via `_create_model_config()` in `src/qwen_server/server.py`:
+Each model is defined via `_create_model_config()` in `src/coding_model_server/server.py`:
 
 ```python
 _MY_MODEL = _create_model_config(
@@ -209,10 +209,10 @@ For optimal inference performance on dedicated hardware:
 
 ## Session Storage
 
-Sessions are stored in `~/.qwen_sessions/`:
+Sessions are stored in `~/.coding_model_sessions/`:
 
 ```
-~/.qwen_sessions/
+~/.coding_model_sessions/
 ├── default.json              # Default unnamed session
 ├── my_project.json           # Named session
 └── metal_renderer.json       # Another named session
@@ -228,4 +228,4 @@ Each file contains:
 }
 ```
 
-Legacy sessions (`~/.qwen_chat_history*.json`) are auto-migrated on first startup.
+Legacy sessions (`~/.coding_model_chat_history*.json`) are auto-migrated on first startup.

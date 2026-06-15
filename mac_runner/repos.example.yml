@@ -1,5 +1,5 @@
 # Registered-repo map for the Mac runner.
-# Copy to ~/.config/qwen-runner/repos.yml and fill in for your projects.
+# Copy to ~/.config/coding-model-runner/repos.yml and fill in for your projects.
 #
 # Each entry maps a short symbolic name (used in spec YAML) to an absolute
 # path on this Mac. The runner refuses to operate on any path that isn't

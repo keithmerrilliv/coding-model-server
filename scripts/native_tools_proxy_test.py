@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Validate that the qwen-server proxy forwards tools and tool_calls.
+"""Validate that the coding-model-server proxy forwards tools and tool_calls.
 
-Single-turn test against the running qwen-server (port 5000) that:
-  1. POSTs /v1/chat/completions with model='glm', tools=[remote_exec]
+Single-turn test against the running coding-model-server (port 5000) that:
+  1. POSTs /v1/chat/completions with model='native_implementer', tools=[remote_exec]
   2. Reads the SSE stream, verifies delta.tool_calls chunks arrive
   3. Reassembles into OpenAI-shape and prints the result
 
 This proves the server-side changes only — the orchestrator integration
-needs an interactive client run (QWEN_NATIVE_TOOLS=1 ./client.py --model glm).
+needs an interactive client run (CODING_MODEL_NATIVE_TOOLS=1 ./client.py --model native_implementer).
 """
 import json
 import os
@@ -43,7 +43,7 @@ TOOLS = [{
 }]
 
 payload = {
-    "model": "glm",
+    "model": "native_implementer",
     "messages": [
         # No client system message — let the server inject its tools-aware
         # agent prompt (system_prompt_native_tools). That prompt teaches the
@@ -60,7 +60,7 @@ payload = {
     "stream": True,
 }
 
-print(f"[proxy-test] POST {URL} model=glm tools=[remote_exec]")
+print(f"[proxy-test] POST {URL} model=native_implementer tools=[remote_exec]")
 r = requests.post(URL, json=payload, headers={"X-Admin-Key": admin_key},
                   stream=True, timeout=600)
 if r.status_code != 200:
@@ -111,10 +111,10 @@ for idx in sorted(calls):
     print(f"[proxy-test] tool_call[{idx}] name={c['name']!r} args={c['args']!r} id={c['id'][:12]!r}")
 
 if not saw_tool_call_delta:
-    sys.exit("[proxy-test] FAILED — no tool_calls deltas proxied through qwen-server")
+    sys.exit("[proxy-test] FAILED — no tool_calls deltas proxied through coding-model-server")
 if finish_reason != "tool_calls":
     sys.exit(f"[proxy-test] FAILED — expected finish_reason=tool_calls, got {finish_reason!r}")
 if not calls:
     sys.exit("[proxy-test] FAILED — no calls reassembled")
 
-print("\n[proxy-test] PASSED ✓ — qwen-server proxies native tool_calls correctly")
+print("\n[proxy-test] PASSED ✓ — coding-model-server proxies native tool_calls correctly")

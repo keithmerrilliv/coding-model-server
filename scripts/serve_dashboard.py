@@ -6,7 +6,7 @@ index.html on any 404 so React Router (BrowserRouter) deep links like
 /specs/abc123 resolve correctly when the user types or refreshes them.
 
 No external dependencies — stdlib only. Run as a systemd service
-(`qwen-dashboard.service`).
+(`coding-model-dashboard.service`).
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ import os
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 
-logger = logging.getLogger("qwen-dashboard")
+logger = logging.getLogger("coding-model-dashboard")
 
 
 class SPAFallbackHandler(SimpleHTTPRequestHandler):
@@ -73,20 +73,20 @@ def main() -> int:
     parser.add_argument(
         "--root",
         default=os.getenv(
-            "QWEN_DASHBOARD_ROOT",
+            "CODING_MODEL_DASHBOARD_ROOT",
             str(Path(__file__).resolve().parent.parent / "dashboard" / "dist"),
         ),
         help="Path to the built dashboard directory (default: ../dashboard/dist)",
     )
     parser.add_argument(
         "--host",
-        default=os.getenv("QWEN_DASHBOARD_HOST", "0.0.0.0"),
+        default=os.getenv("CODING_MODEL_DASHBOARD_HOST", "0.0.0.0"),
         help="Bind host (default: 0.0.0.0; set to 127.0.0.1 for loopback only)",
     )
     parser.add_argument(
         "--port",
         type=int,
-        default=int(os.getenv("QWEN_DASHBOARD_PORT", "3001")),
+        default=int(os.getenv("CODING_MODEL_DASHBOARD_PORT", "3001")),
         help="Bind port (default: 3001)",
     )
     args = parser.parse_args()

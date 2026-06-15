@@ -1,7 +1,7 @@
 """Tests for the autonomous package's shared chat-completion helper.
 
 planner / supervisor / executor were each hand-rolling the same POST to the
-local qwen-server. These pin the consolidated helper: payload shape, the
+local coding-model-server. These pin the consolidated helper: payload shape, the
 skip_memory default, extra-param passthrough (tools/tool_choice for supervisor),
 and — most importantly — the opt-in transient-5xx backoff that executor.call_agent
 relies on to survive model-swap CUDA OOMs.
@@ -10,7 +10,7 @@ time.sleep is patched out so the backoff path is exercised without real waits.
 """
 from unittest import mock
 
-import qwen_autonomous._http as http
+import coding_model_autonomous._http as http
 
 
 def _resp(status):

@@ -4,8 +4,8 @@ The reviewer's naive substring grep false-FAILed spec_5a87fd64 on the word "any"
 in comments and string literals. These pin that the scanner ignores those and
 catches only the real `any` TYPE.
 """
-from qwen_autonomous import executor
-from qwen_autonomous.executor import find_any_type_violations, scan_any_violations
+from coding_model_autonomous import executor
+from coding_model_autonomous.executor import find_any_type_violations, scan_any_violations
 
 
 # ── the exact false positives from spec_5a87fd64 → ZERO violations ───────────

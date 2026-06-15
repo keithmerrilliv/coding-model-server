@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Optional
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_DB = REPO_ROOT / "tasks_db" / "tasks.sqlite"
+DEFAULT_DB = REPO_ROOT / "var" / "tasks_db" / "tasks.sqlite"
 
 
 def _query_events(db_path: Path, since: Optional[str], spec_id: Optional[str]) -> list[dict]:

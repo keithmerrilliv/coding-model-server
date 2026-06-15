@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "qwen-server"
+name = "coding-model-server"
 version = "0.1.0"
-description = "Qwen multi-agent FastAPI inference server, autonomous orchestrator, and chat client"
+description = "Coding Model multi-agent FastAPI inference server, autonomous orchestrator, and chat client"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -45,14 +45,14 @@ client = [
 
 [project.scripts]
 # CLIs users invoke directly. Server + orchestrator are systemd-managed and
-# use `python -m qwen_server.server` / `python -m qwen_server.orchestrator_daemon`,
+# use `python -m coding_model_server.server` / `python -m coding_model_server.orchestrator_daemon`,
 # so they don't need console_scripts entries.
-qwen-client = "qwen_client.main:main"
-qwen-autonomous = "qwen_client.autonomous:main"
+coding-model-client = "coding_model_client.main:main"
+coding-model-autonomous = "coding_model_client.autonomous:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["qwen_server*", "qwen_client*", "qwen_autonomous*"]
+include = ["coding_model_server*", "coding_model_client*", "coding_model_autonomous*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

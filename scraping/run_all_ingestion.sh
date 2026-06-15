@@ -3,7 +3,7 @@
 # Run All Ingestion Scripts — Repopulate the RAG Database (Parallel)
 # =============================================================================
 # Usage:  ./run_all_ingestion.sh [server_ip]
-#   server_ip defaults to QWEN_SERVER_IP env var, then 192.168.50.101
+#   server_ip defaults to CODING_MODEL_SERVER_IP env var, then 192.168.50.101
 #
 # The database should be cleared before running this.
 # All stages run in parallel since they use independent data sources.
@@ -16,8 +16,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LOG_DIR="$SCRIPT_DIR/ingestion_logs"
 mkdir -p "$LOG_DIR"
 
-export QWEN_SERVER_IP="${1:-${QWEN_SERVER_IP:-192.168.50.101}}"
-MEMORY_URL="http://${QWEN_SERVER_IP}:5000/v1/memory"
+export CODING_MODEL_SERVER_IP="${1:-${CODING_MODEL_SERVER_IP:-192.168.50.101}}"
+MEMORY_URL="http://${CODING_MODEL_SERVER_IP}:5000/v1/memory"
 
 # Colors
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
@@ -26,13 +26,13 @@ timestamp() { date '+%Y-%m-%d %H:%M:%S'; }
 
 # ─── Preflight check ───
 echo -e "${YELLOW}Checking server connectivity...${NC}"
-if ! curl -sf --max-time 5 "http://${QWEN_SERVER_IP}:5000/health" > /dev/null 2>&1; then
-    echo -e "${RED}ERROR: Cannot reach server at ${QWEN_SERVER_IP}:5000${NC}"
-    echo "  Ensure the server is running and QWEN_SERVER_IP is correct."
+if ! curl -sf --max-time 5 "http://${CODING_MODEL_SERVER_IP}:5000/health" > /dev/null 2>&1; then
+    echo -e "${RED}ERROR: Cannot reach server at ${CODING_MODEL_SERVER_IP}:5000${NC}"
+    echo "  Ensure the server is running and CODING_MODEL_SERVER_IP is correct."
     echo "  Usage: ./run_all_ingestion.sh <server_ip>"
     exit 1
 fi
-echo -e "${GREEN}Server is healthy at ${QWEN_SERVER_IP}:5000${NC}"
+echo -e "${GREEN}Server is healthy at ${CODING_MODEL_SERVER_IP}:5000${NC}"
 
 # ─── Activate venv (tree-sitter + dependencies) ───
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
@@ -112,7 +112,7 @@ fi
 # =============================================================================
 SCRAPED_OUTPUT="$SCRIPT_DIR/output"
 if [ -d "$SCRAPED_OUTPUT" ] && [ "$(ls -A "$SCRAPED_OUTPUT" 2>/dev/null)" ]; then
-    export QWEN_SERVER_PORT=5000
+    export CODING_MODEL_SERVER_PORT=5000
     echo -e "  Starting: ${YELLOW}scraped-frameworks${NC}"
     # ingest_scraped_data.py now auto-discovers all frameworks when called without args
     (cd "$SCRIPT_DIR" && python3 ingest_scraped_data.py) > "$LOG_DIR/scraped-frameworks.log" 2>&1 &

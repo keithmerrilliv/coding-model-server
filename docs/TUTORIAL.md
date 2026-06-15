@@ -1,4 +1,4 @@
-# Tutorial: Setting Up and Using the Qwen Multi-Agent Server
+# Tutorial: Setting Up and Using the Coding Model Multi-Agent Server
 
 This guide walks through setting up a local LLM inference server with a multi-agent coding assistant client. By the end, you'll have a system where AI agents can read files, execute commands, write code, and search documentation — all running on your own hardware.
 
@@ -19,16 +19,16 @@ This guide walks through setting up a local LLM inference server with a multi-ag
 ### 1.1 Clone and Install
 
 ```bash
-git clone <repo-url> qwen-server
-cd qwen-server
-./setup.sh
+git clone <repo-url> coding-model-server
+cd coding-model-server
+./bin/setup.sh
 ```
 
 This creates a Python venv, installs dependencies (FastAPI, llama-cpp-python, ChromaDB, sentence-transformers), and sets up the directory structure.
 
 ### 1.2 Download Models
 
-Models are GGUF files from HuggingFace. Download them to any directory and reference the paths in `src/qwen_server/server.py`. A good starting point is a single small model:
+Models are GGUF files from HuggingFace. Download them to any directory and reference the paths in `src/coding_model_server/server.py`. A good starting point is a single small model:
 
 ```bash
 # Example: download Qwen3-Coder-30B (3B active MoE, ~22 GB)
@@ -42,7 +42,7 @@ Set `HF_TOKEN` in your environment for authenticated downloads (unauthenticated 
 
 ### 1.3 Configure Your First Model
 
-Open `src/qwen_server/server.py` and find the `Config` class. Add a model config:
+Open `src/coding_model_server/server.py` and find the `Config` class. Add a model config:
 
 ```python
 _MY_MODEL = _create_model_config(
@@ -72,7 +72,7 @@ AGENTS = {
 The most important tuning parameter is `n_gpu_layers`. More layers on GPU = faster inference but more VRAM.
 
 1. Start with a low value (e.g., 4)
-2. Start the server: `./start.sh`
+2. Start the server: `./bin/start.sh`
 3. Send a test request and check VRAM: `nvidia-smi`
 4. If you have > 2 GB free, increase layers
 5. Repeat until ~1 GB free remains
@@ -87,10 +87,10 @@ curl -s http://localhost:5000/v1/chat/completions \
 ### 1.5 Configure Environment
 
 ```bash
-mkdir -p ~/.config/qwen-server
-cp .env.example ~/.config/qwen-server/.env
-chmod 600 ~/.config/qwen-server/.env
-# Edit ~/.config/qwen-server/.env:
+mkdir -p ~/.config/coding-model-server
+cp .env.example ~/.config/coding-model-server/.env
+chmod 600 ~/.config/coding-model-server/.env
+# Edit ~/.config/coding-model-server/.env:
 #   PORT=5000
 #   HOST=127.0.0.1          # 0.0.0.0 only if you need LAN access
 #   ADMIN_API_KEY=<generate with: python -c "import secrets; print(secrets.token_urlsafe(32))">
@@ -98,19 +98,19 @@ chmod 600 ~/.config/qwen-server/.env
 
 ### 1.6 Start as a Service (Recommended)
 
-Create `/etc/systemd/system/qwen-server.service`:
+Create `/etc/systemd/system/coding-model-server.service`:
 
 ```ini
 [Unit]
-Description=Qwen Multi-Agent Server (FastAPI)
+Description=Coding Model Multi-Agent Server (FastAPI)
 After=network.target
 
 [Service]
 Type=simple
 User=your-username
-WorkingDirectory=/path/to/qwen-server
+WorkingDirectory=/path/to/coding-model-server
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/path/to/qwen-server/venv/bin/python -m qwen_server.server
+ExecStart=/path/to/coding-model-server/venv/bin/python -m coding_model_server.server
 Restart=on-failure
 RestartSec=5
 
@@ -120,25 +120,25 @@ WantedBy=multi-user.target
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable qwen-server
-sudo systemctl start qwen-server
-journalctl -u qwen-server -f  # View logs
+sudo systemctl enable coding-model-server
+sudo systemctl start coding-model-server
+journalctl -u coding-model-server -f  # View logs
 ```
 
 ## Part 2: Client Setup
 
 ### 2.1 Configure the Client
 
-Edit `qwen_client/config.py` or set the environment variable:
+Edit `coding_model_client/config.py` or set the environment variable:
 
 ```bash
-export QWEN_SERVER_IP=192.168.1.100  # Your server's IP
+export CODING_MODEL_SERVER_IP=192.168.1.100  # Your server's IP
 ```
 
 ### 2.2 Start the Client
 
 ```bash
-./start-client.sh
+./bin/start-client.sh
 ```
 
 You'll see the available agents, permission mode, and a prompt. Type a message to start interacting.
@@ -188,7 +188,7 @@ This section traces the complete lifecycle of a single user message through ever
 
 When you type a message and press Enter, the client:
 
-1. **Classifies the query** — The agentic context system (`qwen_client/agentic/context.py`) determines if your query is simple, medium, or complex. This sets the tool-use budget (how many iterations the agent gets before being forced to synthesize).
+1. **Classifies the query** — The agentic context system (`coding_model_client/agentic/context.py`) determines if your query is simple, medium, or complex. This sets the tool-use budget (how many iterations the agent gets before being forced to synthesize).
 2. **Appends to history** — Your message is added to the in-memory conversation history.
 3. **Checks history budget** — Budget is measured on the compressed view (what actually gets sent). At 120K chars, the model generates a conversation summary. At 150K, the oldest 25% is dropped.
 4. **Sanitizes history** — Internal flags (`auto_send`, `_retried`) are stripped. Empty messages and invalid roles are filtered. Old messages are compressed (head + tail only for tool outputs > 500 chars).
@@ -211,7 +211,7 @@ This is the OpenAI-compatible chat completions API. The server authenticates via
 
 #### Stage 3: Server-Side Processing
 
-The FastAPI server (`src/qwen_server/server.py`) receives the request and:
+The FastAPI server (`src/coding_model_server/server.py`) receives the request and:
 
 1. **Resolves the agent** — Looks up the model config (path, ngl, n_ctx, backend, etc.) from the `AGENTS` dict.
 2. **Injects few-shot examples** — For short conversations (≤4 messages), format examples are prepended so the model learns the tool marker syntax from "conversation" rather than instructions alone.
@@ -244,16 +244,16 @@ This is where the prompt is processed — the most compute-intensive phase:
 
 | Agent | Prompt tokens | Prefill (tok/s) | Notes |
 |-------|---------------|-----------------|-------|
-| `glm` | 6,972 | **2,552** | GLM-4.7-Flash, all 47 layers on GPU + cpu_moe |
+| `native_implementer` | 6,972 | **2,552** | GLM-4.7-Flash, all 47 layers on GPU + cpu_moe |
 | `debugger` | 8,383 | **2,386** | Coder-30B Turbo, 30/48 layers on GPU |
 | `fast_implementer` | 8,666 | **2,309** | Coder-30B Fast, 26/48 layers, 262K ctx |
 | `reviewer` | 9,405 | **1,392** | Coder-30B HD (Q8_0), 21/48 layers |
 | `implementer` | 8,671 | **1,156** | Qwen3.6-35B-A3B, 48/48 layers + cpu_moe (re-measure after swap) |
-| `nemotron` | 4,521 | **904** | Nemotron-3-Nano, all 52 layers + cpu_moe |
-| `m25_architect` | 7,171 | **749** | MiniMax M2.5, 62/62 layers + cpu_moe |
-| `m25_implementer` | 7,068 | **734** | MiniMax M2.5 (same model, different role) |
+| `brainstorm` | 4,521 | **904** | Nemotron-3-Nano, all 52 layers + cpu_moe |
+| `moe_architect` | 7,171 | **749** | MiniMax M2.5, 62/62 layers + cpu_moe |
+| `moe_implementer` | 7,068 | **734** | MiniMax M2.5 (same model, different role) |
 | `deep_implementer` | 6,972 | **675** | Coder-Next 80B, 48/48 layers + cpu_moe |
-| `q36_architect` | — | — | Qwen3.6-27B dense, 20/64 layers (re-measure after swap) |
+| `dense_architect` | — | — | Qwen3.6-27B dense, 20/64 layers (re-measure after swap) |
 | `lite_architect` | 8,337 | **153** | Coder-480B IQ1_M, 4/62 layers |
 | `architect` | 8,787 | **140** | Coder-480B Q2_K_XL, 4/62 layers + YaRN |
 
@@ -317,7 +317,7 @@ The loop continues until:
 #### Stage 10: Session Persistence
 
 After each agent response:
-- **History saved** — Full conversation written to `~/.qwen_sessions/<name>.json`
+- **History saved** — Full conversation written to `~/.coding_model_sessions/<name>.json`
 - **Pruning** — If history exceeds 100 messages, first 10 + last 90 are kept
 - **Stats displayed** — TTFT, total duration, token throughput shown to user
 
@@ -334,7 +334,7 @@ After each agent response:
 
 ### 3.3 The Agent Loop
 
-The orchestrator (`qwen_client/orchestrator.py`) runs this cycle:
+The orchestrator (`coding_model_client/orchestrator.py`) runs this cycle:
 
 ```
 get_completion() → process tools → append output → get_completion() → ...
@@ -366,7 +366,7 @@ The server runs a ChromaDB vector database with SentenceTransformer embeddings (
 
 - **Save**: `<<<SAVE_MEMORY>>>` marker or `/ingest` command (content-hash dedup prevents duplicates)
 - **Retrieve**: Automatic — top-K similar documents injected into system prompt
-- **Storage**: `memory_db/` directory (SQLite + HNSW index)
+- **Storage**: `var/memory_db/` directory (SQLite + HNSW index)
 - **Auth**: All memory API calls use `X-Admin-Key` when `ADMIN_API_KEY` is configured
 
 For details on the database cleanup (842K to 85K documents), AST-aware code chunking, and the agentic query layer (classifier, budget, scratchpad, planner, confidence gate), see [RAG_UPDATES.md](RAG_UPDATES.md).
@@ -384,7 +384,7 @@ Find GGUF models on HuggingFace. Key factors:
 
 ### 4.2 Add the Model Config
 
-In `src/qwen_server/server.py`, add a new model config:
+In `src/coding_model_server/server.py`, add a new model config:
 
 ```python
 # New model: Example-70B Q4_K_M
@@ -419,13 +419,13 @@ AGENTS = {
 
 ### 4.4 Add the Theme (Client)
 
-In `qwen_client/config.py`, add to `THEME_STYLES`:
+In `coding_model_client/config.py`, add to `THEME_STYLES`:
 
 ```python
 "example": {"color": COLORS["CYAN"], "icon": "\U0001f4a1", "prompt": "Example"},
 ```
 
-And in `qwen_client/models.py`, add to the fallback defaults.
+And in `coding_model_client/models.py`, add to the fallback defaults.
 
 ### 4.5 Tuning VRAM
 
@@ -488,13 +488,13 @@ logit_bias=[[TOKEN_ID, -100.0], [OTHER_TOKEN_ID, -100.0]]
 
 ```bash
 # Server logs
-journalctl -u qwen-server -f
+journalctl -u coding-model-server -f
 
 # VRAM usage
 nvidia-smi
 
 # RAG database size
-du -sh memory_db/
+du -sh var/memory_db/
 
 # Active model
 curl -s http://localhost:5000/health
@@ -508,7 +508,7 @@ curl -s http://localhost:5000/health
 | Model generates `<tool_call>` | Native tokens not banned | Add `logit_bias` for the token IDs |
 | Agent loops on same file | Write-loop or response-loop | Check logs; reduce `repeat_penalty` for the model |
 | Slow TTFT | Long prompt + SWA model | Use `/compact` to reduce context |
-| "Memory retrieval timed out" | Large ChromaDB | Increase timeout in src/qwen_server/server.py or prune old memories |
+| "Memory retrieval timed out" | Large ChromaDB | Increase timeout in src/coding_model_server/server.py or prune old memories |
 
 ### 5.3 Updating llama-cpp-python
 
@@ -537,19 +537,19 @@ After upgrading, models that previously needed `llama_server` backend may work w
 source venv/bin/activate
 python3 -c "
 import chromadb
-c = chromadb.PersistentClient(path='memory_db')
+c = chromadb.PersistentClient(path='var/memory_db')
 for col in c.list_collections():
     print(f'{col.name}: {col.count():,} documents')
 "
 
 # Reclaim disk space (run when server is stopped)
-sqlite3 memory_db/chroma.sqlite3 "VACUUM;"
+sqlite3 var/memory_db/chroma.sqlite3 "VACUUM;"
 ```
 
 ### 5.5 Backup
 
 Back up these directories:
-- `memory_db/` — RAG vector database
-- `~/.qwen_sessions/` — Chat session history
-- `~/.qwen_checkpoints/` — File modification undo history
+- `var/memory_db/` — RAG vector database
+- `~/.coding_model_sessions/` — Chat session history
+- `~/.coding_model_checkpoints/` — File modification undo history
 - `.env` — Configuration

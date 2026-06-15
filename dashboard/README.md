@@ -1,6 +1,6 @@
-# Qwen Multi-Agent Server Dashboard
+# Coding Model Multi-Agent Server Dashboard
 
-A standalone React + TypeScript SPA for monitoring the runtime state of the Qwen Multi-Agent Server.
+A standalone React + TypeScript SPA for monitoring the runtime state of the Coding Model Multi-Agent Server.
 
 ## Prerequisites
 
@@ -41,7 +41,7 @@ A standalone React + TypeScript SPA for monitoring the runtime state of the Qwen
 
 ## Usage
 
-- On first load, you will be prompted for the admin API key. It is stored in `localStorage["qwen.adminKey"]`.
+- On first load, you will be prompted for the admin API key. It is stored in `localStorage["codingModel.adminKey"]`.
 - The dashboard polls `/health`, `/v1/models`, `/v1/autonomous/specs`, and `/v1/autonomous/specs/:id` at configured intervals.
 - Navigate between Overview (`/`), Specs List (`/specs`), and Spec Detail (`/specs/:id`).
 - Use the Logout button to clear the admin key from storage.

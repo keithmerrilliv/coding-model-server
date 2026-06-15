@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# redeploy.sh — sync the qwen systemd units from this repo, reload, and restart
+# redeploy.sh — sync the coding-model systemd units from this repo, reload, and restart
 # the services so they pick up code or unit-file changes.
 #
 #   sudo bash scripts/redeploy.sh
@@ -16,7 +16,7 @@
 #     dependency order.
 #   - Polls /health until the server answers.
 #
-# qwen-monitor is skipped by default: the repo version runs as the invoking
+# coding-model-monitor is skipped by default: the repo version runs as the invoking
 # user (not root), which needs an ACL on /sys/class/powercap/.../energy_uj for
 # RAPL power reads. Pass SYNC_MONITOR=1 once that ACL is in place.
 #
@@ -34,11 +34,11 @@ if [[ $EUID -ne 0 ]]; then
   exit 1
 fi
 
-# App services to sync/restart. Add qwen-monitor only on explicit opt-in.
-SERVICES=(qwen-server qwen-orchestrator qwen-dashboard)
+# App services to sync/restart. Add coding-model-monitor only on explicit opt-in.
+SERVICES=(coding-model-server coding-model-orchestrator coding-model-dashboard)
 if [[ "${SYNC_MONITOR:-0}" == "1" ]]; then
-  echo "SYNC_MONITOR=1 -> including qwen-monitor (ensure the RAPL ACL is set first)."
-  SERVICES+=(qwen-monitor)
+  echo "SYNC_MONITOR=1 -> including coding-model-monitor (ensure the RAPL ACL is set first)."
+  SERVICES+=(coding-model-monitor)
 fi
 
 echo "==> Repo:    ${REPO}"
@@ -68,7 +68,7 @@ systemctl daemon-reload
 # Restart in dependency order: server (owns the GPU + inference) -> orchestrator
 # (calls the server) -> dashboard (polls it). Only restart what we manage.
 echo "==> Restarting services"
-for s in qwen-server qwen-orchestrator qwen-dashboard; do
+for s in coding-model-server coding-model-orchestrator coding-model-dashboard; do
   printf '    restarting %s ...\n' "${s}"
   systemctl restart "${s}"
 done
@@ -77,13 +77,13 @@ done
 # sensible fallbacks — never a hardcoded LAN IP.
 HOST="127.0.0.1"; PORT="5000"; SERVER_IP=""
 ENV_FILE=""
-for candidate in "${HOME}/.config/qwen-server/.env" "${REPO}/.env"; do
+for candidate in "${HOME}/.config/coding-model-server/.env" "${REPO}/.env"; do
   [[ -f "${candidate}" ]] && ENV_FILE="${candidate}" && break
 done
 if [[ -n "${ENV_FILE}" ]]; then
   HOST="$(grep -E '^HOST=' "${ENV_FILE}" | tail -1 | cut -d= -f2- | tr -d '"' || true)"; HOST="${HOST:-127.0.0.1}"
   PORT="$(grep -E '^PORT=' "${ENV_FILE}" | tail -1 | cut -d= -f2- | tr -d '"' || true)"; PORT="${PORT:-5000}"
-  SERVER_IP="$(grep -E '^QWEN_SERVER_IP=' "${ENV_FILE}" | tail -1 | cut -d= -f2- | tr -d '"' || true)"
+  SERVER_IP="$(grep -E '^CODING_MODEL_SERVER_IP=' "${ENV_FILE}" | tail -1 | cut -d= -f2- | tr -d '"' || true)"
 fi
 # 0.0.0.0 isn't dialable; probe loopback instead.
 [[ "${HOST}" == "0.0.0.0" ]] && HOST="127.0.0.1"
@@ -100,11 +100,11 @@ done
 if [[ "${ok}" == "1" ]]; then
   echo "    /health OK"
 else
-  echo "    !! /health did not respond — check: journalctl -u qwen-server -n 50"
+  echo "    !! /health did not respond — check: journalctl -u coding-model-server -n 50"
 fi
 
 echo "==> Status"
-for s in qwen-server qwen-orchestrator qwen-dashboard; do
+for s in coding-model-server coding-model-orchestrator coding-model-dashboard; do
   printf "    %-22s %s\n" "${s}" "$(systemctl is-active "${s}")"
 done
 

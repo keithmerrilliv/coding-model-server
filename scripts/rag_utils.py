@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import chromadb
 
-PERSIST_DIR = "memory_db"
+PERSIST_DIR = "var/memory_db"
 COLLECTION_NAME = "qwen_agent_memory"
 
 

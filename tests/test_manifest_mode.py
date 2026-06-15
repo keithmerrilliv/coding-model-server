@@ -1,6 +1,6 @@
 """Unit tests for manifest-mode infra (#4): parser, mode select, summary, builders."""
-from qwen_autonomous import executor
-from qwen_autonomous.executor import ManifestEntry, ParseError
+from coding_model_autonomous import executor
+from coding_model_autonomous.executor import ManifestEntry, ParseError
 
 
 # ── parse_manifest_response ──────────────────────────────────────────────────
@@ -44,7 +44,7 @@ def test_parse_manifest_missing_block_and_empty():
 
 
 def test_parse_manifest_tolerates_bracket_drift():
-    # Qwen emits <MANIFEST>/<<MANIFEST>> non-deterministically; regex accepts 1-3.
+    # Coding Model emits <MANIFEST>/<<MANIFEST>> non-deterministically; regex accepts 1-3.
     raw = "<MANIFEST>\nx/y.ts | thing | Z\n<END_MANIFEST>"
     res = executor.parse_manifest_response(raw)
     assert not isinstance(res, ParseError)

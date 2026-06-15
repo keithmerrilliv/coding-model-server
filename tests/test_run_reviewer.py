@@ -16,10 +16,10 @@ from unittest import mock
 
 import pytest
 
-import qwen_server.orchestrator_daemon as d
-from qwen_autonomous.db import Database
-from qwen_autonomous.executor import ParseError, ReviewerResult
-from qwen_autonomous.models import ArtifactKind, GateType, SpecStatus, TaskStatus
+import coding_model_server.orchestrator_daemon as d
+from coding_model_autonomous.db import Database
+from coding_model_autonomous.executor import ParseError, ReviewerResult
+from coding_model_autonomous.models import ArtifactKind, GateType, SpecStatus, TaskStatus
 
 
 @pytest.fixture

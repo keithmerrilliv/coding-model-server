@@ -16,7 +16,7 @@ import os
 
 import pytest
 
-from qwen_server import tool_handlers as th
+from coding_model_server import tool_handlers as th
 
 
 @pytest.fixture(autouse=True)

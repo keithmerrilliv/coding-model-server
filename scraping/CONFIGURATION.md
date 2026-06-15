@@ -19,11 +19,11 @@ The system uses environment variables for configuration. Create a `.env` file in
 
 ```env
 # Scraping Configuration
-APPLE_DEEP_DOCS_PATH=/Users/km4/Dev/Qwen/appledeepdoc-mcp/run.sh
+APPLE_DEEP_DOCS_PATH=/Users/km4/Dev/Coding Model/appledeepdoc-mcp/run.sh
 
 # Server Configuration
-QWEN_SERVER_IP=192.168.50.101
-QWEN_SERVER_PORT=5000
+CODING_MODEL_SERVER_IP=192.168.50.101
+CODING_MODEL_SERVER_PORT=5000
 ```
 
 ### Installation Instructions
@@ -133,7 +133,7 @@ The scripts are configured to work with the open-source tools. When both tools a
 - Check that the server is properly configured for your AI tools
 
 ### Server Connection Issues
-- Verify that the Qwen server is running at the configured IP and port
+- Verify that the Coding Model server is running at the configured IP and port
 - Check firewall settings if connecting to remote server
 - Ensure network connectivity to the server
 

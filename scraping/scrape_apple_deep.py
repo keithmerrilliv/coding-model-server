@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from bs4 import BeautifulSoup
 
 # Server Configuration
-LINUX_SERVER_IP = os.getenv("QWEN_SERVER_IP", "192.168.50.101")
+LINUX_SERVER_IP = os.getenv("CODING_MODEL_SERVER_IP", "192.168.50.101")
 MEMORY_API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/memory"
 
 # Priority Documentation Clusters for Apple

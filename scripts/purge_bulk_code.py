@@ -19,7 +19,7 @@ import sqlite3
 
 import chromadb
 
-DB_PATH = "memory_db"
+DB_PATH = "var/memory_db"
 SQLITE_PATH = f"{DB_PATH}/chroma.sqlite3"
 COLLECTION = "qwen_agent_memory"
 BATCH_SIZE = 500

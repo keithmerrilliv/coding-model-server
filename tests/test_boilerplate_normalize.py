@@ -1,7 +1,7 @@
 """Tests for deterministic boilerplate normalization (#3): exact-pin deps."""
 import json
 
-from qwen_autonomous import executor
+from coding_model_autonomous import executor
 
 
 def test_pin_version_strips_ranges_keeps_exact_and_specials():
