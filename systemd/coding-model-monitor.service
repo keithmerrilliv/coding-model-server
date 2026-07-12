@@ -28,7 +28,7 @@ RestrictSUIDSGID=yes
 RestrictRealtime=yes
 LockPersonality=yes
 ProtectSystem=strict
-ReadWritePaths=%h/Dev/coding-model-server
+ReadWritePaths=/home/keith-merrill/Dev/coding-model-server
 
 [Install]
 WantedBy=multi-user.target

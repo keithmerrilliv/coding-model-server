@@ -26,7 +26,7 @@ Environment="PYTHONUNBUFFERED=1"
 # Model configuration. Prefer ~/.config/coding-model-server/.env (keeps secrets out of
 # the repo); repo-local .env is kept as a fallback during migration.
 EnvironmentFile=-/home/keith-merrill/Dev/coding-model-server/.env
-EnvironmentFile=-%h/.config/coding-model-server/.env
+EnvironmentFile=-/home/keith-merrill/.config/coding-model-server/.env
 
 # Resource limits
 LimitNOFILE=65536
