@@ -8,6 +8,7 @@ relies on to survive model-swap CUDA OOMs.
 
 time.sleep is patched out so the backoff path is exercised without real waits.
 """
+import importlib
 from unittest import mock
 
 import coding_model_autonomous._http as http
@@ -105,3 +106,55 @@ def test_retry_5xx_does_not_retry_4xx():
         http.post_chat_completion("m", [], timeout=10, retry_5xx=True)
     assert post.call_count == 1          # 4xx is a real error, not transient
     assert t.sleep.call_count == 0
+
+
+# ── internal calls bind to loopback, decoupled from the advertised LAN IP ─────
+# Regression for the network-move outage: CODING_MODEL_SERVER_IP is the server's
+# externally advertised address; when the box changed subnets it went stale and,
+# because internal calls used to read it, the orchestrator dialed a dead LAN IP
+# ("No route to host"). Internal calls must ride loopback regardless.
+
+def test_internal_url_is_loopback_by_default(monkeypatch):
+    monkeypatch.delenv("CODING_MODEL_INTERNAL_HOST", raising=False)
+    monkeypatch.delenv("CODING_MODEL_SERVER_IP", raising=False)
+    reloaded = importlib.reload(http)
+    try:
+        assert reloaded.API_URL == "http://127.0.0.1:5000/v1/chat/completions"
+    finally:
+        importlib.reload(http)
+
+
+def test_internal_url_ignores_server_ip(monkeypatch):
+    # The advertised LAN IP must NOT redirect internal calls.
+    monkeypatch.delenv("CODING_MODEL_INTERNAL_HOST", raising=False)
+    monkeypatch.setenv("CODING_MODEL_SERVER_IP", "10.0.0.123")
+    reloaded = importlib.reload(http)
+    try:
+        assert "10.0.0.123" not in reloaded.API_URL
+        assert reloaded.API_URL == "http://127.0.0.1:5000/v1/chat/completions"
+    finally:
+        importlib.reload(http)
+
+
+def test_internal_host_empty_falls_back_to_loopback(monkeypatch):
+    # An empty/whitespace override must not produce a hostless URL.
+    monkeypatch.setenv("CODING_MODEL_INTERNAL_HOST", "  ")
+    reloaded = importlib.reload(http)
+    try:
+        assert reloaded.API_URL == "http://127.0.0.1:5000/v1/chat/completions"
+    finally:
+        monkeypatch.undo()
+        importlib.reload(http)
+
+
+def test_internal_host_explicit_override(monkeypatch):
+    # Split-host topologies can still opt in via the dedicated var.
+    monkeypatch.setenv("CODING_MODEL_INTERNAL_HOST", "192.168.1.9")
+    reloaded = importlib.reload(http)
+    try:
+        assert reloaded.API_URL == "http://192.168.1.9:5000/v1/chat/completions"
+    finally:
+        # Restore env FIRST, then reload, so the module is left on the loopback
+        # default instead of leaking 192.168.1.9 to later test modules.
+        monkeypatch.undo()
+        importlib.reload(http)

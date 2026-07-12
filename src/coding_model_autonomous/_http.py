@@ -6,9 +6,8 @@ This centralises the session, the URL, the auth header, and an optional
 transient-5xx retry so those three stop duplicating it.
 
 Server-side counterpart to ``coding_model_client/http.py`` — kept separate on purpose:
-this package talks to the *local* server (``CODING_MODEL_SERVER_IP``/``CODING_MODEL_SERVER_PORT``,
-``skip_memory`` defaulted on for structured prompts), and must not depend on the
-client package.
+this package talks to the *local* server over loopback (``skip_memory`` defaulted
+on for structured prompts), and must not depend on the client package.
 
 The helper returns the raw :class:`requests.Response`; callers own status
 checking and body parsing so each keeps its existing error semantics.
@@ -19,11 +18,22 @@ import time
 
 import requests
 
-CODING_MODEL_SERVER_HOST = os.getenv("CODING_MODEL_SERVER_IP", "127.0.0.1")
+# The orchestrator (planner/supervisor/executor) always runs on the SAME box as
+# the inference server, so it reaches it over loopback. This is deliberately
+# decoupled from CODING_MODEL_SERVER_IP: that var is the server's *externally
+# advertised* LAN address (remote clients, CORS, dashboard) and moves whenever the
+# box's DHCP lease or network changes. Binding internal calls to it once pointed
+# the orchestrator at a dead LAN IP after a network move ("No route to host").
+# Loopback never moves. CODING_MODEL_INTERNAL_HOST is honoured only for unusual
+# split-host topologies (orchestrator and server on different machines); the
+# default is always loopback.
+# `.strip() or ...` so an empty/whitespace override (e.g. CODING_MODEL_INTERNAL_HOST=
+# in an env file) falls back to loopback instead of yielding a hostless URL.
+CODING_MODEL_INTERNAL_HOST = os.getenv("CODING_MODEL_INTERNAL_HOST", "").strip() or "127.0.0.1"
 CODING_MODEL_SERVER_PORT = int(os.getenv("CODING_MODEL_SERVER_PORT", "5000"))
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
 
-API_URL = f"http://{CODING_MODEL_SERVER_HOST}:{CODING_MODEL_SERVER_PORT}/v1/chat/completions"
+API_URL = f"http://{CODING_MODEL_INTERNAL_HOST}:{CODING_MODEL_SERVER_PORT}/v1/chat/completions"
 
 # Module-level session: reuses TCP+TLS across the architect → implementer →
 # reviewer → supervisor sequence, saving 5-30 ms per call.
