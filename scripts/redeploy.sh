@@ -81,10 +81,16 @@ fi
 
 # Restart in dependency order: server (owns the GPU + inference) -> orchestrator
 # (calls the server) -> dashboard (polls it). Only restart what we manage.
-echo "==> Restarting services"
+# Capture the server PID first so the /health poll can distinguish the freshly
+# started process from a still-draining old one (which keeps answering /health).
+OLD_SERVER_PID="$(systemctl show -p MainPID --value coding-model-server 2>/dev/null || echo 0)"
+echo "==> Restarting services (non-blocking; readiness confirmed by the /health poll below)"
 for s in coding-model-server coding-model-orchestrator coding-model-dashboard; do
   printf '    restarting %s ...\n' "${s}"
-  systemctl restart "${s}"
+  # --no-block: queue the restart and move on. uvicorn's graceful SIGTERM drain
+  # can take up to the unit's TimeoutStopSec; a blocking restart would trip
+  # systemctl's ~25s D-Bus wait -> non-zero exit -> set -e aborts the redeploy.
+  systemctl restart --no-block "${s}"
 done
 
 # Health host/port from .env (HOST/PORT are what the server binds), with
@@ -105,8 +111,12 @@ fi
 echo "==> Waiting for /health (up to 120s) on ${HOST}:${PORT}${SERVER_IP:+ / ${SERVER_IP}:${PORT}}"
 ok=0
 for _ in $(seq 1 60); do
-  if curl -fsS --max-time 3 "http://${HOST}:${PORT}/health" >/dev/null 2>&1 \
-     || { [[ -n "${SERVER_IP}" ]] && curl -fsS --max-time 3 "http://${SERVER_IP}:${PORT}/health" >/dev/null 2>&1; }; then
+  cur_pid="$(systemctl show -p MainPID --value coding-model-server 2>/dev/null || echo 0)"
+  # Ready only when a NEW process (PID changed) is answering /health — so a
+  # slow-draining old process can't produce a false "ready".
+  if [[ "${cur_pid}" != "0" && "${cur_pid}" != "${OLD_SERVER_PID}" ]] \
+     && { curl -fsS --max-time 3 "http://${HOST}:${PORT}/health" >/dev/null 2>&1 \
+          || { [[ -n "${SERVER_IP}" ]] && curl -fsS --max-time 3 "http://${SERVER_IP}:${PORT}/health" >/dev/null 2>&1; }; }; then
     ok=1; break
   fi
   sleep 2
@@ -122,6 +132,8 @@ for s in coding-model-server coding-model-orchestrator coding-model-dashboard; d
   printf "    %-22s %s\n" "${s}" "$(systemctl is-active "${s}")"
 done
 
-echo
-echo "Backups in ${BACKUP}"
-echo "  restore: cp ${BACKUP}/<unit> ${UNIT_DIR}/ && systemctl daemon-reload"
+if [[ "${RESTART_ONLY}" != "1" ]]; then
+  echo
+  echo "Backups in ${BACKUP}"
+  echo "  restore: cp ${BACKUP}/<unit> ${UNIT_DIR}/ && systemctl daemon-reload"
+fi
