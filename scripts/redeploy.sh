@@ -3,7 +3,8 @@
 # redeploy.sh — sync the coding-model systemd units from this repo, reload, and restart
 # the services so they pick up code or unit-file changes.
 #
-#   sudo bash scripts/redeploy.sh
+#   sudo bash scripts/redeploy.sh              # full: sync unit files + reload + restart (root)
+#   bash scripts/redeploy.sh --restart-only    # code-only: restart the services (no sudo; polkit rule)
 #
 # Safe to re-run (idempotent). No pip step: the venv is an editable install
 # (.pth -> src/), so code changes are already importable — a restart is enough.
@@ -27,43 +28,56 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "${SCRIPT_DIR}/.." && pwd)"
 UNIT_DIR="/etc/systemd/system"
 TS="$(date +%Y%m%d_%H%M%S)"
-BACKUP="/root/qwen-unit-backup-${TS}"
+BACKUP="/root/coding-model-unit-backup-${TS}"
 
-if [[ $EUID -ne 0 ]]; then
-  echo "Run as root:  sudo bash ${BASH_SOURCE[0]}" >&2
-  exit 1
-fi
+# Mode: full redeploy (syncs unit files + daemon-reload -> needs root) vs
+# restart-only (just bounce the services). Restart-only needs NO sudo thanks to
+# the coding-model polkit rule (/etc/polkit-1/rules.d/49-coding-model.rules), and
+# is enough for code changes since the venv is an editable install.
+RESTART_ONLY=0
+[[ "${1:-}" == "--restart-only" || "${1:-}" == "-r" ]] && RESTART_ONLY=1
 
-# App services to sync/restart. Add coding-model-monitor only on explicit opt-in.
-SERVICES=(coding-model-server coding-model-orchestrator coding-model-dashboard)
-if [[ "${SYNC_MONITOR:-0}" == "1" ]]; then
-  echo "SYNC_MONITOR=1 -> including coding-model-monitor (ensure the RAPL ACL is set first)."
-  SERVICES+=(coding-model-monitor)
-fi
-
-echo "==> Repo:    ${REPO}"
-echo "==> Backing up current unit files to ${BACKUP}"
-mkdir -p "${BACKUP}"
-for s in "${SERVICES[@]}"; do
-  [[ -f "${UNIT_DIR}/${s}.service" ]] && cp -a "${UNIT_DIR}/${s}.service" "${BACKUP}/"
-done
-
-echo "==> Syncing unit files from repo (only when changed)"
-for s in "${SERVICES[@]}"; do
-  src="${REPO}/systemd/${s}.service"
-  dst="${UNIT_DIR}/${s}.service"
-  if [[ ! -f "${src}" ]]; then
-    echo "    ! repo unit missing: ${src} (skipping)"
-  elif cmp -s "${src}" "${dst}" 2>/dev/null; then
-    echo "    = ${s}: already up to date"
-  else
-    install -m 0644 "${src}" "${dst}"
-    echo "    + ${s}: updated"
+if [[ "${RESTART_ONLY}" == "1" ]]; then
+  echo "==> restart-only mode (no unit sync / daemon-reload; sudo-free via polkit)"
+else
+  if [[ $EUID -ne 0 ]]; then
+    echo "Full redeploy syncs unit files + daemon-reload, which need root:" >&2
+    echo "  sudo bash ${BASH_SOURCE[0]}" >&2
+    echo "Code-only change? No sudo needed:  bash ${BASH_SOURCE[0]} --restart-only" >&2
+    exit 1
   fi
-done
 
-echo "==> systemctl daemon-reload"
-systemctl daemon-reload
+  # App services to sync/restart. Add coding-model-monitor only on explicit opt-in.
+  SERVICES=(coding-model-server coding-model-orchestrator coding-model-dashboard)
+  if [[ "${SYNC_MONITOR:-0}" == "1" ]]; then
+    echo "SYNC_MONITOR=1 -> including coding-model-monitor (ensure the RAPL ACL is set first)."
+    SERVICES+=(coding-model-monitor)
+  fi
+
+  echo "==> Repo:    ${REPO}"
+  echo "==> Backing up current unit files to ${BACKUP}"
+  mkdir -p "${BACKUP}"
+  for s in "${SERVICES[@]}"; do
+    [[ -f "${UNIT_DIR}/${s}.service" ]] && cp -a "${UNIT_DIR}/${s}.service" "${BACKUP}/"
+  done
+
+  echo "==> Syncing unit files from repo (only when changed)"
+  for s in "${SERVICES[@]}"; do
+    src="${REPO}/systemd/${s}.service"
+    dst="${UNIT_DIR}/${s}.service"
+    if [[ ! -f "${src}" ]]; then
+      echo "    ! repo unit missing: ${src} (skipping)"
+    elif cmp -s "${src}" "${dst}" 2>/dev/null; then
+      echo "    = ${s}: already up to date"
+    else
+      install -m 0644 "${src}" "${dst}"
+      echo "    + ${s}: updated"
+    fi
+  done
+
+  echo "==> systemctl daemon-reload"
+  systemctl daemon-reload
+fi
 
 # Restart in dependency order: server (owns the GPU + inference) -> orchestrator
 # (calls the server) -> dashboard (polls it). Only restart what we manage.
