@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Identity probe — sniff for cross-vendor leakage in a model's outputs.
 
-Fires a battery of prompts at a target qwen-server agent and scores responses
+Fires a battery of prompts at a target coding-model-server agent and scores responses
 for vendor self-attribution and refusal-pattern fingerprints. The goal is a
 quick gut-check, NOT rigorous attribution. A model that mentions "DeepSeek"
 or "Claude" 30 % of the time is suspicious; one that mentions it 0 % of the
@@ -23,7 +23,7 @@ For each response we tally:
   - training-cutoff claims (any date string surfaced)
 
 Usage:
-  ./venv/bin/python scripts/identity_probe.py --model glm
+  ./venv/bin/python scripts/identity_probe.py --model native_implementer
   ./venv/bin/python scripts/identity_probe.py --model implementer --runs 5 --temperature 0.9 --json out.json
 """
 import argparse
@@ -323,7 +323,7 @@ def run(model, runs, temperature, max_tokens, host, json_path=None):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--model", required=True, help="Agent name registered on qwen-server (e.g. implementer, glm, q36_architect)")
+    p.add_argument("--model", required=True, help="Agent name registered on coding-model-server (e.g. implementer, native_implementer, dense_architect)")
     p.add_argument("--runs", type=int, default=3, help="How many sampling runs per prompt (default 3)")
     p.add_argument("--temperature", type=float, default=0.7, help="Sampling temperature (higher = more variation)")
     p.add_argument("--max-tokens", type=int, default=512)

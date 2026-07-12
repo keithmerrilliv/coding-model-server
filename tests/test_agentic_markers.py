@@ -5,7 +5,7 @@ Models emit ``<<<CONFIDENCE>>>N`` with inconsistent bracket counts
 load-bearing. These also pin the gate's retrieve-vs-synthesize decisions, which
 steer the agentic RAG loop.
 """
-from qwen_client.agentic.confidence import ConfidenceGate
+from coding_model_client.agentic.confidence import ConfidenceGate
 
 
 class TestUpdateFromResponse:

@@ -1,12 +1,14 @@
 #!/bin/bash
-# Setup script for Qwen Multi-Agent Server (FastAPI)
+# Setup script for Coding Model Multi-Agent Server (FastAPI)
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+# Script lives in bin/; cd to the repo root (one level up) so venv/, tools/,
+# .env and pip install -e . all operate at the repo root.
+cd "$SCRIPT_DIR/.."
 
-echo "Setting up Qwen Multi-Agent Server (FastAPI)..."
+echo "Setting up Coding Model Multi-Agent Server (FastAPI)..."
 echo "================================================"
 
 # Check Python version
@@ -38,8 +40,8 @@ pip install --upgrade pip
 
 # Install dependencies + the three src/ packages in one step. pyproject.toml
 # is the single source of truth for dependencies; `-e .` installs the core
-# deps and makes qwen_server / qwen_client / qwen_autonomous importable plus
-# wires the qwen-client / qwen-autonomous console scripts. Add the client
+# deps and makes coding_model_server / coding_model_client / coding_model_autonomous importable plus
+# wires the coding-model-client / coding-model-autonomous console scripts. Add the client
 # extras (rich, beautifulsoup4) with `pip install -e '.[client]'`.
 echo "Installing dependencies and packages (pip install -e .)..."
 pip install -e .
@@ -82,12 +84,12 @@ echo "================================================"
 echo ""
 echo "Next steps:"
 echo "1. Edit .env file with your configuration"
-echo "2. Start the server with: ./start.sh"
+echo "2. Start the server with: ./bin/start.sh"
 echo "3. Or install as systemd service (see below)"
 echo ""
 echo "To install as systemd service:"
-echo "  sudo cp systemd/qwen-server.service /etc/systemd/system/"
+echo "  sudo cp systemd/coding-model-server.service /etc/systemd/system/"
 echo "  sudo systemctl daemon-reload"
-echo "  sudo systemctl enable qwen-server"
-echo "  sudo systemctl start qwen-server"
+echo "  sudo systemctl enable coding-model-server"
+echo "  sudo systemctl start coding-model-server"
 echo ""

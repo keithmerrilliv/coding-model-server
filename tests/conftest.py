@@ -1,7 +1,7 @@
 """Pytest bootstrap.
 
 The project is normally installed editable (``pip install -e .``), so the
-``qwen_server`` / ``qwen_client`` / ``qwen_autonomous`` packages import without
+``coding_model_server`` / ``coding_model_client`` / ``coding_model_autonomous`` packages import without
 help. As a fallback for a bare checkout, put ``src/`` on the path too so the
 suite runs regardless of install state.
 """

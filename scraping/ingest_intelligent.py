@@ -10,13 +10,13 @@ import threading
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from qwen_server.code_chunker import CodeChunker
+from coding_model_server.code_chunker import CodeChunker
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 logger = logging.getLogger(__name__)
 
 # Server Configuration
-LINUX_SERVER_IP = os.getenv("QWEN_SERVER_IP", "192.168.50.101")
+LINUX_SERVER_IP = os.getenv("CODING_MODEL_SERVER_IP", "192.168.50.101")
 MEMORY_API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/memory"
 
 DEV_ROOT = os.path.expanduser("~/Dev")

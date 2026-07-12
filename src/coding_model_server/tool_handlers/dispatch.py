@@ -1,0 +1,279 @@
+"""Marker parsing and tool dispatch — the top layer.
+
+process_remote_commands scans an agent response for <<<TAG>>> markers and runs
+the matching handler from files/shell (plus external handlers via state); the
+git-style SEARCH/REPLACE normalizer and the markdown-code-block fallback live
+here too. ingest_pdf_content is dispatch-only, so it stays with this layer.
+"""
+import os
+import re
+from typing import List, Optional
+
+from coding_model_server.tool_state import state
+from coding_model_server.tool_handlers.editing import _compact_summary
+from coding_model_server.tool_handlers.files import (
+    edit_file_content,
+    glob_files,
+    grep_search,
+    list_directory,
+    read_file_content,
+    write_file_content,
+)
+from coding_model_server.tool_handlers.shell import execute_remote_command
+
+
+def _normalize_standalone_search_replace(text):
+    """Convert standalone git-style SEARCH/REPLACE blocks into <<<EDIT_FILE>>> blocks.
+
+    Catches the case where the model emits a bare search/replace block without
+    wrapping it in <<<EDIT_FILE>>>:
+        /path/to/file
+        <<<<<<< SEARCH
+        old text
+        =======
+        new text
+        >>>>>>> REPLACE
+
+    Converts to:
+        <<<EDIT_FILE>>>/path/to/file
+        <<<OLD>>>
+        old text
+        <<<NEW>>>
+        new text
+    """
+    # Match: filepath line, then <<<<<<< SEARCH block(s)
+    # The filepath is on the line before <<<<<<< SEARCH
+    pattern = (
+        r'^([^\n<>]+?)\s*\n'                  # filepath (line without angle brackets)
+        r'<{1,7}\s*SEARCH\s*>{0,7}\s*\n'      # <<<<<<< SEARCH
+        r'(.*?)'                                # old text (multi-line, lazy)
+        r'\n={3,}\s*\n'                         # =======
+        r'(.*?)'                                # new text (multi-line, lazy)
+        r'\n>{1,7}\s*REPLACE\s*>{0,7}'         # >>>>>>> REPLACE
+    )
+    def _replace(m):
+        path = m.group(1).strip()
+        old = m.group(2)
+        new = m.group(3)
+        return f'<<<EDIT_FILE>>>{path}\n<<<OLD>>>\n{old}\n<<<NEW>>>\n{new}\n'
+
+    return re.sub(pattern, _replace, text, flags=re.DOTALL | re.MULTILINE)
+
+
+def process_remote_commands(response_text: str) -> Optional[str]:
+    """Process ALL remote command markers in agent response.
+
+    Finds and executes every tool marker in the response, in order of appearance.
+    Returns aggregated output from all commands, or None if no markers found.
+    """
+    # Pre-process: strip Qwen3.5 native formatting that breaks marker parsing.
+    # <tool_call> special token turns <<<TAG>>> into <tool_call>TAG>>> — strip it.
+    response_text = re.sub(r'</?tool_call\s*>', '', response_text)
+    # <REACT>Thought:...</REACT> reasoning blocks are noise — strip them.
+    response_text = re.sub(r'<REACT>.*?</REACT>', '', response_text, flags=re.DOTALL)
+
+    # Strip agentic markers (SCRATCHPAD, PLAN, CONFIDENCE) so they don't leak
+    # into file content. These aren't tool commands but the command regex doesn't
+    # know about them, so <<<CONFIDENCE>>>95 ends up inside WRITE_FILE payloads.
+    response_text = re.sub(
+        r'<{1,3}SCRATCHPAD>{1,3}\s*.*?(?=<{1,3}\w+>{1,3}|\Z)', '', response_text, flags=re.DOTALL
+    )
+    response_text = re.sub(
+        r'<{1,3}PLAN>{1,3}\s*.*?(?=<{1,3}\w+>{1,3}|\Z)', '', response_text, flags=re.DOTALL
+    )
+    response_text = re.sub(r'<{0,3}/?CONFIDEN\w*>{0,3}\s*\d*', '', response_text)
+
+    # Pre-process: convert standalone git-style SEARCH/REPLACE into EDIT_FILE blocks
+    response_text = _normalize_standalone_search_replace(response_text)
+
+    # Dispatch table: opening tag name -> handler
+    command_handlers = {
+        'REMOTE_EXEC':    lambda arg: execute_remote_command(arg.strip()),
+        'READ_FILE':      lambda arg: read_file_content(arg.strip()),
+        'WRITE_FILE':     lambda arg: write_file_content(arg),
+        'EDIT_FILE':      lambda arg: edit_file_content(arg),
+        'LIST_DIR':       lambda arg: list_directory(arg),
+        'GLOB':           lambda arg: glob_files(arg),
+        'GREP':           lambda arg: grep_search(arg),
+        'SAVE_MEMORY':    lambda arg: state.external_handlers['save_memory'](arg.strip()),
+        'WEB_SEARCH':     lambda arg: state.external_handlers['web_search'](arg.strip()),
+        'CUPERTINO':      lambda arg: state.external_handlers['handle_cupertino_search'](arg.strip()),
+        'APPLE_DEEP_DOCS': lambda arg: state.external_handlers['handle_apple_deep_docs'](arg.strip()),
+        'INGEST_PDF':     lambda arg: ingest_pdf_content(arg),
+        'DEEP_INGEST':    lambda arg: state.external_handlers['ingest_url_content'](arg.strip()),
+    }
+
+    # Build regex from known tags so internal markers (<<<OLD>>>, <<<NEW>>>) are not
+    # mistaken for command boundaries.  Each command block runs from its opening tag
+    # to the next known opening tag (or end of string).  No closing tags required.
+    #
+    # The regex matches liberally (1-3 brackets on each side) so we can detect
+    # malformed markers as content-boundary anchors, but a post-match validation
+    # step rejects any bracket combination that isn't one of the documented forms:
+    #   <<<TAG>>>  -- standard triple-bracket format
+    #   <TAG>>>    -- after <tool_call> special token strip (1 open, 3 close)
+    #   <TAG>      -- XML-style (1 open, 1 close; seen with EDIT_FILE)
+    # Asymmetric or partial markers like <<<TAG> or <<TAG>>> are rejected, which
+    # forces the model to emit a properly-formed marker on its next turn instead
+    # of silently executing a tool from a malformed call.
+    _TAG_NAMES = '|'.join(command_handlers.keys())
+    _COMMAND_RE = (
+        rf'(<{{1,3}})({_TAG_NAMES})(>{{1,3}})\s*'
+        rf'(.*?)'
+        rf'(?=<{{1,3}}(?:{_TAG_NAMES})>{{1,3}}|\Z)'
+    )
+    _VALID_BRACKETS = frozenset({('<<<', '>>>'), ('<', '>>>'), ('<', '>')})
+
+    all_matches = []
+    for match in re.finditer(_COMMAND_RE, response_text, re.DOTALL | re.IGNORECASE):
+        open_brackets = match.group(1)
+        tag = match.group(2).upper()
+        close_brackets = match.group(3)
+        content = match.group(4).strip()
+
+        if (open_brackets, close_brackets) not in _VALID_BRACKETS:
+            if state.logger:
+                state.logger.warning(
+                    "Rejecting malformed tool marker: %s%s%s — expected one of "
+                    "<<<TAG>>>, <TAG>>>, or <TAG>",
+                    open_brackets, tag, close_brackets
+                )
+            continue
+
+        if content:  # skip empty blocks (e.g. stale closing tags parsed as openers)
+            all_matches.append((match.start(), match, tag, command_handlers[tag]))
+
+    if not all_matches:
+        return None
+
+    # Execute all commands and aggregate results
+    results = []
+    total_len = 0
+    GLOBAL_MAX_LEN = 40000 # ~10k tokens global cap for tool outputs in one turn
+
+    for i, (_, match, tag, handler) in enumerate(all_matches):
+        if total_len > GLOBAL_MAX_LEN:
+            results.append(f"\n... [OMITTED {len(all_matches) - i} ADDITIONAL COMMANDS TO PREVENT CONTEXT OVERFLOW] ...")
+            break
+
+        arg = match.group(4)
+        # Strip closing tags the model generates (e.g. </REMOTE_EXEC>, </list_dir>).
+        # These get captured as part of the content and corrupt shell commands
+        # (the shell interprets </TAG> as input redirection < /TAG>).
+        arg = re.sub(r'</\w+>\s*$', '', arg)
+        try:
+            result = handler(arg)
+            if result is None:
+                continue  # Handler silently refused (e.g., write-loop detection)
+            if result:
+                # In compact mode, show one-liner to user but keep full result for history
+                if not state.verbose_mode:
+                    summary = _compact_summary(tag, arg, result)
+                    if summary:
+                        state.print_colored(summary, state.colors['CYAN'])
+                res_str = f"[Command {i+1}] {result}"
+                results.append(res_str)
+                total_len += len(res_str)
+        except Exception as e:
+            err_str = f"[Command {i+1}] Error: {str(e)}"
+            results.append(err_str)
+            total_len += len(err_str)
+
+    return "\n\n".join(results) if results else None
+
+
+def extract_fallback_commands(response_text: str) -> List[str]:
+    """Extract shell commands from markdown code blocks when <<<REMOTE_EXEC>>> markers are missing.
+
+    Catches the common failure mode where the model writes a correct command
+    inside a fenced code block instead of using the marker protocol.
+    Only extracts blocks explicitly tagged as shell languages (bash/shell/sh/zsh).
+    Plain or non-shell code blocks (python, swift, etc.) are ignored to prevent
+    catastrophic misexecution of code snippets as shell commands.
+    """
+    commands = []
+
+    # REQUIRE a shell language hint -- the ? was removed to prevent matching
+    # python/swift/unlabeled blocks which caused catastrophic misexecution.
+    # Allow matching to end-of-string (```|\Z) for unclosed code blocks --
+    # the model sometimes emits a stop token before closing backticks.
+    for m in re.finditer(r'```(?:bash|shell|sh|zsh)\s*\n(.+?)(?:```|\Z)', response_text, re.DOTALL):
+        block = m.group(1).strip()
+        if block:
+            commands.append(block)
+
+    return commands
+
+
+def ingest_pdf_content(payload):
+    """Ingest a PDF file into memory. Can handle both local client files and server files.
+
+    Payload format:
+        /path/to/document.pdf       - Path to PDF file (on client or server)
+        local:/path/to/document.pdf - Explicitly indicates client-side file to upload first
+
+    Examples:
+        /home/user/docs/manual.pdf
+        local:/Users/me/Documents/report.pdf
+    """
+    try:
+        import base64
+        import requests
+
+        path = payload.strip()
+        if not path:
+            return "Error: No PDF path provided"
+
+        # Check if this is a local file that needs to be uploaded
+        if path.startswith('local:') or not path.startswith('/'):
+            # This is a local file path - we need to upload it first
+            if path.startswith('local:'):
+                local_path = path[6:]  # Remove 'local:' prefix
+            else:
+                local_path = path
+
+            # Expand user path if needed
+            local_path = os.path.expanduser(local_path)
+
+            # Check if file exists locally
+            if not os.path.exists(local_path):
+                return f"Error: Local file not found: {local_path}"
+
+            # Read the file content
+            with open(local_path, 'rb') as f:
+                file_content = f.read()
+
+            # Encode as base64
+            encoded_content = base64.b64encode(file_content).decode('utf-8')
+
+            # Upload the file to the server
+            upload_payload = {
+                "filename": os.path.basename(local_path),
+                "content": encoded_content
+            }
+
+            upload_url = f"http://{state.config.LINUX_SERVER_IP}:5000/v1/files/upload"
+            state.print_colored(f"Uploading {local_path} to server...", state.colors['CYAN'])
+
+            response = requests.post(upload_url, json=upload_payload, timeout=state.config.LONG_REQUEST_TIMEOUT)
+            if response.status_code != 200:
+                return f"Error uploading file: {response.text}"
+
+            upload_result = response.json()
+            server_path = upload_result.get("path", "")
+
+            if not server_path:
+                return "Error: Upload succeeded but no path returned"
+
+            state.print_colored(f"File uploaded to server: {server_path}", state.colors['GREEN'])
+
+            # Now ingest the uploaded file
+            result = state.external_handlers['ingest_pdf'](server_path)
+            return result
+        else:
+            # This is a server-side file path - ingest directly
+            result = state.external_handlers['ingest_pdf'](path)
+            return result
+    except Exception as e:
+        state.logger.error("Error ingesting PDF %s: %s", path, str(e))
+        return f"Error ingesting PDF: {str(e)}"

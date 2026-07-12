@@ -9,11 +9,11 @@ from unittest import mock
 
 import pytest
 
-import qwen_server.orchestrator_daemon as d
-from qwen_autonomous import executor
-from qwen_autonomous.db import Database
-from qwen_autonomous.executor import ArchitectResult, ImplementerResult, ParseError
-from qwen_autonomous.models import GateType, TaskStatus
+import coding_model_server.orchestrator_daemon as d
+from coding_model_autonomous import executor
+from coding_model_autonomous.db import Database
+from coding_model_autonomous.executor import ArchitectResult, ImplementerResult, ParseError
+from coding_model_autonomous.models import GateType, TaskStatus
 
 
 @pytest.fixture
@@ -110,7 +110,7 @@ def test_per_file_truncation_bails_and_records_agent(db, spec_task):
     with mock.patch.object(executor, "PER_FILE_PARSE_RETRIES", 2):
         with mock.patch.object(d, "call_agent", side_effect=fake_call) as ca:
             res = d._generate_via_manifest(db, spec, task, spec_dir, "S", "D",
-                                           "glm", [], None)
+                                           "native_implementer", [], None)
     # no usable files → ParseError → caller rotates to the next implementer
     assert isinstance(res, ParseError)
     # manifest + exactly ONE per-file attempt (bailed instead of burning retries)
@@ -119,7 +119,7 @@ def test_per_file_truncation_bails_and_records_agent(db, spec_task):
     evs = db.list_events_by_kind(spec_id=spec.id, kind=d.EventKind.OUTPUT_TRUNCATED)
     assert evs, "expected an OUTPUT_TRUNCATED event"
     payload = json.loads(evs[0].payload_json)
-    assert payload["agent"] == "glm"
+    assert payload["agent"] == "native_implementer"
     assert payload["role"] == "per-file:shared/t.ts"
 
 
@@ -223,7 +223,7 @@ def test_retry_architect_resets_downstream_tasks(db):
     # reviewer to PENDING — else the revised design is never re-implemented and
     # the reviewer judges stale code against a new design.
     spec = db.create_spec(title="demo", source_md_path="spec.md")
-    a = db.create_task(spec_id=spec.id, agent="q36_architect", role="architect", title="a")
+    a = db.create_task(spec_id=spec.id, agent="dense_architect", role="architect", title="a")
     i = db.create_task(spec_id=spec.id, agent="implementer", role="implementer", title="i")
     r = db.create_task(spec_id=spec.id, agent="reviewer", role="reviewer", title="r")
     for t in (a, i, r):
@@ -241,7 +241,7 @@ def _architect_spec(db):
     spec = db.create_spec(title="demo", source_md_path="spec.md")
     spec_dir = db.spec_dir(spec.id)
     (spec_dir / "spec.md").write_text("# spec\nbuild a thing")
-    task = db.create_task(spec_id=spec.id, agent="q36_architect", role="architect", title="a")
+    task = db.create_task(spec_id=spec.id, agent="dense_architect", role="architect", title="a")
     return db.get_spec(spec.id), db.get_task(task.id), spec_dir
 
 

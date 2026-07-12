@@ -1,20 +1,22 @@
 #!/bin/bash
-# Qwen Remote Client Startup Script
+# Coding Model Remote Client Startup Script
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+# Script lives in bin/; cd to the repo root (one level up) so the relative
+# paths below (venv/, myenv/, .env) resolve correctly.
+cd "$SCRIPT_DIR/.."
 
-# Load environment variables. Prefer ~/.config/qwen-server/.env (keeps secrets
+# Load environment variables. Prefer ~/.config/coding-model-server/.env (keeps secrets
 # out of the repo); fall back to a repo-local .env for development only.
-ENV_FILE="${QWEN_ENV_FILE:-$HOME/.config/qwen-server/.env}"
+ENV_FILE="${CODING_MODEL_ENV_FILE:-$HOME/.config/coding-model-server/.env}"
 if [ -f "$ENV_FILE" ]; then
     set -a
     . "$ENV_FILE"
     set +a
 elif [ -f .env ]; then
-    echo "Warning: loading .env from repo — move secrets to $HOME/.config/qwen-server/.env"
+    echo "Warning: loading .env from repo — move secrets to $HOME/.config/coding-model-server/.env"
     set -a
     . .env
     set +a
@@ -46,5 +48,5 @@ else
 fi
 
 # Start the client
-echo "Starting Qwen Remote Client..."
-$PYTHON_EXE -m qwen_client "$@"
+echo "Starting Coding Model Remote Client..."
+$PYTHON_EXE -m coding_model_client "$@"

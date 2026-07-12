@@ -7,14 +7,14 @@ machine for accurate measurements.
 
 Usage:
     python3 benchmark_prefill.py                       # benchmark all agents
-    python3 benchmark_prefill.py -a q36_architect glm  # benchmark specific agents
+    python3 benchmark_prefill.py -a dense_architect native_implementer  # benchmark specific agents
     python3 benchmark_prefill.py --prompt-tokens 4000  # custom prompt size
     python3 benchmark_prefill.py --warmup              # discard first request
     python3 benchmark_prefill.py --json results.json   # save results
 
 Environment:
-    QWEN_SERVER_IP    default 127.0.0.1
-    QWEN_SERVER_PORT  default 5000
+    CODING_MODEL_SERVER_IP    default 127.0.0.1
+    CODING_MODEL_SERVER_PORT  default 5000
     ADMIN_API_KEY     required if server has auth enabled
 """
 import argparse
@@ -156,8 +156,8 @@ def main():
     parser.add_argument("--warmup", action="store_true",
                         help="Run a small warmup request before measuring (loads model)")
     parser.add_argument("--json", help="Write results to JSON file")
-    parser.add_argument("--host", default=os.getenv("QWEN_SERVER_IP", "127.0.0.1"))
-    parser.add_argument("--port", default=os.getenv("QWEN_SERVER_PORT", "5000"))
+    parser.add_argument("--host", default=os.getenv("CODING_MODEL_SERVER_IP", "127.0.0.1"))
+    parser.add_argument("--port", default=os.getenv("CODING_MODEL_SERVER_PORT", "5000"))
     parser.add_argument("--timeout", type=int, default=1800,
                         help="Per-request timeout in seconds (default: 1800)")
     args = parser.parse_args()

@@ -20,8 +20,8 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
-HOST = os.getenv("QWEN_SERVER_IP", "127.0.0.1")
-PORT = int(os.getenv("QWEN_SERVER_PORT", "5000"))
+HOST = os.getenv("CODING_MODEL_SERVER_IP", "127.0.0.1")
+PORT = int(os.getenv("CODING_MODEL_SERVER_PORT", "5000"))
 KEY = os.getenv("ADMIN_API_KEY", "")
 
 TERMINAL_STATES = {"done", "failed", "cancelled"}

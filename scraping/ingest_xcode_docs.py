@@ -12,7 +12,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 
 # Server configuration
-LINUX_SERVER_IP = os.getenv("QWEN_SERVER_IP", "192.168.50.101")
+LINUX_SERVER_IP = os.getenv("CODING_MODEL_SERVER_IP", "192.168.50.101")
 MEMORY_API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/memory"
 
 # Local Xcode Documentation paths
@@ -145,7 +145,7 @@ def process_file(file_path):
         return False
 
 def main():
-    print(f"Connecting to Qwen Server at {LINUX_SERVER_IP}...")
+    print(f"Connecting to Coding Model Server at {LINUX_SERVER_IP}...")
 
     # Load progress to skip already-ingested files
     progress_data = load_progress()

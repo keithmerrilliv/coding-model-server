@@ -13,8 +13,8 @@ except ImportError:
     HAS_PYNVML = False
 
 # Configuration
-LOG_FILE = "/home/keith-merrill/Dev/qwen-server/server_stats.csv"
-DB_PATH = "/home/keith-merrill/Dev/qwen-server/memory_db"
+LOG_FILE = "/home/keith-merrill/Dev/coding-model-server/var/server_stats.csv"
+DB_PATH = "/home/keith-merrill/Dev/coding-model-server/var/memory_db"
 POWERCAP_PATH = "/sys/class/powercap/intel-rapl:0/energy_uj"
 INTERVAL = 5.0
 MAX_LOG_SIZE_MB = 10  # Rotate when log exceeds this size

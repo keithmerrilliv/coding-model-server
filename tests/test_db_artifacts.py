@@ -10,8 +10,8 @@ touched.
 """
 import pytest
 
-from qwen_autonomous.db import Database
-from qwen_autonomous.models import ArtifactKind
+from coding_model_autonomous.db import Database
+from coding_model_autonomous.models import ArtifactKind
 
 
 @pytest.fixture

@@ -13,14 +13,14 @@ import type {
 // API host defaults to the same host that served the dashboard, on port 5000.
 // In dev (Vite at localhost:3000) → http://localhost:5000. In production
 // served at http://192.168.50.101:3001 → http://192.168.50.101:5000. On a
-// TV pointed at the LAN dashboard → same. Override with VITE_QWEN_SERVER_URL
-// at build time if the qwen-server lives on a different host or port.
+// TV pointed at the LAN dashboard → same. Override with VITE_CODING_MODEL_SERVER_URL
+// at build time if the coding-model-server lives on a different host or port.
 const BASE_URL =
-  import.meta.env.VITE_QWEN_SERVER_URL ||
+  import.meta.env.VITE_CODING_MODEL_SERVER_URL ||
   `${window.location.protocol}//${window.location.hostname}:5000`;
 
 function getAdminKey(): string | null {
-  return localStorage.getItem('qwen.adminKey');
+  return localStorage.getItem('codingModel.adminKey');
 }
 
 async function request<T>(url: string, options?: RequestInit): Promise<ApiResponse<T>> {

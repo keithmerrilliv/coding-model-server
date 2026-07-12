@@ -1,8 +1,8 @@
 """Runtime configuration for mac_runner.
 
-Env vars are loaded from ~/.config/qwen-runner/.env (override via
-QWEN_RUNNER_ENV_FILE). The registered-repo map lives at
-~/.config/qwen-runner/repos.yml.
+Env vars are loaded from ~/.config/coding-model-runner/.env (override via
+CODING_MODEL_RUNNER_ENV_FILE). The registered-repo map lives at
+~/.config/coding-model-runner/repos.yml.
 """
 from __future__ import annotations
 
@@ -11,9 +11,9 @@ from pathlib import Path
 
 import yaml
 
-CONFIG_DIR = Path.home() / ".config" / "qwen-runner"
-ENV_FILE = Path(os.environ.get("QWEN_RUNNER_ENV_FILE", CONFIG_DIR / ".env"))
-REPOS_FILE = Path(os.environ.get("QWEN_RUNNER_REPOS_FILE", CONFIG_DIR / "repos.yml"))
+CONFIG_DIR = Path.home() / ".config" / "coding-model-runner"
+ENV_FILE = Path(os.environ.get("CODING_MODEL_RUNNER_ENV_FILE", CONFIG_DIR / ".env"))
+REPOS_FILE = Path(os.environ.get("CODING_MODEL_RUNNER_REPOS_FILE", CONFIG_DIR / "repos.yml"))
 
 
 def _load_env_file(path: Path) -> None:
@@ -32,17 +32,17 @@ _load_env_file(ENV_FILE)
 
 
 class Config:
-    HOST = os.getenv("QWEN_RUNNER_HOST", "127.0.0.1")
-    PORT = int(os.getenv("QWEN_RUNNER_PORT", "5050"))
-    API_KEY = os.getenv("QWEN_RUNNER_API_KEY", "")
-    ALLOW_UNAUTH = os.getenv("QWEN_RUNNER_ALLOW_UNAUTH", "").lower() in ("1", "true", "yes")
+    HOST = os.getenv("CODING_MODEL_RUNNER_HOST", "127.0.0.1")
+    PORT = int(os.getenv("CODING_MODEL_RUNNER_PORT", "5050"))
+    API_KEY = os.getenv("CODING_MODEL_RUNNER_API_KEY", "")
+    ALLOW_UNAUTH = os.getenv("CODING_MODEL_RUNNER_ALLOW_UNAUTH", "").lower() in ("1", "true", "yes")
     WORKTREE_ROOT = Path(os.getenv(
-        "QWEN_RUNNER_WORKTREE_ROOT",
-        str(Path.home() / "Library" / "Caches" / "qwen-runner" / "worktrees"),
+        "CODING_MODEL_RUNNER_WORKTREE_ROOT",
+        str(Path.home() / "Library" / "Caches" / "coding-model-runner" / "worktrees"),
     ))
     DERIVED_DATA = Path(os.getenv(
-        "QWEN_RUNNER_DERIVED_DATA",
-        str(Path.home() / "Library" / "Caches" / "qwen-runner" / "DerivedData"),
+        "CODING_MODEL_RUNNER_DERIVED_DATA",
+        str(Path.home() / "Library" / "Caches" / "coding-model-runner" / "DerivedData"),
     ))
     REPOS_FILE = REPOS_FILE
 

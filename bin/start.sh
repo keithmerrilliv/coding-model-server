@@ -1,20 +1,22 @@
 #!/bin/bash
-# Qwen Multi-Agent Server Startup Script
+# Coding Model Multi-Agent Server Startup Script
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+# Script lives in bin/; cd to the repo root (one level up) so the relative
+# paths below (venv/, .env, python -m ...) resolve correctly.
+cd "$SCRIPT_DIR/.."
 
-# Load environment variables. Prefer ~/.config/qwen-server/.env (keeps secrets
+# Load environment variables. Prefer ~/.config/coding-model-server/.env (keeps secrets
 # out of the repo); fall back to a repo-local .env for development only.
-ENV_FILE="${QWEN_ENV_FILE:-$HOME/.config/qwen-server/.env}"
+ENV_FILE="${CODING_MODEL_ENV_FILE:-$HOME/.config/coding-model-server/.env}"
 if [ -f "$ENV_FILE" ]; then
     set -a
     . "$ENV_FILE"
     set +a
 elif [ -f .env ]; then
-    echo "Warning: loading .env from repo — move secrets to $HOME/.config/qwen-server/.env"
+    echo "Warning: loading .env from repo — move secrets to $HOME/.config/coding-model-server/.env"
     set -a
     . .env
     set +a
@@ -54,5 +56,5 @@ export VECLIB_MAXIMUM_THREADS=$PHYS_CORES
 export NUMEXPR_NUM_THREADS=$PHYS_CORES
 
 # Start the server
-echo "Starting Qwen Multi-Agent Server (FastAPI)..."
-python -m qwen_server.server
+echo "Starting Coding Model Multi-Agent Server (FastAPI)..."
+python -m coding_model_server.server

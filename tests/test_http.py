@@ -11,8 +11,8 @@ from unittest import mock
 
 import requests
 
-import qwen_client.http as client_http
-from qwen_client.config import config
+import coding_model_client.http as client_http
+from coding_model_client.config import config
 
 
 def _call(**kwargs):

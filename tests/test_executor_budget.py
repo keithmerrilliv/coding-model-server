@@ -8,7 +8,7 @@ Covers the two halves of the #2 pipeline fix:
     daemon can emit OUTPUT_TRUNCATED instead of letting a cut-off file read as
     a phantom reviewer "missing file" FAIL.
 """
-from qwen_autonomous import executor
+from coding_model_autonomous import executor
 
 
 # ── file-count estimate ──────────────────────────────────────────────────────

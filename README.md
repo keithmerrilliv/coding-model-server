@@ -1,4 +1,4 @@
-# Qwen Multi-Agent Server
+# Coding Model Multi-Agent Server
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -9,7 +9,7 @@ A local LLM inference server with a multi-agent CLI client. The server provides 
 ```
 Client (macOS/Linux)                    Server (Linux + GPU)
 ┌──────────────────┐                   ┌──────────────────────────────────┐
-│ src/qwen_client/ │  HTTP/SSE         │ qwen_server.server (FastAPI :5000)│
+│ src/coding_model_client/ │  HTTP/SSE         │ coding_model_server.server (FastAPI :5000)│
 │  main.py         │◄─────────────────►│  ├─ llama_server backend          │
 │  orchestrator.py │  /v1/chat/        │  │   (llama-server subprocess)    │
 │  completion.py   │  completions      │  ├─ tool_handlers (server-side)   │
@@ -37,23 +37,23 @@ idle (30-min watchdog; in-flight requests block the kill).
 ### Server (Linux with NVIDIA GPU)
 
 ```bash
-git clone <repo-url> && cd qwen-server
-./setup.sh                  # Creates venv, runs `pip install -e .`, sets up .env
-cp .env.example .env        # (setup.sh does this too; edit IP, ports, model paths)
-./start.sh                  # Starts on port 5000
+git clone <repo-url> && cd coding-model-server
+./bin/setup.sh              # Creates venv, runs `pip install -e .`, sets up .env
+cp .env.example .env        # (bin/setup.sh does this too; edit IP, ports, model paths)
+./bin/start.sh              # Starts on port 5000
 ```
 
-Dependencies live in `pyproject.toml` (single source of truth). `setup.sh`
+Dependencies live in `pyproject.toml` (single source of truth). `bin/setup.sh`
 runs `pip install -e .`, which installs the core deps, makes the three `src/`
-packages importable, and wires the `qwen-client` / `qwen-autonomous` console
+packages importable, and wires the `coding-model-client` / `coding-model-autonomous` console
 scripts. For the client's optional niceties (rich output, scraping) add the
 extra: `pip install -e '.[client]'`.
 
 Or as a systemd service:
 ```bash
-sudo systemctl enable qwen-server
-sudo systemctl start qwen-server
-journalctl -u qwen-server -f   # View logs
+sudo systemctl enable coding-model-server
+sudo systemctl start coding-model-server
+journalctl -u coding-model-server -f   # View logs
 ```
 
 After pulling code or editing a `systemd/*.service` unit, redeploy the running
@@ -68,9 +68,9 @@ code changes. The script backs up the installed units before overwriting.
 ### Client (macOS or Linux)
 
 ```bash
-./start-client.sh                        # Default agent (implementer)
-./start-client.sh --model architect      # Specific agent
-./start-client.sh --name my-project      # Named session
+./bin/start-client.sh                    # Default agent (implementer)
+./bin/start-client.sh --model architect  # Specific agent
+./bin/start-client.sh --name my-project  # Named session
 ```
 
 ## Agents
@@ -87,10 +87,10 @@ Each agent maps to a model configuration and system prompt. Switch with `/agent 
 | `deep_reviewer` | Deep judgment | Qwen3.5-122B-A10B Q4_K_M | 10B/122B | **256K** | Q8_0 | 49 cpu_moe | subprocess |
 | `architect` | System design | Coder-480B Q2_K_XL | 35B/480B | 32K | Q8_0 | 63 cpu_moe | subprocess |
 | `lite_architect` | Lite design | Coder-480B IQ1_M | 35B/480B | 32K | Q8_0 | 63 cpu_moe | subprocess |
-| `q36_architect` / `supervisor` | Flagship design | Qwen3.6-27B Q4_K_M (dense) | 27B dense | 131K | Q4_0 | 40 | subprocess |
-| `m25_implementer` / `m25_architect` | Implementation / architecture | MiniMax M2.5 Q4_K_M | 10B/230B | 116K | Q4_0 | 62 cpu_moe | subprocess |
-| `nemotron` | Fastest brainstorm | Nemotron-3-Nano Q4_K_M | 3.5B/30B | **1M** | Q8_0 | 52 cpu_moe | subprocess |
-| `glm` | Implementation | GLM-4.7-Flash Q4_K_M | 3B/30B | 262K | Q8_0 | 47 cpu_moe | subprocess |
+| `dense_architect` / `supervisor` | Flagship design | Qwen3.6-27B Q4_K_M (dense) | 27B dense | 131K | Q4_0 | 40 | subprocess |
+| `moe_implementer` / `moe_architect` | Implementation / architecture | MiniMax M2.5 Q4_K_M | 10B/230B | 116K | Q4_0 | 62 cpu_moe | subprocess |
+| `brainstorm` | Fastest brainstorm | Nemotron-3-Nano Q4_K_M | 3.5B/30B | **1M** | Q8_0 | 52 cpu_moe | subprocess |
+| `native_implementer` | Implementation | GLM-4.7-Flash Q4_K_M | 3B/30B | 262K | Q8_0 | 47 cpu_moe | subprocess |
 
 Subprocess models use `--cpu-moe` to keep MoE expert weights on CPU, enabling near-max GPU layer offload for attention. Nemotron's Mamba-hybrid architecture (only 6/52 layers need KV cache) allows a full 1M native context on RTX 5080. KV-cache preference is Q8_0 wherever it fits — see `~/.claude/.../memory/feedback_kv_quant_preference.md` for the rationale (KV-quant noise produces diffuse quality degradation harder to manage than smaller context).
 
@@ -176,24 +176,24 @@ A separate service mode where you submit a markdown spec and the system autonomo
 
 ```bash
 # Submit a spec
-python qwen-autonomous submit spec.md
+python coding-model-autonomous submit spec.md
 
 # Watch progress
-python qwen-autonomous status <spec_id>
+python coding-model-autonomous status <spec_id>
 
 # Review and approve gates
-python qwen-autonomous gates
-python qwen-autonomous review <gate_id> --approve
+python coding-model-autonomous gates
+python coding-model-autonomous review <gate_id> --approve
 
 # Check event log
-python qwen-autonomous events <spec_id>
+python coding-model-autonomous events <spec_id>
 ```
 
-**Pipeline:** Planner (q36_architect) → Architect → *design review gate* → Implementer → *code review gate* → Reviewer + tests → *release gate* → DONE
+**Pipeline:** Planner (dense_architect) → Architect → *design review gate* → Implementer → *code review gate* → Reviewer + tests → *release gate* → DONE
 
 **Human in the loop:** Every major transition requires your explicit approval — the system blocks at review gates until you approve or reject. Rejection notes feed back into the agent for a retry. If Jira is configured (`JIRA_*` env vars), gates sync to a Jira board with native email notifications so you can approve from anywhere.
 
-**Orchestrator daemon:** Runs as a separate systemd unit (`qwen-orchestrator.service`). Polls the SQLite task store, calls agents via the inference API, runs tests via subprocess. Independent of the interactive client.
+**Orchestrator daemon:** Runs as a separate systemd unit (`coding-model-orchestrator.service`). Polls the SQLite task store, calls agents via the inference API, runs tests via subprocess. Independent of the interactive client.
 
 See `docs/TUTORIAL.md` for an end-to-end walkthrough of the pipeline.
 
@@ -217,14 +217,14 @@ The server exposes an OpenAI-compatible API. When `ADMIN_API_KEY` is set, all en
 ## Project Structure
 
 PyPA `src` layout — three packages under `src/`, declared in
-`pyproject.toml`. Run `pip install -e .` after `setup.sh` to install
+`pyproject.toml`. Run `pip install -e .` after `bin/setup.sh` to install
 them into the venv.
 
 ```
-qwen-server/
+coding-model-server/
 ├── pyproject.toml              # Package metadata, deps, console scripts
 ├── src/
-│   ├── qwen_server/            # FastAPI server + orchestrator daemon + shared modules
+│   ├── coding_model_server/            # FastAPI server + orchestrator daemon + shared modules
 │   │   ├── server.py           #   FastAPI app, model configs, inference dispatch
 │   │   ├── llama_server.py     #   llama-server subprocess manager (VRAM coord)
 │   │   ├── orchestrator_daemon.py  # Autonomous mode coordinator (systemd entry)
@@ -237,20 +237,20 @@ qwen-server/
 │   │   ├── config.py           #   Server-side Config + agent definitions
 │   │   ├── metrics.py          #   GPU sampler + request metrics
 │   │   └── code_chunker.py     #   tree-sitter-aware code chunking for RAG
-│   ├── qwen_client/            # Modular chat client package
+│   ├── coding_model_client/            # Modular chat client package
 │   │   ├── main.py             #   Chat loop, startup
-│   │   ├── __main__.py         #   `python -m qwen_client` entry
+│   │   ├── __main__.py         #   `python -m coding_model_client` entry
 │   │   ├── orchestrator.py     #   Agent loop, tool dispatch
 │   │   ├── completion.py       #   SSE streaming, retries
 │   │   ├── compaction.py       #   Context compaction
 │   │   ├── commands.py         #   Slash command handlers
 │   │   ├── review.py           #   /review multi-judge fan-out
-│   │   ├── autonomous.py       #   `qwen-autonomous` CLI entry
+│   │   ├── autonomous.py       #   `coding-model-autonomous` CLI entry
 │   │   ├── history.py          #   Session persistence
 │   │   ├── config.py           #   Client-side configuration, constants
 │   │   ├── models.py           #   Agent theme management
 │   │   └── agentic/            #   RAG: scratchpad, planner, budget
-│   └── qwen_autonomous/        # Autonomous mode task store + agents
+│   └── coding_model_autonomous/        # Autonomous mode task store + agents
 │       ├── db.py               #   SQLite-backed task store (WAL, thread-safe)
 │       ├── models.py           #   Pydantic models (Spec, Task, Gate, Event)
 │       ├── schema.sql          #   DDL for specs, tasks, artifacts, gates, events
@@ -259,17 +259,20 @@ qwen-server/
 │       ├── jira_client.py      #   Jira interface (FakeJiraClient + real Atlassian)
 │       └── jira_sync.py        #   Bidirectional sync (SQLite ↔ Jira)
 ├── tests/                      # Real dev tests (currently a placeholder)
+├── bin/                        # Entry-point scripts: setup.sh, start*.sh
 ├── scripts/                    # Operational scripts (auto-approve, stats, profiling)
-├── systemd/                    # Service units (use `python -m qwen_server.X` ExecStart)
+├── systemd/                    # Service units (use `python -m coding_model_server.X` ExecStart)
 ├── tools/                      # llama-server binary + shared libs
 ├── scraping/                   # Apple documentation scraper
 ├── dashboard/                  # TypeScript React dashboard
 ├── mac_runner/                 # Separate Swift/Xcode test runner service
-└── docs/
-    ├── TUTORIAL.md             #   End-to-end pipeline tutorial
-    ├── CONFIGURATION.md        #   Env vars, agent-config knobs, systemd
-    ├── RAG_UPDATES.md          #   RAG database + agentic query layer
-    └── XCODEGEN_GUIDE.md       #   Xcode project generation (mac_runner)
+├── docs/
+│   ├── TUTORIAL.md             #   End-to-end pipeline tutorial
+│   ├── CONFIGURATION.md        #   Env vars, agent-config knobs, systemd
+│   ├── RAG_UPDATES.md          #   RAG database + agentic query layer
+│   └── XCODEGEN_GUIDE.md       #   Xcode project generation (mac_runner)
+├── var/                        # Runtime state, git-ignored: tasks_db/, memory_db/, server_stats.csv
+└── .archive/                   # Superseded backups, git-ignored
 ```
 
 ## License

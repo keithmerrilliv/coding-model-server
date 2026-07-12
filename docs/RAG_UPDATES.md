@@ -41,7 +41,7 @@ The old bulk ingestion is replaced by on-demand, structure-aware ingestion via t
 
 ### How it works
 
-`CodeChunker` (`src/qwen_server/code_chunker.py`) uses tree-sitter to parse source files into ASTs and extract chunks at semantically meaningful boundaries:
+`CodeChunker` (`src/coding_model_server/code_chunker.py`) uses tree-sitter to parse source files into ASTs and extract chunks at semantically meaningful boundaries:
 
 ```
 Source file  -->  tree-sitter AST  -->  Walk nodes  -->  Match chunk types  -->  Emit chunks
@@ -93,7 +93,7 @@ When tree-sitter cannot parse a file (unsupported language, parse error), `CodeC
 
 ## 3. Agentic Query Layer
 
-The client now runs a five-component agentic context system (`qwen_client/agentic/`) that wraps every completion request. This layer operates entirely client-side with zero additional model calls for classification.
+The client now runs a five-component agentic context system (`coding_model_client/agentic/`) that wraps every completion request. This layer operates entirely client-side with zero additional model calls for classification.
 
 ### 3.1 Query Classification
 
@@ -180,7 +180,7 @@ BUDGET WARNING: You have used 60/80 retrieval steps. Only 20 steps remain.
 
 ## 4. Server-Side RAG Integration
 
-The server (`src/qwen_server/server.py`) automatically injects RAG context into every completion request:
+The server (`src/coding_model_server/server.py`) automatically injects RAG context into every completion request:
 
 1. Extract the last user message from the conversation
 2. Embed it via `SentenceTransformer('all-MiniLM-L6-v2')` (384-dim, CPU-bound)
@@ -193,7 +193,7 @@ This runs async with a **2-second hard timeout** to prevent stalls from large da
 
 ### Authentication
 
-All client requests (completions, memory, search, ingestion, model listing) include an `X-Admin-Key` header when `ADMIN_API_KEY` is configured. This is handled centrally by `Config.auth_headers` (`qwen_client/config.py`).
+All client requests (completions, memory, search, ingestion, model listing) include an `X-Admin-Key` header when `ADMIN_API_KEY` is configured. This is handled centrally by `Config.auth_headers` (`coding_model_client/config.py`).
 
 ### Deduplication
 
@@ -247,7 +247,7 @@ python3 scripts/rag_utils.py inspect <id>   # Full metadata for an entry
 
 ```bash
 # Stop the server first
-sqlite3 memory_db/chroma.sqlite3 "VACUUM;"
+sqlite3 var/memory_db/chroma.sqlite3 "VACUUM;"
 ```
 
 ### Purging by source pattern

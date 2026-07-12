@@ -5,7 +5,7 @@ The orchestrator turns a PlannerError into spec FAILED, so a single garbled
 model emission used to hard-kill a spec. call_planner now re-issues the request
 a bounded number of times on a parse failure (mirrors REVIEWER_PARSE_RETRIES).
 """
-from qwen_autonomous import planner
+from coding_model_autonomous import planner
 
 
 # A valid YAML plan block.

@@ -14,6 +14,10 @@ appledeepdoc-mcp/
 scraping/output
 server_stats.csv*
 
+# Consolidated runtime state + archived backups (new homes after the reorg)
+var/
+.archive/
+
 # Local-only artifacts that should not land in the repo
 .claude/
 audit_report.md

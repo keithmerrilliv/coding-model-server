@@ -12,19 +12,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [adminKey, setAdminKeyState] = useState<string | null>(null);
 
   useEffect(() => {
-    const stored = localStorage.getItem('qwen.adminKey');
+    const stored = localStorage.getItem('codingModel.adminKey');
     if (stored) {
       setAdminKeyState(stored);
     }
   }, []);
 
   const setAdminKey = useCallback((key: string) => {
-    localStorage.setItem('qwen.adminKey', key);
+    localStorage.setItem('codingModel.adminKey', key);
     setAdminKeyState(key);
   }, []);
 
   const logout = useCallback(() => {
-    localStorage.removeItem('qwen.adminKey');
+    localStorage.removeItem('codingModel.adminKey');
     setAdminKeyState(null);
   }, []);
 

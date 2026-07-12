@@ -15,7 +15,7 @@ from unittest import mock
 
 import pytest
 
-from qwen_server.llama_server import LlamaServerManager
+from coding_model_server.llama_server import LlamaServerManager
 
 
 @pytest.fixture
@@ -159,12 +159,12 @@ def test_start_executes_post_popen_body(mgr, monkeypatch, tmp_path):
     fake_proc = mock.Mock()
     fake_proc.poll.return_value = None
     fake_proc.stdout.readline.side_effect = lambda: b""  # drain loop exits immediately
-    monkeypatch.setattr("qwen_server.llama_server.subprocess.Popen",
+    monkeypatch.setattr("coding_model_server.llama_server.subprocess.Popen",
                         lambda *a, **k: fake_proc)
 
     # 3) /health returns 200 on first poll
     healthy = mock.Mock(status_code=200)
-    monkeypatch.setattr("qwen_server.llama_server.http_requests.get",
+    monkeypatch.setattr("coding_model_server.llama_server.http_requests.get",
                         lambda *a, **k: healthy)
 
     # 4) don't spin up the real idle watchdog thread

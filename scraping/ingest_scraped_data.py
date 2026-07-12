@@ -3,7 +3,7 @@
 Ingest Scraped Framework Documentation into Memory Service
 
 This script reads the JSON output from the scrapers and sends the content
-to the Qwen Server's memory service for RAG.
+to the Coding Model Server's memory service for RAG.
 
 When invoked without arguments, auto-discovers and processes all framework
 directories under output/.
@@ -20,8 +20,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Server configuration (resolved once)
-SERVER_IP = os.getenv('QWEN_SERVER_IP', '127.0.0.1')
-SERVER_PORT = os.getenv('QWEN_SERVER_PORT', '5000')
+SERVER_IP = os.getenv('CODING_MODEL_SERVER_IP', '127.0.0.1')
+SERVER_PORT = os.getenv('CODING_MODEL_SERVER_PORT', '5000')
 SERVER_URL = f"http://{SERVER_IP}:{SERVER_PORT}/v1/memory"
 
 session = requests.Session()

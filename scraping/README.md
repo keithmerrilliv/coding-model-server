@@ -56,8 +56,8 @@ Create a `.env` file in the root directory with the following variables:
 APPLE_DEEP_DOCS_PATH=/path/to/appledeepdoc-mcp/run.sh
 
 # Server Configuration
-QWEN_SERVER_IP=192.168.50.101
-QWEN_SERVER_PORT=5000
+CODING_MODEL_SERVER_IP=192.168.50.101
+CODING_MODEL_SERVER_PORT=5000
 ```
 
 ## Usage
@@ -155,13 +155,13 @@ The system generates structured output in `scraping/output/{framework}/`:
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `APPLE_DEEP_DOCS_PATH` | Path to Apple Deep Docs MCP server | - |
-| `QWEN_SERVER_IP` | IP address of Qwen server | 127.0.0.1 |
-| `QWEN_SERVER_PORT` | Port of Qwen server | 5000 |
+| `CODING_MODEL_SERVER_IP` | IP address of Coding Model server | 127.0.0.1 |
+| `CODING_MODEL_SERVER_PORT` | Port of Coding Model server | 5000 |
 
 ## Troubleshooting
 
 ### Server Connection Issues
-- Verify that the Qwen server is running at the configured IP and port
+- Verify that the Coding Model server is running at the configured IP and port
 - Check firewall settings if connecting to remote server
 - Ensure network connectivity to the server
 

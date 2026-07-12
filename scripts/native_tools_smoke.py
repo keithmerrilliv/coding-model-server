@@ -9,7 +9,7 @@ runs a 2-turn conversation that exercises the OpenAI tool-calling shape:
   turn 2: dispatch shell command → send back role="tool" with stdout →
           expect a final assistant message that references the listing
 
-If both turns behave correctly the wire is proven. The qwen-server proxy
+If both turns behave correctly the wire is proven. The coding-model-server proxy
 in server.py just passes these chunks through unchanged.
 """
 import json
