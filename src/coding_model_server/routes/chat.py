@@ -92,11 +92,38 @@ async def _maybe_inject_rag_context(system_prompt: str, request: ChatCompletionR
     )
 
 
+def _guidance_token_cost(tokenize_fn=None, req_id: str = "req_unknown") -> int:
+    """Token cost of the budget guidance appended to the system prompt.
+
+    The guidance is only built *after* the clamp runs (it needs the clamped
+    figure to interpolate), so its cost has to be reserved up front or the
+    clamp hands those tokens to the output and the prompt overruns n_ctx.
+    The interpolated number shifts the length by a token or two — measure
+    with a worst-case value so the reserve is never short. The trailing +1
+    covers the newline that joins it to the system prompt.
+    """
+    text = Config.TOKEN_BUDGET_GUIDANCE.format(available_tokens=999999)
+    if tokenize_fn is not None:
+        try:
+            return tokenize_fn(text) + 1
+        except Exception as e:
+            logger.warning(
+                "[%s] tokenize round-trip failed for budget guidance (%s)"
+                " — falling back to chars/2.5", req_id, e,
+            )
+    return int(len(text) / 2.5) + 1
+
+
 def _estimate_and_clamp_tokens(system_prompt: str, messages: List[ChatMessage],
                                n_ctx: int, max_tokens: int,
-                               tokenize_fn=None,
+                               tokenize_fn=None, reserve: int = 0,
                                req_id: str = "req_unknown") -> tuple[int, int]:
     """Estimate prompt tokens and return (est_prompt_tokens, clamped_max_output).
+
+    ``reserve`` is tokens the caller will append to the prompt *after* this
+    returns (the budget guidance). They are counted against n_ctx here; the
+    clamp leaves no headroom of its own, so anything unreserved is handed to
+    the output and overruns the window.
 
     Two paths:
     - If ``tokenize_fn`` is supplied (a callable str → int that round-trips
@@ -111,23 +138,22 @@ def _estimate_and_clamp_tokens(system_prompt: str, messages: List[ChatMessage],
     """
     if tokenize_fn is not None:
         try:
-            content_tokens = tokenize_fn(system_prompt) + sum(
+            content_tokens = (tokenize_fn(system_prompt) if system_prompt else 0) + sum(
                 tokenize_fn(m.content or '') for m in messages
             )
             # Per-turn template overhead — chatml uses <|im_start|>{role}\n
             # ... <|im_end|>\n which is ~7 tokens per turn including the
             # system turn. Round up; a few extra is cheaper than overflow.
             template_overhead = 8 * (len(messages) + 1)
-            return content_tokens + template_overhead, max(
-                min(max_tokens, n_ctx - content_tokens - template_overhead), 1
-            )
+            est = content_tokens + template_overhead + reserve
+            return est, max(min(max_tokens, n_ctx - est), 1)
         except Exception as e:
             logger.warning(
                 "[%s] tokenize round-trip failed (%s) — falling back to chars/2.5",
                 req_id, e,
             )
     est_prompt_chars = len(system_prompt) + sum(len(m.content or '') for m in messages)
-    est_prompt_tokens = int(est_prompt_chars / 2.5)
+    est_prompt_tokens = int(est_prompt_chars / 2.5) + reserve
     available = max(n_ctx - est_prompt_tokens, 1)
     return est_prompt_tokens, min(max_tokens, available)
 
@@ -191,9 +217,22 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
         llama_server_manager.ensure_running(model_config, agent_id=request.model)
 
         n_ctx = model_config.get('n_ctx', 32768)
+        # Estimate what actually reaches llama-server. `_build_openai_messages`
+        # drops the agent system prompt — and the guidance appended to it —
+        # when the client sends its own system message, so counting either one
+        # in that case under-allocates the budget by the size of a prompt that
+        # never ships.
+        client_has_system = (
+            bool(request.messages) and request.messages[0].role == "system"
+        )
+        effective_system = "" if client_has_system else system_prompt
+        guidance_reserve = 0 if client_has_system else _guidance_token_cost(
+            llama_server_manager.tokenize, req_id,
+        )
         est_prompt_tokens, clamped_max = _estimate_and_clamp_tokens(
-            system_prompt, request.messages, n_ctx, request.max_tokens,
+            effective_system, request.messages, n_ctx, request.max_tokens,
             tokenize_fn=llama_server_manager.tokenize,
+            reserve=guidance_reserve,
             req_id=req_id,
         )
         budget_guidance = Config.TOKEN_BUDGET_GUIDANCE.format(available_tokens=clamped_max)
