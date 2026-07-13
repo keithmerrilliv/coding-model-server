@@ -48,7 +48,7 @@ def agent_flags(agent: str, ctx: int | None) -> tuple[str, list[str]]:
 
 
 def sweep(agent: str, n_values: list[int], ctx: int | None,
-          safe_free: int, total_mib: int) -> None:
+          safe_free: int) -> None:
     binary, base_flags = agent_flags(agent, ctx)
     stripped = strip_moe_flags(base_flags)
     eff_ctx = base_flags[base_flags.index("-c") + 1]
@@ -73,21 +73,22 @@ def sweep(agent: str, n_values: list[int], ctx: int | None,
             break
         rows.append((n, res))
 
-    safe = [(n, r) for n, r in rows if (total_mib - r["vram_mib"]) >= safe_free]
+    # Headroom is the driver's memory.free, NOT total-used: they differ by ~550
+    # MiB of reserved overhead, and _check_vram_or_raise gates on memory.free.
+    safe = [(n, r) for n, r in rows if r["free_mib"] >= safe_free]
     print(f"\n  == {agent} summary (baseline --cpu-moe decode {base_decode:.2f} t/s) ==")
     print(f"  {'config':<16}{'VRAM MiB':>9}{'free':>7}{'prefill t/s':>13}{'decode t/s':>12}{'vs base':>10}")
     for n, r in rows:
-        free = total_mib - r["vram_mib"]
         gain = (r["decode_tps"] / base_decode - 1) * 100 if base_decode else 0
         tag = "  <-- SAFE pick" if safe and n == safe[-1][0] else ""
-        print(f"  n-cpu-moe {n:<6}{r['vram_mib']:>9}{free:>7}"
+        print(f"  n-cpu-moe {n:<6}{r['vram_mib']:>9}{r['free_mib']:>7}"
               f"{(r['prefill_tps'] or 0):>13.1f}{(r['decode_tps'] or 0):>12.2f}"
               f"{gain:>+9.0f}%{tag}")
 
     if safe:
         n, r = safe[-1]
         print(f"\n  RECOMMEND {agent}: n_cpu_moe={n} "
-              f"(decode {r['decode_tps']:.2f} t/s, {total_mib - r['vram_mib']} MiB free)")
+              f"(decode {r['decode_tps']:.2f} t/s, {r['free_mib']} MiB free)")
         print(f"  Current config.py value: n_cpu_moe="
               f"{Config.AGENTS[agent]['model_config'].get('n_cpu_moe')}")
     else:
@@ -122,7 +123,7 @@ def main() -> int:
 
     try:
         for agent in agents:
-            sweep(agent, args.n_values, args.ctx, args.safe_free, total)
+            sweep(agent, args.n_values, args.ctx, args.safe_free)
     finally:
         restore_server()
     return 0

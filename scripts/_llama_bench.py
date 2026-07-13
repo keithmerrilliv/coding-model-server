@@ -60,6 +60,20 @@ def gpu_total() -> int:
     return int(out)
 
 
+def gpu_free() -> int:
+    """Free VRAM, MiB, as the driver reports it.
+
+    Use this, NOT (total - used): they disagree by ~550 MiB of reserved/context
+    overhead. LlamaServerManager._check_vram_or_raise gates loads on this exact
+    number, so a headroom figure computed the other way overstates by that gap
+    and will happily recommend a config the VRAM guard then refuses.
+    """
+    out = subprocess.check_output(
+        ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"]
+    ).decode().strip().splitlines()[0]
+    return int(out)
+
+
 def wait_gpu_free(limit: int = 2000, tries: int = 40) -> bool:
     """Poll until VRAM drops below `limit`. Blackwell can take 10-30s to release."""
     for _ in range(tries):
@@ -137,7 +151,8 @@ def measure(flags: list[str], *, binary: str = BINARY, libdir: str = TOOLS,
         requests.post(f"http://127.0.0.1:{PORT}/completion",
                       json={"prompt": "Hello.", "n_predict": 4, "temperature": 0,
                             "cache_prompt": False}, timeout=180)
-        vram = gpu_used()  # model + KV fully resident
+        vram = gpu_used()   # model + KV fully resident
+        free = gpu_free()   # what _check_vram_or_raise will actually see
 
         r = requests.post(f"http://127.0.0.1:{PORT}/completion",
                           json={"prompt": prompt, "n_predict": npred, "temperature": 0,
@@ -145,6 +160,7 @@ def measure(flags: list[str], *, binary: str = BINARY, libdir: str = TOOLS,
         t = r.get("timings", {})
         return {
             "vram_mib": vram,
+            "free_mib": free,
             "prefill_tps": t.get("prompt_per_second"),
             "decode_tps": t.get("predicted_per_second"),
             "prompt_n": t.get("prompt_n"),
