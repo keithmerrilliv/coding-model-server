@@ -445,19 +445,31 @@ Update these after each retrieval step. They help you stay organized and efficie
     # n_cpu_moe=22 is the knee: +11% decode vs 26 with 2.5 GB free (well above the
     # ~1.4 GB swap floor). 21/20 add ~0 decode; 19/18 add +18/+21% but drop under the
     # swap floor and risk the spec_fa78ca9c-style swap OOM.
-    # CHOSE 18 (user override 2026-06-05): max decode (+21%, 83.4 tok/s) accepting
-    # OOM risk. Only ~719 MiB free at peak — BELOW the ~1.4 GB swap floor. Steady-state
-    # is fine (KV is pre-allocated for full 64K), but model-swaps INTO the implementer
-    # from a large resident model (deep_reviewer/architect) may OOM before the old VRAM
-    # releases. The real de-risk is fixing [[project_model_swap_oom]] (free-before-spawn
-    # barrier); until then expect occasional swap-OOM retries. See [[project_llama_server_upgrade]].
+    # WAS 18 (user override 2026-06-05), on the reading that it bought +21% decode.
+    #
+    # CHANGED TO 20 (2026-07-13). Two things forced it:
+    #
+    # 1. At 18 the implementer left only ~496-570 MiB free — under _VRAM_MARGIN_MIB
+    #    (500), so _check_vram_or_raise refused every RELOAD. The first load in a
+    #    process is exempt (nothing recorded yet) and records the footprint; every
+    #    load after that 503'd. Since the watchdog reaps the child after IDLE_TIMEOUT,
+    #    the server bricked itself after ~30 min idle until restarted by hand. This
+    #    was not the "occasional swap-OOM retry" the note above anticipated.
+    # 2. The +21% was an artifact. Decode drifts up ~15% over a session (65->75 tok/s),
+    #    and sweeps walk N descending, so N=18 was always measured LAST, at peak warmth.
+    #    Order-balanced paired runs put 18-vs-20 at ~2% decode, not the 6.7% the
+    #    2026-06-05 sweep reported. scripts/sweep_cpu_moe.py now warms up and takes a
+    #    median over --reps to stop this recurring.
+    #
+    # 20 costs ~2% decode and leaves ~1500 MiB free — clears the VRAM guard AND the
+    # ~1.4 GB swap floor. See [[project_llama_server_child_lifecycle]].
     _MOE_35B = _create_model_config(
         'MODEL_PATH_35B',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf',
         48, 65536, 4608,
         server_extra_args=['--jinja', '--reasoning-format', 'none', '--swa-full'],
         type_k=8, type_v=8,
-        cpu_moe=True, n_cpu_moe=18, n_ubatch=4608,
+        cpu_moe=True, n_cpu_moe=20, n_ubatch=4608,
         repeat_penalty=1.05,
     )
 
