@@ -502,8 +502,18 @@ class LlamaServerManager:
         # don't have to wait for the slow operations.
         with self._swap_lock:
             with self.lock:
+                # Liveness is part of "already correct". A child that dies out
+                # of band — CUDA crash, the OOM-killer, an external kill —
+                # leaves _state == RUNNING behind, because nothing transitions
+                # it. Trusting _state alone made this an early-return no-op, so
+                # the manager never respawned and every later request proxied to
+                # a dead port and 502'd until the unit was restarted by hand.
+                # is_running() has always checked poll(); this has to agree.
+                prev_state = self._state
+                child_alive = self.process is not None and self.process.poll() is None
                 already_correct = (
-                    self._state == _STATE_RUNNING
+                    prev_state == _STATE_RUNNING
+                    and child_alive
                     and self.current_runtime_signature == signature
                 )
                 if already_correct:
@@ -511,7 +521,10 @@ class LlamaServerManager:
                     if agent_id is not None:
                         self.current_agent_id = agent_id
                     return
-                need_swap = self._state == _STATE_RUNNING
+                # Tear down whenever state from a previous child is still
+                # attached: alive (a genuine swap) or dead (stale state to
+                # clear before starting fresh).
+                need_swap = prev_state == _STATE_RUNNING or self.process is not None
                 same_path = (
                     need_swap
                     and self.current_model_path == model_config.get('path')
@@ -523,7 +536,12 @@ class LlamaServerManager:
                 # that share a path. Shut down and reload to honor the new
                 # config. _wait_for_vram_release handles the kernel's async
                 # free.
-                if same_path:
+                if not child_alive:
+                    logger.warning(
+                        "llama-server child is gone (state=%s) — clearing stale "
+                        "state and starting a fresh one", prev_state,
+                    )
+                elif same_path:
                     logger.info(
                         "Runtime swap (same model file, different config) for %s",
                         agent_id or '?',
