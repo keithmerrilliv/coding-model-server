@@ -22,6 +22,7 @@ Kills the live server's llama-server child to free the GPU; the FastAPI server
 stays up and respawns it on the next real request.
 """
 import argparse
+import statistics
 import sys
 
 from _llama_bench import (
@@ -48,12 +49,22 @@ def agent_flags(agent: str, ctx: int | None) -> tuple[str, list[str]]:
 
 
 def sweep(agent: str, n_values: list[int], ctx: int | None,
-          safe_free: int) -> None:
+          safe_free: int, reps: int) -> None:
     binary, base_flags = agent_flags(agent, ctx)
     stripped = strip_moe_flags(base_flags)
     eff_ctx = base_flags[base_flags.index("-c") + 1]
     print(f"\n########## {agent} — {Config.AGENTS[agent]['description']}", flush=True)
     print(f"########## ctx={eff_ctx}  (production argv, offload flag swept)\n", flush=True)
+
+    # Discarded warm-up. Decode climbs ~15% over the first runs of a session
+    # (65 -> 75 tok/s measured 2026-07-13, both arms alike). Because a sweep walks
+    # N in one direction, that ramp lands entirely on whichever end runs last and
+    # masquerades as a real difference: the 2026-06-05 sweep (descending) credited
+    # n_cpu_moe=18 with +6.7% decode over 20, but order-balanced pairs put the true
+    # gap at ~2%. Burn one load before measuring anything.
+    print("  (warm-up load, discarded — absorbs the session ramp)", flush=True)
+    measure(stripped + ["--cpu-moe"], binary=binary, npred=128,
+            log_tag=f"{agent}-warmup")
 
     base = measure(stripped + ["--cpu-moe"], binary=binary, log_tag=f"{agent}-cpumoe")
     print(f"  --cpu-moe baseline: {base}", flush=True)
@@ -64,13 +75,30 @@ def sweep(agent: str, n_values: list[int], ctx: int | None,
 
     rows = []
     for n in n_values:
-        res = measure(stripped + ["--n-cpu-moe", str(n)], binary=binary,
-                      log_tag=f"{agent}-ncmoe{n}")
-        print(f"  n-cpu-moe {n}: {res}", flush=True)
-        if "error" in res:
-            print(f"   -> {res['error']}\n   -> stopping: lower N needs even more VRAM.",
-                  flush=True)
+        # Repeat and take the median: single-shot decode is noisy enough
+        # (up to 13% spread) to invert a 2% difference between neighbouring N.
+        reads = []
+        for rep in range(reps):
+            res = measure(stripped + ["--n-cpu-moe", str(n)], binary=binary,
+                          log_tag=f"{agent}-ncmoe{n}-{rep}")
+            if "error" in res:
+                print(f"  n-cpu-moe {n}: {res}", flush=True)
+                print(f"   -> {res['error']}\n   -> stopping: lower N needs even more VRAM.",
+                      flush=True)
+                reads = []
+                break
+            reads.append(res)
+        if not reads:
             break
+        res = dict(reads[0])
+        res["decode_tps"] = statistics.median(r["decode_tps"] for r in reads)
+        res["prefill_tps"] = statistics.median(r["prefill_tps"] for r in reads)
+        spread = ""
+        if len(reads) > 1:
+            ds = [r["decode_tps"] for r in reads]
+            spread = f"  (n={len(ds)}, {min(ds):.1f}-{max(ds):.1f})"
+        print(f"  n-cpu-moe {n}: decode {res['decode_tps']:.2f} t/s  "
+              f"vram {res['vram_mib']}  free {res['free_mib']}{spread}", flush=True)
         rows.append((n, res))
 
     # Headroom is the driver's memory.free, NOT total-used: they differ by ~550
@@ -107,6 +135,9 @@ def main() -> int:
                    help=f"MiB of VRAM to leave free (default {DEFAULT_SAFE_FREE_MIB})")
     p.add_argument("-n", "--n-values", type=int, nargs="+", default=DEFAULT_N_VALUES,
                    help="N values to sweep, high to low")
+    p.add_argument("--reps", type=int, default=2,
+                   help="measurements per N, median reported (default 2; "
+                        "single-shot decode is noisy enough to invert small gaps)")
     args = p.parse_args()
 
     agents = args.agents or ["implementer"]
@@ -123,7 +154,7 @@ def main() -> int:
 
     try:
         for agent in agents:
-            sweep(agent, args.n_values, args.ctx, args.safe_free)
+            sweep(agent, args.n_values, args.ctx, args.safe_free, args.reps)
     finally:
         restore_server()
     return 0
