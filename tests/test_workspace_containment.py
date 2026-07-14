@@ -48,11 +48,18 @@ def workspace(tmp_path):
 
 def test_bare_relative_path_lands_in_workspace_not_cwd(workspace):
     """The original bug: a bare filename must not follow the process CWD."""
+    repo_copy = os.path.join(ws.REPO_ROOT, "path")
+    # `path` may legitimately exist in the repo — it is the artifact this very bug
+    # produced. So assert the repo copy is *unchanged*, not that it is absent;
+    # asserting absence couples the test to whether someone cleaned it up.
+    before = open(repo_copy, encoding='utf-8').read() if os.path.exists(repo_copy) else None
+
     result = th.write_file_content("path\n// swift-tools-version:5.9\n")
 
     assert "Successfully wrote" in result
     assert os.path.exists(os.path.join(workspace, "path"))
-    assert not os.path.exists(os.path.join(ws.REPO_ROOT, "path"))
+    after = open(repo_copy, encoding='utf-8').read() if os.path.exists(repo_copy) else None
+    assert after == before
 
 
 def test_write_into_repo_is_refused(workspace):
