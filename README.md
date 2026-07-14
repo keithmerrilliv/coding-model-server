@@ -222,10 +222,24 @@ request has no continuation turn.
   or is a read-only `git` subcommand — and contains no shell metacharacters
   (`| & ; $ \` > < ( )`), which could chain past the check. Anything unrecognised
   prompts. Extend with `EXTRA_AUTO_APPROVE_COMMANDS`.
-- **Protected paths**: `.git/`, `.ssh/`, `.gnupg/`, `/etc/`, `/usr/`, `/bin/`,
-  `/sbin/`, plus files like `.env`, `.bashrc`, `id_rsa`, `authorized_keys` —
-  always require confirmation, resolved through `realpath` so a symlink can't
-  smuggle a path past the check.
+- **Protected paths**: always require confirmation, in every permission mode.
+  Covers version control and key material (`.git/`, `.ssh/`, `.gnupg/`), system
+  dirs (`/etc/`, `/usr/`, `/bin/`, `/sbin/`, `/root/`, `/var/db/`), macOS secret
+  stores (Keychains, Safari/Chrome/Firefox cookie and password stores), cloud and
+  registry credentials (`~/.aws/`, `~/.config/gcloud/`, `~/.kube/`, `~/.docker/`,
+  `~/.netrc`, `~/.git-credentials`, `~/.npmrc`, `~/.pypirc`), and files like
+  `.env`, `id_rsa`, `authorized_keys`.
+
+  Both the candidate path *and* the protected roots are resolved through
+  `realpath`, so a symlink can't smuggle a path past the check — and a
+  platform symlink (macOS maps `/etc` to `/private/etc`) can't accidentally
+  disable one either. Matching is boundary-aware, so `/usrfoo` does not match
+  `/usr`.
+
+  This list matters more than it looks: reads are **not** confined to the
+  workspace (the agent needs to read source elsewhere for context), and the agent
+  also has outbound-fetch tools — so an unprompted read of a secret store is the
+  first half of an exfiltration primitive.
 - **Dangerous command warnings**: `rm -r`, `sudo`, `chmod 777`, `git push --force`
   warn even in yolo mode.
 - **Deny rules**: `rm -rf /`, `rm -rf ~`, `find / -delete`, `shutil.rmtree('/')`,
