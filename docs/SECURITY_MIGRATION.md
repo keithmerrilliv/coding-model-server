@@ -276,11 +276,15 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.codingmodel.runner.p
 ./bin/start-mac-runner.sh
 ```
 
-> **Check the plist paths before bootstrapping.** `com.codingmodel.runner.plist`
-> currently hardcodes `WorkingDirectory` / `ProgramArguments` under
-> `/Users/km4/Dev/coding-model-server`, which does not exist — the repo is at
-> `/Users/km4/Dev/qwen-server`. Fix the paths in the plist (or rename the repo
-> directory) or the LaunchAgent will fail to start.
+> **The plist hardcodes absolute paths.** `WorkingDirectory` and
+> `ProgramArguments` point at `/Users/km4/Dev/qwen-server` — LaunchAgent plists
+> expand neither `~` nor environment variables, so if your checkout lives
+> elsewhere (or your username isn't `km4`) edit those two keys before
+> bootstrapping, or the agent will fail to start.
+>
+> The runner also needs `fastapi`, `uvicorn`, `pydantic`, and `pyyaml`, which a
+> `--no-deps` client install (step 0) does **not** provide. Use the full
+> `venv/bin/pip install -e .` on any Mac that actually runs the runner.
 
 Verify:
 
@@ -353,6 +357,6 @@ list.
 - **Rate limiting**: still none. A misbehaving client can DoS the server even when authenticated.
 - **PDF ingest size cap**: `INGEST_MAX_FILE_SIZE` is declared in `.env.example` but not read in code.
 - **Mac runner has no sandbox**: Swift test code executes with the runner user's privileges. Revisit if/when a dedicated builder exists.
-- **Mac runner plist paths**: `com.codingmodel.runner.plist` points at `/Users/km4/Dev/coding-model-server`, a directory that doesn't exist. The LaunchAgent won't start until the paths are corrected.
+- **Stale `Dev/coding-model-server` paths on the Linux server**: the four `systemd/*.service` units and `scripts/monitor_resources.py` hardcode `/home/keith-merrill/Dev/coding-model-server`. The Mac plist had the same bug and is now fixed, but the Linux paths could not be verified from the Mac. Confirm the server's actual checkout directory and correct them — note `EnvironmentFile=-` fails *open*, so a wrong path yields an unauthenticated server rather than a startup error.
 - **pbxproj editing for Xcode projects without existing XCTest targets**: not supported yet — the planner must target projects that already have a test target. SPM (`swift_test`) handles add-new-tests fine via text edits to `Package.swift`.
 - **Binary patches**: the orchestrator ships UTF-8 files only; binary assets (images, asset catalogs) can't currently be added/modified by the LLM. Worktree bases carry whatever binaries exist at `base_ref`.

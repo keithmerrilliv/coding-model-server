@@ -14,13 +14,13 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/km4/Dev/coding-model-server/venv/bin/python</string>
+    <string>/Users/km4/Dev/qwen-server/venv/bin/python</string>
     <string>-m</string>
     <string>mac_runner.server</string>
   </array>
 
   <key>WorkingDirectory</key>
-  <string>/Users/km4/Dev/coding-model-server</string>
+  <string>/Users/km4/Dev/qwen-server</string>
 
   <key>EnvironmentVariables</key>
   <dict>
