@@ -12,6 +12,7 @@ from typing import List
 
 from coding_model_server.tool_state import state
 from coding_model_server.tool_handlers.chunking import chunk_large_output, get_chunk_for_display
+from coding_model_server.tool_handlers.workspace import get_workspace
 from coding_model_server.tool_handlers.safety import (
     _check_dangerous_command,
     _check_deny_rules,
@@ -242,18 +243,26 @@ def execute_remote_command(command, chunk_output=True):
             tmp_path = tmp.name
         state.temp_tracker['add'](tmp_path)
 
-        # Run process redirecting stdout/stderr to the temp file
+        # Run commands from the workspace, not the process CWD (which is the repo
+        # checkout — bin/start-client.sh cds there). This keeps `> out.txt` and
+        # friends inside the workspace.
+        #
+        # Note this is a default, not a sandbox: shell=True can still `cd` out and
+        # write anywhere the user can. Confining that needs real sandboxing (see
+        # "Shell execution" under what-remains-open in docs/SECURITY_MIGRATION.md).
+        # The file tools (WRITE_FILE/EDIT_FILE) *are* hard-confined.
+        workspace = get_workspace()
         try:
             if state.config.ALLOW_SHELL_MODE:
-                state.logger.debug("Running command in shell mode: %s", command)
+                state.logger.debug("Running command in shell mode (cwd=%s): %s", workspace, command)
                 with open(tmp_path, 'w') as f:
-                    result = subprocess.run(command, shell=True, stdout=f, stderr=subprocess.STDOUT, text=True, errors='replace', timeout=state.config.COMMAND_TIMEOUT)
+                    result = subprocess.run(command, shell=True, cwd=workspace, stdout=f, stderr=subprocess.STDOUT, text=True, errors='replace', timeout=state.config.COMMAND_TIMEOUT)
             else:
                 command_args = parse_command_safely(command)
                 command_args = expand_paths_in_args(command_args)
-                state.logger.debug("Running command in safe mode: %s", command_args)
+                state.logger.debug("Running command in safe mode (cwd=%s): %s", workspace, command_args)
                 with open(tmp_path, 'w') as f:
-                    result = subprocess.run(command_args, shell=False, stdout=f, stderr=subprocess.STDOUT, text=True, errors='replace', timeout=state.config.COMMAND_TIMEOUT)
+                    result = subprocess.run(command_args, shell=False, cwd=workspace, stdout=f, stderr=subprocess.STDOUT, text=True, errors='replace', timeout=state.config.COMMAND_TIMEOUT)
         except subprocess.TimeoutExpired:
             state.logger.error("Command timed out: %s", command[:100])
             return f"Error: Command timed out after {state.config.COMMAND_TIMEOUT} seconds. Command: {command[:100]}..."

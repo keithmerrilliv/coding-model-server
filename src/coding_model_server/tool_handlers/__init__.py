@@ -34,6 +34,20 @@ from coding_model_server.tool_handlers.safety import (  # noqa: E402
     _should_auto_approve,
 )
 
+# Workspace containment: relative paths resolve against the workspace root (a
+# temp dir unless set), and writes may not escape it. Re-exported so the client's
+# /workspace command can drive it.
+from coding_model_server.tool_handlers.workspace import (  # noqa: E402
+    REPO_ROOT,
+    WORKSPACE_ENV,
+    get_workspace,
+    is_inside,
+    is_temp_workspace,
+    resolve_for_read,
+    resolve_for_write,
+    set_workspace,
+)
+
 
 def reset_write_counts():
     """Clear per-file and shell-write counters between tasks."""

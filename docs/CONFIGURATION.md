@@ -47,6 +47,7 @@ because every one of them is a VRAM-budget decision that has been measured.
 | `ALLOW_ALL` | *(unset)* | Legacy alias — equivalent to `PERMISSION_MODE=yolo`. |
 | `ALLOW_SHELL_MODE` | `false` | Allow pipes, redirects, and shell features. **Off by default.** |
 | `COMMAND_WHITELIST` | *(none)* | CSV of allowed commands (empty = all allowed) |
+| `CODING_MODEL_WORKSPACE` | *(a fresh temp dir)* | Root the agent's file tools resolve relative paths against, and the only place `WRITE_FILE` / `EDIT_FILE` may write. Writes outside it are **refused in every permission mode, including `yolo`** — this is a hard gate, not a prompt. Shell commands also run with this as their CWD. Unset means a throwaway `coding-model-work-*` temp dir, so an unconfigured session cannot touch a real project. Change it at runtime with `/workspace <dir>`. The server checkout itself is permanently protected and can never be the workspace. |
 | `CODING_MODEL_NATIVE_TOOLS` | *(unset)* | Set to `1` to send an OpenAI `tools` array (native function-calls for `remote_exec`) to agents that define a native-tools system prompt. Otherwise all tools are marker-based. |
 
 ### Memory / RAG

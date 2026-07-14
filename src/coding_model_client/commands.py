@@ -40,6 +40,7 @@ def handle_user_command(user_input, history, model, agent_theme):
 
         print_colored(f"\n{COLORS['BOLD']}SESSION & DISPLAY:{COLORS['ENDC']}", COLORS['BLUE'])
         print(f"  /permissions         - Cycle permission mode (default -> acceptEdits -> yolo)")
+        print(f"  /workspace [dir]     - Show or set where the agent may write (default: a temp dir)")
         print(f"  /verbose             - Toggle verbose/compact tool output display")
         print(f"  /context             - Show context window usage (tokens, budget)")
         print(f"  /compact             - Manually compress conversation history")
@@ -272,6 +273,23 @@ def handle_user_command(user_input, history, model, agent_theme):
         _tool_handlers.set_permission_mode(config.PERMISSION_MODE)
         color = COLORS['FAIL'] if config.PERMISSION_MODE == 'yolo' else COLORS['GREEN']
         print_colored(f"Permission mode: {config.PERMISSION_MODE} — {labels[config.PERMISSION_MODE]}", color)
+        return True, model
+
+    # ── Workspace ─────────────────────────────────────────────────────────
+    if user_input.lower() == '/workspace' or user_input.lower().startswith('/workspace '):
+        parts = user_input.split(maxsplit=1)
+        if len(parts) == 1:
+            current = _tool_handlers.get_workspace()
+            print_colored(f"Workspace: {current}", COLORS['GREEN'])
+            print_colored("  Relative paths resolve here; writes outside it are refused.", COLORS['CYAN'])
+            print_colored("  Set with: /workspace <dir>", COLORS['CYAN'])
+            return True, model
+
+        ok, result = _tool_handlers.set_workspace(parts[1].strip())
+        if ok:
+            print_colored(f"Workspace: {result}", COLORS['GREEN'])
+        else:
+            print_colored(f"Workspace unchanged — {result}", COLORS['FAIL'])
         return True, model
 
     # ── Verbose toggle ────────────────────────────────────────────────────
