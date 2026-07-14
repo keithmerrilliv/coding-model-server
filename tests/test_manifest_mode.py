@@ -1,4 +1,6 @@
 """Unit tests for manifest-mode infra (#4): parser, mode select, summary, builders."""
+import pytest
+
 from coding_model_autonomous import executor
 from coding_model_autonomous.executor import ManifestEntry, ParseError
 
@@ -70,6 +72,76 @@ def test_use_manifest_mode_forced(monkeypatch):
     assert executor.use_manifest_mode(_design_with_files(1)) is True
     monkeypatch.setattr(executor, "IMPLEMENTER_MODE", "single")
     assert executor.use_manifest_mode(_design_with_files(50)) is False
+
+
+# ── manifest detection for designs the file-path regex misses (DEV-27) ────────
+
+_RAILS_DESIGN = """## File Structure
+app/models/user.rb
+app/models/order.rb
+app/controllers/users_controller.rb
+app/controllers/orders_controller.rb
+app/views/users/show.erb
+app/services/billing.rb
+config/routes.rb
+db/schema.rb
+Gemfile
+Dockerfile
+"""
+
+_TREE_DESIGN = """## File Structure
+myapp/
+├── src/
+│   ├── components/
+│   │   ├── Header
+│   │   ├── Footer
+│   ├── hooks/
+│   ├── utils/
+│   ├── pages/
+│   ├── api/
+│   ├── store/
+│   └── types/
+├── tests/
+└── public/
+"""
+
+_PROSE_DESIGN = """## Architecture
+The service is composed of ten modules: an HTTP router, an auth middleware, a
+user service, an order service, a payments adapter, a Postgres repository layer,
+a Redis cache client, a background worker, a metrics exporter, and a CLI entry.
+"""
+
+
+@pytest.mark.parametrize("design", [_RAILS_DESIGN, _TREE_DESIGN, _PROSE_DESIGN],
+                         ids=["other-language", "extension-less-tree", "prose"])
+def test_large_design_triggers_manifest_even_when_file_regex_scores_zero(monkeypatch, design):
+    monkeypatch.setattr(executor, "IMPLEMENTER_MODE", "auto")
+    monkeypatch.setattr(executor, "MANIFEST_FILE_THRESHOLD", 8)
+    # the budget file counter misses these shapes entirely...
+    assert executor.estimate_design_file_count(design) < 8
+    # ...but the unit estimate catches them, so mode selection is correct.
+    assert executor.estimate_design_unit_count(design) >= 8
+    assert executor.use_manifest_mode(design) is True
+
+
+@pytest.mark.parametrize("design", [
+    "## Files\nonly/one.ts",                                  # one file
+    "A small tool with two modules: a parser and a printer.",  # small prose
+    "## Files\nsrc/a.rb\nsrc/b.rb\nGemfile",                   # 3 units, other lang
+])
+def test_small_design_stays_single_call(monkeypatch, design):
+    monkeypatch.setattr(executor, "IMPLEMENTER_MODE", "auto")
+    monkeypatch.setattr(executor, "MANIFEST_FILE_THRESHOLD", 8)
+    assert executor.use_manifest_mode(design) is False
+
+
+def test_unit_count_does_not_disturb_budget_counter():
+    """estimate_design_file_count (budget sizing) must be untouched by the
+    separate mode-selection counter."""
+    five_with_dup = "src/a.ts\nsrc/b.ts\nsrc/c.ts\nsrc/a.ts\nsrc/d.ts"
+    assert executor.estimate_design_file_count(five_with_dup) == 4
+    assert executor.estimate_design_file_count(
+        "Some prose mentioning a function name but no file path at all") == 0
 
 
 # ── summarize_written_files ──────────────────────────────────────────────────
