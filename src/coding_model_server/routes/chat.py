@@ -92,17 +92,21 @@ async def _maybe_inject_rag_context(system_prompt: str, request: ChatCompletionR
     )
 
 
-def _guidance_token_cost(tokenize_fn=None, req_id: str = "req_unknown") -> int:
-    """Token cost of the budget guidance appended to the system prompt.
+def _guidance_token_cost(guidance: str, tokenize_fn=None,
+                         req_id: str = "req_unknown") -> int:
+    """Token cost of the budget guidance appended to the prompt.
 
     The guidance is only built *after* the clamp runs (it needs the clamped
     figure to interpolate), so its cost has to be reserved up front or the
     clamp hands those tokens to the output and the prompt overruns n_ctx.
     The interpolated number shifts the length by a token or two — measure
     with a worst-case value so the reserve is never short. The trailing +1
-    covers the newline that joins it to the system prompt.
+    covers the newline that joins it to the prompt.
+
+    ``guidance`` is whichever variant this caller will actually get — the two
+    differ in length, so reserving for the wrong one under-counts.
     """
-    text = Config.TOKEN_BUDGET_GUIDANCE.format(available_tokens=999999)
+    text = guidance.format(available_tokens=999999)
     if tokenize_fn is not None:
         try:
             return tokenize_fn(text) + 1
@@ -218,16 +222,28 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
 
         n_ctx = model_config.get('n_ctx', 32768)
         # Estimate what actually reaches llama-server. `_build_openai_messages`
-        # drops the agent system prompt — and the guidance appended to it —
-        # when the client sends its own system message, so counting either one
-        # in that case under-allocates the budget by the size of a prompt that
-        # never ships.
+        # drops the agent system prompt when the client sends its own system
+        # message, so counting it in that case under-allocates the budget by
+        # the size of a prompt that never ships.
         client_has_system = (
             bool(request.messages) and request.messages[0].role == "system"
         )
         effective_system = "" if client_has_system else system_prompt
-        guidance_reserve = 0 if client_has_system else _guidance_token_cost(
-            llama_server_manager.tokenize, req_id,
+        # The budget guidance ships either way, but it can't ride the agent
+        # system prompt when that prompt is about to be dropped — which is the
+        # case for every programmatic caller (the whole autonomous pipeline).
+        # Those callers got no guidance at all until this branch existed, i.e.
+        # the agents whose truncation the budget machinery exists to prevent
+        # were the only ones never told to budget. A second system message is
+        # not an option (strict Jinja templates reject it — see
+        # _build_openai_messages), so the core block is folded into the
+        # caller's own system message below, after the clamp resolves.
+        guidance_text = (
+            Config.TOKEN_BUDGET_GUIDANCE_CORE if client_has_system
+            else Config.TOKEN_BUDGET_GUIDANCE
+        )
+        guidance_reserve = _guidance_token_cost(
+            guidance_text, llama_server_manager.tokenize, req_id,
         )
         est_prompt_tokens, clamped_max = _estimate_and_clamp_tokens(
             effective_system, request.messages, n_ctx, request.max_tokens,
@@ -235,8 +251,17 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
             reserve=guidance_reserve,
             req_id=req_id,
         )
-        budget_guidance = Config.TOKEN_BUDGET_GUIDANCE.format(available_tokens=clamped_max)
-        augmented_system = f"{system_prompt}\n{budget_guidance}"
+        budget_guidance = guidance_text.format(available_tokens=clamped_max)
+        if client_has_system:
+            # Append, so the caller's task prompt still leads and the marker
+            # formats it depends on (<<<YAML>>>, <<<DESIGN>>>, <<<FILE:>>>)
+            # keep their position. Still exactly one system message on the wire.
+            request.messages[0].content = (
+                f"{request.messages[0].content}\n{budget_guidance}"
+            )
+            augmented_system = system_prompt  # dropped downstream; kept for clarity
+        else:
+            augmented_system = f"{system_prompt}\n{budget_guidance}"
 
         logger.info(
             "[%s] chat_completions agent=%s stream=%s est_prompt=%d budget=%d n_ctx=%d",

@@ -139,9 +139,56 @@ class Config:
     )
 
     # ── Token budget guidance (injected dynamically) ──
-    TOKEN_BUDGET_GUIDANCE = """# OUTPUT BUDGET: ~{available_tokens} tokens available for your response.
+    #
+    # Two variants, because the two caller populations can honour very
+    # different advice.
+    #
+    # Interactive clients drive a tool-using agent over many turns, so they can
+    # act on "signal continuation" and "assemble the file with shell tools".
+    # Programmatic callers (the autonomous pipeline: architect, implementer,
+    # reviewer, manifest, per-file, synthesis, supervisor, planner) get ONE
+    # shot at a response that a regex then parses. For them:
+    #
+    #   - There is no continuation turn. Nothing in the codebase handles
+    #     <<<CONTINUE>>>, so a model that stops early to emit it produces a
+    #     short file set, and the reviewer reports a bogus "missing file" FAIL.
+    #   - They have no tools, so "use cat to assemble the file" is unfollowable.
+    #   - "Prioritise critical files over auxiliary ones" invites dropping
+    #     required files — the same bogus FAIL by another route.
+    #
+    # So the shared core tells the model to keep each unit whole and to fit by
+    # being terser rather than by omitting; only the interactive variant carries
+    # the continuation protocol and the tool-based advice.
+    _BUDGET_HEADER = """# OUTPUT BUDGET: ~{available_tokens} tokens available for your response.
 
-CRITICAL: Plan your response to fit within this budget. If the task requires more output:
+CRITICAL: Plan your response to fit within this budget."""
+
+    _BUDGET_GUIDELINES = """BUDGET GUIDELINES:
+- ~100 tokens ≈ 75 words or ~4-5 lines of code
+- A typical function: 50-200 tokens
+- A typical file: 200-1000 tokens
+- If budget < 1000: Keep response very concise
+- If budget < 500: Single focused answer only"""
+
+    # Programmatic / single-shot callers. Marker-safe: no <<<CONTINUE>>>, no
+    # tool advice, no instruction that could be read as "omit required output".
+    TOKEN_BUDGET_GUIDANCE_CORE = f"""{_BUDGET_HEADER}
+
+1. NEVER TRUNCATE A UNIT: complete each file, function, or section fully before
+   starting the next. A half-emitted file is worse than a terse one — whatever
+   parses your output treats an unterminated unit as a MISSING unit, not a
+   partial one.
+
+2. FIT BY BEING TERSER, NOT BY OMITTING: if the work is close to the budget,
+   tighten the output — less boilerplate, fewer comments, no restating the task.
+   Do NOT drop, stub, or partially emit anything the task requires, and do NOT
+   invent a continuation marker: this is a single-shot request and there is no
+   continuation turn. Nothing will ask you for the rest.
+
+{_BUDGET_GUIDELINES}"""
+
+    # Interactive, tool-using clients over a multi-turn session.
+    TOKEN_BUDGET_GUIDANCE = f"""{_BUDGET_HEADER} If the task requires more output:
 
 1. PARTITION LARGE TASKS: Break into logical, self-contained sections
    - Each section should be complete and usable on its own
@@ -161,12 +208,7 @@ CRITICAL: Plan your response to fit within this budget. If the task requires mor
 
 4. MAINTAIN ATOMIC INTEGRITY: When context limits prevent delivering a large file in one turn, DO NOT provide a partial rewrite. Instead, use incremental replace calls for specific blocks or write segments to temporary files and use shell tools (like cat) to assemble the complete final file. Always ensure the worktree remains syntactically valid at the end of each turn.
 
-BUDGET GUIDELINES:
-- ~100 tokens ≈ 75 words or ~4-5 lines of code
-- A typical function: 50-200 tokens
-- A typical file: 200-1000 tokens
-- If budget < 1000: Keep response very concise
-- If budget < 500: Single focused answer only"""
+{_BUDGET_GUIDELINES}"""
 
     # ── macOS development toolkit (injected into EXECUTOR_PROMPT) ──
     MACOS_TOOLKIT = """
