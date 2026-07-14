@@ -196,6 +196,7 @@ on day one:
 ```
 /agent <name>        # Switch agent (or use @name inline)
 /permissions         # Cycle default → acceptEdits → yolo
+/workspace [dir]     # Show or set where the agent may write (default: a temp dir)
 /undo                # Revert the last file modification
 /context             # Token/char usage against the budget
 /compact             # Summarize the conversation now

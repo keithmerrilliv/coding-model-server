@@ -40,6 +40,10 @@ class ToolState:
         self.checkpoint_stack: list = []   # [(original_path, checkpoint_path, ts)]
         self.write_counts: dict = {}        # {normalized_path: count}
         self.shell_write_count: int = 0
+        # Root the file tools resolve relative paths against and confine writes
+        # to. None until first use, when tool_handlers.workspace lazily creates a
+        # temp dir (so an unconfigured session cannot write into a real project).
+        self.workspace_root: Optional[str] = None
 
 
 state = ToolState()

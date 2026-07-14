@@ -163,6 +163,7 @@ than a smaller context.
 | Command | Description |
 |---------|-------------|
 | `/permissions` | Cycle permission mode (default/acceptEdits/yolo) |
+| `/workspace [dir]` | Show or set where the agent may write. Defaults to a temp dir; writes outside it are refused in every mode. |
 | `/undo` | Revert the last file modification |
 
 ### Tools

@@ -17,13 +17,20 @@ from coding_model_server.tool_handlers.editing import (
     _sanitize_generated_content,
 )
 from coding_model_server.tool_handlers.safety import _is_protected_path, _should_auto_approve
+from coding_model_server.tool_handlers.workspace import (
+    get_workspace,
+    resolve_for_read,
+    resolve_for_write,
+)
 
 
 def read_file_content(path):
     """Read content of a local file safely"""
     try:
-        # Expand user path
-        full_path = os.path.expanduser(path)
+        # Relative paths resolve against the workspace, not the process CWD.
+        # Reads are NOT confined to it — the agent still needs to read source
+        # elsewhere for context, and protected paths are gated just below.
+        full_path = resolve_for_read(path)
         if not os.path.exists(full_path):
             return f"Error: File not found: {path}"
 
@@ -81,11 +88,13 @@ def write_file_content(payload):
         path = lines[0].strip()
         content = _sanitize_generated_content(lines[1] if len(lines) > 1 else "")
 
-        if not path:
-            return "Error: No file path provided"
-
-        # Expand user path
-        full_path = os.path.expanduser(path)
+        # Workspace containment. Runs before the permission gates below so it
+        # holds in every mode, including yolo — a prompt-based guard would be
+        # auto-approved away, which is how the stray write got here originally.
+        full_path, ws_error = resolve_for_write(path)
+        if ws_error:
+            state.logger.warning("WRITE_FILE refused (workspace): %s", path)
+            return ws_error
         norm_path = os.path.normpath(full_path)
 
         # Write-loop detection: prevent agent from rewriting the same file endlessly
@@ -160,6 +169,14 @@ def write_file_content(payload):
         # Checkpoint before overwriting
         _create_checkpoint(full_path)
 
+        # Create missing parents. A fresh temp workspace is empty, so a path like
+        # "src/foo.py" has nowhere to land; before containment this happened to
+        # work only because the CWD (the repo) already had the directories.
+        # full_path is workspace-contained by now, so this cannot mkdir elsewhere.
+        parent = os.path.dirname(full_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+
         # Write the file
         with open(full_path, 'w', encoding='utf-8') as f:
             f.write(content)
@@ -218,10 +235,11 @@ def edit_file_content(payload):
         path = lines[0].strip()
         edit_content = lines[1] if len(lines) > 1 else ""
 
-        if not path:
-            return "Error: No file path provided"
-
-        full_path = os.path.expanduser(path)
+        # Workspace containment — same gate as WRITE_FILE. An edit is a write.
+        full_path, ws_error = resolve_for_write(path)
+        if ws_error:
+            state.logger.warning("EDIT_FILE refused (workspace): %s", path)
+            return ws_error
 
         if not os.path.exists(full_path):
             return f"Error: File not found: {path}"
@@ -324,7 +342,8 @@ def list_directory(path):
     Returns structured listing with file types, sizes, and modification times.
     """
     try:
-        full_path = os.path.expanduser(path.strip()) if path else os.getcwd()
+        # Bare LIST_DIR shows the workspace, not the CWD (which is the repo).
+        full_path = resolve_for_read(path)
 
         if not os.path.exists(full_path):
             return f"Error: Directory not found: {path}"
@@ -385,11 +404,10 @@ def glob_files(pattern):
         if not pattern:
             return "Error: No glob pattern provided"
 
-        # If pattern doesn't start with / or ., assume current directory
+        # Unrooted patterns glob the workspace, not the CWD (which is the repo).
         if not pattern.startswith('/') and not pattern.startswith('.'):
-            # Check if it's a relative path or just a pattern
             if '/' not in pattern or pattern.startswith('**'):
-                pattern = os.path.join(os.getcwd(), pattern)
+                pattern = os.path.join(get_workspace(), pattern)
 
         # Expand user home if present
         pattern = os.path.expanduser(pattern)

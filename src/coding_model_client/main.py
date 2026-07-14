@@ -135,8 +135,18 @@ def chat(model="implementer", session_name=None):
         COLORS['BLUE']
     )
 
+    # Surface the workspace at startup. It defaults to a throwaway temp dir, and
+    # a silent default is how writes ended up somewhere nobody intended.
+    from coding_model_server import tool_handlers as _th
+    workspace = _th.get_workspace()
+    is_temp = _th.is_temp_workspace()
     print_colored(
-        "\nCommands: /help /exit /agent /clear /resume /permissions /verbose /context /compact /undo /rename /review",
+        f"  Workspace: {workspace}{' (temp — set one with /workspace <dir>)' if is_temp else ''}",
+        COLORS['WARNING'] if is_temp else COLORS['GREEN']
+    )
+
+    print_colored(
+        "\nCommands: /help /exit /agent /clear /resume /permissions /workspace /verbose /context /compact /undo /rename /review",
         COLORS['BLUE']
     )
     if READLINE_AVAILABLE:

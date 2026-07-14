@@ -357,7 +357,8 @@ list.
 
 ## What remains open
 
-- **Shell execution**: `src/coding_model_server/tool_handlers/shell.py:250` still uses `subprocess.run(..., shell=True)` gated by a regex deny-list. The default is now off (`ALLOW_SHELL_MODE=false`), but turning it on still exposes the class of bypasses called out in the audit. A parsed-allowlist rewrite is the proper fix.
+- **Shell execution**: `src/coding_model_server/tool_handlers/shell.py` still uses `subprocess.run(..., shell=True)` gated by a regex deny-list. The default is now off (`ALLOW_SHELL_MODE=false`), but turning it on still exposes the class of bypasses called out in the audit. A parsed-allowlist rewrite is the proper fix.
+- **Shell is not workspace-confined**: `WRITE_FILE` / `EDIT_FILE` are hard-confined to the workspace (see `CODING_MODEL_WORKSPACE` in `docs/CONFIGURATION.md`), and shell commands *run* with the workspace as their CWD — but that is a default, not a jail. With `shell=True` a command can still `cd` out and write anywhere the user can. Confining it needs the same sandboxing the item above calls for.
 - **Scraping SSRF**: `scraping/*` and `ingest_url_content` accept arbitrary URLs and follow redirects. Not addressed in this pass.
 - **Rate limiting**: still none. A misbehaving client can DoS the server even when authenticated.
 - **PDF ingest size cap**: `INGEST_MAX_FILE_SIZE` is declared in `.env.example` but not read in code.

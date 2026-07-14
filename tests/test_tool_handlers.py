@@ -17,11 +17,18 @@ import os
 import pytest
 
 from coding_model_server import tool_handlers as th
+from coding_model_server.tool_state import state
 
 
 @pytest.fixture(autouse=True)
-def configured(monkeypatch):
-    """Configure tool_handlers with test doubles + yolo auto-approve."""
+def configured(monkeypatch, tmp_path):
+    """Configure tool_handlers with test doubles + yolo auto-approve.
+
+    Also points the workspace at this test's tmp_path. The file handlers confine
+    writes to the workspace, and these tests drive them against tmp_path, which
+    is exactly the "working folder" the workspace models. Without this they would
+    be refused — see tests/test_workspace_containment.py.
+    """
     class _Cfg:
         CHUNK_THRESHOLD = 1_000_000   # high so handlers return inline, not chunked
         CHUNK_SIZE = 100_000
@@ -46,7 +53,11 @@ def configured(monkeypatch):
     # yolo REMOTE_EXEC also needs the env opt-in; harmless for file ops.
     monkeypatch.setenv("ALLOW_REMOTE_EXEC_YOLO", "1")
     th.reset_write_counts()
+
+    ok, _ = th.set_workspace(str(tmp_path))
+    assert ok, "test workspace must be settable"
     yield
+    state.workspace_root = None
 
 
 # ── pure security helpers ─────────────────────────────────────────────────────
