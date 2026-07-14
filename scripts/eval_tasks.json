@@ -1,0 +1,42 @@
+[
+  {
+    "id": "stripper_stall",
+    "kind": "bug",
+    "prompt": "This streaming state machine is used to hide a model's <think>...</think> reasoning from a client. For models that never emit a <think> block at all, users report that nothing appears on screen until the whole response has finished generating. Explain the root cause precisely, then fix it.\n\n```python\nclass ThinkingStripper:\n    BUFFERING, PASSTHROUGH = 0, 1\n    MAX_BUFFER = 32768\n    _CLOSE_TAG = '</think>'\n\n    def __init__(self):\n        self.state = self.BUFFERING\n        self.buffer = ''\n\n    def feed(self, token: str) -> str:\n        if self.state == self.PASSTHROUGH:\n            return token\n        self.buffer += token\n        idx = self.buffer.find(self._CLOSE_TAG)\n        if idx != -1:\n            after = self.buffer[idx + len(self._CLOSE_TAG):]\n            self.state = self.PASSTHROUGH\n            self.buffer = ''\n            return after.lstrip()\n        if len(self.buffer) >= self.MAX_BUFFER:\n            self.state = self.PASSTHROUGH\n            out, self.buffer = self.buffer, ''\n            return out\n        return ''\n\n    def flush(self) -> str:\n        out, self.buffer = self.buffer, ''\n        return out\n```"
+  },
+  {
+    "id": "swap_race",
+    "kind": "concurrency",
+    "prompt": "A GPU inference server keeps exactly one model loaded at a time. Requests call `ensure(model)`, which swaps the subprocess if a different model is wanted. Under concurrent load it sometimes kills a subprocess while another request is mid-inference, and sometimes two subprocesses exist at once and the GPU OOMs. Identify every race, then rewrite it correctly.\n\n```python\nclass Manager:\n    def __init__(self):\n        self.lock = threading.Lock()\n        self.proc = None\n        self.current = None\n        self.inflight = 0\n\n    def ensure(self, model):\n        with self.lock:\n            if self.current == model:\n                self.inflight += 1\n                return\n        if self.proc:\n            self.proc.terminate()\n            self.proc.wait()\n        p = subprocess.Popen(['llama-server', '--model', model])\n        wait_for_health()\n        with self.lock:\n            self.proc = p\n            self.current = model\n            self.inflight += 1\n\n    def done(self):\n        with self.lock:\n            self.inflight -= 1\n```"
+  },
+  {
+    "id": "sse_parse",
+    "kind": "bug",
+    "prompt": "This client parses an OpenAI-compatible SSE stream. It works against most servers but silently drops content against one that emits multi-line data fields and sends a non-OpenAI keepalive event. Find every defect and produce a corrected version.\n\n```python\ndef stream(resp):\n    out = []\n    for line in resp.iter_lines(decode_unicode=True):\n        if not line.startswith('data: '):\n            continue\n        data = line[6:]\n        if data == '[DONE]':\n            break\n        obj = json.loads(data)\n        delta = obj['choices'][0]['delta']\n        if 'content' in delta:\n            out.append(delta['content'])\n    return ''.join(out)\n```"
+  },
+  {
+    "id": "token_budget",
+    "kind": "implement",
+    "prompt": "Implement `clamp_max_tokens(system_prompt, messages, requested_max, n_ctx, tokenize)` for an LLM server.\n\nRules: the prompt (system + all messages) plus the generation must fit in `n_ctx`. Return the largest safe `max_tokens`, never exceeding `requested_max`. Reserve a small safety margin for chat-template overhead. If the prompt alone already exceeds the context, raise a `PromptTooLong` error carrying both the prompt size and the limit — do not silently truncate, because a mid-stream truncation corrupts the tool markers this server's clients parse.\n\n`tokenize(text) -> int` is available but is an HTTP round-trip, so call it as few times as possible. Include type hints and handle the degenerate cases."
+  },
+  {
+    "id": "moe_offload",
+    "kind": "reasoning",
+    "prompt": "A 35B-total / 3B-active Mixture-of-Experts model runs under llama.cpp on a 16 GB GPU with 188 GB of system RAM. Using `--n-cpu-moe N`, the first N layers' expert weights stay in system RAM while the rest go on the GPU. Measured decode throughput:\n\n  N=40 -> 53.8 tok/s, 11774 MiB VRAM free\n  N=28 -> 68.7 tok/s,  6060 MiB free\n  N=20 -> 83.2 tok/s,  2474 MiB free\n  N=18 -> 88.2 tok/s,  1544 MiB free\n  N=16 -> 93.7 tok/s,   614 MiB free\n\nExplain the mechanism behind this curve. Is there a knee, or is the trade-off linear? The server must also be able to swap to a different model without OOM, and a VRAM guard refuses any load leaving under 500 MiB free. Which N would you ship, and what exactly are you trading away? Be quantitative."
+  },
+  {
+    "id": "cache_bug",
+    "kind": "bug",
+    "prompt": "This benchmark reports decode throughput by timing two calls and subtracting to cancel out prefill cost. It returns wildly wrong numbers — sometimes negative — against a server that caches prompt prefixes. Explain why, and fix it.\n\n```python\ndef decode_tps(server, prompt, n):\n    t0 = time.time()\n    a = post(server, {'prompt': prompt, 'max_tokens': 1})\n    wall_a = time.time() - t0\n\n    t1 = time.time()\n    b = post(server, {'prompt': prompt, 'max_tokens': n})\n    wall_b = time.time() - t1\n\n    return (b['usage']['completion_tokens'] - a['usage']['completion_tokens']) / (wall_b - wall_a)\n```"
+  },
+  {
+    "id": "retry_backoff",
+    "kind": "implement",
+    "prompt": "Write a decorator `retry(attempts, base_delay, retry_on)` for an HTTP client that talks to a flaky inference backend.\n\nRequirements: exponential backoff with full jitter; honour a `Retry-After` header (seconds or HTTP-date) when the response carries one; never retry a non-idempotent request that has already been partially streamed to the caller; surface the final exception with all prior attempts chained; and make it safe to use on a generator function that yields streamed chunks. Explain which of these requirements are in tension and how you resolved them."
+  },
+  {
+    "id": "test_design",
+    "kind": "tests",
+    "prompt": "Write a pytest suite for a function `strip_thinking(text) -> str` that removes model reasoning from a completed response. It must handle: a full `<think>...</think>` block; an orphaned closing `</think>` with no opener (the chat template consumed the opener); an unclosed `<think>` that was truncated by a token limit; multiple blocks; and text with no reasoning at all. Reasoning may itself contain the literal strings `<think>` and `</think>` inside code fences. State any behaviour that is genuinely ambiguous and say how you chose to resolve it."
+  }
+]
