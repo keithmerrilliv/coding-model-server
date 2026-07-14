@@ -19,6 +19,22 @@ PROTECTED_FILES = [
     'id_rsa', 'id_ed25519', 'authorized_keys', 'known_hosts',
 ]
 
+# Name-only entries (".git", ".ssh") match any path component.
+_PROTECTED_NAMES = tuple(p.rstrip('/') for p in PROTECTED_PATHS if not p.startswith('/'))
+
+# Absolute entries ("/etc") are resolved through realpath once, here, and paired
+# with their original label for the message.
+#
+# The input is realpath'd before comparison (so a symlink pointing *at* a
+# protected dir is still caught), but the roots used to be compared as written.
+# On macOS /etc is itself a symlink to /private/etc, so a realpath'd
+# "/etc/passwd" became "/private/etc/passwd" and matched no root — /etc was
+# silently unprotected on the very machine the client runs on. Resolving both
+# sides fixes it; on Linux realpath("/etc") is just "/etc", so nothing changes.
+_PROTECTED_ROOTS = tuple(
+    (os.path.realpath(p.rstrip('/')), p) for p in PROTECTED_PATHS if p.startswith('/')
+)
+
 
 def _is_protected_path(filepath):
     """Check if a path is protected. Returns (is_protected, reason).
@@ -34,15 +50,18 @@ def _is_protected_path(filepath):
         # If the path doesn't exist yet, fall back to the lexical normpath.
         # Real-world: this happens when WRITE_FILE creates a new file.
         norm = os.path.normpath(expanded)
-    # Check directory components
+
     parts = norm.split(os.sep)
-    for pdir in PROTECTED_PATHS:
-        pdir_clean = pdir.rstrip('/')
-        if pdir_clean in parts:
-            return True, f"inside protected directory '{pdir}'"
-        # Absolute path prefix (e.g., /etc/)
-        if pdir_clean.startswith('/') and norm.startswith(os.path.normpath(pdir_clean)):
-            return True, f"inside protected directory '{pdir}'"
+    for name in _PROTECTED_NAMES:
+        if name in parts:
+            return True, f"inside protected directory '{name}/'"
+
+    for root, label in _PROTECTED_ROOTS:
+        # Boundary-aware: a bare startswith(root) also matched "/usrfoo/bar"
+        # against "/usr", blocking unrelated paths.
+        if norm == root or norm.startswith(root + os.sep):
+            return True, f"inside protected directory '{label}'"
+
     basename = os.path.basename(norm)
     for pfile in PROTECTED_FILES:
         if basename == pfile:
