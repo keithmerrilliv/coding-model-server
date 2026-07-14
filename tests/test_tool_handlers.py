@@ -101,6 +101,52 @@ class TestProtectedPath:
             prot, _ = th._is_protected_path(p)
             assert not prot, f"{p} must not be protected"
 
+    def test_secret_stores_protected(self):
+        """Keychain, browser session stores, and cloud creds.
+
+        Reads are not workspace-confined (the agent needs to read source for
+        context) and the agent has outbound-fetch tools, so an unprompted read
+        here is the first half of an exfiltration primitive.
+        """
+        for p in (
+            "~/Library/Keychains/login.keychain-db",
+            "/Library/Keychains/System.keychain",
+            "~/Library/Cookies/Cookies.binarycookies",
+            "~/Library/Safari/History.db",
+            "~/Library/Application Support/Google/Chrome/Default/Login Data",
+            "~/.aws/credentials",
+            "~/.config/gcloud/credentials.db",
+            "~/.kube/config",
+            "~/.docker/config.json",
+            "~/.netrc",
+            "~/.git-credentials",
+            "~/.npmrc",
+            "~/.pypirc",
+            "~/.password-store/aws.gpg",
+            "~/.mozilla/firefox/p/cookies.sqlite",
+            "~/.ssh/id_ecdsa",
+            "/root/.bashrc",
+        ):
+            prot, _ = th._is_protected_path(p)
+            assert prot, f"{p} must be protected"
+
+    def test_secret_store_names_do_not_over_match(self):
+        """Rooted entries, not bare names: a project dir called Chrome is fine.
+
+        Also guards the paths the tools legitimately live in — the default
+        workspace sits under /var/folders on macOS, and the Mac runner caches
+        under ~/Library. Neither may start prompting.
+        """
+        for p in (
+            "/Users/km4/Dev/proj/Chrome/theme.css",
+            "/Users/km4/Dev/proj/Safari/ext.js",
+            "/var/folders/ab/T/coding-model-work-z/out.txt",
+            "~/Library/Caches/coding-model-runner/worktrees/x",
+            "~/Documents/notes.md",
+        ):
+            prot, why = th._is_protected_path(p)
+            assert not prot, f"{p} must not be protected ({why})"
+
     def test_ordinary_path_not_protected(self, tmp_path):
         prot, _ = th._is_protected_path(str(tmp_path / "notes.txt"))
         assert not prot

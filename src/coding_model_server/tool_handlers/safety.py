@@ -10,29 +10,74 @@ import shlex
 
 from coding_model_server.tool_state import state
 
-# Paths that require explicit user confirmation regardless of permission mode
+# Paths that require explicit user confirmation regardless of permission mode.
+#
+# Two forms, distinguished by shape:
+#   * bare names (".ssh/")      — match ANY path component, at any depth
+#   * rooted paths ("/etc/", "~/.aws/") — match that subtree only
+#
+# Prefer a rooted path unless the directory is genuinely meaningful anywhere.
+# ".git" is; "Chrome" is not — as a bare name it would also flag a project
+# directory that happens to be called Chrome.
+#
+# These produce a confirmation prompt, not a hard denial, so the cost of a false
+# positive is one keystroke. But prompts that fire constantly train people to
+# approve reflexively, so the list stays targeted rather than sweeping: no bare
+# "~/Library/" (the runner caches there), no "/var/" (the default workspace lives
+# under /var/folders on macOS).
 PROTECTED_PATHS = [
-    '.git/', '.ssh/', '.gnupg/', '/etc/', '/usr/', '/bin/', '/sbin/',
+    # Version control + key material, meaningful at any depth.
+    '.git/', '.ssh/', '.gnupg/',
+
+    # System.
+    '/etc/', '/usr/', '/bin/', '/sbin/', '/root/', '/var/db/',
+
+    # macOS secret stores. The Keychain holds signing certs and the iCloud
+    # session; the browser stores hold live session cookies and saved passwords.
+    # The agent has outbound-fetch tools, so an unprompted read here is the first
+    # half of an exfiltration primitive.
+    '~/Library/Keychains/',
+    '/Library/Keychains/',
+    '~/Library/Cookies/',
+    '~/Library/Safari/',
+    '~/Library/Application Support/Google/Chrome/',
+    '~/Library/Application Support/Firefox/',
+
+    # Cloud / registry credentials. Several of these do not exist on this host
+    # today; they are listed so they are covered the day they appear, rather than
+    # being silently unprotected.
+    '~/.aws/', '~/.azure/', '~/.kube/', '~/.docker/', '~/.gem/',
+    '~/.config/gcloud/', '~/.password-store/',
+
+    # Linux browser profiles.
+    '~/.mozilla/', '~/.config/google-chrome/', '~/.config/chromium/',
 ]
 PROTECTED_FILES = [
-    '.env', '.bashrc', '.zshrc', '.profile', '.bash_profile',
-    'id_rsa', 'id_ed25519', 'authorized_keys', 'known_hosts',
+    '.env', '.env.local', '.env.production',
+    '.bashrc', '.zshrc', '.profile', '.bash_profile',
+    'id_rsa', 'id_ed25519', 'id_ecdsa', 'id_dsa',
+    'authorized_keys', 'known_hosts',
+    '.netrc', '_netrc', '.git-credentials', '.npmrc', '.pypirc', '.htpasswd',
+    'credentials', 'credentials.db',
 ]
 
-# Name-only entries (".git", ".ssh") match any path component.
-_PROTECTED_NAMES = tuple(p.rstrip('/') for p in PROTECTED_PATHS if not p.startswith('/'))
+# Bare-name entries match any path component.
+_PROTECTED_NAMES = tuple(
+    p.rstrip('/') for p in PROTECTED_PATHS if not p.startswith(('/', '~'))
+)
 
-# Absolute entries ("/etc") are resolved through realpath once, here, and paired
-# with their original label for the message.
+# Rooted entries are expanded and resolved once, here, and paired with their
+# original label for the message.
 #
-# The input is realpath'd before comparison (so a symlink pointing *at* a
+# The candidate is realpath'd before comparison (so a symlink pointing *at* a
 # protected dir is still caught), but the roots used to be compared as written.
 # On macOS /etc is itself a symlink to /private/etc, so a realpath'd
 # "/etc/passwd" became "/private/etc/passwd" and matched no root — /etc was
 # silently unprotected on the very machine the client runs on. Resolving both
 # sides fixes it; on Linux realpath("/etc") is just "/etc", so nothing changes.
 _PROTECTED_ROOTS = tuple(
-    (os.path.realpath(p.rstrip('/')), p) for p in PROTECTED_PATHS if p.startswith('/')
+    (os.path.realpath(os.path.expanduser(p.rstrip('/'))), p)
+    for p in PROTECTED_PATHS if p.startswith(('/', '~'))
 )
 
 
