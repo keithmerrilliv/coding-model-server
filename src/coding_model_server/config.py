@@ -206,7 +206,7 @@ CRITICAL: Plan your response to fit within this budget."""
 
    The client will automatically request continuation.
 
-4. MAINTAIN ATOMIC INTEGRITY: When context limits prevent delivering a large file in one turn, DO NOT provide a partial rewrite. Instead, use incremental replace calls for specific blocks or write segments to temporary files and use shell tools (like cat) to assemble the complete final file. Always ensure the worktree remains syntactically valid at the end of each turn.
+4. MAINTAIN ATOMIC INTEGRITY: When the budget won't fit a large file in one turn, DO NOT emit a partial rewrite. Build it up across turns instead: <<<WRITE_FILE>>> a complete, syntactically valid first slice, then extend it with successive <<<EDIT_FILE>>> calls, one block at a time. Never assemble a file with shell commands — the tool rules above forbid it, and for good reason: it skips the diff preview and breaks checkpoint/undo. The worktree must be syntactically valid at the end of EVERY turn.
 
 {_BUDGET_GUIDELINES}"""
 
