@@ -65,7 +65,32 @@ class MemoryService:
                     metadata={"hnsw:space": "cosine"} # Cosine similarity for semantic search
                 )
 
-                logger.info("Memory Service initialized successfully.")
+                # An empty collection is not an error — a fresh install has one — but it
+                # is indistinguishable from a working one at query time: every search
+                # simply finds nothing above the relevance threshold and the completion
+                # proceeds without context. No error, no log line. The July 2026 move of
+                # the default path to var/ left the populated DB behind at the repo root
+                # and RAG silently retrieved nothing until someone counted the rows by
+                # hand. So say it once, loudly, at boot.
+                try:
+                    count = self._collection.count()
+                except Exception as e:  # best-effort; never fail startup over a count
+                    logger.info("Memory Service initialized successfully (count unavailable: %s).", e)
+                    return
+
+                if count == 0:
+                    logger.warning(
+                        "Memory collection is EMPTY at %s — RAG retrieval will return nothing "
+                        "for every query, and will do so SILENTLY. If you expected memories "
+                        "here, check CODING_MODEL_MEMORY_DB: a populated database left at "
+                        "another path is the usual cause.",
+                        self.persist_directory,
+                    )
+                else:
+                    logger.info(
+                        "Memory Service initialized successfully (%s documents at %s).",
+                        f"{count:,}", self.persist_directory,
+                    )
                 return
 
             except Exception as e:
