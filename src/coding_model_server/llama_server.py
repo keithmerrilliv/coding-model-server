@@ -104,6 +104,10 @@ class LlamaServerManager:
         # ensure_running call, not just on the swap.
         self.current_agent_id: Optional[str] = None
         self.current_model_config: Optional[dict] = None
+        # Whether the running child's chat template opens a <think> block, which
+        # decides if proxy_stream must withhold tokens. Read from /props at load.
+        # True until proven otherwise — see _probe_expects_thinking.
+        self.current_expects_thinking: bool = True
         # Tuple of fields that must match for the running child to be reused.
         # Path equality alone isn't enough — fast_implementer (n_ctx=196608,
         # n_ubatch=3584) and debugger (n_ctx=131072, n_ubatch=4096) point at
@@ -291,6 +295,7 @@ class LlamaServerManager:
                     self.current_model_path = None
                     self.current_model_config = None
                     self.current_runtime_signature = None
+                    self.current_expects_thinking = True  # back to the safe default
                     self.started_at = None
                 raise RuntimeError(
                     f"llama-server exited with code {process.returncode} during startup"
@@ -299,8 +304,10 @@ class LlamaServerManager:
                 resp = self._session.get(health_url, timeout=2)
                 if resp.status_code == 200:
                     logger.info("llama-server healthy after %.1fs", time.time() - start_t)
+                    expects_thinking = self._probe_expects_thinking()
                     with self.lock:
                         self._state = _STATE_RUNNING
+                        self.current_expects_thinking = expects_thinking
                         self.last_request_time = time.time()
                     self._start_watchdog()
                     return
@@ -315,6 +322,56 @@ class LlamaServerManager:
         # self._swap_lock (which we hold) and clears state to idle.
         self._shutdown_unlocked()
         raise TimeoutError(f"llama-server did not become healthy within {self.HEALTH_TIMEOUT}s")
+
+    def _probe_expects_thinking(self) -> bool:
+        """Does this model's chat template open a <think> block for the assistant?
+
+        If it does, the template swallows the opening tag, so the model's output
+        starts mid-reasoning with only an orphan </think> to close it — and
+        proxy_stream has to withhold every token until that tag arrives. If it
+        does not, there is no reasoning to strip and withholding is pure harm:
+        the whole response lands in one chunk when the stream ends.
+
+        Two signals, and BOTH must say "no reasoning" before we stream:
+        a literal <think> anywhere in the template, and llama.cpp's own
+        supports_preserve_reasoning capability. A hybrid template (Qwen3.6)
+        carries <think> behind an enable_thinking conditional, so the substring
+        test reads True for it — erring toward buffering, which is the safe way
+        to be wrong.
+
+        Any failure to read /props also returns True. Withholding a response is
+        recoverable; leaking reasoning is not. The client executes <<<TOOL>>>
+        markers for real, so a model merely *reasoning about* a shell command
+        would have that command run.
+        """
+        try:
+            resp = self._session.get(
+                f"http://127.0.0.1:{self.LLAMA_SERVER_PORT}/props", timeout=5)
+            resp.raise_for_status()
+            props = resp.json()
+        except (http_requests.RequestException, ValueError) as e:
+            logger.warning("could not read /props (%s); assuming a thinking model "
+                           "and buffering the stream", e)
+            return True
+
+        # /props is advisory metadata, not a load-bearing contract: a shape we
+        # don't recognise must not take the model down. Fall back, don't raise.
+        if not isinstance(props, dict):
+            logger.warning("/props returned %s, not an object; assuming a thinking "
+                           "model and buffering the stream", type(props).__name__)
+            return True
+
+        template = props.get('chat_template')
+        caps = props.get('chat_template_caps')
+        template = template if isinstance(template, str) else ''
+        caps = caps if isinstance(caps, dict) else {}
+        expects = ('<think>' in template) or bool(caps.get('supports_preserve_reasoning'))
+        logger.info(
+            "chat template %s reasoning — streaming is %s",
+            "uses" if expects else "does not use",
+            "buffered until </think>" if expects else "incremental",
+        )
+        return expects
 
     def _shutdown_unlocked(self):
         """Internal: stop the subprocess. Caller must hold self._swap_lock.
@@ -341,6 +398,7 @@ class LlamaServerManager:
             self.current_model_config = None
             self.current_agent_id = None
             self.current_runtime_signature = None
+            self.current_expects_thinking = True  # back to the safe default
             self.started_at = None
 
         pid = proc.pid
@@ -937,7 +995,8 @@ class LlamaServerManager:
             completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
             finish_reason = None
             accumulated_text = []  # Diagnostic: capture full response
-            think_stripper = ThinkingStripper()
+            think_stripper = ThinkingStripper(
+                expect_thinking=self.current_expects_thinking)
 
             try:
                 # _post_with_recovery handles the case where the child died

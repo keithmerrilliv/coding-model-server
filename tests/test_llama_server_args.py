@@ -14,6 +14,7 @@ import os
 from unittest import mock
 
 import pytest
+import requests as http_requests
 
 from coding_model_server.llama_server import LlamaServerManager
 
@@ -162,9 +163,16 @@ def test_start_executes_post_popen_body(mgr, monkeypatch, tmp_path):
     monkeypatch.setattr("coding_model_server.llama_server.subprocess.Popen",
                         lambda *a, **k: fake_proc)
 
-    # 3) /health returns 200 on first poll (health poll uses the shared session)
+    # 3) /health returns 200 on first poll, then /props is read for the chat
+    #    template (both go through the shared session, so route on the URL).
     healthy = mock.Mock(status_code=200)
-    monkeypatch.setattr(mgr._session, "get", lambda *a, **k: healthy)
+    props = mock.Mock(status_code=200)
+    props.json.return_value = {
+        "chat_template": "{%- for m in messages -%}{{ m.content }}{%- endfor -%}",
+        "chat_template_caps": {"supports_preserve_reasoning": False},
+    }
+    monkeypatch.setattr(mgr._session, "get",
+                        lambda url, *a, **k: props if "/props" in url else healthy)
 
     # 4) don't spin up the real idle watchdog thread
     monkeypatch.setattr(mgr, "_start_watchdog", lambda: None)
@@ -173,3 +181,54 @@ def test_start_executes_post_popen_body(mgr, monkeypatch, tmp_path):
 
     assert mgr.current_model_path == "/models/m.gguf"
     assert mgr.process is fake_proc
+    # A template with no <think> means nothing to strip -> stream incrementally.
+    assert mgr.current_expects_thinking is False
+
+
+class TestProbeExpectsThinking:
+    """Which models proxy_stream is allowed to stream token-by-token.
+
+    Getting this wrong in the permissive direction leaks reasoning to a client
+    that EXECUTES <<<TOOL>>> markers, so every unclear case must answer True.
+    """
+
+    def _mgr_with_props(self, mgr, monkeypatch, payload):
+        resp = mock.Mock(status_code=200)
+        resp.json.return_value = payload
+        monkeypatch.setattr(mgr._session, "get", lambda *a, **k: resp)
+        return mgr
+
+    def test_plain_chatml_template_streams(self, mgr, monkeypatch):
+        # Qwen3-Coder-*-Instruct: no <think>, no reasoning caps.
+        self._mgr_with_props(mgr, monkeypatch, {
+            "chat_template": "<|im_start|>assistant\n",
+            "chat_template_caps": {"supports_preserve_reasoning": False},
+        })
+        assert mgr._probe_expects_thinking() is False
+
+    def test_template_opening_a_think_block_buffers(self, mgr, monkeypatch):
+        self._mgr_with_props(mgr, monkeypatch, {
+            "chat_template": "<|im_start|>assistant\n<think>\n",
+            "chat_template_caps": {"supports_preserve_reasoning": False},
+        })
+        assert mgr._probe_expects_thinking() is True
+
+    def test_reasoning_capability_alone_buffers(self, mgr, monkeypatch):
+        # No literal <think>, but llama.cpp says the template handles reasoning.
+        # Either signal is enough to withhold.
+        self._mgr_with_props(mgr, monkeypatch, {
+            "chat_template": "<|im_start|>assistant\n",
+            "chat_template_caps": {"supports_preserve_reasoning": True},
+        })
+        assert mgr._probe_expects_thinking() is True
+
+    def test_unreachable_props_buffers(self, mgr, monkeypatch):
+        def boom(*a, **k):
+            raise http_requests.ConnectionError("refused")
+        monkeypatch.setattr(mgr._session, "get", boom)
+        assert mgr._probe_expects_thinking() is True
+
+    def test_malformed_props_buffers_instead_of_raising(self, mgr, monkeypatch):
+        # A shape we don't recognise must not take the model load down.
+        self._mgr_with_props(mgr, monkeypatch, ["not", "an", "object"])
+        assert mgr._probe_expects_thinking() is True

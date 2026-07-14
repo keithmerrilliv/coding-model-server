@@ -101,14 +101,14 @@ Each agent maps to a model configuration and system prompt, both defined in
 
 | Agent | Role | Model | Active/Total | Context | KV | GPU offload |
 |-------|------|-------|--------------|---------|-----|-------------|
-| `implementer` | Default implementation | Qwen3.6-35B-A3B UD-Q4_K_M | 3B/35B | 64K | Q8_0 | ngl 48, n_cpu_moe 20 |
+| `implementer` | Default implementation | Qwen3.6-35B-A3B UD-Q4_K_M | 3B/35B | 64K | Q8_0 | ngl 41, n_cpu_moe 20 |
+| `ornith` | Implementation (**on eval**) | Ornith-1.0-35B Q4_K_M | 3B/35B | 64K | Q8_0 | ngl 41, n_cpu_moe 20 |
 | `deep_implementer` | Deep reasoning | Qwen3-Coder-Next Q8_0 | 3B/80B | 256K | Q8_0 | ngl 48, cpu_moe |
 | `fast_implementer` | Fast implementation | Qwen3-Coder-30B Q4_K_M | 3B/30B | 64K | Q8_0 | ngl 49, n_cpu_moe 26 |
 | `debugger` | Debugging | Qwen3-Coder-30B Q4_K_M | 3B/30B | 128K | Q8_0 | ngl 49, cpu_moe |
 | `reviewer` | Code review | Qwen3-Coder-30B Q8_0 | 3B/30B | 192K | Q8_0 | ngl 49, cpu_moe |
 | `deep_reviewer` | Deep judgment | Qwen3.5-122B-A10B Q4_K_M | 10B/122B | 256K | Q8_0 | ngl 49, cpu_moe |
 | `architect` | System design | Qwen3-Coder-480B Q2_K_XL | 35B/480B | 32K | Q8_0 | ngl 63, cpu_moe |
-| `lite_architect` | Lite design | Qwen3-Coder-480B IQ1_M | 35B/480B | 32K | Q8_0 | ngl 63, cpu_moe |
 | `dense_architect` | Autonomous planner + architect | Qwen3.6-27B MTP Q4_K_M (dense) | 27B dense | 128K | Q4_0 | ngl 36, MTP speculative decode |
 | `supervisor` | Retry/fail/replan decisions | Qwen3.6-27B MTP Q4_K_M (dense) | 27B dense | 128K | Q4_0 | ngl 36, MTP speculative decode |
 | `moe_implementer` / `moe_architect` | Implementation / architecture | MiniMax M2.5 Q4_K_M | 10B/230B | 116K | Q4_0 | ngl 62, cpu_moe |

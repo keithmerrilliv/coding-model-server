@@ -37,12 +37,12 @@ def _load_fallback_themes():
     AGENT_THEMES.clear()
     defaults = {
         "implementer": "Implementer — Qwen3.5-35B (offline)",
+        "ornith": "Implementer — Ornith-1.0-35B (offline)",
         "deep_implementer": "Implementer — Coder-Next Deep (offline)",
         "fast_implementer": "Implementer — Coder-30B Fast (offline)",
         "architect": "Architect — Coder-480B Ultra (offline)",
         "reviewer": "Reviewer — Coder-30B HD (offline)",
         "debugger": "Debugger — Coder-30B Turbo (offline)",
-        "lite_architect": "Architect — Coder-480B Lite (offline)",
         "moe_implementer": "Implementer — MiniMax M2.5 (offline)",
         "moe_architect": "Architect — MiniMax M2.5 (offline)",
         "dense_architect": "Architect — Qwen3.6-27B (offline)",
