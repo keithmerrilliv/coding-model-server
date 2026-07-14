@@ -233,7 +233,12 @@ class JiraSync:
         # to read in the Jira UI without context-switching.
         try:
             md = (self.db.spec_dir(spec.id) / spec.source_md_path).read_text()
-        except OSError:
+        except OSError as e:
+            # Not fatal — the epic still gets created — but a missing/unreadable
+            # spec file usually means a bad source_md_path or a workspace that
+            # moved, so leave a trail rather than silently shipping a placeholder.
+            logger.warning("jira-sync: spec markdown unavailable for %s (%s): %s",
+                           spec.id, spec.source_md_path, e)
             md = "(spec markdown unavailable)"
         body = (
             f"Autonomous spec `{spec.id}`\n\n"
@@ -316,10 +321,14 @@ class JiraSync:
         spec = self.db.get_spec(event.spec_id)
         if spec is None or not spec.jira_epic_key:
             return
+        import json
         try:
-            import json
             payload = json.loads(event.payload_json) if event.payload_json else {}
-        except Exception:
+        except (ValueError, TypeError) as e:
+            # Bad JSON only degrades a cosmetic comment body, so don't fail the
+            # sync — but log it, and keep the clause narrow so a real error in
+            # the surrounding code isn't swallowed as "empty payload".
+            logger.debug("jira-sync: unparseable payload_json for event %s: %s", event.id, e)
             payload = {}
         body = "**Planner ran**\n\n```json\n" + str(payload) + "\n```"
         try:
@@ -342,10 +351,11 @@ class JiraSync:
         spec = self.db.get_spec(event.spec_id)
         if spec is None or not spec.jira_epic_key:
             return
+        import json
         try:
-            import json
             payload = json.loads(event.payload_json) if event.payload_json else {}
-        except Exception:
+        except (ValueError, TypeError) as e:
+            logger.debug("jira-sync: unparseable payload_json for event %s: %s", event.id, e)
             payload = {}
         body = f"**{label}**\n\n```json\n{payload}\n```"
         try:

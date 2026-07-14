@@ -26,6 +26,7 @@ import shutil
 import subprocess
 import sys
 import textwrap
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -724,9 +725,8 @@ def _dedupe_files_last_wins(
     for i, (path, _content) in enumerate(pairs):
         indexed[path] = i  # last occurrence wins
     deduped = [pairs[i] for i in sorted(indexed.values())]
-    duplicates = sorted({
-        p for p, _ in pairs if [pp for pp, _ in pairs if pp == p].count(p) > 1
-    })
+    counts = Counter(path for path, _ in pairs)
+    duplicates = sorted(path for path, n in counts.items() if n > 1)
     return deduped, duplicates
 
 

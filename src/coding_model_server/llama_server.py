@@ -17,6 +17,7 @@ from threading import Lock, Thread
 from typing import Any, Dict, Iterator, List, Optional
 
 import requests as http_requests
+from requests.adapters import HTTPAdapter
 from fastapi import HTTPException
 
 from coding_model_server.config import Config
@@ -125,6 +126,19 @@ class LlamaServerManager:
         self._active_requests: int = 0
         self._watchdog_thread: Optional[Thread] = None
         self._watchdog_running = False
+        # One shared HTTP session for every call to the llama-server child
+        # (proxy, tokenize, health poll). Without it `requests` opened and tore
+        # down a TCP connection per request on the hot proxy path. The pool is
+        # sized to the chat admission cap so concurrent streams each keep a
+        # warm keep-alive connection instead of contending for one.
+        self._session = http_requests.Session()
+        # Read the admission cap directly rather than importing runtime (which
+        # imports this module — a cycle). Kept in sync with runtime.CHAT_MAX_INFLIGHT.
+        _chat_max = int(os.getenv("CODING_MODEL_CHAT_MAX_INFLIGHT", "5"))
+        _pool = max(_chat_max + 2, 8)
+        _adapter = HTTPAdapter(pool_connections=_pool, pool_maxsize=_pool)
+        self._session.mount("http://", _adapter)
+        self._session.mount("https://", _adapter)
 
     def _build_server_args(self, binary: str, model_config: dict) -> list[str]:
         """Build the llama-server argv from a model config.
@@ -282,7 +296,7 @@ class LlamaServerManager:
                     f"llama-server exited with code {process.returncode} during startup"
                 )
             try:
-                resp = http_requests.get(health_url, timeout=2)
+                resp = self._session.get(health_url, timeout=2)
                 if resp.status_code == 200:
                     logger.info("llama-server healthy after %.1fs", time.time() - start_t)
                     with self.lock:
@@ -442,6 +456,27 @@ class LlamaServerManager:
         """True if any sync/stream request is mid-flight against llama-server."""
         with self.lock:
             return self._active_requests > 0
+
+    # Coarsest keep-alive granularity worth a lock acquisition. The idle
+    # watchdog's timeout is minutes, so refreshing more often than this buys
+    # nothing but per-token lock traffic on the streaming hot path.
+    _KEEPALIVE_THROTTLE_S = 5.0
+
+    def _bump_last_request_time(self) -> None:
+        """Refresh the idle-watchdog keep-alive from inside a stream.
+
+        The streaming loop calls this once per emitted delta. Writing
+        last_request_time there used to be done bare, off-lock — the one place
+        the two-lock discipline was violated (the watchdog reads it under
+        self.lock). Guard the write, but throttle it: the unlocked read is an
+        atomic float load used only to skip the common case, so we take the lock
+        at most once per _KEEPALIVE_THROTTLE_S rather than on every token.
+        """
+        now = time.time()
+        if now - self.last_request_time < self._KEEPALIVE_THROTTLE_S:
+            return
+        with self.lock:
+            self.last_request_time = now
 
     @staticmethod
     def _runtime_signature(mc: dict) -> tuple:
@@ -766,7 +801,7 @@ class LlamaServerManager:
         # Short timeout — /tokenize is CPU-bound and quick. If it stalls
         # this long, llama-server is unhealthy and the caller should
         # fall back rather than blocking the request.
-        resp = http_requests.post(url, json={"content": text}, timeout=5)
+        resp = self._session.post(url, json={"content": text}, timeout=5)
         resp.raise_for_status()
         count = len(resp.json().get("tokens", []))
 
@@ -792,7 +827,7 @@ class LlamaServerManager:
         last_exc = None
         for attempt in range(2):
             try:
-                return http_requests.post(
+                return self._session.post(
                     url, json=payload, stream=stream,
                     timeout=Config.LLAMA_SERVER_REQUEST_TIMEOUT,
                 )
@@ -955,7 +990,7 @@ class LlamaServerManager:
                             # client reassembles parallel calls.
                             tc = delta.get("tool_calls")
                             if tc:
-                                self.last_request_time = time.time()
+                                self._bump_last_request_time()
                                 out_chunk = build_stream_chunk(completion_id, model_id, tool_calls=tc)
                                 yield f"data: {json.dumps(out_chunk)}\n\n"
 
@@ -964,7 +999,7 @@ class LlamaServerManager:
                                 # Strip <think>...</think> blocks from streaming output
                                 filtered = think_stripper.feed(content)
                                 if filtered:
-                                    self.last_request_time = time.time()  # Keep watchdog at bay during long streams
+                                    self._bump_last_request_time()  # Keep watchdog at bay during long streams
                                     out_chunk = build_stream_chunk(completion_id, model_id, content=filtered)
                                     yield f"data: {json.dumps(out_chunk)}\n\n"
                         except json.JSONDecodeError:
