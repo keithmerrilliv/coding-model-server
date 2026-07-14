@@ -284,32 +284,49 @@ This is where the prompt is processed — the most compute-intensive phase:
 4. **Batch processing** — Tokens are processed in micro-batches (`n_ubatch`). Larger batches = fewer GPU kernel launches = faster prefill. This is why bumping ubatch from 512 to 4096 gave 4.6x prefill speedup on Coder-Next.
 5. **Progress event** — The server emits an SSE progress event with prompt token count so the client can display "Prefill: 16.7K / 262K tokens".
 
-**Performance**: Prefill speed varies by ~18x across the configured agents — from ~140 tok/s for the largest CPU-bound MoE models (480B-class architects) to ~2,500 tok/s for small all-on-GPU models (GLM 30B, Coder-30B variants).
+**Performance**: prefill speed varies by ~15x across the roster — from ~220 tok/s
+for the 480B CPU-bound architect to ~3,350 tok/s for a small partial-offload MoE
+(Coder-30B). Decode varies ~13x, from 6 tok/s (architect) to 81 (ornith).
 
-> **This table is a historical snapshot, not the current configuration.** It was
-> measured on the reference hardware (RTX 5080, CUDA 12.8, with `--warmup`) against
-> the **April–May 2026** agent configs — the "Notes" column describes the layout each
-> number was measured under. Several agents have been retuned since (the June 2026
-> `n_cpu_moe` partial-offload sweeps, the June llama-server upgrade, and the July
-> `implementer` `n_cpu_moe` 18→20 fix), and `architect` now runs at
-> ngl=63 with `--cpu-moe` rather than the 4/62 shown here. Re-run the benchmark
-> before trusting any of these figures; treat them as an ordering, not a spec.
+> Measured 2026-07-14 on the reference hardware (RTX 5080 16 GB, CUDA 12.8) against
+> the **current** agent configs, `--warmup` on both benchmarks. Prefill is
+> `benchmark_prefill.py` over a ~5K-token prompt (tok/s = prompt ÷ TTFT). Decode is
+> `benchmark_decode.py --reps 3` (median), which isolates generation by subtracting
+> a 1-token call's wall time from a 200-token call's.
+>
+> **These are end-to-end numbers, measured through the FastAPI server** — what a
+> caller actually experiences. They run a few percent below the raw-llama-server
+> figures recorded in `config.py` (e.g. ornith 80.9 here vs 86.8 in the offload
+> sweep), because those measure the child process in isolation without the proxy
+> hop. Both are correct; they measure different things. Sorted by decode — the rate
+> you feel while output streams. Treat as an ordering on this hardware, not a spec:
+> re-run after any config change (this table exists because the last one didn't).
 
-| Agent | Prompt tokens | Prefill (tok/s) | Notes (config **as measured**) |
-|-------|---------------|-----------------|-------|
-| `native_implementer` | 6,972 | **2,552** | GLM-4.7-Flash, all 47 layers on GPU + cpu_moe |
-| `debugger` | 8,383 | **2,386** | Coder-30B Turbo, 30/48 layers on GPU |
-| `fast_implementer` | 8,666 | **2,309** | Coder-30B Fast, 26/48 layers, 262K ctx |
-| `reviewer` | 9,405 | **1,392** | Coder-30B HD (Q8_0), 21/48 layers |
-| `implementer` | 8,671 | **1,156** | Qwen3.6-35B-A3B, 48/48 layers + cpu_moe (re-measure after swap) |
-| `brainstorm` | 4,521 | **904** | Nemotron-3-Nano, all 52 layers + cpu_moe |
-| `moe_architect` | 7,171 | **749** | MiniMax M2.5, 62/62 layers + cpu_moe |
-| `moe_implementer` | 7,068 | **734** | MiniMax M2.5 (same model, different role) |
-| `deep_implementer` | 6,972 | **675** | Coder-Next 80B, 48/48 layers + cpu_moe |
-| `dense_architect` | — | — | Qwen3.6-27B dense, 20/64 layers (re-measure after swap) |
-| `architect` | 8,787 | **140** | Coder-480B Q2_K_XL, 4/62 layers + YaRN |
+| Agent | Prompt tok | Prefill (tok/s) | Decode (tok/s) | Config as measured |
+|-------|-----------:|----------------:|---------------:|-------|
+| `ornith` | 2,507 | 2,153 | **80.9** | Ornith-35B, ngl 41, n_cpu_moe 18 (on eval) |
+| `implementer` | 2,475 | 2,060 | **75.5** | Qwen3.6-35B-A3B, ngl 41, n_cpu_moe 20 (default) |
+| `native_implementer` | 2,299 | 2,529 | **59.7** | GLM-4.7-Flash, ngl 47, n_cpu_moe 20 |
+| `fast_implementer` | 2,399 | 3,348 | **58.2** | Coder-30B, ngl 49, n_cpu_moe 26, 64K |
+| `brainstorm` | 595 | 581 | **40.1** | Nemotron-3-Nano, ngl 52 cpu_moe, 1M ctx |
+| `debugger` | 2,179 | 2,044 | **37.1** | Coder-30B, ngl 49 cpu_moe, 128K |
+| `deep_implementer` | 2,399 | 383 | **26.9** | Coder-Next 80B, ngl 48 cpu_moe, 256K |
+| `reviewer` | 2,376 | 1,366 | **26.0** | Coder-30B Q8_0, ngl 49 cpu_moe, 192K |
+| `deep_reviewer` | 2,449 | 370 | **20.0** | Qwen3.5-122B, ngl 49 cpu_moe, 256K |
+| `supervisor` | 1,245 | 827 | **11.4** | Qwen3.6-27B dense, ngl 36 MTP |
+| `moe_implementer` | 2,495 | 300 | **11.2** | MiniMax M2.5, ngl 62 cpu_moe, 116K |
+| `moe_architect` | 2,540 | 304 | **11.2** | MiniMax M2.5 (same model, other role) |
+| `dense_architect` | 2,520 | 829 | **10.8** | Qwen3.6-27B dense, ngl 36 MTP |
+| `architect` | 2,449 | 222 | **6.3** | Coder-480B Q2_K_XL, ngl 63 cpu_moe, 32K |
 
-To measure current speeds on your hardware, run `python3 scripts/benchmark_prefill.py --warmup` from the server machine. The `--warmup` flag is important: it discards the first request per agent so model load time is excluded from the TTFT measurement. Without `--warmup`, the slowest agents will appear orders of magnitude slower than they actually are during normal operation.
+`supervisor` and `dense_architect` share one model (Qwen3.6-27B); their 11.4 vs
+10.8 is run-to-run noise, not a real difference. Same for the two MiniMax roles.
+
+To re-measure on your hardware: `python3 scripts/benchmark_prefill.py --warmup`
+and `python3 scripts/benchmark_decode.py -a <agent> --reps 3` from the server
+machine. `--warmup` (prefill) and the discarded first rep (decode) both exist to
+exclude the on-demand model load; without them the slowest agents look orders of
+magnitude worse than they run in practice.
 
 #### Stage 6: Token Generation (Autoregressive Decoding)
 
