@@ -31,6 +31,18 @@ class InsufficientVramError(RuntimeError):
     """
 
 
+class ModelBusyError(RuntimeError):
+    """Raised when a model swap is needed but a live child is mid-request.
+
+    A swap SIGTERMs the shared llama-server child; doing that while another
+    agent's stream is in flight drops that response mid-token. The idle
+    watchdog already refuses to kill while ``_active_requests > 0`` — this
+    mirrors that guard on the swap path. Caller (routes.chat) translates it
+    to a 503 + Retry-After, exactly as it does for InsufficientVramError, so
+    the orchestrator backs off and retries once the in-flight request drains.
+    """
+
+
 # State machine for the llama-server child process. Exposed via snapshot()
 # so the dashboard can show "swap in progress" vs "running" rather than
 # guessing from process.poll().
@@ -531,6 +543,28 @@ class LlamaServerManager:
                 )
 
             if need_swap:
+                # Refuse to swap out a LIVE child while another request is in
+                # flight against it. _shutdown_unlocked() SIGTERMs the shared
+                # child, which would drop that request's stream mid-token. The
+                # idle watchdog already skips its kill while _active_requests > 0
+                # (see _idle_watchdog); this mirrors that guard on the swap path,
+                # surfacing a retryable busy signal the caller turns into a
+                # 503 + Retry-After rather than a blocking wait (which would pin
+                # _swap_lock for another agent's full generation).
+                #
+                # Gated on child_alive so it never blocks the two paths that
+                # legitimately swap with a request "active":
+                #   * chat_completions calls ensure_running BEFORE proxy_*
+                #     increments _active_requests, so the caller's own request
+                #     is never counted here — only *other* agents' requests are.
+                #   * crash recovery (_post_with_recovery) reaches here only with
+                #     a dead child, so child_alive is False and there is no live
+                #     stream left to protect.
+                if child_alive and self.has_active_requests():
+                    raise ModelBusyError(
+                        f"model swap for {agent_id or '?'} deferred: another "
+                        f"request is in flight against the current model — retry shortly"
+                    )
                 # Runtime drift — even if the GGUF file is the same, n_ctx
                 # / sampler bias / server flags can differ between agents
                 # that share a path. Shut down and reload to honor the new

@@ -15,7 +15,7 @@ from requests import exceptions as http_requests_exceptions
 
 from coding_model_server import runtime
 from coding_model_server.config import Config
-from coding_model_server.llama_server import InsufficientVramError
+from coding_model_server.llama_server import InsufficientVramError, ModelBusyError
 from coding_model_server.runtime import chat_admission, llama_server_manager, verify_admin_key
 from coding_model_server.schemas import ChatCompletionRequest, ChatMessage
 
@@ -283,6 +283,18 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
             status_code=503,
             detail=str(e),
             headers={"Retry-After": "30"},
+        )
+    except ModelBusyError as e:
+        # A swap was needed but another agent's request is mid-flight against
+        # the live child. Refusing the swap protects that in-flight stream;
+        # tell the client to back off and retry — same contract as the VRAM
+        # refusal above. The in-flight request drains in seconds.
+        logger.info("[%s] model busy, deferring swap: %s", req_id, e)
+        raw_request.state.error_category = "5xx_model_busy"
+        raise HTTPException(
+            status_code=503,
+            detail=str(e),
+            headers={"Retry-After": "5"},
         )
     except FileNotFoundError as e:
         logger.error("[%s] Model file error: %s", req_id, e)
