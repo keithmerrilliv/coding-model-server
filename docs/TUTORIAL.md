@@ -24,11 +24,17 @@ cd coding-model-server
 ./bin/setup.sh
 ```
 
-This creates a Python venv, installs dependencies (FastAPI, llama-cpp-python, ChromaDB, sentence-transformers), and sets up the directory structure.
+This creates a Python venv, runs `pip install -e .` (FastAPI, ChromaDB,
+sentence-transformers, …), and sets up the directory structure.
+
+You also need the **`tools/llama-server` binary** and its shared libraries. It is
+the only inference backend — every agent runs on it — and `setup.sh` does not
+fetch it for you. (`llama-cpp-python` is still declared in `pyproject.toml`, but
+nothing imports it; the in-process backend was retired in April 2026.)
 
 ### 1.2 Download Models
 
-Models are GGUF files from HuggingFace. Download them to any directory and reference the paths in `src/coding_model_server/server.py`. A good starting point is a single small model:
+Models are GGUF files from HuggingFace. Download them to any directory and reference the paths in `src/coding_model_server/config.py`. A good starting point is a single small model:
 
 ```bash
 # Example: download Qwen3-Coder-30B (3B active MoE, ~22 GB)
@@ -42,7 +48,9 @@ Set `HF_TOKEN` in your environment for authenticated downloads (unauthenticated 
 
 ### 1.3 Configure Your First Model
 
-Open `src/coding_model_server/server.py` and find the `Config` class. Add a model config:
+Open `src/coding_model_server/config.py` and find the `Config` class (this is
+where all model configs, agents, and system prompts live — `server.py` is app
+assembly only). Add a model config:
 
 ```python
 _MY_MODEL = _create_model_config(
@@ -78,9 +86,11 @@ The most important tuning parameter is `n_gpu_layers`. More layers on GPU = fast
 5. Repeat until ~1 GB free remains
 
 ```bash
-# Quick test after starting server:
+# Quick test after starting server (once ADMIN_API_KEY is set in §1.5, the
+# key header is required — without it this returns 401):
 curl -s http://localhost:5000/v1/chat/completions \
   -H "Content-Type: application/json" \
+  -H "X-Admin-Key: $ADMIN_API_KEY" \
   -d '{"model":"implementer","messages":[{"role":"user","content":"Hello"}],"max_tokens":50}'
 ```
 
@@ -98,38 +108,33 @@ chmod 600 ~/.config/coding-model-server/.env
 
 ### 1.6 Start as a Service (Recommended)
 
-Create `/etc/systemd/system/coding-model-server.service`:
+Don't hand-write a unit — the repo ships four, in `systemd/`:
 
-```ini
-[Unit]
-Description=Coding Model Multi-Agent Server (FastAPI)
-After=network.target
-
-[Service]
-Type=simple
-User=your-username
-WorkingDirectory=/path/to/coding-model-server
-Environment=PYTHONUNBUFFERED=1
-ExecStart=/path/to/coding-model-server/venv/bin/python -m coding_model_server.server
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
+| Unit | What it runs |
+|------|--------------|
+| `coding-model-server.service` | The inference API (`python -m coding_model_server.server`) |
+| `coding-model-orchestrator.service` | Autonomous mode daemon (see Part 6) |
+| `coding-model-dashboard.service` | Static dashboard SPA on :3001 |
+| `coding-model-monitor.service` | Resource sampler → `var/server_stats.csv` |
 
 ```bash
+sudo cp systemd/coding-model-server.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable coding-model-server
 sudo systemctl start coding-model-server
 journalctl -u coding-model-server -f  # View logs
 ```
 
+After pulling code or editing a unit, `sudo bash scripts/redeploy.sh` syncs the
+units, reloads, restarts server → orchestrator → dashboard in order, and waits
+for `/health`. The venv is an editable install, so code changes need only a
+restart — never a reinstall.
+
 ## Part 2: Client Setup
 
 ### 2.1 Configure the Client
 
-Edit `coding_model_client/config.py` or set the environment variable:
+Edit `src/coding_model_client/config.py` or set the environment variable:
 
 ```bash
 export CODING_MODEL_SERVER_IP=192.168.1.100  # Your server's IP
@@ -138,8 +143,13 @@ export CODING_MODEL_SERVER_IP=192.168.1.100  # Your server's IP
 ### 2.2 Start the Client
 
 ```bash
-./bin/start-client.sh
+./bin/start-client.sh                    # or: coding-model-client
+./bin/start-client.sh --model architect  # Specific agent
+./bin/start-client.sh --name my-project  # Named session
 ```
+
+`pip install -e .` puts `coding-model-client` on your PATH; it takes the same
+flags as the script.
 
 You'll see the available agents, permission mode, and a prompt. Type a message to start interacting.
 
@@ -178,6 +188,36 @@ You (implementer) > @architect Design a URL shortener then @implementer build it
 
 Sessions persist across restarts. Each session has independent history and tracks the last-used agent.
 
+### 2.6 Slash Commands
+
+`/help` prints the full list with the live agent roster. The ones worth knowing
+on day one:
+
+```
+/agent <name>        # Switch agent (or use @name inline)
+/permissions         # Cycle default → acceptEdits → yolo
+/undo                # Revert the last file modification
+/context             # Token/char usage against the budget
+/compact             # Summarize the conversation now
+/verbose             # Toggle verbose vs compact tool-output display
+/review              # Fan the uncommitted git diff out to 4 judges
+/ingest <path>       # Ingest a PDF into RAG memory (local: prefix = client-side file)
+/ingest-code <dir>   # Ingest a codebase with AST-aware chunking
+/cupertino <query>   # Search Apple docs (local MCP, macOS)
+/apple <tool> <args> # Apple Deep Docs MCP (server-side)
+/scrape [framework]  # Run the documentation scraper
+/resume              # Resume interrupted multi-agent tasks
+```
+
+### 2.7 Permission Modes
+
+- **default** — prompts for every operation.
+- **acceptEdits** — auto-approves file operations; shell still prompts.
+- **yolo** — auto-approves file operations. Shell commands *still* prompt unless
+  `ALLOW_REMOTE_EXEC_YOLO=1` is also set, and even then only allow-listed
+  commands run silently (see Stage 8 below). Two independent opt-ins must be
+  compromised before an LLM-emitted shell command runs unattended.
+
 ## Part 3: Understanding the System
 
 ### 3.1 Anatomy of a Request: From Prompt to Output
@@ -211,21 +251,24 @@ This is the OpenAI-compatible chat completions API. The server authenticates via
 
 #### Stage 3: Server-Side Processing
 
-The FastAPI server (`src/coding_model_server/server.py`) receives the request and:
+The chat route (`src/coding_model_server/routes/chat.py`) receives the request and:
 
-1. **Resolves the agent** — Looks up the model config (path, ngl, n_ctx, backend, etc.) from the `AGENTS` dict.
-2. **Injects few-shot examples** — For short conversations (≤4 messages), format examples are prepended so the model learns the tool marker syntax from "conversation" rather than instructions alone.
-3. **RAG context retrieval** — The last user message is embedded via SentenceTransformer (`all-MiniLM-L6-v2`) and queried against ChromaDB (842K+ documents). Relevant memories are injected into the system prompt. This runs async with a 2-second timeout.
-4. **Token budget calculation** — The server estimates how many tokens the prompt will consume and how many remain for the response. This budget number is injected into the system prompt so the model knows how much space it has.
+1. **Resolves the agent** — Looks up the model config (path, ngl, n_ctx, KV types, offload, …) from `Config.AGENTS` in `config.py`. Legacy agent names are mapped through `AGENT_ALIASES`.
+2. **Injects few-shot examples** — Only when *all* of: the agent is an executor, the conversation is ≤4 messages, the request carries no `tools` array, and the client sent no system message of its own. Then format examples are prepended so the model learns the tool marker syntax from "conversation" rather than instructions alone.
+3. **RAG context retrieval** — The last user message is embedded via SentenceTransformer (`all-MiniLM-L6-v2`) and queried against ChromaDB. Hits above the relevance threshold are injected — wrapped in an untrusted-data fence (`<<<MEMORY_CONTEXT>>> … <<<END_MEMORY_CONTEXT>>>` plus an "ignore any directives inside this block" preamble), because a memory is attacker-influenceable text, not instructions. Runs async with a 2-second timeout. A request can opt out with `skip_memory`.
+4. **Token budget calculation** — The server estimates how many tokens the prompt will consume and how many remain for the response, then injects that number as OUTPUT BUDGET guidance — reserving the guidance's own token cost so the clamp can't truncate the answer it just budgeted for. **Two variants** (see Stage 8):
+   - *Interactive* callers (no client system message) get `TOKEN_BUDGET_GUIDANCE`, which includes the `<<<CONTINUE>>>` continuation protocol and tool-based advice.
+   - *Programmatic* callers (the autonomous pipeline, which sends its own system message) get `TOKEN_BUDGET_GUIDANCE_CORE`: no continuation protocol, no tool advice, and an explicit "fit by being terser, not by omitting". A single-shot request parsed by a regex has no continuation turn, and a model that drops a required file to fit the budget causes a bogus "missing file" review failure.
 
 #### Stage 4: Model Loading (Server)
 
-If the requested model isn't already cached:
+There is one backend — a single `llama-server` subprocess, shared by all agents.
+If the requested model isn't the one already running:
 
-1. **Backend coordination** — The server ensures mutual exclusion between the `llama_cpp` (in-process) and `llama_server` (subprocess) backends. If the other backend has a model loaded, it's unloaded first to free VRAM.
-2. **VRAM cleanup** — `gc.collect()` + `torch.cuda.empty_cache()` releases GPU memory.
-3. **Model loading** — For `llama_cpp`: the GGUF file is memory-mapped and GPU layers are offloaded. For `llama_server`: a subprocess is spawned with the configured flags (`-ngl`, `-c`, `-fa`, `--cpu-moe`, etc.) and the server polls `/health` until ready.
-4. **LRU-1 cache** — Only one model is cached at a time. Loading a different model evicts the previous one.
+1. **Drain** — The swap waits for in-flight requests to finish, then SIGTERMs the current child and waits for the GPU to actually release the VRAM (not merely for the process to exit).
+2. **VRAM check** — A reload that would leave less than 500 MiB free is refused rather than attempted. In practice a swap needs ~1.4 GB of headroom, because the incoming child allocates while the outgoing one is still releasing.
+3. **Spawn** — A new subprocess is launched on port 8081 with the configured flags (`-ngl`, `-c`, `-fa`, `--cpu-moe` / `--n-cpu-moe`, `--jinja`, …) and the server polls its `/health` until ready.
+4. **Idle watchdog** — The child is reaped after 30 minutes idle; in-flight requests block the kill. A child that dies out of band is respawned on the next request.
 
 #### Stage 5: Prefill (GPU + CPU)
 
@@ -240,9 +283,18 @@ This is where the prompt is processed — the most compute-intensive phase:
 4. **Batch processing** — Tokens are processed in micro-batches (`n_ubatch`). Larger batches = fewer GPU kernel launches = faster prefill. This is why bumping ubatch from 512 to 4096 gave 4.6x prefill speedup on Coder-Next.
 5. **Progress event** — The server emits an SSE progress event with prompt token count so the client can display "Prefill: 16.7K / 262K tokens".
 
-**Performance**: Prefill speed varies by ~18x across the configured agents — from ~140 tok/s for the largest CPU-bound MoE models (480B-class architects) to ~2,500 tok/s for small all-on-GPU models (GLM 30B, Coder-30B variants). The benchmark below was measured on the reference hardware (RTX 5080, CUDA 12.8, ~4K-token prompt, with `--warmup` to exclude model load time):
+**Performance**: Prefill speed varies by ~18x across the configured agents — from ~140 tok/s for the largest CPU-bound MoE models (480B-class architects) to ~2,500 tok/s for small all-on-GPU models (GLM 30B, Coder-30B variants).
 
-| Agent | Prompt tokens | Prefill (tok/s) | Notes |
+> **This table is a historical snapshot, not the current configuration.** It was
+> measured on the reference hardware (RTX 5080, CUDA 12.8, with `--warmup`) against
+> the **April–May 2026** agent configs — the "Notes" column describes the layout each
+> number was measured under. Several agents have been retuned since (the June 2026
+> `n_cpu_moe` partial-offload sweeps, the June llama-server upgrade, and the July
+> `implementer` `n_cpu_moe` 18→20 fix), and `architect`/`lite_architect` now run at
+> ngl=63 with `--cpu-moe` rather than the 4/62 shown here. Re-run the benchmark
+> before trusting any of these figures; treat them as an ordering, not a spec.
+
+| Agent | Prompt tokens | Prefill (tok/s) | Notes (config **as measured**) |
 |-------|---------------|-----------------|-------|
 | `native_implementer` | 6,972 | **2,552** | GLM-4.7-Flash, all 47 layers on GPU + cpu_moe |
 | `debugger` | 8,383 | **2,386** | Coder-30B Turbo, 30/48 layers on GPU |
@@ -285,18 +337,27 @@ Each generated token is immediately sent to the client:
 
 #### Stage 8: Tool Extraction and Execution (Client)
 
+Tools run **on the client machine**, under the operator's permission mode. The
+handlers live in `src/coding_model_server/tool_handlers/` — a module that ships
+in the server package but is imported and executed by the client. The server
+never runs a tool; it only emits the markers.
+
 After the full response is received:
 
 1. **Pre-processing** — Strip `<tool_call>` artifacts, `<REACT>` blocks, agentic markers (SCRATCHPAD, PLAN, CONFIDENCE). Normalize git-style SEARCH/REPLACE to standard format.
-2. **Regex extraction** — A regex matches `<{1,3}(TAG_NAME)>{1,3}` patterns (accepts 1-3 brackets to tolerate model variations). Content between tags is captured.
-3. **Dispatch** — Each extracted tag maps to a handler: `REMOTE_EXEC` → shell execution, `WRITE_FILE` → file creation, `EDIT_FILE` → search/replace, etc.
-4. **Permission checking** — Before execution:
-   - Deny rules checked first (unconditional blocks: `rm -rf /`, fork bombs)
-   - Dangerous commands detected (prompts even in yolo mode: `sudo`, `rm -rf`, `chmod 777`)
-   - Protected paths checked (always prompts: `.git/`, `.ssh/`, `.env`)
-   - Permission mode applied (`default` → prompt, `acceptEdits` → auto file ops, `yolo` → auto all)
-5. **Execution** — Tool runs with timeout, output captured. File modifications create checkpoints for `/undo`.
-6. **Output aggregation** — Results from all tools are combined (40KB cap per turn to prevent context overflow).
+2. **Continuation check** — If the response ends in `<<<CONTINUE>>>` (optionally followed by a `REMAINING:` list), the client splits the marker off and asks the model to pick up where it left off, feeding its own REMAINING list back to it. Same path as a hard cut-off (`finish_reason == "length"`). Capped at 5 continuations; exhausting the cap with work outstanding says so rather than presenting a partial answer as finished.
+3. **Regex extraction** — A regex matches `<{1,3}(TAG_NAME)>{1,3}` patterns (accepts 1-3 brackets to tolerate model variations). Content between tags is captured.
+4. **Dispatch** — Each extracted tag maps to a handler: `REMOTE_EXEC` → shell execution, `WRITE_FILE` → file creation, `EDIT_FILE` → search/replace, etc.
+5. **Permission checking** — Before execution:
+   - **Deny rules** — unconditional blocks: `rm -rf /`, `rm -rf ~`, `find / -delete`, `shutil.rmtree('/')`, raw block-device writes, fork bombs.
+   - **Protected paths** — always prompt: `.git/`, `.ssh/`, `.gnupg/`, `/etc/`, `/usr/`, `/bin/`, `/sbin/`, and files like `.env`, `.bashrc`, `id_rsa`, `authorized_keys`. Resolved through `realpath`, so a symlink can't smuggle a path past the check.
+   - **Dangerous-command warnings** — `sudo`, recursive `rm`, `chmod 777`, `git push --force` warn even in yolo.
+   - **Permission mode** — `default` → prompt for everything; `acceptEdits` → auto file ops, shell prompts; `yolo` → auto file ops, and shell **only** if `ALLOW_REMOTE_EXEC_YOLO=1`.
+   - **Allow-list for unattended shell** — the actual security boundary. Even in yolo-with-opt-in, a command runs silently only if it contains no shell metacharacters (`| & ; $ \` > < ( )`) *and* its base binary is read-only (`ls`, `grep`, `jq`, …), build/test tooling (`pytest`, `make`, `cargo`, `xcodebuild`, …), or a read-only `git` subcommand. Anything unrecognised prompts. Extend with `EXTRA_AUTO_APPROVE_COMMANDS`.
+
+   The deny and dangerous-pattern lists are a **backstop**, not the boundary: nothing executes silently on the strength of "the denylist didn't match" — `find / -delete` and `python3 -c "shutil.rmtree(...)"` both used to sail through that way.
+6. **Execution** — Tool runs with timeout, output captured. File modifications create checkpoints for `/undo`.
+7. **Output aggregation** — Results from all tools are combined (40KB cap per turn to prevent context overflow).
 
 #### Stage 9: Agent Loop (Client)
 
@@ -308,10 +369,11 @@ If tools were executed, the cycle repeats:
 4. **Back to Stage 1** — `get_completion()` is called again with the updated history.
 
 The loop continues until:
-- The model produces a response with no tool markers (task complete)
+- The model produces a response with no tool markers **and** no `<<<CONTINUE>>>` signal (task complete)
 - Budget is exhausted (forced synthesis)
 - Turn cap reached (50 turns)
 - Loop detected (3 identical responses)
+- 3 consecutive errors
 - User interrupts (Ctrl+C)
 
 #### Stage 10: Session Persistence
@@ -334,7 +396,7 @@ After each agent response:
 
 ### 3.3 The Agent Loop
 
-The orchestrator (`coding_model_client/orchestrator.py`) runs this cycle:
+The orchestrator (`src/coding_model_client/orchestrator.py`) runs this cycle:
 
 ```
 get_completion() → process tools → append output → get_completion() → ...
@@ -349,14 +411,18 @@ Safety mechanisms prevent infinite loops:
 
 ### 3.4 Context Management
 
-Long conversations are managed through three tiers:
+Long conversations are managed through two tiers:
 
 | Threshold | Action | Cost |
 |-----------|--------|------|
 | 120K chars | Model-generated conversation summary | 1 LLM call |
 | 150K chars | Hard trim (drop oldest 25%) | None (data loss) |
 
-Old tool outputs are compressed at send time (`_compress_history`) without modifying the in-memory history, preserving KV-cache prefix stability for llama-server models.
+Both thresholds are measured on the *compressed* view — what actually gets sent —
+and only after a cheap 100K raw-char short-circuit, so the full pass isn't paid on
+every turn.
+
+Old tool outputs (>500 chars) and large assistant messages (>2000 chars) are compressed at send time (`_compress_history`) to head+tail summaries, without modifying the in-memory history, preserving KV-cache prefix stability.
 
 The `/compact` command triggers model-generated compaction manually.
 
@@ -380,11 +446,11 @@ Find GGUF models on HuggingFace. Key factors:
 - **Total size**: How much RAM/VRAM needed
 - **Quantization**: Q4_K_M (good balance), Q8_0 (higher quality), IQ1_M (extreme compression)
 - **Context window**: Training context size (n_ctx_train)
-- **Architecture**: Check if llama-cpp-python supports it (if not, use llama_server backend)
+- **Architecture**: Check that your `tools/llama-server` build supports it. There is no second backend to fall back to — if llama.cpp can't load it, you need a newer binary.
 
 ### 4.2 Add the Model Config
 
-In `src/coding_model_server/server.py`, add a new model config:
+In `src/coding_model_server/config.py`, add a new model config:
 
 ```python
 # New model: Example-70B Q4_K_M
@@ -393,15 +459,18 @@ In `src/coding_model_server/server.py`, add a new model config:
 _EXAMPLE_70B = _create_model_config(
     'MODEL_PATH_EXAMPLE_70B',
     '/path/to/Example-70B-Q4_K_M.gguf',
-    n_gpu_layers=10,     # Start here, increase until ~1 GB VRAM free
+    n_gpu_layers=10,     # Start here, increase until ~1.4 GB VRAM free
     n_ctx=32768,         # Start conservative, increase if VRAM allows
     n_batch=2048,
-    # backend='llama_server',  # Uncomment if arch not in llama-cpp-python
     # server_extra_args=['--jinja', '--reasoning-format', 'none'],
     type_k=8, type_v=8,  # Q8_0 cache, or use 2 for Q4_0 if VRAM-tight
-    # cpu_moe=True,      # For MoE models on llama_server: huge VRAM savings
+    # cpu_moe=True,      # For MoE models: huge VRAM savings (all experts on CPU)
+    # n_cpu_moe=20,      # Partial split: only the first 20 layers' experts on CPU
 )
 ```
+
+There is **no `backend` parameter** (and no `yarn`) — passing either raises
+`TypeError`. Every model runs on the llama-server subprocess.
 
 ### 4.3 Add the Agent
 
@@ -419,13 +488,15 @@ AGENTS = {
 
 ### 4.4 Add the Theme (Client)
 
-In `coding_model_client/config.py`, add to `THEME_STYLES`:
+In `src/coding_model_client/config.py`, add to `THEME_STYLES`:
 
 ```python
 "example": {"color": COLORS["CYAN"], "icon": "\U0001f4a1", "prompt": "Example"},
 ```
 
-And in `coding_model_client/models.py`, add to the fallback defaults.
+And in `src/coding_model_client/models.py`, add to the fallback defaults. An
+agent with no theme still works — it just renders with the generic 🤖 default
+(as `deep_reviewer` and `supervisor` currently do).
 
 ### 4.5 Tuning VRAM
 
@@ -434,13 +505,20 @@ After adding the model, iterate on `n_gpu_layers`:
 1. Set a low value, restart server, load the model
 2. Check `nvidia-smi` — note free VRAM
 3. Calculate VRAM per layer: `(total_used - baseline) / n_gpu_layers`
-4. Increase layers until ~1 GB remains free
+4. Increase layers until ~**1.4 GB** remains free
 5. If VRAM is tight, switch KV cache to Q4_0: `type_k=2, type_v=2`
 6. If still tight, reduce `n_ctx`
 
+> **Don't tune to the last megabyte.** The loader refuses any *reload* that would
+> leave under 500 MiB free, and a model *swap* needs ~1.4 GB (the incoming child
+> allocates before the outgoing one has released). A config that clears the very
+> first load but not a reload will brick the server once the 30-minute idle
+> watchdog reaps the child — every subsequent load 503s until you restart by hand.
+> This is exactly what `implementer` at `n_cpu_moe=18` did; it now sits at 20.
+
 ### 4.6 MoE Models: The `--cpu-moe` Advantage
 
-For MoE (Mixture of Experts) models on the `llama_server` backend, `cpu_moe=True` is transformative. MoE models have two weight categories per layer:
+For MoE (Mixture of Experts) models, `cpu_moe=True` is transformative. MoE models have two weight categories per layer:
 
 - **Attention weights**: Small (~20-100 MiB/layer), needed for every token
 - **Expert weights**: Large (~1,500-1,700 MiB/layer), sparsely activated
@@ -453,23 +531,27 @@ Without `--cpu-moe`, both go to GPU together, severely limiting ngl. With `--cpu
 | Nemotron 30B | ngl=28, ~2 GB free | ngl=52, 1M context, ~6.5 GB free |
 | MiniMax 230B | ngl=6, ~6 GB free | ngl=62, 98K context, ~4.9 GB free |
 
-After enabling `--cpu-moe`, use the freed VRAM for more context (`n_ctx`) rather than leaving it idle. Mamba-hybrid models like Nemotron are especially efficient because most layers don't need KV cache at all.
+After enabling `--cpu-moe`, spend the freed VRAM — on more context (`n_ctx`), or on pulling experts back onto the GPU (next section). Mamba-hybrid models like Nemotron are especially efficient because most layers don't need KV cache at all.
 
-### 4.7 Handling Unsupported Architectures
+### 4.7 Partial Expert Offload (`n_cpu_moe`)
 
-If `llama-cpp-python` errors on model load ("unknown architecture"), use the subprocess backend:
+`--cpu-moe` is all-or-nothing: every expert on CPU. `n_cpu_moe=N` keeps only the
+**first N layers'** experts on CPU and puts the rest on the GPU. Lower N = more
+experts on GPU = faster decode, bounded by VRAM (the KV cache competes for the
+same space). It overrides `cpu_moe` when set.
 
-```python
-_MY_MODEL = _create_model_config(
-    'MODEL_PATH',
-    '/path/to/model.gguf',
-    10, 32768, 2048,
-    backend='llama_server',
-    server_extra_args=['--jinja', '--reasoning-format', 'none'],
-)
-```
+This is the knob the tuned agents actually use — `implementer` (N=20),
+`fast_implementer` (N=26), `native_implementer` (N=20) — and each one bought its
+decode speedup by trading away context (typically 256K → 64K).
 
-The `tools/llama-server` binary must be present with its shared libraries.
+Sweep it with `scripts/sweep_cpu_moe.py`. Use the script rather than hand-timing:
+decode drifts upward ~15% over a session as things warm, and a naive descending
+sweep therefore flatters whichever N it measures last. The script warms up and
+takes a median over `--reps` for exactly this reason — an earlier hand-sweep
+"showed" +21% for N=18 that turned out to be ~2% once the run order was balanced.
+
+Stop before the VRAM floor (§4.5): the fastest N that OOMs on swap, or bricks the
+server on reload, is not the best N.
 
 ### 4.8 Banning Native Tool Tokens
 
@@ -496,9 +578,19 @@ nvidia-smi
 # RAG database size
 du -sh var/memory_db/
 
-# Active model
+# Health (status, model_loaded bool, agent list) — no auth needed
 curl -s http://localhost:5000/health
+
+# Which model is actually loaded (admin-keyed)
+curl -s http://localhost:5000/v1/admin/active_model -H "X-Admin-Key: $ADMIN_API_KEY"
+
+# Request metrics / GPU stats
+curl -s http://localhost:5000/v1/admin/metrics   -H "X-Admin-Key: $ADMIN_API_KEY"
+curl -s http://localhost:5000/v1/admin/gpu_stats -H "X-Admin-Key: $ADMIN_API_KEY"
 ```
+
+`/health` reports *whether* a model is loaded, not which one — use
+`/v1/admin/active_model` for that.
 
 ### 5.2 Common Issues
 
@@ -508,27 +600,22 @@ curl -s http://localhost:5000/health
 | Model generates `<tool_call>` | Native tokens not banned | Add `logit_bias` for the token IDs |
 | Agent loops on same file | Write-loop or response-loop | Check logs; reduce `repeat_penalty` for the model |
 | Slow TTFT | Long prompt + SWA model | Use `/compact` to reduce context |
-| "Memory retrieval timed out" | Large ChromaDB | Increase timeout in src/coding_model_server/server.py or prune old memories |
+| "Memory retrieval timed out" | Large ChromaDB | Raise the 2s timeout in `src/coding_model_server/routes/chat.py` or prune old memories |
+| Every model load 503s after ~30 min idle | Config tuned under the VRAM reload floor | Raise `n_cpu_moe` / lower `n_ctx` until ≥1.4 GB is free (see §4.5) |
 
-### 5.3 Updating llama-cpp-python
+### 5.3 Updating the llama-server Binary
 
-Pre-built CUDA wheels may not match your CUDA toolkit version. Build from source:
+`tools/llama-server` is a llama.cpp build committed alongside its shared libraries
+(`libggml*.so`, `libllama*.so`, …). Upgrading means dropping in a new build and
+its libs; there is no pip package to update. Keep the previous build (the repo
+has kept them under `.archive/`) — a new binary can change VRAM behavior, and the
+June 2026 upgrade shifted footprints by ~2.7 GB, which invalidated every
+`n_cpu_moe` tuning at once. **Re-sweep after upgrading** (§4.7).
 
-```bash
-source venv/bin/activate
-CMAKE_ARGS="-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=120 -DGGML_CUDA_FORCE_CUBLAS=OFF -DCUDAToolkit_ROOT=/usr/local/cuda-12.8" \
-CUDACXX=/usr/local/cuda-12.8/bin/nvcc \
-pip install llama-cpp-python==X.Y.Z --no-binary llama-cpp-python --no-cache-dir
-```
+> **Blackwell GPU users (RTX 5080/5090):** Build against CUDA 12.8, not 13.x. CUDA 13.x has a compiler bug that silently disables MMQ kernels, causing ~7x prefill regression with cuBLAS fallback. See llama.cpp issues #18331 and #18398.
 
-> **Blackwell GPU users (RTX 5080/5090):** You must use CUDA 12.8, not 13.x. CUDA 13.x has a compiler bug that silently disables MMQ kernels, causing ~7x prefill regression with cuBLAS fallback. See llama.cpp issues #18331 and #18398.
-
-Verify CUDA loaded after install:
-```bash
-python3 -c "import llama_cpp, os; libs=os.listdir(os.path.join(os.path.dirname(llama_cpp.__file__),'lib')); print('CUDA' if any('cuda' in l for l in libs) else 'CPU only')"
-```
-
-After upgrading, models that previously needed `llama_server` backend may work with `llama_cpp` if architecture support was added (e.g., Qwen3.5 support added in 0.3.17).
+(`llama-cpp-python` remains in `pyproject.toml` but nothing imports it — the
+in-process backend is gone. Rebuilding it fixes nothing.)
 
 ### 5.4 Database Maintenance
 
@@ -542,14 +629,67 @@ for col in c.list_collections():
     print(f'{col.name}: {col.count():,} documents')
 "
 
-# Reclaim disk space (run when server is stopped)
-sqlite3 var/memory_db/chroma.sqlite3 "VACUUM;"
+# Prune junk classes (boilerplate, page headers, …) and reclaim disk space
+python3 scripts/cleanup_memory.py --vacuum
 ```
+
+`cleanup_memory.py --vacuum` does the VACUUM for you — no need to stop the server
+and drive `sqlite3` by hand.
 
 ### 5.5 Backup
 
 Back up these directories:
 - `var/memory_db/` — RAG vector database
+- `var/tasks_db/` — Autonomous task store (`tasks.sqlite`) + per-spec artifacts
 - `~/.coding_model_sessions/` — Chat session history
 - `~/.coding_model_checkpoints/` — File modification undo history
 - `.env` — Configuration
+
+## Part 6: Autonomous Mode
+
+Autonomous mode takes a markdown spec and drives it through plan → design →
+implement → review → tests, blocking at a human gate on every major transition.
+It runs in the `coding-model-orchestrator` systemd unit, independent of the
+interactive client.
+
+### 6.1 The Pipeline
+
+```
+spec.md → Planner (dense_architect)  → [plan_approval gate]
+        → Architect                  → [design_approval gate]
+        → Implementer                → [code_review gate]
+        → Reviewer + sandboxed tests → [release_approval gate] → DONE
+```
+
+A planner that needs more information opens a **clarification** gate instead of
+guessing. A rejected gate feeds your notes back to the agent for a retry. With
+`AUTONOMOUS_DESIGN_REVIEW=1` (the default) a reviewer critiques the design and
+the architect gets a revision pass before any code is written.
+
+### 6.2 Driving It
+
+```bash
+coding-model-autonomous submit spec.md           # returns a spec_id
+coding-model-autonomous status <spec_id>         # omit the id to list recent specs
+coding-model-autonomous gates                    # open gates awaiting you
+coding-model-autonomous review <gate_id> --approve
+coding-model-autonomous review <gate_id> --reject --notes "wrong data model"
+coding-model-autonomous events <spec_id>         # event log (alias: logs)
+```
+
+The same operations are available over HTTP (`/v1/autonomous/...`, admin-keyed)
+and in the dashboard, which renders the execution DAG and lets you approve or
+reject a gate with markdown notes. If `JIRA_*` is configured, gates sync to a
+Jira board and you can approve from the emails it sends.
+
+### 6.3 Test Sandboxing
+
+Tests written by an LLM are executed under **bubblewrap** (`--unshare-all`) with a
+**seccomp-BPF** filter — not because the model is assumed hostile, but because
+generated code that shells out is a category of accident you cannot review your
+way out of. `CODING_MODEL_ALLOW_UNSANDBOXED_TESTS=1` disables this and is not
+recommended: tests then run with the orchestrator's own privileges.
+
+Test frameworks are chosen by the planner's `test_strategy` block (`pytest`,
+`jest`, `swift_test`, `xcodebuild_test`). The Swift/Xcode frameworks dispatch to
+the Mac runner over an SSH reverse tunnel; see `docs/CONFIGURATION.md`.

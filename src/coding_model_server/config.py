@@ -149,9 +149,12 @@ class Config:
     # reviewer, manifest, per-file, synthesis, supervisor, planner) get ONE
     # shot at a response that a regex then parses. For them:
     #
-    #   - There is no continuation turn. Nothing in the codebase handles
-    #     <<<CONTINUE>>>, so a model that stops early to emit it produces a
-    #     short file set, and the reviewer reports a bogus "missing file" FAIL.
+    #   - There is no continuation turn on THIS path. The interactive client does
+    #     honour <<<CONTINUE>>> (orchestrator._split_continue_signal, DEV-80), but
+    #     that loop is the client's — the autonomous pipeline calls the API once
+    #     and regex-parses the reply. A programmatic caller's model that stops
+    #     early to emit the marker produces a short file set, and the reviewer
+    #     reports a bogus "missing file" FAIL. Hence: no marker in this variant.
     #   - They have no tools, so "use cat to assemble the file" is unfollowable.
     #   - "Prioritise critical files over auxiliary ones" invites dropping
     #     required files — the same bogus FAIL by another route.
@@ -701,19 +704,19 @@ Update these after each retrieval step. They help you stay organized and efficie
     # 'executor': True means few-shot + fallback extraction are enabled.
     AGENTS = {
         'implementer': _create_agent_config(
-            'Implementer — Qwen3.6-35B-A3B UD-Q4_K_M (3B/35B MoE, 131K ctx, ngl=48 cpu_moe, default)',
+            'Implementer — Qwen3.6-35B-A3B UD-Q4_K_M (3B/35B MoE, 64K ctx Q8_0, ngl=48 n_cpu_moe=20, default)',
             _IMPLEMENTER_SYSTEM_PROMPT,
             _MOE_35B,
             executor=True
         ),
         'deep_implementer': _create_agent_config(
-            'Implementer — Coder-Next Q8_0 (3B/80B MoE, 256K ctx, ngl=48, deep reasoning)',
+            'Implementer — Coder-Next Q8_0 (3B/80B MoE, 256K ctx Q8_0, ngl=48 cpu_moe, deep reasoning)',
             _IMPLEMENTER_SYSTEM_PROMPT,
             _MOE_80B_Q8,
             executor=True
         ),
         'fast_implementer': _create_agent_config(
-            'Implementer — Coder-30B Q4_K_M (3B/30B MoE, 256K ctx, ngl=26, fast)',
+            'Implementer — Coder-30B Q4_K_M (3B/30B MoE, 64K ctx Q8_0, ngl=49 n_cpu_moe=26, fast)',
             _IMPLEMENTER_SYSTEM_PROMPT,
             _MOE_30B_FAST,
             executor=True
@@ -725,7 +728,7 @@ Update these after each retrieval step. They help you stay organized and efficie
             executor=True
         ),
         'reviewer': _create_agent_config(
-            'Reviewer — Coder-30B Q8_0 (3B/30B MoE, 196K ctx Q8_0, ngl=49 cpu_moe ub=3072, high precision)',
+            'Reviewer — Coder-30B Q8_0 (3B/30B MoE, 192K ctx Q8_0, ngl=49 cpu_moe ub=3072, high precision)',
             _REVIEWER_SYSTEM_PROMPT,
             _MOE_30B_HD,
             executor=True
@@ -737,7 +740,7 @@ Update these after each retrieval step. They help you stay organized and efficie
             executor=True
         ),
         'debugger': _create_agent_config(
-            'Debugger — Coder-30B Q4_K_M (3B/30B MoE, 131K ctx, ngl=30, turbo)',
+            'Debugger — Coder-30B Q4_K_M (3B/30B MoE, 128K ctx Q8_0, ngl=49 cpu_moe, turbo)',
             f'You are a debugger. {EXECUTOR_PROMPT}\n\nDEBUGGING WORKFLOW:\n- Use `<<<READ_FILE>>>` to examine source code\n- Use `<<<REMOTE_EXEC>>>` to run tests, check logs, execute debuggers\n- Use `<<<WRITE_FILE>>>` to apply fixes to source files\n- After fixing, use `<<<REMOTE_EXEC>>>` to verify the fix works (compile, run tests)\n\n{TOOL_REFERENCE}',
             _MOE_30B_TURBO,
             executor=True
@@ -749,20 +752,20 @@ Update these after each retrieval step. They help you stay organized and efficie
             executor=True
         ),
         'moe_implementer': _create_agent_config(
-            'Implementer — MiniMax M2.5 Q4_K_M (10B/230B MoE, 116K ctx, ngl=62)',
+            'Implementer — MiniMax M2.5 Q4_K_M (10B/230B MoE, 116K ctx Q4_0, ngl=62 cpu_moe)',
             _IMPLEMENTER_SYSTEM_PROMPT + _UNICODE_GUARD,
             _MOE_230B,
             executor=True
         ),
         'moe_architect': _create_agent_config(
-            'Architect — MiniMax M2.5 Q4_K_M (10B/230B MoE, 116K ctx, ngl=62)',
+            'Architect — MiniMax M2.5 Q4_K_M (10B/230B MoE, 116K ctx Q4_0, ngl=62 cpu_moe)',
             _ARCHITECT_SYSTEM_PROMPT + _UNICODE_GUARD,
             _MOE_230B,
             executor=True
         ),
         # ── Qwen3.6 agents (replaced retired Qwen3.5 architect tier) ──
         'dense_architect': _create_agent_config(
-            'Architect — Qwen3.6-27B Q4_K_M (27B dense, 131K Q4_0 ctx, ngl=40, autonomous default planner+architect)',
+            'Architect — Qwen3.6-27B MTP Q4_K_M (27B dense, 128K Q4_0 ctx, ngl=36 + MTP spec-decode, autonomous default planner+architect)',
             _ARCHITECT_SYSTEM_PROMPT,
             _DENSE_27B,
             executor=True
@@ -770,13 +773,13 @@ Update these after each retrieval step. They help you stay organized and efficie
         # Supervisor — meta-orchestrator. Always invoked with native tools
         # (decide()), never with marker-based shell tools, so executor=False.
         'supervisor': _create_agent_config(
-            'Supervisor — Qwen3.6-27B Q4_K_M (27B dense, decision-only, no shell tools)',
+            'Supervisor — Qwen3.6-27B MTP Q4_K_M (27B dense, decision-only, no shell tools)',
             _SUPERVISOR_SYSTEM_PROMPT,
             _DENSE_27B,
         ),
         # ── Non-Coding Model agents ──
         'brainstorm': _create_agent_config(
-            'Brainstorm — Nemotron-3-Nano Q4_K_M (3.5B/30B Mamba-MoE, 1M ctx, ngl=52, fastest)',
+            'Brainstorm — Nemotron-3-Nano Q4_K_M (3.5B/30B Mamba-MoE, 1M ctx Q8_0, ngl=52 cpu_moe, fastest, no tools)',
             'You are a fast brainstorming assistant. Help the user think through ideas, '
             'explore approaches, outline plans, and draft designs. You are great at rapid '
             'iteration and generating options quickly.\n\n'
@@ -789,7 +792,7 @@ Update these after each retrieval step. They help you stay organized and efficie
             _HYBRID_30B,
         ),
         'native_implementer': _create_agent_config(
-            'Implementer — GLM-4.7-Flash Q4_K_M (3B/30B MoE, 262K ctx, ngl=47, Zhipu AI)',
+            'Implementer — GLM-4.7-Flash Q4_K_M (3B/30B MoE, 64K ctx Q8_0, ngl=47 n_cpu_moe=20, Zhipu AI)',
             _IMPLEMENTER_SYSTEM_PROMPT,
             _MOE_30B_FLASH,
             executor=True,
