@@ -570,7 +570,33 @@ class LlamaServerManager:
 
         First-time loads bypass the check (we have no measurement yet) —
         this is intentional. Once we've successfully loaded an agent and
-        recorded its delta, subsequent loads gate on `free >= delta + margin`.
+        recorded its delta, subsequent loads gate on that measurement.
+
+        The hard floor is ``free >= recorded``, and the margin on top of it is
+        advisory. That asymmetry is the whole point of this function, so it is
+        worth being explicit about why.
+
+        ``recorded`` is not an estimate. It is the delta measured across a load
+        that SUCCEEDED, on this GPU, in this process. So a model that fits in
+        ``recorded`` MiB is not a prediction — it is a fact we observed. Demanding
+        ``recorded + margin`` before allowing the same model back therefore asks
+        for VRAM the load never needed, and for an agent whose footprint lands
+        within ``margin`` of the card's capacity it asks for VRAM that does not
+        exist on the card at all. That check cannot be satisfied by ANY amount of
+        freeing, because there is nothing left to free: the GPU is already idle.
+
+        That is not hypothetical. `implementer` at n_cpu_moe=18 loaded fine and
+        left ~500 MiB free, so `recorded` came to within a margin of the whole
+        card. Every RELOAD then failed — not because VRAM was scarce, but because
+        the arithmetic could never come out true. The first load in a process is
+        exempt (nothing recorded yet), so the server looked healthy right up until
+        the idle watchdog reaped the child, at which point it bricked itself and
+        stayed bricked until a human restarted it. See [[project_llama_server_child_lifecycle]].
+
+        So: refuse only when the model genuinely does not fit (``free < recorded``
+        — something else is holding VRAM we need). When it fits but the margin is
+        not fully covered, load it and say so. A thinner-than-preferred cushion is
+        a risk; refusing forever is a certainty.
         """
         if agent_id is None:
             return
@@ -580,11 +606,19 @@ class LlamaServerManager:
         free = self._gpu_free_mib()
         if free is None:
             return  # nvidia-smi unavailable — proceed and hope for the best
-        needed = recorded + self._VRAM_MARGIN_MIB
-        if free < needed:
+
+        if free < recorded:
             raise InsufficientVramError(
                 f"refusing to load {agent_id}: needs ~{recorded} MiB "
-                f"(+{self._VRAM_MARGIN_MIB} margin) but only {free} MiB free"
+                f"but only {free} MiB free"
+            )
+
+        if free < recorded + self._VRAM_MARGIN_MIB:
+            logger.warning(
+                "[vram] %s fits with only %d MiB to spare (prefer >=%d). Loading "
+                "anyway — it measured %d MiB on a successful load, so it fits. "
+                "Raise n_cpu_moe for this agent if the compute buffer OOMs.",
+                agent_id, free - recorded, self._VRAM_MARGIN_MIB, recorded,
             )
 
     def ensure_running(self, model_config: dict, agent_id: Optional[str] = None):
@@ -698,6 +732,20 @@ class LlamaServerManager:
                                 "[vram] %s footprint: %d MiB (free %d -> %d)",
                                 agent_id, delta, free_before, free_after,
                             )
+                            # Say this at the load that CAUSES it, not 30 minutes
+                            # later. An agent this tight loads fine and serves fine;
+                            # the cost only shows up under memory pressure or on a
+                            # compute-buffer growth during prefill, long after the
+                            # config that caused it stopped being the obvious suspect.
+                            if free_after < self._VRAM_MARGIN_MIB:
+                                logger.warning(
+                                    "[vram] %s leaves only %d MiB free (prefer >=%d). "
+                                    "It will still reload — the guard gates on the "
+                                    "measured footprint, not on the margin — but there "
+                                    "is no cushion for compute-buffer growth or another "
+                                    "process. Raise n_cpu_moe to buy headroom.",
+                                    agent_id, free_after, self._VRAM_MARGIN_MIB,
+                                )
             except Exception as e:
                 logger.error("Failed to start llama-server for %s: %s",
                              model_config.get('path'), e)
