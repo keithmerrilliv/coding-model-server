@@ -75,6 +75,32 @@ class TestProtectedPath:
         prot, _ = th._is_protected_path("/etc/passwd")
         assert prot
 
+    def test_etc_protected_through_platform_symlink(self):
+        """Regression: macOS symlinks /etc -> /private/etc.
+
+        The input is realpath'd but the roots were compared as written, so
+        "/etc/passwd" resolved to "/private/etc/passwd" and matched nothing —
+        /etc was unprotected on the very machine the client runs on.
+        """
+        for p in ("/etc/passwd", "/etc/hosts", "/etc/sudoers"):
+            prot, _ = th._is_protected_path(p)
+            assert prot, f"{p} must be protected"
+
+    def test_symlink_to_protected_path_is_caught(self, tmp_path):
+        """The reason realpath is used at all: a link pointing at a protected file."""
+        link = tmp_path / "innocent.txt"
+        os.symlink("/etc/passwd", str(link))
+
+        prot, _ = th._is_protected_path(str(link))
+
+        assert prot
+
+    def test_protected_prefix_does_not_over_match(self):
+        """Regression: a bare startswith matched "/usrfoo" against "/usr"."""
+        for p in ("/usrfoo/bar", "/etcetera/x", "/binary/x"):
+            prot, _ = th._is_protected_path(p)
+            assert not prot, f"{p} must not be protected"
+
     def test_ordinary_path_not_protected(self, tmp_path):
         prot, _ = th._is_protected_path(str(tmp_path / "notes.txt"))
         assert not prot
