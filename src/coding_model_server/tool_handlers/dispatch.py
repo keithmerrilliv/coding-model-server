@@ -19,7 +19,40 @@ from coding_model_server.tool_handlers.files import (
     read_file_content,
     write_file_content,
 )
+from coding_model_server.tool_handlers.safety import _should_auto_approve
 from coding_model_server.tool_handlers.shell import execute_remote_command
+
+
+# Tools that reach the network. Whatever the agent read this turn can leave the
+# machine through one of these, so they get an approval gate at dispatch time.
+# CUPERTINO / APPLE_DEEP_DOCS also egress, but only to fixed Apple documentation
+# endpoints — they carry no attacker-chosen destination, so they are not gated.
+_OUTBOUND_FETCH_TAGS = frozenset({'WEB_SEARCH', 'DEEP_INGEST'})
+
+
+def _confirm_outbound_fetch(tag, arg):
+    """Gate an outbound-fetch tool before it runs.
+
+    Returns None to proceed, or a denial string to short-circuit dispatch.
+    yolo/acceptEdits auto-approve, consistent with _should_auto_approve on the
+    write path; 'default' mode prompts.
+    """
+    if _should_auto_approve(tag):
+        state.print_colored(
+            f"   Auto-approved outbound fetch ({state.permission_mode} mode)", state.colors['GREEN']
+        )
+        return None
+    state.print_colored(f"\nAgent wants an outbound fetch via {tag}: {arg[:200]}",
+                        state.colors['WARNING'])
+    state.print_colored("   This can send local data off-machine.", state.colors['WARNING'])
+    try:
+        choice = input(f"{state.colors['BOLD']}Allow outbound {tag}? [y/N] > {state.colors['ENDC']}")
+    except (EOFError, KeyboardInterrupt):
+        return f"User cancelled outbound {tag}."
+    if choice.lower() != 'y':
+        state.logger.info("Outbound %s denied by user: %s", tag, arg[:100])
+        return f"User denied outbound {tag}."
+    return None
 
 
 def _normalize_standalone_search_replace(text):
@@ -161,6 +194,19 @@ def process_remote_commands(response_text: str) -> Optional[str]:
         # These get captured as part of the content and corrupt shell commands
         # (the shell interprets </TAG> as input redirection < /TAG>).
         arg = re.sub(r'</\w+>\s*$', '', arg)
+
+        # Outbound-fetch gate. These tools reach the network, so they can carry
+        # off whatever the agent has read this turn — that is the second half of
+        # the read-and-exfil path READ_FILE's protected-path prompt closes the
+        # first half of. Gate them here at the chokepoint, mirroring how the
+        # file and shell handlers gate internally.
+        if tag in _OUTBOUND_FETCH_TAGS:
+            denial = _confirm_outbound_fetch(tag, arg.strip())
+            if denial is not None:
+                res_str = f"[Command {i+1}] {denial}"
+                results.append(res_str)
+                total_len += len(res_str)
+                continue
         try:
             result = handler(arg)
             if result is None:
