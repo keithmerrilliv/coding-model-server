@@ -9,8 +9,13 @@ client, or the orchestrator.
 Two hosts are assumed:
 
 - **Mac dev machine** — `/Users/km4/Dev/qwen-server` (you run the client here).
-- **Linux server** — `/home/keith-merrill/Dev/qwen-server` (runs the server,
-  orchestrator, and monitor via systemd).
+- **Linux server** — `/home/keith-merrill/Dev/coding-model-server` (runs the
+  server, orchestrator, and monitor via systemd).
+
+Note the two checkouts sit at *different* directory names: the Mac was never
+renamed when the project was. The systemd units and `scripts/monitor_resources.py`
+correctly hardcode the Linux path; the Mac LaunchAgent plist did not, and was
+fixed separately.
 
 ---
 
@@ -24,7 +29,7 @@ checkout.
 
 ```sh
 # Linux server — full server dependency set.
-cd ~/Dev/qwen-server && venv/bin/pip install -e .
+cd ~/Dev/coding-model-server && venv/bin/pip install -e .
 
 # Mac dev machine — client only. --no-deps avoids building llama-cpp-python,
 # transformers, and chromadb, none of which the client needs. The client runs
@@ -60,7 +65,7 @@ chmod 600 ~/.config/coding-model-server/.env
 ```sh
 mkdir -p ~/.config/coding-model-server
 chmod 700 ~/.config/coding-model-server
-mv /home/keith-merrill/Dev/qwen-server/.env ~/.config/coding-model-server/.env
+mv /home/keith-merrill/Dev/coding-model-server/.env ~/.config/coding-model-server/.env
 chmod 600 ~/.config/coding-model-server/.env
 ```
 
@@ -357,6 +362,6 @@ list.
 - **Rate limiting**: still none. A misbehaving client can DoS the server even when authenticated.
 - **PDF ingest size cap**: `INGEST_MAX_FILE_SIZE` is declared in `.env.example` but not read in code.
 - **Mac runner has no sandbox**: Swift test code executes with the runner user's privileges. Revisit if/when a dedicated builder exists.
-- **Stale `Dev/coding-model-server` paths on the Linux server**: the four `systemd/*.service` units and `scripts/monitor_resources.py` hardcode `/home/keith-merrill/Dev/coding-model-server`. The Mac plist had the same bug and is now fixed, but the Linux paths could not be verified from the Mac. Confirm the server's actual checkout directory and correct them — note `EnvironmentFile=-` fails *open*, so a wrong path yields an unauthenticated server rather than a startup error.
+- **`EnvironmentFile=-` fails open**: the systemd units tolerate a missing env file by design (the leading dash). If the `.env` is ever moved or mistyped, the server starts with an empty `ADMIN_API_KEY` instead of failing loudly. The startup guard added to `server.py` catches this (it refuses to boot unauthenticated), but the units themselves will not complain — check `journalctl` after any change to the env path.
 - **pbxproj editing for Xcode projects without existing XCTest targets**: not supported yet — the planner must target projects that already have a test target. SPM (`swift_test`) handles add-new-tests fine via text edits to `Package.swift`.
 - **Binary patches**: the orchestrator ships UTF-8 files only; binary assets (images, asset catalogs) can't currently be added/modified by the LLM. Worktree bases carry whatever binaries exist at `base_ref`.
