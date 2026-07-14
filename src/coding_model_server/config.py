@@ -372,24 +372,19 @@ Update these after each retrieval step. They help you stay organized and efficie
         cpu_moe=True, n_ubatch=3072,
     )
 
-    # Lite: IQ1_M variant of the 480B Coder. Same architecture as ULTRA; the
-    # only difference is more aggressive quant (~1.7 bpw vs ~2.7 bpw). Migrated
-    # 2026-04-28 to llama_server + cpu_moe to mirror ULTRA's recipe — the
-    # default llama_cpp / ngl=4 layout left ~14 of the 480B's expert mass on
-    # CPU in a non-cpu_moe layout, which hurts decode bandwidth even more
-    # than for ULTRA because IQ1_M's per-token byte count is already lower.
-    # Q8_0 KV at 32K (capped here, not native 256K) — see
-    # feedback_kv_quant_preference: at this model's KV layout (8 heads × 62
-    # layers × 64 head_dim) Q8_0 KV at 256K would need ~33 GB on its own.
-    # 32K is the largest ctx where Q8_0 KV still fits.
-    _MOE_480B_LITE = _create_model_config(
-        'MODEL_PATH_480B_LITE',
-        '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/Qwen3-Coder-480B-A35B-Instruct-UD-IQ1_M.gguf',
-        63, 32768, 4096,
-        server_extra_args=['--chat-template', 'chatml', '--swa-full'],
-        logit_bias=[[151657, -100.0], [151658, -100.0]],
-        cpu_moe=True, n_ubatch=4096,
-    )
+    # Retired 2026-07-14: _MOE_480B_LITE (the 480B at IQ1_M, ~1.7 bpw) backed a
+    # `lite_architect` agent that existed to be the *fast* architect. It wasn't.
+    # Measured A/B against ULTRA (median of 3, llama.cpp's own timings):
+    #   architect      Q2_K_XL  180.3 GB   6.38 tok/s decode   14,456 MiB VRAM
+    #   lite_architect IQ1_M    149.7 GB   6.80 tok/s decode   14,206 MiB VRAM
+    # Decode here is bandwidth-bound on 35B active experts crossing DDR5, so a
+    # 17% smaller model should have decoded ~20% faster. It managed 6.6% — the
+    # IQ1 kernel ate two thirds of the win (REPACK covers Q4_0/Q4_K/IQ4_NL, not
+    # IQ1_M). Paying a 2.7 -> 1.7 bpw quality cliff, on the one agent whose whole
+    # job is reasoning quality, to buy 0.42 tok/s that no human perceives.
+    # The GGUF is still on disk; restore this block and the agent entry if you
+    # ever want the 30 GB of RAM headroom back (180.3 GB leaves only ~8 GB free).
+    # The real lever is fewer ACTIVE params, not fewer bits: see Qwen3.5-397B-A17B.
 
     # Ultra: Premium reasoning using Q2_K_XL on 192GB RAM.
     # llama_server + cpu_moe → all 62 attention sublayers + output on GPU
@@ -508,10 +503,70 @@ Update these after each retrieval step. They help you stay organized and efficie
     #
     # 20 costs ~2% decode and leaves ~1500 MiB free — clears the VRAM guard AND the
     # ~1.4 GB swap floor. See [[project_llama_server_child_lifecycle]].
+    #
+    # ngl 48 -> 41 (2026-07-14). The model has 40 blocks, not 48, so llama.cpp was
+    # silently clamping: no behaviour change, but the config, its description, and
+    # the README all advertised a layer count this model does not have. 41 is the
+    # honest spelling of "all 40 blocks + the output layer" — llama.cpp counts
+    # output as the 41st, the same convention as architect's ngl=63 over 62 blocks.
+    # NOT 40: that would leave the output layer on CPU, and it runs every token.
     _MOE_35B = _create_model_config(
         'MODEL_PATH_35B',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf',
-        48, 65536, 4608,
+        41, 65536, 4608,
+        server_extra_args=['--jinja', '--reasoning-format', 'none', '--swa-full'],
+        type_k=8, type_v=8,
+        cpu_moe=True, n_cpu_moe=20, n_ubatch=4608,
+        repeat_penalty=1.05,
+    )
+
+    # Ornith-1.0-35B Q4_K_M — 21.2 GB, official GGUF from DeepReinforce (MIT).
+    # Post-trained on Qwen3.5, so general.architecture is `qwen35moe`, which
+    # build 5343f45 already speaks — no patch, no upgrade.
+    #
+    # Same 3B/35B MoE shape as _MOE_35B, but NOT the same layout, so its flags
+    # are not copied from it:
+    #   block_count 40 (not 48)   -> ngl=41 puts all 40 attn layers + output on GPU
+    #   context_length 262144
+    #   16 heads / 2 KV heads     -> 8:1 GQA, so Q8_0 KV at 64K costs only ~1.4 GB
+    #   256 experts, 8 active
+    #
+    # On evaluation, not yet a default: the lab is near-unknown and its headline
+    # numbers (SWE-bench Verified 75.6, Terminal-Bench 2.1 64.2 — which would beat
+    # every agent here at 3B active) are self-reported with no third-party
+    # replication. Treated as a claim to test, not a fact. Speed is settled
+    # (below); quality is NOT — that needs a real eval, not a decode benchmark.
+    #
+    # Expert-offload sweep 2026-07-14 (median of 2, warm-up discarded, 64K Q8_0):
+    #   n_cpu_moe=40 -> 53.78 tok/s @ 11,774 MiB free   (all experts on CPU)
+    #             32 -> 62.65          @  7,920
+    #             28 -> 68.74          @  6,060
+    #             24 -> 74.94          @  4,266
+    #             22 -> 79.20          @  3,338
+    #             20 -> 83.18          @  2,474   <- chosen
+    #             18 -> 88.19          @  1,544
+    #             16 -> 93.66          @    614   (under _VRAM_MARGIN_MIB; would brick)
+    # No knee: decode trades off against VRAM almost linearly, so this is purely
+    # a headroom decision. 18 clears the ~1,400 MiB swap floor by only 144 MiB.
+    # Chose 20 instead — it holds 2,474 MiB free (MORE headroom than implementer's
+    # 1,842) and still beats it on decode. The 2026-07-13 note above is the reason
+    # to be conservative here: implementer ran at 18, dipped under _VRAM_MARGIN_MIB
+    # on reload, and bricked the server after every idle-watchdog reap.
+    #
+    # Same-session head-to-head, both at n_cpu_moe=20 (a true apples-to-apples:
+    # the two models are architecturally IDENTICAL — 40 blocks, 16 heads, 2 KV
+    # heads, 2048 embedding — so the same N offloads the same fraction of experts):
+    #   implementer  80.74 tok/s | prefill 238.4 | 1,842 MiB free   (22.1 GB file)
+    #   ornith       83.18 tok/s | prefill 242.3 | 2,474 MiB free   (21.2 GB file)
+    # The ~3% decode edge and the ~630 MiB of extra headroom are just the 0.9 GB
+    # smaller file: decode is bandwidth-bound, so tok/s tracks bytes-per-token
+    # almost exactly. There is no architectural advantage here. Ornith is a
+    # fine-tune of the same shape, so SPEED IS A WASH and the only question that
+    # matters is quality — which a decode benchmark cannot answer.
+    _MOE_ORNITH = _create_model_config(
+        'MODEL_PATH_ORNITH',
+        '/home/keith-merrill/.lmstudio/models/deepreinforce-ai/Ornith-1.0-35B-GGUF/ornith-1.0-35b-Q4_K_M.gguf',
+        41, 65536, 4608,
         server_extra_args=['--jinja', '--reasoning-format', 'none', '--swa-full'],
         type_k=8, type_v=8,
         cpu_moe=True, n_cpu_moe=20, n_ubatch=4608,
@@ -704,9 +759,17 @@ Update these after each retrieval step. They help you stay organized and efficie
     # 'executor': True means few-shot + fallback extraction are enabled.
     AGENTS = {
         'implementer': _create_agent_config(
-            'Implementer — Qwen3.6-35B-A3B UD-Q4_K_M (3B/35B MoE, 64K ctx Q8_0, ngl=48 n_cpu_moe=20, default)',
+            'Implementer — Qwen3.6-35B-A3B UD-Q4_K_M (3B/35B MoE, 64K ctx Q8_0, ngl=41 n_cpu_moe=20, default)',
             _IMPLEMENTER_SYSTEM_PROMPT,
             _MOE_35B,
+            executor=True
+        ),
+        # Same system prompt and executor wiring as `implementer`, deliberately:
+        # the only variable in an ornith-vs-implementer A/B should be the model.
+        'ornith': _create_agent_config(
+            'Implementer — Ornith-1.0-35B Q4_K_M (3B/35B MoE, 64K ctx Q8_0, ngl=41 n_cpu_moe=20, ON EVAL)',
+            _IMPLEMENTER_SYSTEM_PROMPT,
+            _MOE_ORNITH,
             executor=True
         ),
         'deep_implementer': _create_agent_config(
@@ -743,12 +806,6 @@ Update these after each retrieval step. They help you stay organized and efficie
             'Debugger — Coder-30B Q4_K_M (3B/30B MoE, 128K ctx Q8_0, ngl=49 cpu_moe, turbo)',
             f'You are a debugger. {EXECUTOR_PROMPT}\n\nDEBUGGING WORKFLOW:\n- Use `<<<READ_FILE>>>` to examine source code\n- Use `<<<REMOTE_EXEC>>>` to run tests, check logs, execute debuggers\n- Use `<<<WRITE_FILE>>>` to apply fixes to source files\n- After fixing, use `<<<REMOTE_EXEC>>>` to verify the fix works (compile, run tests)\n\n{TOOL_REFERENCE}',
             _MOE_30B_TURBO,
-            executor=True
-        ),
-        'lite_architect': _create_agent_config(
-            'Architect — Coder-480B IQ1_M (35B/480B MoE, 32K ctx Q8_0, ngl=63 cpu_moe, lite reasoning)',
-            f'You are a system architect. {EXECUTOR_PROMPT}\n\nFILE WRITING: Use `<<<WRITE_FILE>>>` to create or update source files. After writing, use `<<<REMOTE_EXEC>>>` to compile and verify.\n\n{TOOL_REFERENCE}',
-            _MOE_480B_LITE,
             executor=True
         ),
         'moe_implementer': _create_agent_config(

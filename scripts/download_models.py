@@ -13,7 +13,8 @@ import os
 import sys
 from huggingface_hub import hf_hub_download, snapshot_download
 
-BASE_DIR = os.path.expanduser("~/.lmstudio/models/unsloth")
+MODELS_ROOT = os.path.expanduser("~/.lmstudio/models")
+BASE_DIR = os.path.join(MODELS_ROOT, "unsloth")
 
 MODELS = [
     {
@@ -71,6 +72,16 @@ MODELS = [
         "files": ["Qwen3.6-27B-Q4_K_M.gguf"],
         "local_dir": os.path.join(BASE_DIR, "Qwen3.6-27B-GGUF"),
         "size": "~16.8 GB",
+    },
+    # Official GGUF from the lab, not an Unsloth requant — hence its own org dir.
+    # arch is qwen35moe, which build 5343f45 already speaks (same as the 122B).
+    {
+        "id": 8,
+        "name": "Ornith-1.0-35B Q4_K_M (3B/35B MoE, MIT)",
+        "repo": "deepreinforce-ai/Ornith-1.0-35B-GGUF",
+        "files": ["ornith-1.0-35b-Q4_K_M.gguf"],
+        "local_dir": os.path.join(MODELS_ROOT, "deepreinforce-ai", "Ornith-1.0-35B-GGUF"),
+        "size": "~21.2 GB",
     },
 ]
 
