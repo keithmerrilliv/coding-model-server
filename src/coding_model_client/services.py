@@ -3,11 +3,10 @@ import os
 import json
 import subprocess
 import threading
-import select
 import atexit
 import logging
-import time
 from pathlib import Path
+from queue import Queue, Empty
 
 import requests
 
@@ -284,10 +283,22 @@ class CupertinoMCPClient:
     def __init__(self):
         self.process = None
         self.msg_id = 1
-        # RLock so _send_request can hold the lock and call start() inside
-        # it without deadlocking. Lock-protected start() prevents two
-        # concurrent first-time callers from each spawning a subprocess.
+        # RLock so _send_request can hold the lock and call start() inside it
+        # without deadlocking. Lock-protected start() prevents two concurrent
+        # first-time callers from each spawning a subprocess. It now guards only
+        # the fast operations — process lifecycle, the msg_id counter, and the
+        # stdin write — NOT the response wait. A dedicated reader thread (below)
+        # owns stdout and hands each response to the waiting caller's queue, so
+        # concurrent requests no longer serialize behind one another for up to
+        # MAX_TOTAL_WALL_TIME each.
         self.lock = threading.RLock()
+        # req_id -> Queue on which the reader thread delivers that request's
+        # response (or a None sentinel if the process dies). Guarded by its own
+        # lock so the reader can route without contending for self.lock.
+        self._pending = {}
+        self._pending_lock = threading.Lock()
+        self._reader = None
+        self._reader_stop = False
 
     def start(self):
         """Start the Cupertino MCP server process."""
@@ -306,14 +317,72 @@ class CupertinoMCPClient:
                     text=True,
                     bufsize=1,
                 )
+                # Unlike the server-side Apple Deep Docs client, there's no
+                # synchronous handshake reading stdout here, so the reader can
+                # take the pipe immediately — nothing else ever reads it.
+                self._start_reader(self.process)
                 return True
             except Exception as e:
                 print_colored(f"Error starting Cupertino MCP: {e}", COLORS['FAIL'])
                 return False
 
+    def _start_reader(self, proc):
+        """Spawn the stdout demux thread for `proc` (caller holds self.lock)."""
+        self._reader_stop = False
+        self._reader = threading.Thread(
+            target=self._reader_loop, args=(proc,),
+            name="cupertino-mcp-reader", daemon=True,
+        )
+        self._reader.start()
+
+    def _reader_loop(self, proc):
+        """Own `proc`'s stdout: parse each JSON-RPC line and deliver it to the
+        queue registered for its id.
+
+        This is what lets _send_request wait off-lock. A single reader means one
+        consumer of the shared stdout pipe, so responses can't be swallowed by
+        the wrong caller — the old design had every caller read the pipe and
+        discard lines whose id didn't match, so two at once ate each other's
+        replies.
+        """
+        stdout = proc.stdout
+        try:
+            while not self._reader_stop:
+                try:
+                    line = stdout.readline()
+                except (ValueError, OSError):
+                    break  # pipe closed under us
+                if line == "":
+                    break  # EOF — the child exited
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    resp = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                rid = resp.get("id")
+                if rid is None:
+                    continue  # server-initiated notification — nobody waiting
+                with self._pending_lock:
+                    q = self._pending.get(rid)
+                if q is not None:
+                    q.put(resp)
+        finally:
+            # Reader is exiting (EOF, stop, or error): wake every waiter with a
+            # sentinel so they fail fast instead of blocking to their timeout.
+            self._fail_all_pending()
+
+    def _fail_all_pending(self):
+        with self._pending_lock:
+            waiters = list(self._pending.values())
+        for q in waiters:
+            q.put(None)  # None = connection lost; _send_request maps it to an error
+
     def stop(self):
         """Stop the Cupertino MCP server process."""
         if self.process:
+            self._reader_stop = True
             try:
                 self.process.terminate()
                 self.process.wait(timeout=2)
@@ -323,25 +392,32 @@ class CupertinoMCPClient:
                 except Exception:
                     pass
             self.process = None
+            # readline() returns EOF once the child is gone, so the reader loop
+            # falls out on its own; join briefly so a restart gets a clean slate.
+            if self._reader is not None:
+                self._reader.join(timeout=5)
+                self._reader = None
+            self._fail_all_pending()
 
-    def _readline_with_timeout(self, timeout: float = 30):
-        """Read a line from subprocess stdout with a timeout using select."""
-        if not self.process or not self.process.stdout:
-            return None
-        ready, _, _ = select.select([self.process.stdout], [], [], timeout)
-        if ready:
-            return self.process.stdout.readline()
-        print_colored(f"Cupertino MCP readline timed out after {timeout:.1f} seconds", COLORS['WARNING'])
-        return None
+    # 2 min. This is now a per-request wait, not a lock hold, so a slow request
+    # no longer blocks every other caller for its duration.
+    MAX_TOTAL_WALL_TIME = 120
 
     def _send_request(self, method, params):
         """Send a JSON-RPC request to the MCP server and wait for response."""
         if not self.start():
             return {"error": "Cupertino MCP not found or failed to start"}
 
+        response_q = Queue()
+
+        # Short critical section: allocate the id, register the waiter, and write
+        # the request. The response wait happens AFTER releasing the lock, so
+        # concurrent callers overlap instead of queueing for up to 2 min each.
         with self.lock:
             req_id = self.msg_id
             self.msg_id += 1
+            with self._pending_lock:
+                self._pending[req_id] = response_q
             request = {
                 "jsonrpc": "2.0",
                 "id": req_id,
@@ -351,31 +427,26 @@ class CupertinoMCPClient:
             try:
                 self.process.stdin.write(json.dumps(request) + "\n")
                 self.process.stdin.flush()
-
-                # Total wall-time bound: previously 50 × 30s readline timeout
-                # could hold the lock for up to 25 min on a misbehaving MCP
-                # that emits a stream of non-matching JSON.
-                MAX_TOTAL_WALL_TIME = 120  # 2 min
-                deadline = time.time() + MAX_TOTAL_WALL_TIME
-                while time.time() < deadline:
-                    remaining = deadline - time.time()
-                    line = self._readline_with_timeout(timeout=min(30, remaining))
-                    if not line:
-                        if self.process.poll() is not None:
-                            return {"error": "Cupertino MCP server process exited unexpectedly."}
-                        return {"error": "No response from Cupertino MCP (timed out)."}
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        response = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if response.get("id") == req_id:
-                        return response.get("result", {})
-                return {"error": f"Cupertino MCP response not received within {MAX_TOTAL_WALL_TIME}s"}
             except Exception as e:
+                with self._pending_lock:
+                    self._pending.pop(req_id, None)
                 return {"error": f"Communication error: {e}"}
+
+        try:
+            try:
+                response = response_q.get(timeout=self.MAX_TOTAL_WALL_TIME)
+            except Empty:
+                return {
+                    "error": "Cupertino MCP response not received within "
+                             f"{self.MAX_TOTAL_WALL_TIME}s"
+                }
+            if response is None:  # sentinel from _fail_all_pending
+                return {"error": "Cupertino MCP server process exited unexpectedly."}
+            return response.get("result", {})
+        finally:
+            # Always deregister, so a late/never response can't leak the queue.
+            with self._pending_lock:
+                self._pending.pop(req_id, None)
 
     def search(self, query):
         """Search Apple documentation using the MCP tool."""
