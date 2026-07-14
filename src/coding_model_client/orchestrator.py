@@ -152,6 +152,43 @@ def _looks_like_stall(response_text: str) -> bool:
     return False
 
 
+# The budget guidance (Config.TOKEN_BUDGET_GUIDANCE §3) tells the model it may
+# stop early on a task too large for one response by ending with <<<CONTINUE>>>
+# and a REMAINING list, promising "the client will automatically request
+# continuation". The client only ever honoured a *hard* cut-off — finish_reason
+# == "length" — so a VOLUNTARY stop came back as finish_reason "stop", fell
+# through the continuation loop, and the marker was stripped as degenerate
+# output with the REMAINING items dropped on the floor. The model had taken an
+# offer nothing implemented.
+#
+# Tolerate the sloppy variants the model actually emits (<continue>, ***, case,
+# stray colon) rather than only the canonical form, and anchor to the END of the
+# response so a mid-answer mention of the marker (e.g. the model quoting these
+# very instructions) doesn't trigger a continuation.
+_CONTINUE_SIGNAL_RE = re.compile(
+    r'\**\s*<{1,3}\s*CONTINUE\s*>{0,3}\s*:?\s*\**\s*'
+    r'(?:\n+\**\s*REMAINING\s*\**\s*:?(?P<remaining>.*?))?\s*\Z',
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _split_continue_signal(text):
+    """Split a trailing <<<CONTINUE>>> signal off a response.
+
+    Returns (text_without_signal, remaining_note). ``remaining_note`` is None
+    when the model did not signal continuation, "" when it signalled without
+    naming what's left, and otherwise the REMAINING list it gave us — which we
+    feed back so it picks up the right thread.
+    """
+    if not text:
+        return text, None
+    match = _CONTINUE_SIGNAL_RE.search(text)
+    if not match:
+        return text, None
+    remaining = (match.group("remaining") or "").strip()
+    return text[:match.start()].rstrip(), remaining
+
+
 def _check_history_budget(history, model="implementer", agent_theme=None):
     """Proactively manage history size with tiered compaction.
 
@@ -292,20 +329,44 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                     save_chat_history(history, model)
                     break
 
-                # ── Handle truncated responses ──
+                # ── Handle truncated or voluntarily-deferred responses ──
+                # Two ways a response can be incomplete: the model was CUT OFF
+                # (finish_reason "length"), or it chose to stop and said so with
+                # <<<CONTINUE>>> (finish_reason "stop"). Both mean "there's more
+                # to come" and both are answered by the same continuation turn.
                 continuation_count = 0
+                response_text, remaining_note = _split_continue_signal(response_text)
                 aggregated_response = response_text
-                while finish_reason == "length" and continuation_count < max_continuations:
+                while (
+                    (finish_reason == "length" or remaining_note is not None)
+                    and continuation_count < max_continuations
+                ):
                     continuation_count += 1
+                    voluntary = remaining_note is not None
+                    if voluntary:
+                        reason = "Model signalled more work remains"
+                        nudge = (
+                            "You ended with <<<CONTINUE>>>. Pick up exactly where you "
+                            "left off and finish the remaining work. Do not repeat what "
+                            "you already produced."
+                        )
+                        if remaining_note:
+                            nudge += f"\n\nStill to do, per your own list:\n{remaining_note}"
+                    else:
+                        reason = "Response was truncated"
+                        nudge = (
+                            "Your previous response was cut off. Continue exactly "
+                            "where you left off."
+                        )
                     print_colored(
                         f"\n[Continuation {continuation_count}/{max_continuations}] "
-                        "Response was truncated. Requesting continuation...",
+                        f"{reason}. Requesting continuation...",
                         COLORS['WARNING']
                     )
                     history.append({"role": "assistant", "content": response_text})
                     history.append({
                         "role": "user",
-                        "content": "Your previous response was cut off. Continue exactly where you left off.",
+                        "content": nudge,
                         "auto_send": True,
                     })
                     save_chat_history(history, model)
@@ -314,11 +375,21 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                     if cont_text is None:
                         task_aborted = True
                         break
+                    cont_text, remaining_note = _split_continue_signal(cont_text)
                     response_text = cont_text
 
-                    if re.search(r'<{1,3}\w*$', aggregated_response):
-                        cont_text = cont_text.lstrip()
-                    aggregated_response += cont_text
+                    if voluntary:
+                        # The model stopped at a clean boundary, so the two halves
+                        # are separate blocks — don't fuse the last line of one to
+                        # the first line of the next.
+                        if aggregated_response and not aggregated_response.endswith("\n"):
+                            aggregated_response += "\n"
+                        aggregated_response += cont_text.lstrip()
+                    else:
+                        # Cut off mid-token: splice the halves back together as-is.
+                        if re.search(r'<{1,3}\w*$', aggregated_response):
+                            cont_text = cont_text.lstrip()
+                        aggregated_response += cont_text
 
                 if task_aborted:
                     # Clean up fragmented history from failed continuations
@@ -327,6 +398,17 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                         history.append({"role": "assistant", "content": aggregated_response})
                         save_chat_history(history, model)
                     break
+
+                if remaining_note is not None:
+                    # Ran out of continuation budget while the model still says it
+                    # has work left. Say so — the aggregated answer looks finished
+                    # otherwise, and the leftovers would vanish silently.
+                    print_colored(
+                        f"\n[Continuation] Model still reports unfinished work after "
+                        f"{max_continuations} continuations; delivering what it has."
+                        + (f" Left undone: {remaining_note}" if remaining_note else ""),
+                        COLORS['WARNING']
+                    )
 
                 if continuation_count > 0:
                     response_text = aggregated_response
@@ -526,11 +608,13 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                     and agentic_ctx.plan.goal is not None
                 )
                 # Strip residual XML-like tags (any case, any bracket count) that aren't
-                # tool commands or real prose — catches degenerate output like a lone
-                # "<continue>" or "<<<CONTINUE>>>" (the documented continuation marker that
-                # otherwise has no handler).  Without this, such responses would slip through
-                # as "substantive" and the orchestrator would prematurely declare the task
-                # complete instead of nudging with the next plan step.
+                # tool commands or real prose. Without this, such responses would slip
+                # through as "substantive" and the orchestrator would prematurely declare
+                # the task complete instead of nudging with the next plan step.
+                # A *trailing* <<<CONTINUE>>> no longer reaches here — the continuation
+                # loop consumes it (DEV-80). This still catches the leftovers: a marker
+                # the model buried mid-response, or one that survived because the
+                # continuation budget ran out.
                 _substantive = re.sub(r'<+/?[A-Za-z_]\w*>+\s*\d*', '', cleaned_response).strip()
                 if not _substantive and (has_pending_steps or has_active_plan):
                     print_colored(
