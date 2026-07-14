@@ -51,24 +51,46 @@ class ThinkingStripper:
         1. <think>reasoning...</think>response  (full block)
         2. reasoning...</think>response          (orphan — Jinja consumed <think>)
 
-    Buffers all tokens until </think> is found, then emits everything after it.
-    Thinking content can itself contain tool markers (<<<WRITE_FILE>>> etc.)
-    as the model reasons about tools, so we cannot use those as shortcuts.
+    Pattern 2 is the expensive one: the response opens with bare reasoning and
+    nothing marks it as such, so the only safe move is to withhold every token
+    until </think> arrives. Thinking content can itself contain tool markers
+    (<<<WRITE_FILE>>> etc.) as the model reasons about tools, and the client
+    executes markers for real — so we cannot use those as shortcuts, and we
+    cannot let reasoning through on the guess that it is a real answer.
+
+    But pattern 2 is only possible when the model's chat template opens a
+    <think> block for the assistant. A model whose template never does has no
+    reasoning to suppress, and buffering it is pure harm: `expect_thinking`
+    False streams those tokens as they arrive, holding back at most
+    len('<think>')-1 characters while it rules the tag out. Before this,
+    non-thinking models emitted their whole response in a single chunk at
+    flush() — 78 seconds of silence for a 500-token reply on the 480B
+    (measured 2026-07-14), and decode benchmarks that read a flat 0.00 tok/s.
+
+    Defaults to True: withholding a response is recoverable, leaking reasoning
+    into a tool-executing client is not. Callers opt in to streaming only for
+    models whose template proves there is nothing to strip.
 
     If no </think> appears within MAX_BUFFER chars, assumes no thinking block
     and flushes the buffer as real content.
     """
     BUFFERING = 0
     PASSTHROUGH = 1
+    DECIDING = 2
 
     MAX_BUFFER = 32768  # chars — Nemotron generates 8K+ thinking blocks
 
+    # Bounds how long DECIDING may hold whitespace before it gives up and
+    # streams. The tag probe alone bounds non-whitespace to _OPEN_LEN chars.
+    MAX_DECIDE_BUFFER = 256
+
+    _OPEN_TAG = '<think>'
     # The closing tag we're looking for; cached to avoid re-computing length.
     _CLOSE_TAG = '</think>'
     _CLOSE_LEN = len(_CLOSE_TAG)
 
-    def __init__(self):
-        self.state = self.BUFFERING
+    def __init__(self, expect_thinking: bool = True):
+        self.state = self.BUFFERING if expect_thinking else self.DECIDING
         self.buffer = ''
         # How far we've already scanned for the close tag. Without this,
         # find('</think>') restarts at index 0 every chunk, making the
@@ -80,18 +102,47 @@ class ThinkingStripper:
         if self.state == self.PASSTHROUGH:
             return token
 
-        prev_len = len(self.buffer)
-        self.buffer += token
+        if self.state == self.DECIDING:
+            emit = self._decide(token)
+            if self.state != self.BUFFERING:
+                return emit
+            # It really is a <think> block after all; fall through and scan
+            # the buffer we accumulated while deciding.
+        else:
+            self.buffer += token
 
-        # Scan only the new tail (minus tag-length-1 to catch tag boundaries
-        # that span the previous chunk + this one).
-        scan_from = max(0, prev_len - (self._CLOSE_LEN - 1))
-        close_idx = self.buffer.find(self._CLOSE_TAG, scan_from)
+        return self._scan_for_close()
+
+    def _decide(self, token: str) -> str:
+        """Non-thinking model: stream unless the output actually opens <think>.
+
+        Such a model shouldn't emit the tag, but nothing stops it, so we still
+        rule it out rather than assume. Costs at most len('<think>')-1 chars of
+        latency, then this state is never entered again.
+        """
+        self.buffer += token
+        probe = self.buffer.lstrip()
+
+        if probe.startswith(self._OPEN_TAG):
+            self.state = self.BUFFERING
+            return ''
+        if self._OPEN_TAG.startswith(probe) and len(self.buffer) < self.MAX_DECIDE_BUFFER:
+            return ''  # still a possible prefix of <think>; hold one more token
+
+        self.state = self.PASSTHROUGH
+        result, self.buffer = self.buffer, ''
+        return result
+
+    def _scan_for_close(self) -> str:
+        close_idx = self.buffer.find(self._CLOSE_TAG, self._search_start)
         if close_idx != -1:
             after = self.buffer[close_idx + self._CLOSE_LEN:]
             self.state = self.PASSTHROUGH
             self.buffer = ''
             return after.lstrip()
+
+        # Rescan only the tail that could hold a tag split across chunks.
+        self._search_start = max(0, len(self.buffer) - (self._CLOSE_LEN - 1))
 
         # Safety valve: if buffer grows too large without </think>,
         # this response has no thinking block — flush as real content

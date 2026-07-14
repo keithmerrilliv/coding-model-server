@@ -57,3 +57,50 @@ class TestThinkingStripper:
         s = ThinkingStripper()
         s.feed("plain answer")
         assert s.flush() == "plain answer"
+
+    def test_reasoning_never_reaches_the_client(self):
+        # The safety property. Reasoning may contain tool markers while the model
+        # merely considers a call, and the client EXECUTES markers -- so a leak
+        # here runs a shell command the model never committed to.
+        out = self._drain(["thinking about <<<SHELL>>>rm -rf /", "</think>", "done"])
+        assert out == "done"
+        assert "SHELL" not in out
+
+
+class TestThinkingStripperIncremental:
+    """expect_thinking=False: models whose template never opens <think>.
+
+    Buffering these stalled the entire response into one chunk at flush() --
+    78s of silence for a 500-token reply on the 480B at 6.4 tok/s.
+    """
+
+    def test_streams_first_token_immediately(self):
+        s = ThinkingStripper(expect_thinking=False)
+        assert s.feed("Hello") == "Hello"
+        assert s.feed(" world") == " world"
+
+    def test_tool_marker_is_not_mistaken_for_a_tag(self):
+        # <<<WRITE_FILE>>> opens with '<', a viable prefix of '<think>'. The
+        # stripper may hold it for one token, but must not swallow it.
+        s = ThinkingStripper(expect_thinking=False)
+        out = "".join(s.feed(c) for c in ["<", "<<WRITE_FILE>>>x"]) + s.flush()
+        assert out == "<<<WRITE_FILE>>>x"
+
+    def test_holds_back_at_most_a_partial_open_tag(self):
+        # '<' alone is ambiguous, so it is held -- but only until the next token.
+        s = ThinkingStripper(expect_thinking=False)
+        assert s.feed("<") == ""
+        assert s.feed("p>hi") == "<p>hi"
+
+    def test_still_strips_a_think_block_if_one_shows_up(self):
+        # The template says this model doesn't reason, but nothing stops it from
+        # emitting the tag anyway. Rule it out rather than assume.
+        s = ThinkingStripper(expect_thinking=False)
+        out = "".join(s.feed(c) for c in ["<think>", "secret", "</think>", "answer"])
+        assert out + s.flush() == "answer"
+
+    def test_flush_releases_an_undecided_tail(self):
+        # Stream ends while still deciding: the held text must not vanish.
+        s = ThinkingStripper(expect_thinking=False)
+        assert s.feed("<") == ""
+        assert s.flush() == "<"
