@@ -510,6 +510,28 @@ Update these after each retrieval step. They help you stay organized and efficie
     # honest spelling of "all 40 blocks + the output layer" — llama.cpp counts
     # output as the 41st, the same convention as architect's ngl=63 over 62 blocks.
     # NOT 40: that would leave the output layer on CPU, and it runs every token.
+    #
+    # Re-swept 2026-07-14 after DEV-94 removed the reload cliff (median of 3, warm-up
+    # discarded, production argv). STAYS AT 20 — the guard fix did not buy this model
+    # anything:
+    #   n_cpu_moe=24 -> 73.52 tok/s @ 3,696 MiB free
+    #             22 -> 77.54          @ 2,770
+    #             20 -> 80.73          @ 1,842   <- stays
+    #             18 -> 84.75          @   914
+    #             16 -> fails to load (SIGABRT) — the hard ceiling
+    # 18 is +5% decode but leaves 914 MiB, under the ~1,400 MiB swap floor, and that
+    # floor is not what DEV-94 fixed: it exists because of a real swap-time OOM
+    # (spec_fa78ca9c), which is transient contention during teardown->start, not the
+    # reload arithmetic. So 20 remains the honest pick for THIS model.
+    #
+    # Two corrections to the 2026-07-13 note above, for anyone reading it as evidence:
+    #   * At 18 this model measures 914 MiB free, not the 496-570 recorded there. On
+    #     today's numbers the old guard would NOT have refused the reload, so that
+    #     note's account of the brick does not reproduce as written. The brick was
+    #     real (see DEV-94); the free-VRAM figure attached to it was not reliable.
+    #   * ornith gets 18 and this model does not, purely because ornith's file is
+    #     0.9 GB smaller and so leaves 1,544 MiB at the same N. Same shape, same
+    #     flags, different headroom.
     _MOE_35B = _create_model_config(
         'MODEL_PATH_35B',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf',
@@ -537,39 +559,52 @@ Update these after each retrieval step. They help you stay organized and efficie
     # replication. Treated as a claim to test, not a fact. Speed is settled
     # (below); quality is NOT — that needs a real eval, not a decode benchmark.
     #
-    # Expert-offload sweep 2026-07-14 (median of 2, warm-up discarded, 64K Q8_0):
-    #   n_cpu_moe=40 -> 53.78 tok/s @ 11,774 MiB free   (all experts on CPU)
-    #             32 -> 62.65          @  7,920
-    #             28 -> 68.74          @  6,060
-    #             24 -> 74.94          @  4,266
-    #             22 -> 79.20          @  3,338
-    #             20 -> 83.18          @  2,474   <- chosen
-    #             18 -> 88.19          @  1,544
-    #             16 -> 93.66          @    614   (under _VRAM_MARGIN_MIB; would brick)
-    # No knee: decode trades off against VRAM almost linearly, so this is purely
-    # a headroom decision. 18 clears the ~1,400 MiB swap floor by only 144 MiB.
-    # Chose 20 instead — it holds 2,474 MiB free (MORE headroom than implementer's
-    # 1,842) and still beats it on decode. The 2026-07-13 note above is the reason
-    # to be conservative here: implementer ran at 18, dipped under _VRAM_MARGIN_MIB
-    # on reload, and bricked the server after every idle-watchdog reap.
+    # Expert-offload re-sweep 2026-07-14 (median of 3, warm-up discarded, 64K Q8_0,
+    # production argv). Supersedes the median-of-2 pass earlier the same day:
+    #   n_cpu_moe=24 -> 74.94 tok/s @ 4,266 MiB free
+    #             22 -> 79.25          @ 3,338
+    #             20 -> 82.85          @ 2,474
+    #             18 -> 86.80          @ 1,544   <- chosen
+    #             16 -> 92.49          @   614
+    #             14 -> fails to load (SIGSEGV) — this is the hard ceiling
+    # Still no knee: decode trades against VRAM almost linearly, so N is purely a
+    # headroom decision, not an optimum to find.
+    #
+    # WAS 20. Moved to 18 (2026-07-14) once DEV-94 landed. The old reason to sit at
+    # 20 was that 18 risked the reload brick — and that reason is gone: the VRAM
+    # guard used to demand `free >= footprint + margin`, which no idle GPU could
+    # satisfy for a model this size, so any tight config refused to reload and the
+    # server bricked itself after the first idle-watchdog reap. The guard now gates
+    # on the measured footprint alone. 18 buys +4.8% decode and still clears the
+    # ~1,400 MiB swap floor.
+    #
+    # NOT 16, despite it being the fastest that loads (+11.6% over 20). 614 MiB free
+    # is under the ~1,400 MiB swap floor that exists because of a real observed OOM
+    # (spec_fa78ca9c, deep_reviewer -> implementer). DEV-94 fixed the *reload* cliff;
+    # it did nothing about transient VRAM contention during a swap, and 614 MiB is
+    # not enough slack to absorb it. The 2026-06-05 lesson stands: do not override a
+    # safety floor on the strength of a decode number.
     #
     # Same-session head-to-head, both at n_cpu_moe=20 (a true apples-to-apples:
     # the two models are architecturally IDENTICAL — 40 blocks, 16 heads, 2 KV
     # heads, 2048 embedding — so the same N offloads the same fraction of experts):
-    #   implementer  80.74 tok/s | prefill 238.4 | 1,842 MiB free   (22.1 GB file)
-    #   ornith       83.18 tok/s | prefill 242.3 | 2,474 MiB free   (21.2 GB file)
+    #   implementer  80.73 tok/s | prefill 235.5 | 1,842 MiB free   (22.1 GB file)
+    #   ornith       82.85 tok/s | prefill 236.8 | 2,474 MiB free   (21.2 GB file)
     # The ~3% decode edge and the ~630 MiB of extra headroom are just the 0.9 GB
     # smaller file: decode is bandwidth-bound, so tok/s tracks bytes-per-token
     # almost exactly. There is no architectural advantage here. Ornith is a
     # fine-tune of the same shape, so SPEED IS A WASH and the only question that
     # matters is quality — which a decode benchmark cannot answer.
+    #
+    # The extra headroom IS why ornith gets 18 while implementer stays at 20: the
+    # smaller file leaves 1,544 MiB at N=18 where implementer leaves only 914.
     _MOE_ORNITH = _create_model_config(
         'MODEL_PATH_ORNITH',
         '/home/keith-merrill/.lmstudio/models/deepreinforce-ai/Ornith-1.0-35B-GGUF/ornith-1.0-35b-Q4_K_M.gguf',
         41, 65536, 4608,
         server_extra_args=['--jinja', '--reasoning-format', 'none', '--swa-full'],
         type_k=8, type_v=8,
-        cpu_moe=True, n_cpu_moe=20, n_ubatch=4608,
+        cpu_moe=True, n_cpu_moe=18, n_ubatch=4608,
         repeat_penalty=1.05,
     )
 
@@ -767,7 +802,7 @@ Update these after each retrieval step. They help you stay organized and efficie
         # Same system prompt and executor wiring as `implementer`, deliberately:
         # the only variable in an ornith-vs-implementer A/B should be the model.
         'ornith': _create_agent_config(
-            'Implementer — Ornith-1.0-35B Q4_K_M (3B/35B MoE, 64K ctx Q8_0, ngl=41 n_cpu_moe=20, ON EVAL)',
+            'Implementer — Ornith-1.0-35B Q4_K_M (3B/35B MoE, 64K ctx Q8_0, ngl=41 n_cpu_moe=18, ON EVAL)',
             _IMPLEMENTER_SYSTEM_PROMPT,
             _MOE_ORNITH,
             executor=True
