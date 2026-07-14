@@ -18,6 +18,7 @@ from coding_model_server.llama_server import (
     _STATE_IDLE,
     _STATE_RUNNING,
     LlamaServerManager,
+    ModelBusyError,
 )
 
 MODEL_CONFIG = {"path": "/models/x.gguf", "n_ctx": 8192, "n_gpu_layers": 10}
@@ -104,3 +105,49 @@ def test_dead_child_matches_is_running_view(mgr):
     assert mgr.is_running() is False
     mgr.ensure_running(MODEL_CONFIG, agent_id="implementer")
     mgr.start.assert_called_once()
+
+
+# ── swap guard (DEV-17 / HIGH-05) ────────────────────────────────────────────
+def test_swap_refused_while_live_child_has_active_request(mgr):
+    """A swap that would SIGTERM a live child mid-stream must be refused, not
+    silently kill the in-flight request."""
+    _attach_child(mgr, returncode=None)  # alive, serving agent A
+    mgr._active_requests = 1              # another agent's request is streaming
+    other = dict(MODEL_CONFIG, n_ctx=32768)  # forces a swap
+
+    with pytest.raises(ModelBusyError):
+        mgr.ensure_running(other, agent_id="reviewer")
+
+    mgr.start.assert_not_called()        # child was NOT torn down
+    assert mgr.process.terminate.call_count == 0
+
+
+def test_swap_allowed_when_no_active_requests(mgr):
+    """With the child idle, the same swap proceeds normally."""
+    _attach_child(mgr, returncode=None)
+    mgr._active_requests = 0
+    other = dict(MODEL_CONFIG, n_ctx=32768)
+
+    mgr.ensure_running(other, agent_id="reviewer")
+
+    mgr.start.assert_called_once_with(other)
+
+
+def test_crash_recovery_not_blocked_by_its_own_active_request(mgr):
+    """_post_with_recovery calls ensure_running from inside a request that has
+    already incremented _active_requests, but the child is DEAD there — the
+    guard is gated on child_alive, so recovery must still respawn."""
+    _attach_child(mgr, returncode=-9)    # crashed child
+    mgr._active_requests = 1             # the recovering request itself
+
+    mgr.ensure_running(MODEL_CONFIG, agent_id="implementer")
+
+    mgr.start.assert_called_once_with(MODEL_CONFIG)
+
+
+def test_has_active_requests_is_wired(mgr):
+    """Promoted from dead code to the swap guard."""
+    mgr._active_requests = 0
+    assert mgr.has_active_requests() is False
+    mgr._active_requests = 2
+    assert mgr.has_active_requests() is True

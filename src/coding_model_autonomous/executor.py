@@ -26,6 +26,7 @@ import shutil
 import subprocess
 import sys
 import textwrap
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -724,9 +725,8 @@ def _dedupe_files_last_wins(
     for i, (path, _content) in enumerate(pairs):
         indexed[path] = i  # last occurrence wins
     deduped = [pairs[i] for i in sorted(indexed.values())]
-    duplicates = sorted({
-        p for p, _ in pairs if [pp for pp, _ in pairs if pp == p].count(p) > 1
-    })
+    counts = Counter(path for path, _ in pairs)
+    duplicates = sorted(path for path, n in counts.items() if n > 1)
     return deduped, duplicates
 
 
@@ -1059,13 +1059,101 @@ def parse_manifest_response(text: str) -> ManifestResult | ParseError:
     return ManifestResult(entries=entries, raw=text)
 
 
+# Mode-selection signals, kept SEPARATE from estimate_design_file_count (which
+# sizes the output budget and whose exact counts are pinned by tests). The file
+# counter only matches paths with a known code extension, so it scores 0 for
+# designs written in an unlisted language, as an extension-less file tree, or in
+# prose — and those then wrongly took the single-call path and truncated. These
+# add the missing signals. The failure is asymmetric: a missed large design
+# truncates a whole repo into one capped call, while a small design wrongly sent
+# to manifest mode just does a little more orchestration and still emits correct
+# output — so mode selection leans toward manifest, bounded by the threshold.
+
+# Broad superset of the budget regex's extension list — many more languages and
+# config formats, used ONLY for the mode decision.
+_DESIGN_UNIT_PATH_RE = re.compile(
+    r"[\w./-]+\.(?:ts|tsx|js|jsx|mjs|cjs|json|py|pyi|rs|go|java|kt|kts|swift|"
+    r"c|h|cc|cpp|hpp|cs|css|scss|sass|less|html|htm|vue|svelte|astro|toml|yaml|"
+    r"yml|sh|bash|zsh|sql|proto|rb|erb|rake|php|dart|ex|exs|lua|tf|tfvars|xml|"
+    r"graphql|gql|prisma|ini|cfg|conf|env|txt|md|mdx|gradle|groovy|scala|clj|"
+    r"r|jl|pl|pm|hs|ml|fs|vb|ipynb|dockerfile|makefile|cmake)\b",
+    re.IGNORECASE,
+)
+
+# Files that carry no extension but are unmistakably build units.
+_BARE_FILENAME_RE = re.compile(
+    r"(?:^|[\s`/])("
+    r"Dockerfile|Makefile|Gemfile|Rakefile|Procfile|Jenkinsfile|Vagrantfile|"
+    r"Brewfile|Caddyfile|Justfile|Containerfile|CMakeLists\.txt|"
+    r"\.gitignore|\.dockerignore|\.env(?:\.\w+)?"
+    r")(?=$|[\s`,)])",
+    re.MULTILINE,
+)
+
+# A drawn file tree: lines carrying a box-drawing/ASCII tree connector.
+_TREE_NODE_RE = re.compile(r"^\s*(?:[│|]\s*)*[├└][─-]{1,2}\s*\S", re.MULTILINE)
+
+_NUMBER_WORDS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+    "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13,
+    "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18,
+    "nineteen": 19, "twenty": 20,
+}
+# "ten modules", "12 services", "eight components" — an explicit count of build
+# units stated in prose, the one signal that survives when no paths are drawn.
+_PROSE_COUNT_RE = re.compile(
+    r"\b(\d{1,3}|" + "|".join(_NUMBER_WORDS) + r")\s+"
+    r"(?:distinct\s+|separate\s+|small\s+)?"
+    r"(?:modules?|files?|components?|services?|classes?|endpoints?|handlers?|"
+    r"adapters?|packages?|screens?|pages?|routes?|controllers?|models?|widgets?)\b",
+    re.IGNORECASE,
+)
+
+
+def _prose_unit_count(design_md: str) -> int:
+    """Largest explicit '<n> <build-noun>' count stated in the design's prose."""
+    best = 0
+    for m in _PROSE_COUNT_RE.finditer(design_md or ""):
+        tok = m.group(1).lower()
+        n = int(tok) if tok.isdigit() else _NUMBER_WORDS.get(tok, 0)
+        best = max(best, n)
+    return best
+
+
+def estimate_design_unit_count(design_md: str) -> int:
+    """Estimate how many build units a design describes, for mode selection only.
+
+    Union of several signals so a design the file-path regex scores 0 (unlisted
+    language, extension-less tree, prose) is still recognised as large:
+      * named files — broad-extension paths plus bare build files (Dockerfile…),
+      * file-tree nodes — lines drawn with tree connectors,
+      * an explicit prose count — "ten modules", "12 services".
+    Takes the max of the structural and prose signals rather than summing, so a
+    tree of .ts files isn't double-counted. NOT used for budget sizing.
+    """
+    text = design_md or ""
+    named = {m.group(0).strip("./").lower() for m in _DESIGN_UNIT_PATH_RE.finditer(text)}
+    named |= {m.group(1).lower() for m in _BARE_FILENAME_RE.finditer(text)}
+    tree_nodes = len(_TREE_NODE_RE.findall(text))
+    structural = max(len(named), tree_nodes)
+    return max(structural, _prose_unit_count(text))
+
+
 def use_manifest_mode(design_md: str) -> bool:
     """Whether to generate this design file-by-file rather than in one call."""
     if IMPLEMENTER_MODE == "manifest":
         return True
     if IMPLEMENTER_MODE == "single":
         return False
-    return estimate_design_file_count(design_md) >= MANIFEST_FILE_THRESHOLD
+    # OR the budget file-count with the broader unit estimate: either crossing
+    # the threshold means "too big for one capped call". The unit estimate is a
+    # superset for path-based designs, so this never lowers the count the tests
+    # pin for .ts-file designs — it only adds coverage for the shapes the file
+    # regex misses.
+    return (
+        estimate_design_file_count(design_md) >= MANIFEST_FILE_THRESHOLD
+        or estimate_design_unit_count(design_md) >= MANIFEST_FILE_THRESHOLD
+    )
 
 
 def summarize_written_files(

@@ -84,6 +84,39 @@ def _is_safe_public_url(url: str) -> tuple[bool, str]:
     return True, ""
 
 
+_MAX_REDIRECT_HOPS = 5
+
+
+def _get_revalidating_redirects(url, *, timeout):
+    """GET `url`, re-running the SSRF guard on every redirect hop.
+
+    requests follows redirects itself (up to 30) *inside* Session.get, so a URL
+    that passes _is_safe_public_url on hop 0 can still 302 to
+    http://169.254.169.254/ and be fetched — the guard never sees hops 1..n.
+    So we disable automatic redirects and follow them by hand, validating each
+    Location before we touch it. Raises ValueError if a hop fails the guard or
+    the chain is too long.
+    """
+    from urllib.parse import urljoin
+
+    current = url
+    for _ in range(_MAX_REDIRECT_HOPS + 1):
+        safe, reason = _is_safe_public_url(current)
+        if not safe:
+            raise ValueError(f"SSRF guard rejected URL ({reason})")
+        response = _SESSION.get(current, timeout=timeout, allow_redirects=False)
+        if response.status_code not in (301, 302, 303, 307, 308):
+            return response
+        location = response.headers.get("Location")
+        if not location:
+            return response  # 3xx without a target — hand it back as-is
+        # Resolve relative Locations against the URL we just fetched, then loop
+        # to re-validate. Also closes the intermediate response's connection.
+        response.close()
+        current = urljoin(current, location)
+    raise ValueError(f"too many redirects (>{_MAX_REDIRECT_HOPS})")
+
+
 def ingest_url_content(url):
     """Fetch URL content, strip HTML, and send to server memory."""
     safe, reason = _is_safe_public_url(url)
@@ -91,7 +124,10 @@ def ingest_url_content(url):
         return f"Error: SSRF guard rejected URL ({reason})"
     try:
         print_colored(f"[Client] Deep-ingesting content from {url}...", COLORS['BLUE'])
-        response = _SESSION.get(url, timeout=20)
+        try:
+            response = _get_revalidating_redirects(url, timeout=20)
+        except ValueError as e:
+            return f"Error: {e}"
         if response.status_code != 200:
             return f"Error: Failed to fetch URL (Status {response.status_code})"
 

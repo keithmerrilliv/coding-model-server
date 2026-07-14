@@ -17,6 +17,7 @@ from threading import Lock, Thread
 from typing import Any, Dict, Iterator, List, Optional
 
 import requests as http_requests
+from requests.adapters import HTTPAdapter
 from fastapi import HTTPException
 
 from coding_model_server.config import Config
@@ -28,6 +29,18 @@ class InsufficientVramError(RuntimeError):
     Caller (server.chat_completions) translates this to a 503 with
     Retry-After so the orchestrator can back off instead of triggering
     the CUDA crash loop we observed 2026-05-04.
+    """
+
+
+class ModelBusyError(RuntimeError):
+    """Raised when a model swap is needed but a live child is mid-request.
+
+    A swap SIGTERMs the shared llama-server child; doing that while another
+    agent's stream is in flight drops that response mid-token. The idle
+    watchdog already refuses to kill while ``_active_requests > 0`` — this
+    mirrors that guard on the swap path. Caller (routes.chat) translates it
+    to a 503 + Retry-After, exactly as it does for InsufficientVramError, so
+    the orchestrator backs off and retries once the in-flight request drains.
     """
 
 
@@ -113,6 +126,19 @@ class LlamaServerManager:
         self._active_requests: int = 0
         self._watchdog_thread: Optional[Thread] = None
         self._watchdog_running = False
+        # One shared HTTP session for every call to the llama-server child
+        # (proxy, tokenize, health poll). Without it `requests` opened and tore
+        # down a TCP connection per request on the hot proxy path. The pool is
+        # sized to the chat admission cap so concurrent streams each keep a
+        # warm keep-alive connection instead of contending for one.
+        self._session = http_requests.Session()
+        # Read the admission cap directly rather than importing runtime (which
+        # imports this module — a cycle). Kept in sync with runtime.CHAT_MAX_INFLIGHT.
+        _chat_max = int(os.getenv("CODING_MODEL_CHAT_MAX_INFLIGHT", "5"))
+        _pool = max(_chat_max + 2, 8)
+        _adapter = HTTPAdapter(pool_connections=_pool, pool_maxsize=_pool)
+        self._session.mount("http://", _adapter)
+        self._session.mount("https://", _adapter)
 
     def _build_server_args(self, binary: str, model_config: dict) -> list[str]:
         """Build the llama-server argv from a model config.
@@ -270,7 +296,7 @@ class LlamaServerManager:
                     f"llama-server exited with code {process.returncode} during startup"
                 )
             try:
-                resp = http_requests.get(health_url, timeout=2)
+                resp = self._session.get(health_url, timeout=2)
                 if resp.status_code == 200:
                     logger.info("llama-server healthy after %.1fs", time.time() - start_t)
                     with self.lock:
@@ -431,6 +457,27 @@ class LlamaServerManager:
         with self.lock:
             return self._active_requests > 0
 
+    # Coarsest keep-alive granularity worth a lock acquisition. The idle
+    # watchdog's timeout is minutes, so refreshing more often than this buys
+    # nothing but per-token lock traffic on the streaming hot path.
+    _KEEPALIVE_THROTTLE_S = 5.0
+
+    def _bump_last_request_time(self) -> None:
+        """Refresh the idle-watchdog keep-alive from inside a stream.
+
+        The streaming loop calls this once per emitted delta. Writing
+        last_request_time there used to be done bare, off-lock — the one place
+        the two-lock discipline was violated (the watchdog reads it under
+        self.lock). Guard the write, but throttle it: the unlocked read is an
+        atomic float load used only to skip the common case, so we take the lock
+        at most once per _KEEPALIVE_THROTTLE_S rather than on every token.
+        """
+        now = time.time()
+        if now - self.last_request_time < self._KEEPALIVE_THROTTLE_S:
+            return
+        with self.lock:
+            self.last_request_time = now
+
     @staticmethod
     def _runtime_signature(mc: dict) -> tuple:
         """Tuple of fields that materially change llama-server behavior.
@@ -531,6 +578,28 @@ class LlamaServerManager:
                 )
 
             if need_swap:
+                # Refuse to swap out a LIVE child while another request is in
+                # flight against it. _shutdown_unlocked() SIGTERMs the shared
+                # child, which would drop that request's stream mid-token. The
+                # idle watchdog already skips its kill while _active_requests > 0
+                # (see _idle_watchdog); this mirrors that guard on the swap path,
+                # surfacing a retryable busy signal the caller turns into a
+                # 503 + Retry-After rather than a blocking wait (which would pin
+                # _swap_lock for another agent's full generation).
+                #
+                # Gated on child_alive so it never blocks the two paths that
+                # legitimately swap with a request "active":
+                #   * chat_completions calls ensure_running BEFORE proxy_*
+                #     increments _active_requests, so the caller's own request
+                #     is never counted here — only *other* agents' requests are.
+                #   * crash recovery (_post_with_recovery) reaches here only with
+                #     a dead child, so child_alive is False and there is no live
+                #     stream left to protect.
+                if child_alive and self.has_active_requests():
+                    raise ModelBusyError(
+                        f"model swap for {agent_id or '?'} deferred: another "
+                        f"request is in flight against the current model — retry shortly"
+                    )
                 # Runtime drift — even if the GGUF file is the same, n_ctx
                 # / sampler bias / server flags can differ between agents
                 # that share a path. Shut down and reload to honor the new
@@ -732,7 +801,7 @@ class LlamaServerManager:
         # Short timeout — /tokenize is CPU-bound and quick. If it stalls
         # this long, llama-server is unhealthy and the caller should
         # fall back rather than blocking the request.
-        resp = http_requests.post(url, json={"content": text}, timeout=5)
+        resp = self._session.post(url, json={"content": text}, timeout=5)
         resp.raise_for_status()
         count = len(resp.json().get("tokens", []))
 
@@ -758,7 +827,7 @@ class LlamaServerManager:
         last_exc = None
         for attempt in range(2):
             try:
-                return http_requests.post(
+                return self._session.post(
                     url, json=payload, stream=stream,
                     timeout=Config.LLAMA_SERVER_REQUEST_TIMEOUT,
                 )
@@ -921,7 +990,7 @@ class LlamaServerManager:
                             # client reassembles parallel calls.
                             tc = delta.get("tool_calls")
                             if tc:
-                                self.last_request_time = time.time()
+                                self._bump_last_request_time()
                                 out_chunk = build_stream_chunk(completion_id, model_id, tool_calls=tc)
                                 yield f"data: {json.dumps(out_chunk)}\n\n"
 
@@ -930,7 +999,7 @@ class LlamaServerManager:
                                 # Strip <think>...</think> blocks from streaming output
                                 filtered = think_stripper.feed(content)
                                 if filtered:
-                                    self.last_request_time = time.time()  # Keep watchdog at bay during long streams
+                                    self._bump_last_request_time()  # Keep watchdog at bay during long streams
                                     out_chunk = build_stream_chunk(completion_id, model_id, content=filtered)
                                     yield f"data: {json.dumps(out_chunk)}\n\n"
                         except json.JSONDecodeError:

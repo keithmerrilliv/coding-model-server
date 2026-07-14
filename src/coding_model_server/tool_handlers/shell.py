@@ -7,6 +7,7 @@ import os
 import re
 import shlex
 import subprocess
+import tempfile
 from typing import List
 
 from coding_model_server.tool_state import state
@@ -14,6 +15,7 @@ from coding_model_server.tool_handlers.chunking import chunk_large_output, get_c
 from coding_model_server.tool_handlers.safety import (
     _check_dangerous_command,
     _check_deny_rules,
+    _is_auto_approvable_command,
     _should_auto_approve,
 )
 
@@ -73,9 +75,24 @@ def expand_paths_in_args(command_args: List[str]) -> List[str]:
 
 
 def is_command_allowed(command_args: List[str]) -> tuple:
-    """Check if command is allowed based on whitelist"""
+    """Check if command is allowed based on whitelist.
+
+    COMMAND_WHITELIST is unset by default, and an unset whitelist permits every
+    binary. That is deliberate — the agent has to be able to run this project's
+    build and test tooling — but it means this function is NOT the thing keeping
+    a destructive binary from running. In safe mode the protection is:
+
+      1. parse_command_safely() rejects shell metacharacters (no chaining,
+         redirection or $(...) — the command is one argv, run with shell=False),
+      2. the deny rules block the unconditionally-catastrophic forms, and
+      3. every command still needs confirmation unless it is on the
+         auto-approve allow-list (safety._is_auto_approvable_command).
+
+    Set COMMAND_WHITELIST to a comma-separated list of binaries to also restrict
+    *which* commands may run at all.
+    """
     if not state.config.COMMAND_WHITELIST:
-        return True, "No whitelist configured (all commands allowed)"
+        return True, "No whitelist configured (metacharacter filtering only; command still requires approval)"
 
     if not command_args:
         return False, "Empty command"
@@ -179,20 +196,44 @@ def execute_remote_command(command, chunk_output=True):
         if choice.lower() != 'y':
             state.logger.info("Dangerous command denied by user: %s — %s", command[:100], danger_reason)
             return f"User denied dangerous command ({danger_reason})."
-    elif _should_auto_approve('REMOTE_EXEC'):
-        state.print_colored(f"   Auto-approved ({state.permission_mode} mode)", state.colors['GREEN'])
-        state.logger.info("Auto-approving command (%s mode): %s", state.permission_mode, command)
-        choice = 'y'
     else:
-        try:
-            choice = input(f"{state.colors['BOLD']}Allow? [y/N] > {state.colors['ENDC']}")
-        except (EOFError, KeyboardInterrupt):
-            state.logger.info("Command execution cancelled by user: %s", command)
-            return "User cancelled command execution."
+        # Silent execution requires BOTH a permission mode that allows it AND a
+        # command tame enough to be on the allow-list. The mode alone used to be
+        # enough, which made the dangerous/deny pattern lists the security
+        # boundary — and they leak: `find / -delete` and
+        # `python3 -c "shutil.rmtree('/home/u')"` matched neither, so yolo ran
+        # them without a word. An unknown command now costs a prompt, not the disk.
+        auto_ok = False
+        if state.config.ALLOW_SHELL_MODE:
+            # shell=True: the whole string goes to /bin/sh, so metacharacters,
+            # pipes and $(...) are live and none of the argv/whitelist checks
+            # above ran. Never auto-approve that, in any mode.
+            approvable_reason = "shell mode is on (shell=True is unrestricted)"
+        elif not _should_auto_approve('REMOTE_EXEC'):
+            approvable_reason = f"{state.permission_mode} mode does not auto-approve shell"
+        else:
+            auto_ok, approvable_reason = _is_auto_approvable_command(command)
 
-        if choice.lower() != 'y':
-            state.logger.info("Command denied by user: %s", command)
-            return "User denied command execution."
+        if auto_ok:
+            state.print_colored(f"   Auto-approved ({state.permission_mode} mode: {approvable_reason})",
+                                state.colors['GREEN'])
+            state.logger.info("Auto-approving command (%s mode): %s", state.permission_mode, command)
+            choice = 'y'
+        else:
+            if _should_auto_approve('REMOTE_EXEC'):
+                # Mode would have auto-approved; the command itself did not qualify.
+                state.print_colored(f"   Confirmation required: {approvable_reason}",
+                                    state.colors['WARNING'])
+                state.logger.info("Auto-approval refused (%s): %s", approvable_reason, command[:100])
+            try:
+                choice = input(f"{state.colors['BOLD']}Allow? [y/N] > {state.colors['ENDC']}")
+            except (EOFError, KeyboardInterrupt):
+                state.logger.info("Command execution cancelled by user: %s", command)
+                return "User cancelled command execution."
+
+            if choice.lower() != 'y':
+                state.logger.info("Command denied by user: %s", command)
+                return "User denied command execution."
 
     try:
         # Create a temp file to capture output

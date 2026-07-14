@@ -111,13 +111,29 @@ class Database:
             )
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA foreign_keys = ON")
+            # Retry rather than fail immediately when another connection holds
+            # the write lock — the daemon and the FastAPI server each hold their
+            # own connection to this DB. Paired with BEGIN IMMEDIATE below: an
+            # IMMEDIATE that can't get the lock returns plain SQLITE_BUSY, which
+            # the busy handler retries; a DEFERRED that upgrades mid-transaction
+            # returns SQLITE_BUSY_SNAPSHOT, which the busy handler does NOT retry.
+            conn.execute("PRAGMA busy_timeout = 5000")
             self._tls.conn = conn
         return conn
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
+        # BEGIN IMMEDIATE, not plain BEGIN (== DEFERRED). Every use site here is
+        # a writer, and several read-then-write (e.g. respond_to_gate SELECTs the
+        # gate then UPDATEs it). Under WAL a DEFERRED txn takes only a read lock
+        # at BEGIN and tries to upgrade on the first write; if another connection
+        # wrote in between, the upgrade fails with SQLITE_BUSY_SNAPSHOT, which is
+        # NOT retried by busy_timeout and surfaces as "database is locked".
+        # IMMEDIATE takes the write lock up front, so contention degrades to a
+        # retryable wait instead of a hard error. Read-only paths don't use
+        # transaction() (they execute() directly), so none are penalized.
         conn = self._conn()
-        conn.execute("BEGIN")
+        conn.execute("BEGIN IMMEDIATE")
         try:
             yield conn
         except Exception:

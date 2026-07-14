@@ -162,10 +162,9 @@ def test_start_executes_post_popen_body(mgr, monkeypatch, tmp_path):
     monkeypatch.setattr("coding_model_server.llama_server.subprocess.Popen",
                         lambda *a, **k: fake_proc)
 
-    # 3) /health returns 200 on first poll
+    # 3) /health returns 200 on first poll (health poll uses the shared session)
     healthy = mock.Mock(status_code=200)
-    monkeypatch.setattr("coding_model_server.llama_server.http_requests.get",
-                        lambda *a, **k: healthy)
+    monkeypatch.setattr(mgr._session, "get", lambda *a, **k: healthy)
 
     # 4) don't spin up the real idle watchdog thread
     monkeypatch.setattr(mgr, "_start_watchdog", lambda: None)
