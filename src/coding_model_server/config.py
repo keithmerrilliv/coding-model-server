@@ -779,19 +779,12 @@ Update these after each retrieval step. They help you stay organized and efficie
             _MOE_30B_FAST,
             executor=True
         ),
-        'architect': _create_agent_config(
-            # Repointed from Coder-480B to Qwen3.6-27B on 2026-07-14 (DEV-99): the
-            # 27B beat the 480B 4-2 (0 ties) on architect-shaped design tasks under
-            # a blind, counterbalanced claude-sdk judge, at ~1.7x decode, 1/10th the
-            # VRAM (168 -> 16.8 GB), and 4x the context (32K -> 128K). Same model as
-            # dense_architect (the autonomous planner); distinct role name kept so
-            # the interactive architect can diverge later. See the _MOE_480B_ULTRA
-            # retirement note above for the full rationale.
-            'Architect — Qwen3.6-27B MTP Q4_K_M (27B dense, 128K Q4_0 ctx, ngl=36 + MTP spec-decode, interactive default)',
-            _ARCHITECT_SYSTEM_PROMPT,
-            _DENSE_27B,
-            executor=True
-        ),
+        # NB: `architect` (the interactive role) is no longer a standalone entry —
+        # DEV-99 repointed it at Qwen3.6-27B, making it identical to dense_architect,
+        # so DEV-101 folded it into an alias (see AGENT_ALIASES below). `@architect`
+        # and `--model architect` still resolve; it just isn't separately listed in
+        # /v1/models. Restore a distinct entry here if the interactive architect ever
+        # needs to diverge (different model, prompt, or context) from the planner.
         'reviewer': _create_agent_config(
             'Reviewer — Coder-30B Q8_0 (3B/30B MoE, 192K ctx Q8_0, ngl=49 cpu_moe ub=3072, high precision)',
             _REVIEWER_SYSTEM_PROMPT,
@@ -824,7 +817,7 @@ Update these after each retrieval step. They help you stay organized and efficie
         ),
         # ── Qwen3.6 agents (replaced retired Qwen3.5 architect tier) ──
         'dense_architect': _create_agent_config(
-            'Architect — Qwen3.6-27B MTP Q4_K_M (27B dense, 128K Q4_0 ctx, ngl=36 + MTP spec-decode, autonomous default planner+architect)',
+            'Architect — Qwen3.6-27B MTP Q4_K_M (27B dense, 128K Q4_0 ctx, ngl=36 + MTP spec-decode, default planner + interactive architect — the `architect` alias)',
             _ARCHITECT_SYSTEM_PROMPT,
             _DENSE_27B,
             executor=True
@@ -864,6 +857,10 @@ Update these after each retrieval step. They help you stay organized and efficie
     # @-mentions working after the de-branding rename. Aliases are NOT listed
     # in /v1/models — they only resolve on lookup.
     AGENT_ALIASES = {
+        # `architect` = the interactive architect role. Folded into dense_architect
+        # in DEV-101 once DEV-99 made them the same model+prompt. Not listed in
+        # /v1/models, but still resolves for @-mentions and --model architect.
+        'architect':       'dense_architect',
         'q36_architect':   'dense_architect',
         'm25_architect':   'moe_architect',
         'm25_implementer': 'moe_implementer',
