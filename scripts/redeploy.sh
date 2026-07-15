@@ -87,10 +87,22 @@ OLD_SERVER_PID="$(systemctl show -p MainPID --value coding-model-server 2>/dev/n
 echo "==> Restarting services (non-blocking; readiness confirmed by the /health poll below)"
 for s in coding-model-server coding-model-orchestrator coding-model-dashboard; do
   printf '    restarting %s ...\n' "${s}"
-  # --no-block: queue the restart and move on. uvicorn's graceful SIGTERM drain
-  # can take up to the unit's TimeoutStopSec; a blocking restart would trip
-  # systemctl's ~25s D-Bus wait -> non-zero exit -> set -e aborts the redeploy.
-  systemctl restart --no-block "${s}"
+  # --no-block skips waiting for the graceful SIGTERM drain (up to the unit's
+  # TimeoutStopSec) to COMPLETE. But the enqueue is still a D-Bus round-trip to
+  # systemd (via polkit), and under load — e.g. while PID 1 is tearing down the
+  # server's ~180 GB cgroup — that call itself can return "Connection timed out"
+  # (non-zero). Under `set -e` a single such blip would abort the whole redeploy,
+  # skipping the remaining services AND the /health poll below. So retry the
+  # enqueue a few times, and never let it kill the run: the PID-change + /health
+  # poll is the real readiness gate and will catch a restart that didn't take.
+  enqueued=0
+  for attempt in 1 2 3; do
+    if systemctl restart --no-block "${s}"; then enqueued=1; break; fi
+    echo "    (enqueue attempt ${attempt}/3 failed — systemd/D-Bus busy; retrying in 3s)"
+    sleep 3
+  done
+  [[ "${enqueued}" == "1" ]] \
+    || echo "    !! ${s}: could not enqueue restart after 3 tries — see /health + status below"
 done
 
 # Health host/port from .env (HOST/PORT are what the server binds), with
