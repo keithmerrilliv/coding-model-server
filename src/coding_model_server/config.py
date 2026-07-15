@@ -390,49 +390,40 @@ Update these after each retrieval step. They help you stay organized and efficie
     # model that actually won is dense_architect (Qwen3.6-27B); see DEV-93 and the
     # note on _MOE_480B_ULTRA for where that lever really lives.
 
-    # Ultra: Premium reasoning using Q2_K_XL on 192GB RAM.
-    # llama_server + cpu_moe → all 62 attention sublayers + output on GPU
-    # (ngl=63: llama.cpp counts output as the 63rd "layer"). Experts on CPU.
-    # Native context is 262144 but unreachable on a 16 GB GPU for this
-    # model's KV layout (8 KV heads × 62 layers × 64 head_dim ⇒ 33 GB Q8_0
-    # at 256K). 32K is the largest ctx where Q8_0 KV still fits — see
-    # feedback_kv_quant_preference (prefer KV quality over more context).
-    # logit_bias bans <tool_call>/</tool_call> tokens (same Qwen3-Coder family as
-    # Coder-Next; verify IDs via /tokenize after first load if drift suspected).
-    # Speculative-decode draft was wired and measured 2026-05-03 with
-    # Coder-30B-A3B Q4_K_M as draft (CPU-only, ngld=0, -devd none). Result:
-    # average decode regressed ~18% (5.24 tok/s vs 6.42 baseline) across 5
-    # prompts; acceptance ranged 37-81% but the CPU mem-BW contention between
-    # target's expert evaluation and draft's full forward pass exceeded any
-    # spec-decode gain. Disabled. Future experiments could try a much smaller
-    # base Qwen3 draft (0.6B/1.5B) to cut draft CPU cost — but only if the
-    # vocabulary is verified identical to Qwen3-Coder. (See DEV-96.)
+    # Retired 2026-07-14 (DEV-99): _MOE_480B_ULTRA (Qwen3-Coder-480B-A35B Q2_K_XL,
+    # ~180 GB on disk, 35B active) backed the interactive `architect`. It LOST the
+    # quality eval this note (and DEV-93) always flagged as the open question:
+    # dense_architect (Qwen3.6-27B) beat it 4-2 (0 ties) on 6 architect-shaped
+    # design / decomposition / trade-off / failure-analysis tasks, blind and
+    # counterbalanced, judged by Claude via the Claude Agent SDK (DEV-98). Every
+    # verdict held under order-swap. The 480B's only 2 wins were the most
+    # multi-part prompts, and the judge scored those on COVERAGE, not reasoning —
+    # the 27B ran out of a fixed 1400-token eval budget while comparable on core
+    # correctness/insight. So the 480B bought slower, VRAM-hungrier completeness
+    # under a tight budget, not better design. `architect` now points at
+    # _DENSE_27B: ~1.7x decode (6.3 -> 10.8 tok/s, DEV-95), 1/10th the VRAM
+    # (168 -> 16.8 GB, ~150 GB RAM reclaimed), 4x the context (32K -> 128K).
     #
-    # NOT the 397B-A17B (DEV-93, closed 2026-07-14). The idea was to cut decode
-    # by halving active params (17B vs this model's 35B) without an IQ1 quality
-    # cliff. It does not work, for reasons already on the record:
-    #   * The 397B-A17B was retired here for QUALITY, not incidentally: commit
-    #     d2dd54a7 (2026-04-24) recorded Qwen3.6-27B at 77.2 on SWE-bench Verified
-    #     vs the 397B-A17B's 76.2 — a 16.8 GB dense model beat the 100 GB flagship
-    #     on coding. Putting it in front of `architect`, whose whole job is
-    #     reasoning quality, is a downgrade.
-    #   * The only local copy is IQ1_M (scripts/download_models.py id 3). That is
-    #     the same ~1.7 bpw quant DEV-88 retired lite_architect over: the IQ1
-    #     kernel has no REPACK path, so it forfeits most of the fewer-active-params
-    #     decode win, AND 76.2 is the good-quant score — IQ1_M lands below it.
-    # The fewer-active-params model that actually WON that comparison is already
-    # in the roster: dense_architect (Qwen3.6-27B), 10.8 tok/s / 829 prefill vs
-    # this model's 6.3 / 222 (DEV-95). Whether it should also serve the
-    # interactive `architect` role is a live question, tracked separately — that
-    # is a quality eval, not a model to go download.
-    _MOE_480B_ULTRA = _create_model_config(
-        'MODEL_PATH_480B_ULTRA',
-        '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/Qwen3-Coder-480B-A35B-Instruct-UD-Q2_K_XL-00001-of-00004.gguf',
-        63, 32768, 4096,
-        server_extra_args=['--chat-template', 'chatml', '--swa-full'],
-        logit_bias=[[151657, -100.0], [151658, -100.0]],
-        cpu_moe=True, n_ubatch=4096,
-    )
+    # Do NOT re-point `architect` back at the 480B without a fresh eval that beats
+    # this one: both signals we have favor the 27B — this head-to-head, and
+    # SWE-bench Verified (Qwen3.6-27B 77.2 vs the retired 397B's 76.2, commit
+    # d2dd54a7). The GGUF is still on disk and scripts/download_models.py still
+    # lists it; to restore, re-add the agent entry and this config:
+    #   _MOE_480B_ULTRA = _create_model_config(
+    #       'MODEL_PATH_480B_ULTRA',
+    #       '.../Qwen3-Coder-480B-A35B-Instruct-UD-Q2_K_XL-00001-of-00004.gguf',
+    #       63, 32768, 4096,
+    #       server_extra_args=['--chat-template', 'chatml', '--swa-full'],
+    #       logit_bias=[[151657, -100.0], [151658, -100.0]],
+    #       cpu_moe=True, n_ubatch=4096)
+    # Restore caveats that cost time to learn:
+    #   * KV layout: native ctx 262144 is unreachable on a 16 GB GPU (8 KV heads x
+    #     62 layers x 64 head_dim => 33 GB Q8_0 at 256K); 32K was the largest ctx
+    #     where Q8_0 KV still fit (feedback_kv_quant_preference).
+    #   * Spec-decode does NOT help it: a Coder-30B-A3B Q4_K_M draft regressed
+    #     decode ~18% via CPU mem-BW contention (2026-05-03, DEV-96).
+    #   * The 397B-A17B is NOT a faster substitute (DEV-93): retired for quality,
+    #     and the only local copy is IQ1_M (no REPACK path, lands below 76.2).
 
     # MINIMAX: MiniMax M2.5 (230B MoE, 10B active params, 62 layers, ~1,760 MiB/layer)
     # Uses llama-server subprocess backend with native Jinja template
@@ -789,9 +780,16 @@ Update these after each retrieval step. They help you stay organized and efficie
             executor=True
         ),
         'architect': _create_agent_config(
-            'Architect — Coder-480B Q2_K_XL (35B/480B MoE, 32K ctx Q8_0, ngl=63 cpu_moe, ultra reasoning)',
+            # Repointed from Coder-480B to Qwen3.6-27B on 2026-07-14 (DEV-99): the
+            # 27B beat the 480B 4-2 (0 ties) on architect-shaped design tasks under
+            # a blind, counterbalanced claude-sdk judge, at ~1.7x decode, 1/10th the
+            # VRAM (168 -> 16.8 GB), and 4x the context (32K -> 128K). Same model as
+            # dense_architect (the autonomous planner); distinct role name kept so
+            # the interactive architect can diverge later. See the _MOE_480B_ULTRA
+            # retirement note above for the full rationale.
+            'Architect — Qwen3.6-27B MTP Q4_K_M (27B dense, 128K Q4_0 ctx, ngl=36 + MTP spec-decode, interactive default)',
             _ARCHITECT_SYSTEM_PROMPT,
-            _MOE_480B_ULTRA,
+            _DENSE_27B,
             executor=True
         ),
         'reviewer': _create_agent_config(
