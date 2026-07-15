@@ -1552,6 +1552,35 @@ def _sandbox_available() -> bool:
     return sys.platform.startswith("linux") and shutil.which("bwrap") is not None
 
 
+# Mountpoint (inside the sandbox) where the Node toolchain is bound for the
+# `node_test` framework. Must be TOP-LEVEL: the baseline binds mount /opt
+# read-only, so bwrap cannot mkdir a bind target nested under it.
+_SANDBOX_NODE_MOUNT = "/coding-model-node"
+
+
+def _resolve_sandbox_node_root() -> Optional[Path]:
+    """Locate a Node install root to bind into the sandbox for `node --test`.
+
+    Prefers the explicit CODING_MODEL_SANDBOX_NODE_ROOT (required in practice:
+    the orchestrator's systemd PATH usually has no Node, and nvm installs it
+    under /home, which the sandbox masks with tmpfs). Falls back to the Node the
+    orchestrator process itself can see on PATH. Returns None if no usable Node
+    root is found — `node_test` then fails with a clear diagnostic.
+    """
+    explicit = os.getenv("CODING_MODEL_SANDBOX_NODE_ROOT", "").strip()
+    if explicit:
+        root = Path(explicit).expanduser()
+        return root if (root / "bin" / "node").exists() else None
+    node = shutil.which("node")
+    if node:
+        # <root>/bin/node  ->  <root>
+        return Path(node).resolve().parent.parent
+    return None
+
+
+SANDBOX_NODE_ROOT = _resolve_sandbox_node_root()
+
+
 def _wrap_in_sandbox(
     cmd: list[str],
     spec_dir: Path,
@@ -1589,13 +1618,30 @@ def _wrap_in_sandbox(
     # invisible inside the sandbox.
     venv_root = Path(sys.executable).absolute().parent.parent
     spec_abs = spec_dir.resolve()
+
+    # Optionally bind a Node toolchain into the sandbox so `node_test` specs can
+    # run `node --test`. The bind SOURCE is resolved on the host here, before
+    # the `/home` tmpfs mask is applied inside the sandbox, so an nvm path under
+    # /home works as the source. The mountpoint is top-level (see
+    # _SANDBOX_NODE_MOUNT) and prepended to PATH.
+    node_bind: list[str] = []
+    sandbox_path = "/usr/local/bin:/usr/bin:/bin"
+    if SANDBOX_NODE_ROOT is not None:
+        node_bin = SANDBOX_NODE_ROOT / "bin"
+        if str(node_bin) in ("/usr/bin", "/usr/local/bin", "/bin"):
+            # System Node already lives on a bound, on-PATH directory.
+            pass
+        else:
+            node_bind = ["--ro-bind", str(SANDBOX_NODE_ROOT), _SANDBOX_NODE_MOUNT]
+            sandbox_path = f"{_SANDBOX_NODE_MOUNT}/bin:{sandbox_path}"
+
     args = [
         "bwrap",
         "--die-with-parent",
         "--new-session",
         "--unshare-all",
         "--clearenv",
-        "--setenv", "PATH", "/usr/local/bin:/usr/bin:/bin",
+        "--setenv", "PATH", sandbox_path,
         "--setenv", "HOME", "/tmp",
         "--setenv", "LANG", "C.UTF-8",
         "--setenv", "PYTHONUNBUFFERED", "1",
@@ -1618,6 +1664,7 @@ def _wrap_in_sandbox(
         "--tmpfs", "/home",
         "--tmpfs", "/root",
         "--ro-bind", str(venv_root), str(venv_root),
+        *node_bind,
         "--bind", str(spec_abs), str(spec_abs),
         "--chdir", str(spec_abs),
     ]
@@ -1634,6 +1681,7 @@ DEFAULT_TIMEOUTS: dict[str, int] = {
     "pytest": 120,
     "python": 120,
     "jest": 120,
+    "node_test": 120,
     "swift_test": 300,
     "xcodebuild_test": 900,
 }
@@ -1647,7 +1695,7 @@ _SPEC_SKIP_PATTERNS = (".pytest_cache", "__pycache__", ".DS_Store", "test_output
 
 
 def _run_local_tests(spec_dir: Path, framework: str, timeout: int) -> tuple[bool, str]:
-    """Run pytest/jest locally (bwrap sandbox on Linux).
+    """Run pytest/jest/node_test locally (bwrap sandbox on Linux).
 
     LLM-generated test code runs inside a bubblewrap sandbox by default. If
     bwrap is unavailable, the test run fails with a clear diagnostic unless
@@ -1655,6 +1703,12 @@ def _run_local_tests(spec_dir: Path, framework: str, timeout: int) -> tuple[bool
     """
     if framework == "jest":
         raw_cmd = ["npx", "jest", "--no-coverage", "--roots", str(spec_dir)]
+    elif framework == "node_test":
+        # Node's built-in test runner (node:test). Auto-discovers `*.test.js`
+        # from the cwd (== spec_dir, via --chdir / cwd below). Zero external
+        # deps and no network: the sandbox provides `node` on PATH via the
+        # bound Node toolchain (see _wrap_in_sandbox / SANDBOX_NODE_ROOT).
+        raw_cmd = ["node", "--test"]
     else:
         # `--import-mode=importlib`: import each test module by its full path
         # instead of pytest's default 'prepend' mode, which keys modules by
@@ -1869,7 +1923,7 @@ def run_tests(
     """Run tests for a spec.
 
     Dispatches by framework:
-      - pytest / python / jest   → local (bwrap sandbox on Linux)
+      - pytest / python / jest / node_test → local (bwrap sandbox on Linux)
       - swift_test               → Mac runner HTTP dispatch; requires `repo`
       - xcodebuild_test          → Mac runner HTTP dispatch; requires `repo` + `scheme`
 
