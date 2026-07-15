@@ -1704,11 +1704,25 @@ def _run_local_tests(spec_dir: Path, framework: str, timeout: int) -> tuple[bool
     if framework == "jest":
         raw_cmd = ["npx", "jest", "--no-coverage", "--roots", str(spec_dir)]
     elif framework == "node_test":
-        # Node's built-in test runner (node:test). Auto-discovers `*.test.js`
-        # from the cwd (== spec_dir, via --chdir / cwd below). Zero external
-        # deps and no network: the sandbox provides `node` on PATH via the
-        # bound Node toolchain (see _wrap_in_sandbox / SANDBOX_NODE_ROOT).
-        raw_cmd = ["node", "--test"]
+        # Node's built-in test runner (node:test). Zero external deps and no
+        # network: the sandbox provides `node` on PATH via the bound Node
+        # toolchain (see _wrap_in_sandbox / SANDBOX_NODE_ROOT).
+        #
+        # We enumerate the test files EXPLICITLY rather than letting `node --test`
+        # auto-discover from the cwd, so we can exclude `retry_history/` — the
+        # snapshots of prior retries. This mirrors the pytest path's
+        # `--ignore retry_history`. Without it, every retry's stale snapshot is
+        # re-run and its historical failures poison the result, so a JS spec
+        # could never pass once it had retried (killed spec_54b2c1b3 on
+        # 2026-07-15: a fixed `node:assert` typo kept failing from retry_0's
+        # snapshot). Fall back to auto-discovery only if we find no test files.
+        test_files = sorted(
+            p.relative_to(spec_dir).as_posix()
+            for ext in ("js", "mjs", "cjs")
+            for p in spec_dir.rglob(f"*.test.{ext}")
+            if "retry_history" not in p.relative_to(spec_dir).parts
+        )
+        raw_cmd = ["node", "--test", *test_files] if test_files else ["node", "--test"]
     else:
         # `--import-mode=importlib`: import each test module by its full path
         # instead of pytest's default 'prepend' mode, which keys modules by

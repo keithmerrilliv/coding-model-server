@@ -59,6 +59,36 @@ def test_default_timeouts_has_node_test():
     assert executor.DEFAULT_TIMEOUTS.get("node_test") == 120
 
 
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
+def test_node_test_excludes_retry_history(tmp_path, monkeypatch):
+    # Regression (spec_54b2c1b3, 2026-07-15): node --test auto-discovery re-ran
+    # snapshots under retry_history/, so a fixed bug kept failing from an old
+    # snapshot and a JS spec could never pass once it had retried. The live test
+    # files must run; the retry_history snapshot must NOT.
+    spec_dir = tmp_path / "spec"
+    (spec_dir / "test").mkdir(parents=True)
+    (spec_dir / "retry_history" / "retry_0" / "test").mkdir(parents=True)
+
+    (spec_dir / "test" / "live.test.js").write_text(
+        "const test = require('node:test');\n"
+        "const assert = require('node:assert');\n"
+        "test('live passes', () => { assert.ok(true); });\n"
+    )
+    # A snapshot that would FAIL if re-run.
+    (spec_dir / "retry_history" / "retry_0" / "test" / "old.test.js").write_text(
+        "const test = require('node:test');\n"
+        "const assert = require('node:assert');\n"
+        "test('stale snapshot fails', () => { assert.strictEqual(1, 2); });\n"
+    )
+    monkeypatch.setenv("CODING_MODEL_ALLOW_UNSANDBOXED_TESTS", "1")
+
+    passed, output = executor._run_local_tests(spec_dir, "node_test", 60)
+
+    assert passed, f"retry_history snapshot must be excluded; got:\n{output}"
+    assert "stale snapshot" not in output
+    assert "live passes" in output
+
+
 # ── 2. sandbox wrapping ──────────────────────────────────────────────────────
 
 def _path_value(args: list[str]) -> str:
