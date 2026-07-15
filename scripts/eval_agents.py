@@ -85,15 +85,37 @@ def ask_agent(server, headers, agent, prompt, max_tokens):
     }
 
 
+def _with_retry(fn, attempts=6):
+    """External judges rate-limit and 503 under load. A bare judge call has no
+    retry, so one blip anywhere in 2*len(tasks) calls aborts the whole run —
+    losing every generated answer, which is the expensive part. Retry with
+    backoff on ANY exception; re-raise only if every attempt fails.
+
+    Backoff crosses the free-tier RPM reset window. Gemini's 429 says "retry in
+    ~34s" (a per-minute quota of 20 requests), so late attempts must wait longer
+    than that: 8, 16, 24, 32, 40s. Pacing in the caller should keep us under the
+    limit in the first place; this is the recovery if a burst slips through."""
+    for i in range(attempts):
+        try:
+            return fn()
+        except Exception as e:  # noqa: BLE001 — transient API errors are opaque; retry all
+            if i == attempts - 1:
+                raise
+            delay = 8 * (i + 1)
+            print(f"    judge attempt {i+1}/{attempts} failed ({type(e).__name__}); "
+                  f"retrying in {delay}s", flush=True)
+            time.sleep(delay)
+
+
 def judge(judge_name, task, first, second, server, headers):
     """Return 'A' | 'B' | 'TIE'. A is always `first` as shown to the judge."""
     content = (f"# TASK\n{task['prompt']}\n\n"
                f"# RESPONSE A\n{scrub(first)}\n\n"
                f"# RESPONSE B\n{scrub(second)}\n")
     if judge_name == "claude":
-        out = call_claude(JUDGE_SYSTEM, content, max_tokens=2000, timeout=300)
+        out = _with_retry(lambda: call_claude(JUDGE_SYSTEM, content, max_tokens=2000, timeout=300))
     elif judge_name == "gemini":
-        out = call_gemini(JUDGE_SYSTEM, content, max_tokens=2000, timeout=300)
+        out = _with_retry(lambda: call_gemini(JUDGE_SYSTEM, content, max_tokens=2000, timeout=300))
     else:  # a local agent, e.g. deep_reviewer
         r = requests.post(
             f"{server}/v1/chat/completions", headers=headers, timeout=1800,
@@ -117,6 +139,14 @@ def main():
     ap.add_argument("--max-tokens", type=int, default=1400)
     ap.add_argument("--server", default="http://127.0.0.1:5000")
     ap.add_argument("--out", default="/tmp/eval_agents.json")
+    ap.add_argument("--reuse-answers", metavar="JSON",
+                    help="skip generation; load the `answers` block from a prior "
+                         "--out file. Answers are deterministic (temp 0), so a "
+                         "re-judge never needs to re-run the models.")
+    ap.add_argument("--judge-interval", type=float, default=4.0,
+                    help="min seconds between judge calls. The Gemini free tier "
+                         "caps at 20 requests/min; 4s (=15/min) stays under it. "
+                         "Set 0 for a paid judge with no RPM limit.")
     args = ap.parse_args()
 
     if len(args.agents) != 2:
@@ -130,24 +160,46 @@ def main():
     tasks = json.load(open(args.tasks))
     print(f"{len(tasks)} tasks | {x} vs {y} | judge={args.judge}\n")
 
-    # Phase 1 -- one model load per agent, not one per task.
-    answers = {}
-    for agent in (x, y):
-        print(f"### {agent} answering (first call pays the model load)", flush=True)
-        answers[agent] = {}
-        for t in tasks:
-            a = ask_agent(args.server, headers, agent, t["prompt"], args.max_tokens)
-            answers[agent][t["id"]] = a
-            print(f"  {t['id']:16} {a['completion_tokens']:5d} tok  {a['wall']:6.1f}s", flush=True)
-        print()
+    # Phase 1 -- one model load per agent, not one per task. Answers are
+    # deterministic (temp 0), so --reuse-answers skips regeneration entirely when
+    # only the judging failed (e.g. the judge rate-limited mid-run).
+    if args.reuse_answers:
+        saved = json.load(open(args.reuse_answers))
+        answers = saved["answers"]
+        missing = [a for a in (x, y) if a not in answers]
+        if missing:
+            ap.error(f"--reuse-answers {args.reuse_answers} has no answers for {missing}")
+        print(f"### reusing saved answers for {x}, {y} (skipping generation)\n", flush=True)
+    else:
+        answers = {}
+        for agent in (x, y):
+            print(f"### {agent} answering (first call pays the model load)", flush=True)
+            answers[agent] = {}
+            for t in tasks:
+                a = ask_agent(args.server, headers, agent, t["prompt"], args.max_tokens)
+                answers[agent][t["id"]] = a
+                print(f"  {t['id']:16} {a['completion_tokens']:5d} tok  {a['wall']:6.1f}s", flush=True)
+            print()
+        # Checkpoint before judging: generation is the expensive, GPU-bound half,
+        # and the judge is a flaky external API. Persist now so a judge failure
+        # never costs the answers — re-run with --reuse-answers to judge only.
+        json.dump({"agents": [x, y], "judge": args.judge, "answers": answers},
+                  open(args.out, "w"), indent=1)
+        print(f"(answers checkpointed to {args.out})\n", flush=True)
 
     # Phase 2 -- judge each task in both orders; a flip means position bias, not merit.
     print(f"### judging (each task twice, order swapped)\n", flush=True)
     results, transcripts = [], {}
-    for t in tasks:
+    for i, t in enumerate(tasks):
         tx, ty = answers[x][t["id"]]["text"], answers[y][t["id"]]["text"]
 
+        # Pace to stay under the judge's RPM limit (see --judge-interval). Two
+        # calls per task, so half the interval between the paired calls too.
+        if i and args.judge_interval:
+            time.sleep(args.judge_interval)
         v1, o1 = judge(args.judge, t, tx, ty, args.server, headers)   # A=x, B=y
+        if args.judge_interval:
+            time.sleep(args.judge_interval)
         v2, o2 = judge(args.judge, t, ty, tx, args.server, headers)   # A=y, B=x
 
         # Translate each verdict into "who won", independent of shown position.

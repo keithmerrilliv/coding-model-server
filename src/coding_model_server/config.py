@@ -524,14 +524,11 @@ Update these after each retrieval step. They help you stay organized and efficie
     # (spec_fa78ca9c), which is transient contention during teardown->start, not the
     # reload arithmetic. So 20 remains the honest pick for THIS model.
     #
-    # Two corrections to the 2026-07-13 note above, for anyone reading it as evidence:
-    #   * At 18 this model measures 914 MiB free, not the 496-570 recorded there. On
-    #     today's numbers the old guard would NOT have refused the reload, so that
-    #     note's account of the brick does not reproduce as written. The brick was
-    #     real (see DEV-94); the free-VRAM figure attached to it was not reliable.
-    #   * ornith gets 18 and this model does not, purely because ornith's file is
-    #     0.9 GB smaller and so leaves 1,544 MiB at the same N. Same shape, same
-    #     flags, different headroom.
+    # Correction to the 2026-07-13 note above, for anyone reading it as evidence:
+    # at 18 this model measures 914 MiB free, not the 496-570 recorded there. On
+    # today's numbers the old guard would NOT have refused the reload, so that
+    # note's account of the brick does not reproduce as written. The brick was
+    # real (see DEV-94); the free-VRAM figure attached to it was not reliable.
     _MOE_35B = _create_model_config(
         'MODEL_PATH_35B',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf',
@@ -542,71 +539,27 @@ Update these after each retrieval step. They help you stay organized and efficie
         repeat_penalty=1.05,
     )
 
-    # Ornith-1.0-35B Q4_K_M — 21.2 GB, official GGUF from DeepReinforce (MIT).
-    # Post-trained on Qwen3.5, so general.architecture is `qwen35moe`, which
-    # build 5343f45 already speaks — no patch, no upgrade.
+    # Retired 2026-07-14: _MOE_ORNITH (Ornith-1.0-35B Q4_K_M, DeepReinforce, MIT)
+    # backed an `ornith` agent added ON EVAL in DEV-88 to test the lab's self-
+    # reported SWE-bench 75.6 / Terminal-Bench 64.2 claims against `implementer`.
+    # It was a Qwen3.5 fine-tune of the same 3B/35B shape (40 blocks, 16 heads, 2
+    # KV, 256 experts / 8 active), architecturally IDENTICAL to _MOE_35B.
     #
-    # Same 3B/35B MoE shape as _MOE_35B, but NOT the same layout, so its flags
-    # are not copied from it:
-    #   block_count 40 (not 48)   -> ngl=41 puts all 40 attn layers + output on GPU
-    #   context_length 262144
-    #   16 heads / 2 KV heads     -> 8:1 GQA, so Q8_0 KV at 64K costs only ~1.4 GB
-    #   256 experts, 8 active
+    # Speed was a wash (DEV-95): 80.9 vs implementer's 75.5 tok/s decode was pure
+    # file-size (0.9 GB smaller), no architectural edge. Quality was the only open
+    # question, and DEV-90 answered it with the blind, counterbalanced eval:
+    #   Gemini (external judge, 5/8 tasks before its free tier rate-capped): 5 ties.
+    #   deep_reviewer (local Qwen3.5 judge — if biased, biased TOWARD ornith):
+    #     implementer 2, ornith 1, tie 5.
+    # No task where both judges agreed ornith won. An ornith-friendly judge still
+    # favored implementer 2-1 on the decisive tasks. Verdict: a wash, edge to
+    # implementer. A model that does not beat the incumbent is not worth a roster
+    # slot or 21.2 GB — the same call as lite_architect. See DEV-90.
     #
-    # On evaluation, not yet a default: the lab is near-unknown and its headline
-    # numbers (SWE-bench Verified 75.6, Terminal-Bench 2.1 64.2 — which would beat
-    # every agent here at 3B active) are self-reported with no third-party
-    # replication. Treated as a claim to test, not a fact. Speed is settled
-    # (below); quality is NOT — that needs a real eval, not a decode benchmark.
-    #
-    # Expert-offload re-sweep 2026-07-14 (median of 3, warm-up discarded, 64K Q8_0,
-    # production argv). Supersedes the median-of-2 pass earlier the same day:
-    #   n_cpu_moe=24 -> 74.94 tok/s @ 4,266 MiB free
-    #             22 -> 79.25          @ 3,338
-    #             20 -> 82.85          @ 2,474
-    #             18 -> 86.80          @ 1,544   <- chosen
-    #             16 -> 92.49          @   614
-    #             14 -> fails to load (SIGSEGV) — this is the hard ceiling
-    # Still no knee: decode trades against VRAM almost linearly, so N is purely a
-    # headroom decision, not an optimum to find.
-    #
-    # WAS 20. Moved to 18 (2026-07-14) once DEV-94 landed. The old reason to sit at
-    # 20 was that 18 risked the reload brick — and that reason is gone: the VRAM
-    # guard used to demand `free >= footprint + margin`, which no idle GPU could
-    # satisfy for a model this size, so any tight config refused to reload and the
-    # server bricked itself after the first idle-watchdog reap. The guard now gates
-    # on the measured footprint alone. 18 buys +4.8% decode and still clears the
-    # ~1,400 MiB swap floor.
-    #
-    # NOT 16, despite it being the fastest that loads (+11.6% over 20). 614 MiB free
-    # is under the ~1,400 MiB swap floor that exists because of a real observed OOM
-    # (spec_fa78ca9c, deep_reviewer -> implementer). DEV-94 fixed the *reload* cliff;
-    # it did nothing about transient VRAM contention during a swap, and 614 MiB is
-    # not enough slack to absorb it. The 2026-06-05 lesson stands: do not override a
-    # safety floor on the strength of a decode number.
-    #
-    # Same-session head-to-head, both at n_cpu_moe=20 (a true apples-to-apples:
-    # the two models are architecturally IDENTICAL — 40 blocks, 16 heads, 2 KV
-    # heads, 2048 embedding — so the same N offloads the same fraction of experts):
-    #   implementer  80.73 tok/s | prefill 235.5 | 1,842 MiB free   (22.1 GB file)
-    #   ornith       82.85 tok/s | prefill 236.8 | 2,474 MiB free   (21.2 GB file)
-    # The ~3% decode edge and the ~630 MiB of extra headroom are just the 0.9 GB
-    # smaller file: decode is bandwidth-bound, so tok/s tracks bytes-per-token
-    # almost exactly. There is no architectural advantage here. Ornith is a
-    # fine-tune of the same shape, so SPEED IS A WASH and the only question that
-    # matters is quality — which a decode benchmark cannot answer.
-    #
-    # The extra headroom IS why ornith gets 18 while implementer stays at 20: the
-    # smaller file leaves 1,544 MiB at N=18 where implementer leaves only 914.
-    _MOE_ORNITH = _create_model_config(
-        'MODEL_PATH_ORNITH',
-        '/home/keith-merrill/.lmstudio/models/deepreinforce-ai/Ornith-1.0-35B-GGUF/ornith-1.0-35b-Q4_K_M.gguf',
-        41, 65536, 4608,
-        server_extra_args=['--jinja', '--reasoning-format', 'none', '--swa-full'],
-        type_k=8, type_v=8,
-        cpu_moe=True, n_cpu_moe=18, n_ubatch=4608,
-        repeat_penalty=1.05,
-    )
+    # The GGUF is still on disk and scripts/download_models.py still lists it.
+    # To re-eval (e.g. once DEV-98's Claude judge lands), restore this block plus
+    # the `ornith` agent entry from this commit; the offload sweep that picked
+    # n_cpu_moe=18 (86.80 tok/s @ 1,544 MiB free) is in the DEV-90 removal commit.
 
     # Qwen3.6-27B Q4_K_M — DENSE 27B model, ~16.8 GB. Released 2026-04-22.
     # 64 attention layers; dense (no cpu_moe possible). 16 GB VRAM forces
@@ -799,14 +752,8 @@ Update these after each retrieval step. They help you stay organized and efficie
             _MOE_35B,
             executor=True
         ),
-        # Same system prompt and executor wiring as `implementer`, deliberately:
-        # the only variable in an ornith-vs-implementer A/B should be the model.
-        'ornith': _create_agent_config(
-            'Implementer — Ornith-1.0-35B Q4_K_M (3B/35B MoE, 64K ctx Q8_0, ngl=41 n_cpu_moe=18, ON EVAL)',
-            _IMPLEMENTER_SYSTEM_PROMPT,
-            _MOE_ORNITH,
-            executor=True
-        ),
+        # `ornith` retired 2026-07-14 after losing the DEV-90 eval to `implementer`
+        # (a wash, edge to implementer). See the _MOE_ORNITH retirement note above.
         'deep_implementer': _create_agent_config(
             'Implementer — Coder-Next Q8_0 (3B/80B MoE, 256K ctx Q8_0, ngl=48 cpu_moe, deep reasoning)',
             _IMPLEMENTER_SYSTEM_PROMPT,

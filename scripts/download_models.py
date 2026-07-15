@@ -75,9 +75,12 @@ MODELS = [
     },
     # Official GGUF from the lab, not an Unsloth requant — hence its own org dir.
     # arch is qwen35moe, which build 5343f45 already speaks (same as the 122B).
+    # No longer wired to an agent: the `ornith` agent was retired 2026-07-14 after
+    # losing the DEV-90 eval to `implementer`. Kept fetchable so DEV-98 (a Claude-
+    # judged re-eval) can restore the config and re-run without re-hunting the repo.
     {
         "id": 8,
-        "name": "Ornith-1.0-35B Q4_K_M (3B/35B MoE, MIT)",
+        "name": "Ornith-1.0-35B Q4_K_M (3B/35B MoE, MIT) — not in roster; see DEV-90",
         "repo": "deepreinforce-ai/Ornith-1.0-35B-GGUF",
         "files": ["ornith-1.0-35b-Q4_K_M.gguf"],
         "local_dir": os.path.join(MODELS_ROOT, "deepreinforce-ai", "Ornith-1.0-35B-GGUF"),

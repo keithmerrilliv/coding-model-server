@@ -286,7 +286,7 @@ This is where the prompt is processed — the most compute-intensive phase:
 
 **Performance**: prefill speed varies by ~15x across the roster — from ~220 tok/s
 for the 480B CPU-bound architect to ~3,350 tok/s for a small partial-offload MoE
-(Coder-30B). Decode varies ~13x, from 6 tok/s (architect) to 81 (ornith).
+(Coder-30B). Decode varies ~12x, from 6 tok/s (architect) to 76 (implementer).
 
 > Measured 2026-07-14 on the reference hardware (RTX 5080 16 GB, CUDA 12.8) against
 > the **current** agent configs, `--warmup` on both benchmarks. Prefill is
@@ -296,7 +296,7 @@ for the 480B CPU-bound architect to ~3,350 tok/s for a small partial-offload MoE
 >
 > **These are end-to-end numbers, measured through the FastAPI server** — what a
 > caller actually experiences. They run a few percent below the raw-llama-server
-> figures recorded in `config.py` (e.g. ornith 80.9 here vs 86.8 in the offload
+> figures recorded in `config.py` (e.g. implementer 75.5 here vs 80.7 in the offload
 > sweep), because those measure the child process in isolation without the proxy
 > hop. Both are correct; they measure different things. Sorted by decode — the rate
 > you feel while output streams. Treat as an ordering on this hardware, not a spec:
@@ -304,7 +304,6 @@ for the 480B CPU-bound architect to ~3,350 tok/s for a small partial-offload MoE
 
 | Agent | Prompt tok | Prefill (tok/s) | Decode (tok/s) | Config as measured |
 |-------|-----------:|----------------:|---------------:|-------|
-| `ornith` | 2,507 | 2,153 | **80.9** | Ornith-35B, ngl 41, n_cpu_moe 18 (on eval) |
 | `implementer` | 2,475 | 2,060 | **75.5** | Qwen3.6-35B-A3B, ngl 41, n_cpu_moe 20 (default) |
 | `native_implementer` | 2,299 | 2,529 | **59.7** | GLM-4.7-Flash, ngl 47, n_cpu_moe 20 |
 | `fast_implementer` | 2,399 | 3,348 | **58.2** | Coder-30B, ngl 49, n_cpu_moe 26, 64K |
