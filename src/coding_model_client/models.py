@@ -37,7 +37,6 @@ def _load_fallback_themes():
     AGENT_THEMES.clear()
     defaults = {
         "implementer": "Implementer — Qwen3.5-35B (offline)",
-        "ornith": "Implementer — Ornith-1.0-35B (offline)",
         "deep_implementer": "Implementer — Coder-Next Deep (offline)",
         "fast_implementer": "Implementer — Coder-30B Fast (offline)",
         "architect": "Architect — Coder-480B Ultra (offline)",

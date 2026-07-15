@@ -106,7 +106,6 @@ for method, prefill figures, and the caveat about raw-vs-proxy numbers).
 | Agent | Role | Model | Active/Total | Context | KV | GPU offload | Decode tok/s |
 |-------|------|-------|--------------|---------|-----|-------------|-----:|
 | `implementer` | Default implementation | Qwen3.6-35B-A3B UD-Q4_K_M | 3B/35B | 64K | Q8_0 | ngl 41, n_cpu_moe 20 | 75.5 |
-| `ornith` | Implementation (**on eval**) | Ornith-1.0-35B Q4_K_M | 3B/35B | 64K | Q8_0 | ngl 41, n_cpu_moe 18 | 80.9 |
 | `deep_implementer` | Deep reasoning | Qwen3-Coder-Next Q8_0 | 3B/80B | 256K | Q8_0 | ngl 48, cpu_moe | 26.9 |
 | `fast_implementer` | Fast implementation | Qwen3-Coder-30B Q4_K_M | 3B/30B | 64K | Q8_0 | ngl 49, n_cpu_moe 26 | 58.2 |
 | `debugger` | Debugging | Qwen3-Coder-30B Q4_K_M | 3B/30B | 128K | Q8_0 | ngl 49, cpu_moe | 37.1 |
