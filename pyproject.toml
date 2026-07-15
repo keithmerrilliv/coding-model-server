@@ -35,6 +35,9 @@ dependencies = [
     # Soft: /review and Phase b skip the relevant judge if missing or unkeyed.
     "anthropic>=0.40.0",
     "google-genai>=1.0.0",
+    # Soft: the subscription-auth Claude judge (external_judges.call_claude_sdk);
+    # shells out to the Claude Code CLI, which must be installed separately.
+    "claude-agent-sdk>=0.2.0",
 ]
 
 [project.optional-dependencies]

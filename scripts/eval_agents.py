@@ -7,8 +7,10 @@ Design decisions that matter, and why:
 
   External judge. The obvious judge is `deep_reviewer`, but it is Qwen-family and
   so is `implementer` — a local judge scoring its own lineage is not evidence.
-  Default is Claude via external_judges. Pass --judge deep_reviewer to use the
-  local one anyway, and read the result with that caveat in mind.
+  Default is Claude via external_judges. `--judge claude-sdk` runs Claude through
+  the Claude Code subscription (no API credit needed — the reliable path when the
+  API key is empty and Gemini's free tier is rate-capped; see DEV-98). Pass
+  --judge deep_reviewer to use the local one anyway, with that caveat in mind.
 
   Counterbalanced. LLM judges have a well-documented position bias toward the
   first response shown. Every task is therefore judged TWICE, with the order
@@ -38,7 +40,8 @@ from collections import Counter
 import requests
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-from coding_model_server.external_judges import call_claude, call_gemini  # noqa: E402
+from coding_model_server.external_judges import (  # noqa: E402
+    call_claude, call_claude_sdk, call_gemini)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -114,6 +117,8 @@ def judge(judge_name, task, first, second, server, headers):
                f"# RESPONSE B\n{scrub(second)}\n")
     if judge_name == "claude":
         out = _with_retry(lambda: call_claude(JUDGE_SYSTEM, content, max_tokens=2000, timeout=300))
+    elif judge_name == "claude-sdk":
+        out = _with_retry(lambda: call_claude_sdk(JUDGE_SYSTEM, content, max_tokens=2000, timeout=300))
     elif judge_name == "gemini":
         out = _with_retry(lambda: call_gemini(JUDGE_SYSTEM, content, max_tokens=2000, timeout=300))
     else:  # a local agent, e.g. deep_reviewer
@@ -135,7 +140,9 @@ def main():
                     help="exactly two, e.g. -a implementer -a ornith")
     ap.add_argument("--tasks", default=os.path.join(HERE, "eval_tasks.json"))
     ap.add_argument("--judge", default="claude",
-                    help="claude | gemini | any local agent name (e.g. deep_reviewer)")
+                    help="claude (API key) | claude-sdk (Claude Code subscription, "
+                         "no API credit needed) | gemini | any local agent name "
+                         "(e.g. deep_reviewer)")
     ap.add_argument("--max-tokens", type=int, default=1400)
     ap.add_argument("--server", default="http://127.0.0.1:5000")
     ap.add_argument("--out", default="/tmp/eval_agents.json")
