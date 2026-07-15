@@ -1,0 +1,32 @@
+[
+  {
+    "id": "design_model_swap",
+    "kind": "system-design",
+    "prompt": "Design the model-swap manager for a single-GPU LLM inference server that serves many logical agents but keeps exactly one model resident at a time. Requests call ensure(model): if the wanted model differs from the resident one, the old subprocess is torn down and a new one started. Specify: the state machine; the locking discipline that lets dashboard status reads proceed without blocking on a multi-second swap; how an in-flight request against the current model is protected when another agent requests a swap; when it is safe to start the new process relative to the GPU actually releasing the old model's VRAM; and how a child that dies out-of-band (OOM-killer, CUDA crash) is detected and recovered rather than leaving the manager wedged. State your invariants explicitly."
+  },
+  {
+    "id": "design_rate_limiter",
+    "kind": "system-design",
+    "prompt": "Design a rate limiter for an API gateway handling 10k req/s across a fleet of stateless nodes. Requirements: per-user limits AND a global ceiling; a node failure must not let a burst slip through; it must add no more than ~2ms at p99. Choose the algorithm (token bucket / sliding window / fixed window / GCRA) and the shared store, and justify both against at least one alternative you rejected. Address the hot-key problem (one user hammering a single counter) and what happens to correctness when the shared store has a brief network partition."
+  },
+  {
+    "id": "decompose_migration",
+    "kind": "decomposition",
+    "prompt": "A live service stores every entity in one Postgres table with an unstructured JSONB `data` column, and it is now too slow to query. Produce a sequenced, reversible migration to a normalized schema that keeps the service serving reads and writes throughout — no maintenance window. Give the ordered steps, mark which are reversible and how, identify the single riskiest step and how you de-risk it, and state how you know at each step that it is safe to proceed to the next."
+  },
+  {
+    "id": "design_offline_sync",
+    "kind": "design-tradeoff",
+    "prompt": "Design the synchronization and conflict-resolution strategy for an offline-first note app: a user edits the same note on a phone and a laptop while both are offline, then both reconnect. Choose a conflict model (last-write-wins, CRDT, or operational transform) and justify it specifically for free-form text notes edited by a single user across their own devices — including why the other two are worse fits HERE, not in general. Specify what metadata each note and edit must carry, and describe the exact merge behavior when the two offline edits touched overlapping text versus disjoint text."
+  },
+  {
+    "id": "design_orchestrator",
+    "kind": "system-design",
+    "prompt": "Design an autonomous pipeline that drives a software task from spec through plan, implementation, and review to done, with a human approval gate between phases. Requirements: it must survive a process crash mid-phase and resume without repeating completed work or losing a pending approval; a gate must never be silently skipped; and a rejected gate must feed the reviewer's notes back for a retry. Specify the persistence model (what is written, and when, relative to the side effects it records), how resume reconstructs state after a crash, and the invariant that makes skipping a gate impossible rather than merely unlikely."
+  },
+  {
+    "id": "critique_job_queue",
+    "kind": "failure-analysis",
+    "prompt": "Critique this job-queue design and produce a corrected version. Design: workers poll a Postgres `jobs` table with `SELECT ... FOR UPDATE SKIP LOCKED LIMIT 1`, set status='running', COMMIT, do the work (which includes calling a non-idempotent external payment API), then `DELETE` the row on success. On failure the worker sets status='failed'. There is no other coordination. Enumerate every failure mode under worker crashes, retries, duplicate delivery, long jobs, and scale — for each, say concretely what goes wrong and the fix. Then give the corrected design, and call out any place where your fix trades one guarantee for another."
+  }
+]
