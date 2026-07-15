@@ -384,7 +384,11 @@ Update these after each retrieval step. They help you stay organized and efficie
     # job is reasoning quality, to buy 0.42 tok/s that no human perceives.
     # The GGUF is still on disk; restore this block and the agent entry if you
     # ever want the 30 GB of RAM headroom back (180.3 GB leaves only ~8 GB free).
-    # The real lever is fewer ACTIVE params, not fewer bits: see Qwen3.5-397B-A17B.
+    # The real lever is fewer ACTIVE params, not fewer bits — but NOT via the
+    # 397B-A17B this once pointed at: that model was already retired for quality
+    # (DEV-93), and the only local copy is IQ1_M anyway. The fewer-active-params
+    # model that actually won is dense_architect (Qwen3.6-27B); see DEV-93 and the
+    # note on _MOE_480B_ULTRA for where that lever really lives.
 
     # Ultra: Premium reasoning using Q2_K_XL on 192GB RAM.
     # llama_server + cpu_moe → all 62 attention sublayers + output on GPU
@@ -402,7 +406,25 @@ Update these after each retrieval step. They help you stay organized and efficie
     # target's expert evaluation and draft's full forward pass exceeded any
     # spec-decode gain. Disabled. Future experiments could try a much smaller
     # base Qwen3 draft (0.6B/1.5B) to cut draft CPU cost — but only if the
-    # vocabulary is verified identical to Qwen3-Coder.
+    # vocabulary is verified identical to Qwen3-Coder. (See DEV-96.)
+    #
+    # NOT the 397B-A17B (DEV-93, closed 2026-07-14). The idea was to cut decode
+    # by halving active params (17B vs this model's 35B) without an IQ1 quality
+    # cliff. It does not work, for reasons already on the record:
+    #   * The 397B-A17B was retired here for QUALITY, not incidentally: commit
+    #     d2dd54a7 (2026-04-24) recorded Qwen3.6-27B at 77.2 on SWE-bench Verified
+    #     vs the 397B-A17B's 76.2 — a 16.8 GB dense model beat the 100 GB flagship
+    #     on coding. Putting it in front of `architect`, whose whole job is
+    #     reasoning quality, is a downgrade.
+    #   * The only local copy is IQ1_M (scripts/download_models.py id 3). That is
+    #     the same ~1.7 bpw quant DEV-88 retired lite_architect over: the IQ1
+    #     kernel has no REPACK path, so it forfeits most of the fewer-active-params
+    #     decode win, AND 76.2 is the good-quant score — IQ1_M lands below it.
+    # The fewer-active-params model that actually WON that comparison is already
+    # in the roster: dense_architect (Qwen3.6-27B), 10.8 tok/s / 829 prefill vs
+    # this model's 6.3 / 222 (DEV-95). Whether it should also serve the
+    # interactive `architect` role is a live question, tracked separately — that
+    # is a quality eval, not a model to go download.
     _MOE_480B_ULTRA = _create_model_config(
         'MODEL_PATH_480B_ULTRA',
         '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF/Qwen3-Coder-480B-A35B-Instruct-UD-Q2_K_XL-00001-of-00004.gguf',
