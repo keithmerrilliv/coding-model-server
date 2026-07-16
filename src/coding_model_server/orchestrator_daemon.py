@@ -1247,6 +1247,9 @@ _PYTEST_SUMMARY_RE = re.compile(
 )
 # Jest summary: "Tests: N passed, M total"
 _JEST_SUMMARY_RE = re.compile(r"Tests?:\s+\d+\s+\w+", re.IGNORECASE)
+# Node's built-in test runner (node:test) TAP footer: lines like
+# "# tests 2", "# pass 1", "# fail 1". Any one of these confirms a real run.
+_NODE_TEST_SUMMARY_RE = re.compile(r"^# (?:tests|pass|fail)\s+\d+", re.MULTILINE)
 
 
 def _extract_actionable_test_output(output: str, framework: str, max_chars: int = 8000) -> str:
@@ -1279,6 +1282,18 @@ def _extract_actionable_test_output(output: str, framework: str, max_chars: int 
             head = extracted[: max_chars - 1200]
             tail = extracted[-1200:]
             return head + "\n\n[... output truncated ...]\n\n" + tail
+    elif fw == "node_test":
+        # node:test emits TAP: failures are `not ok N - name` lines followed by
+        # a YAML diagnostic block; passes (`ok N`) before them are just noise
+        # for retry feedback. Anchor on the first failure, keep the summary tail.
+        marker = output.find("\nnot ok ")
+        if marker != -1:
+            extracted = output[marker + 1:]
+            if len(extracted) <= max_chars:
+                return extracted
+            head = extracted[: max_chars - 1200]
+            tail = extracted[-1200:]
+            return head + "\n\n[... output truncated ...]\n\n" + tail
     # Default: tail-biased — the summary is at the end and matters most.
     if len(output) <= max_chars:
         return output
@@ -1304,6 +1319,9 @@ def _validate_test_output_structure(test_output: str, framework: str) -> tuple[b
     elif fw == "jest":
         if not _JEST_SUMMARY_RE.search(test_output):
             return False, "no jest summary line ('Tests: ...') detected"
+    elif fw == "node_test":
+        if not _NODE_TEST_SUMMARY_RE.search(test_output):
+            return False, "no node:test summary line ('# tests/# pass/# fail N') detected"
     return True, ""
 
 

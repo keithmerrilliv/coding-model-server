@@ -120,7 +120,7 @@ PLANNER_SYSTEM_PROMPT = textwrap.dedent("""\
       - "Verbatim text of the operator's answer to question 1"
       - "Verbatim text of the operator's answer to question 2"
     test_strategy:
-      framework: pytest            # or xctest, jest, none
+      framework: pytest            # pytest | node_test | xctest | jest | none
       required: true
       notes: "any extra context"
     constraints:
@@ -175,6 +175,16 @@ PLANNER_SYSTEM_PROMPT = textwrap.dedent("""\
        fold clarifications into other fields. Keep the operator's
        original wording. Omit the `clarifications:` field entirely
        when there are no clarifications to record.
+    10. For JavaScript/TypeScript specs whose tests run on THIS server
+       (execution_target: server — e.g. web/WebGPU/Node projects), set
+       test_strategy.framework: node_test. The sandbox has NO network and
+       NO dependency-install step, so tests MUST use Node's built-in runner
+       (`node:test` + `node:assert`) with ZERO external packages — no jest,
+       vitest, ts-jest, or any `package.json` dependency. Test files must be
+       plain `*.test.js` (or pre-compiled to JS) discoverable by `node --test`.
+       Design the spec so the testable logic core is pure JS with no DOM/GPU/
+       browser globals. Reserve the `jest` framework for repos that already
+       vendor their own node_modules.
     """)
 
 
