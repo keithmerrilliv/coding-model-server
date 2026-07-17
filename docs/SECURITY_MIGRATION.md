@@ -279,13 +279,28 @@ cp mac_runner/com.codingmodel.runner.plist ~/Library/LaunchAgents/
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.codingmodel.runner.plist
 # Or for a dev session without LaunchAgent:
 ./bin/start-mac-runner.sh
+
+# 6. Install the tunnel LaunchAgent — the runner binds loopback, so without this
+#    the orchestrator has no route to it. See "Transport" below for the details.
+brew install autossh
+cp mac_runner/com.codingmodel.tunnel.plist ~/Library/LaunchAgents/
+ssh keith-merrill@linux-server true    # once by hand: seeds ~/.ssh/known_hosts
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.codingmodel.tunnel.plist
+
+# 7. Verify from the Linux box — should list your repos.yml entries:
+#    curl -s http://127.0.0.1:5050/health
 ```
 
-> **The plist hardcodes absolute paths.** `WorkingDirectory` and
+> **Both plists hardcode absolute paths.** The runner's `WorkingDirectory` and
 > `ProgramArguments` point at `/Users/km4/Dev/qwen-server` — LaunchAgent plists
 > expand neither `~` nor environment variables, so if your checkout lives
 > elsewhere (or your username isn't `km4`) edit those two keys before
 > bootstrapping, or the agent will fail to start.
+>
+> The tunnel plist likewise hardcodes `keith-merrill@192.168.1.64`, its log paths
+> under `/Users/km4`, and `/opt/homebrew/bin/autossh` (that path is Apple
+> Silicon; Intel Homebrew installs to `/usr/local/bin/autossh`). launchd does not
+> search `PATH` for `argv[0]`, so that one must be absolute and correct.
 >
 > The runner also needs `fastapi`, `uvicorn`, `pydantic`, and `pyyaml`, which a
 > `--no-deps` client install (step 0) does **not** provide. Use the full
@@ -315,24 +330,58 @@ systemctl --user restart coding-model-orchestrator
 
 ### Transport: SSH reverse tunnel (recommended)
 
-From the Mac, keep this running (autossh, tmux, or add a LaunchAgent):
+The runner binds loopback, so this tunnel is the *only* path to it:
 
 ```sh
 ssh -NT -R 5050:localhost:5050 keith-merrill@linux-server
 ```
 
 This makes the Mac runner reachable at `http://127.0.0.1:5050` on the
-Linux box, end-to-end over SSH — no LAN exposure, no TLS to manage.
+Linux box, end-to-end over SSH — no LAN exposure, no TLS to manage. With the
+tunnel down, every dispatch fails with `mac-runner unreachable at
+http://127.0.0.1:5050`.
+
+Run it by hand only for a one-off. For anything durable use the autossh
+LaunchAgent template at `mac_runner/com.codingmodel.tunnel.plist`, which
+survives reboots, sleep/wake, and Wi-Fi drops:
+
+```sh
+brew install autossh
+cp mac_runner/com.codingmodel.tunnel.plist ~/Library/LaunchAgents/
+# Connect once by hand first, so the host key is in ~/.ssh/known_hosts —
+# BatchMode means the agent can never answer a host-key prompt.
+ssh keith-merrill@linux-server true
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.codingmodel.tunnel.plist
+```
+
+Two settings in it are load-bearing, and both fail in ways that are easy to
+misread:
+
+* `ExitOnForwardFailure=yes` — without it, if the server's 5050 is still held by
+  a stale tunnel, ssh connects happily with a **dead forward**. The tunnel looks
+  up while the runner is unreachable. With it, ssh exits loudly and autossh
+  retries until the stale forward is reaped.
+* `AUTOSSH_GATETIME=0` — autossh's default is to give up permanently if its first
+  connection dies inside 30s, which is exactly what happens at login or boot
+  before the network is up. `0` disables that and retries forever.
 
 ### LaunchAgent management
 
 ```sh
-# Start / stop
+# Start / stop — runner
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.codingmodel.runner.plist
 launchctl bootout   gui/$(id -u)/com.codingmodel.runner
 
+# Start / stop — tunnel
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.codingmodel.tunnel.plist
+launchctl bootout   gui/$(id -u)/com.codingmodel.tunnel
+
+# Is either actually up?  (a missing Label means it is not loaded)
+launchctl list | grep codingmodel
+
 # Logs
 tail -f ~/Library/Logs/coding-model-runner.out.log ~/Library/Logs/coding-model-runner.err.log
+tail -f ~/Library/Logs/coding-model-tunnel.out.log ~/Library/Logs/coding-model-tunnel.err.log
 ```
 
 ### Writing a spec that exercises the runner
