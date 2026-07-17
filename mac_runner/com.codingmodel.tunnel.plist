@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- LaunchAgent for the SSH reverse tunnel that carries mac-runner traffic.
+
+     The runner binds loopback only, so the orchestrator can reach it *only*
+     through this tunnel: 127.0.0.1:5050 on the Linux box forwards to
+     127.0.0.1:5050 on this Mac. With the tunnel down, every Swift/Xcode
+     dispatch fails with "mac-runner unreachable at http://127.0.0.1:5050".
+
+     autossh restarts ssh when the link dies; KeepAlive below restarts autossh
+     if autossh itself dies. Both are wanted — they cover different failures.
+
+     1. brew install autossh
+     2. Copy to ~/Library/LaunchAgents/com.codingmodel.tunnel.plist
+     3. Replace keith-merrill@192.168.1.64 with your Linux user@host, and km4
+        with your macOS username.
+     4. autossh is /opt/homebrew/bin/autossh on Apple Silicon, /usr/local/bin/autossh
+        on Intel. ProgramArguments needs the absolute path — launchd does not
+        search PATH for argv[0].
+     5. Connect once by hand first — `ssh keith-merrill@192.168.1.64 true` — so the
+        server's host key lands in ~/.ssh/known_hosts, and confirm the key you
+        use either has no passphrase or was loaded into the login keychain by
+        `ssh-add` with its apple-use-keychain flag. (That flag is spelled with a
+        double hyphen, which XML comments cannot contain, hence the long-hand.)
+        BatchMode means this agent can never answer a host-key or passphrase
+        prompt; it just fails, logging "Host key verification failed" or
+        "Permission denied (publickey)".
+     6. Load:   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.codingmodel.tunnel.plist
+        Unload: launchctl bootout   gui/$(id -u)/com.codingmodel.tunnel
+     7. Verify from the Linux box: curl -s http://127.0.0.1:5050/health
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.codingmodel.tunnel</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/autossh</string>
+
+    <!-- No monitoring port pair; SSH's own keepalives below detect a dead link.
+         The legacy -M <port> monitor burns two ports and is redundant with them. -->
+    <string>-M</string>
+    <string>0</string>
+
+    <!-- No remote command, no TTY: this process only carries the forward. -->
+    <string>-N</string>
+    <string>-T</string>
+
+    <!-- Load-bearing. If the server's 5050 is still held (e.g. by a stale tunnel
+         a previous unclean disconnect left behind), ssh would otherwise connect
+         happily with a DEAD forward — the tunnel looks up while the runner is
+         unreachable, which is the silent failure DEV-83 warns about. This turns
+         that into a loud exit, and autossh retries until the stale one is reaped. -->
+    <string>-o</string>
+    <string>ExitOnForwardFailure=yes</string>
+
+    <!-- Notice a dropped link in ~45s rather than hanging on a half-open socket
+         forever. This is what replaces -M's monitoring. -->
+    <string>-o</string>
+    <string>ServerAliveInterval=15</string>
+    <string>-o</string>
+    <string>ServerAliveCountMax=3</string>
+
+    <!-- launchd has no TTY: fail fast instead of blocking forever on a prompt. -->
+    <string>-o</string>
+    <string>BatchMode=yes</string>
+
+    <string>-R</string>
+    <string>5050:localhost:5050</string>
+    <string>keith-merrill@192.168.1.64</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- Load-bearing. autossh's default gatetime makes it give up for good if the
+         first connection dies within 30s — which is exactly what happens at login
+         or boot, before the network is up. 0 disables that and retries forever. -->
+    <key>AUTOSSH_GATETIME</key>
+    <string>0</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/km4/Library/Logs/coding-model-tunnel.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/km4/Library/Logs/coding-model-tunnel.err.log</string>
+</dict>
+</plist>
