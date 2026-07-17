@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hmac
 import logging
+import os
 import subprocess
 import sys
 import time
@@ -92,7 +93,9 @@ def run_tests_endpoint(req: RunTestsRequest) -> RunTestsResponse:
 
     timeout = req.timeout or DEFAULT_TIMEOUTS[req.framework]
     patch_dicts = [pf.model_dump() for pf in req.patch_files]
-    opts = req.model_dump(exclude_none=True)
+    # framework is passed positionally to build_cmd; leaving it in opts too
+    # makes it a duplicate argument.
+    opts = req.model_dump(exclude_none=True, exclude={"framework"})
 
     start = time.monotonic()
     try:
@@ -119,6 +122,17 @@ def run_tests_endpoint(req: RunTestsRequest) -> RunTestsResponse:
                     f"Tests timed out after {timeout}s\n"
                     f"{e.stdout.decode() if isinstance(e.stdout, bytes) else (e.stdout or '')}\n"
                     f"{e.stderr.decode() if isinstance(e.stderr, bytes) else (e.stderr or '')}"
+                )
+                exit_code = None
+            except FileNotFoundError:
+                # Toolchain missing from PATH — an operator problem, not something
+                # the implementer can patch its way out of. Log the PATH here; the
+                # response only needs to name the binary.
+                logger.error("%s not found on PATH=%s", cmd[0], os.environ.get("PATH", ""))
+                passed = False
+                output = (
+                    f"{cmd[0]!r} was not found on the runner's PATH. Install the "
+                    f"toolchain on the runner host, or fix PATH in the LaunchAgent plist."
                 )
                 exit_code = None
     except WorkspaceError as e:
