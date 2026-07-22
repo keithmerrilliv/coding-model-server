@@ -97,6 +97,41 @@ def test_empty_system_prompt_is_not_tokenized():
     assert est == 100 + 16
 
 
+def test_rag_suffix_is_counted_but_tokenized_separately():
+    """DEV-113: the RAG block contributes to the estimate, but as its own
+    tokenize call — never concatenated onto the base prompt (which would evict
+    the base's cache entry every retrieval)."""
+    calls = []
+
+    def counting(s):
+        calls.append(s)
+        return len(s) // 4
+
+    base = "s" * 400
+    suffix = "r" * 200
+    est, _ = _estimate_and_clamp_tokens(
+        base, [_Msg("user", "u" * 400)], 100_000, max_tokens=1000,
+        tokenize_fn=counting, reserve=0, rag_suffix=suffix,
+    )
+    # base + suffix + user tokenized as three distinct strings.
+    assert base in calls and suffix in calls
+    assert base + suffix not in calls
+    # 100 (base) + 50 (suffix) + 100 (user) + 8*2 (template)
+    assert est == 100 + 50 + 100 + 16
+
+
+def test_rag_suffix_counted_in_the_chars_fallback():
+    def boom(_):
+        raise RuntimeError("tokenize down")
+
+    est, _ = _estimate_and_clamp_tokens(
+        "s" * 250, [_Msg("user", "u" * 250)], 100_000, max_tokens=1000,
+        tokenize_fn=boom, reserve=0, rag_suffix="r" * 500,
+    )
+    # (250 + 500 + 250) / 2.5
+    assert est == int(1000 / 2.5)
+
+
 def test_clamp_floors_at_one_when_prompt_fills_the_window():
     est, clamped = _estimate_and_clamp_tokens(
         "s" * 8000, [_Msg("user", "u")], 500, max_tokens=4000,
