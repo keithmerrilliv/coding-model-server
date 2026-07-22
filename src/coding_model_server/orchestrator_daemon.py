@@ -41,9 +41,18 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import requests
 from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+
+# Transport errors that mean "couldn't reach the server" rather than "the work
+# failed". _http already backs off and retries these; if one still escapes, the
+# server was down longer than the backoff window (e.g. a slow redeploy), so the
+# spec/task is left re-runnable instead of being FAILED and its approved work
+# discarded. HTTPError (a real 4xx/5xx the server returned) is deliberately NOT
+# here — that is a genuine failure and still fails the spec.
+_TRANSPORT_ERRORS = (requests.ConnectionError, requests.Timeout)
 
 from coding_model_autonomous import (
     ArtifactKind,
@@ -220,6 +229,18 @@ def _process_pending_plan(db: Database, spec: Spec) -> None:
 
     try:
         result = call_planner(markdown, clarifications=rounds)
+    except _TRANSPORT_ERRORS as e:
+        # Couldn't reach the server (redeploy race, or a read timeout). Leave the
+        # spec in PENDING_PLAN so the next tick re-runs the planner rather than
+        # discarding it. Recorded, not FAILED.
+        logger.warning("spec %s: planner call hit transport error (%s) — "
+                       "leaving PENDING_PLAN for retry", spec.id, type(e).__name__)
+        db.record_event(
+            EventKind.PLANNER_RAN,
+            spec_id=spec.id,
+            payload={"transient_error": f"{type(e).__name__}: {e}"},
+        )
+        return
     except Exception as e:
         logger.exception("spec %s: planner call failed", spec.id)
         db.record_event(
@@ -529,6 +550,15 @@ def _start_task(db: Database, spec: Spec, task) -> None:
             logger.error("spec %s: unknown role %r for task %s",
                          spec.id, task.role, task.id)
             db.update_task_status(task.id, TaskStatus.FAILED)
+    except _TRANSPORT_ERRORS as e:
+        # Couldn't reach the server mid-inference (redeploy race / read timeout).
+        # Mirror the RUNNING crash-recovery path: reset the task to PENDING and
+        # leave the spec EXECUTING so the next tick re-runs it, instead of
+        # failing an approved spec on a network hiccup.
+        logger.warning("spec %s: task %s (%s) hit transport error (%s) — "
+                       "resetting to PENDING for retry",
+                       spec.id, task.id, task.role, type(e).__name__)
+        db.update_task_status(task.id, TaskStatus.PENDING)
     except Exception:
         logger.exception("spec %s: task %s (%s) failed with exception",
                          spec.id, task.id, task.role)
