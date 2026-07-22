@@ -253,6 +253,30 @@ def _auto_approve_allowlist():
     return READONLY_COMMANDS | BUILD_TEST_COMMANDS | {'git'} | extra
 
 
+def _argv_protected_path(argv):
+    """The first argv token that resolves into a protected path, or None.
+
+    files.py gates READ_FILE against protected paths so `read ~/.ssh/id_rsa`
+    can't silently feed an outbound-fetch tool. REMOTE_EXEC never ran that gate,
+    so `cat ~/.ssh/id_rsa` — an allow-listed read binary — auto-approved the
+    same exfiltration. Re-run the gate here over each argument.
+
+    A `--flag=value` / `VAR=value` token is also checked on its value half, so
+    `git config --file=~/.aws/credentials` is examined at the path, not the flag.
+    """
+    for tok in argv[1:]:
+        candidates = [tok]
+        if '=' in tok:
+            candidates.append(tok.split('=', 1)[1])
+        for cand in candidates:
+            if not cand or cand.startswith('-'):
+                continue
+            protected, _ = _is_protected_path(cand)
+            if protected:
+                return cand
+    return None
+
+
 def _is_auto_approvable_command(command):
     """Whether `command` may run with no prompt. Returns (ok, reason).
 
@@ -281,6 +305,10 @@ def _is_auto_approvable_command(command):
     allowlist = _auto_approve_allowlist()
     if base not in allowlist:
         return False, f"'{base}' is not in the auto-approve allow-list"
+
+    protected_arg = _argv_protected_path(argv)
+    if protected_arg is not None:
+        return False, f"argument '{protected_arg}' resolves into a protected path"
 
     if base == 'git':
         subcommand = next((a for a in argv[1:] if not a.startswith('-')), None)

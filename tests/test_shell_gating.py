@@ -160,6 +160,15 @@ def test_auto_approvable(gated, command):
     "/usr/bin/env python3 evil.py",
     "env -i sh",
     "env -S 'python3 evil.py'",
+    # DEV-115: an allow-listed READ binary pointed at a protected path is the
+    # first half of an exfil primitive (read secret → outbound fetch). It must
+    # prompt, exactly as READ_FILE does.
+    "cat ~/.ssh/id_rsa",
+    "head ~/.aws/credentials",
+    "cat ~/.ssh/known_hosts",
+    "grep -r secret ~/.gnupg",
+    "cat .git/config",
+    "md5sum ~/.ssh/id_ed25519",
 ])
 def test_not_auto_approvable(gated, command):
     ok, _ = _is_auto_approvable_command(command)
