@@ -218,7 +218,14 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
         system_prompt = await _maybe_inject_rag_context(system_prompt, request)
 
         model_config = agent_config['model_config']
-        llama_server_manager.ensure_running(model_config, agent_id=request.model)
+        # ensure_running holds _swap_lock across a SIGTERM wait, a VRAM-release
+        # poll, and a /health loop that time.sleeps — up to ~140s of blocking
+        # work. On the event-loop thread that freezes the whole process:
+        # /health times out, the dashboard hangs, and every other in-flight SSE
+        # stream stalls mid-token. Offload it like proxy_sync below.
+        await asyncio.to_thread(
+            llama_server_manager.ensure_running, model_config, agent_id=request.model
+        )
 
         n_ctx = model_config.get('n_ctx', 32768)
         # Estimate what actually reaches llama-server. `_build_openai_messages`
