@@ -193,6 +193,8 @@ def _check_deny_rules(command):
 # lists costs a prompt rather than the filesystem.
 
 # Read-only inspection: cannot mutate the filesystem or reach the network.
+# `env` qualifies only in its bare form — with arguments it execs them
+# (enforced in _is_auto_approvable_command, like the git subcommand gate).
 READONLY_COMMANDS = frozenset({
     'ls', 'pwd', 'cat', 'bat', 'head', 'tail', 'wc', 'grep', 'egrep', 'fgrep', 'rg',
     'file', 'stat', 'du', 'df', 'tree', 'which', 'whereis', 'type', 'echo', 'printf',
@@ -269,6 +271,14 @@ def _is_auto_approvable_command(command):
         subcommand = next((a for a in argv[1:] if not a.startswith('-')), None)
         if subcommand not in GIT_READONLY_SUBCOMMANDS:
             return False, f"'git {subcommand or ''}'.strip() is not a read-only git subcommand"
+
+    if base == 'env' and len(argv) > 1:
+        # Bare `env` prints the environment; with anything more it stops being
+        # inspection — `env CMD` execs CMD (an unlisted binary rides in on
+        # env's allow-list entry), and `env VAR=v CMD` also rewrites the
+        # child's environment. Flags are no safer: `-S` smuggles a full
+        # command line in one token, `-i`/`-u` exist only to launch something.
+        return False, "'env' with arguments launches another command"
 
     return True, f"'{base}' is auto-approvable"
 
