@@ -83,17 +83,36 @@ def post_chat_completion(model, messages, *, timeout, skip_memory=True,
         return _SESSION.post(API_URL, json=payload, headers=headers, timeout=timeout)
 
     resp = None
+    n_attempts = len(_BACKOFFS) + 1
     for attempt, delay in enumerate((0.0,) + _BACKOFFS):
         if delay:
             logger.info("post_chat_completion: retrying after %.0fs (attempt %d/%d)",
-                        delay, attempt + 1, len(_BACKOFFS) + 1)
+                        delay, attempt + 1, n_attempts)
             time.sleep(delay)
-        resp = _SESSION.post(API_URL, json=payload, headers=headers, timeout=timeout)
+        try:
+            resp = _SESSION.post(API_URL, json=payload, headers=headers, timeout=timeout)
+        except (requests.ConnectionError, requests.Timeout) as e:
+            # A transport failure is the same transient class as a 5xx and must
+            # back off identically — not raise straight out unretried. The
+            # dominant cause is the redeploy race: scripts/redeploy.sh restarts
+            # the server before the orchestrator, so an in-flight call dies with
+            # ConnectionError while the child is down for a second or two (or a
+            # read timeout while requests queue behind a slow model swap). The
+            # callers turn any escaping exception into spec FAILED, discarding
+            # approved work, so we retry here first and only re-raise once the
+            # backoff schedule is exhausted.
+            if attempt == len(_BACKOFFS):
+                raise
+            logger.warning(
+                "post_chat_completion: %s (attempt %d/%d) — retrying",
+                type(e).__name__, attempt + 1, n_attempts,
+            )
+            continue
         if resp.status_code < 500 or attempt == len(_BACKOFFS):
             break
         logger.warning(
             "post_chat_completion: %d from server (attempt %d/%d, body=%s)",
-            resp.status_code, attempt + 1, len(_BACKOFFS) + 1,
+            resp.status_code, attempt + 1, n_attempts,
             resp.text[:200].replace("\n", " "),
         )
     return resp

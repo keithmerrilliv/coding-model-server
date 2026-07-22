@@ -11,6 +11,8 @@ time.sleep is patched out so the backoff path is exercised without real waits.
 import importlib
 from unittest import mock
 
+import requests
+
 import coding_model_autonomous._http as http
 
 
@@ -106,6 +108,61 @@ def test_retry_5xx_does_not_retry_4xx():
         http.post_chat_completion("m", [], timeout=10, retry_5xx=True)
     assert post.call_count == 1          # 4xx is a real error, not transient
     assert t.sleep.call_count == 0
+
+
+# ── DEV-120: transport errors are the same transient class as a 5xx ───────────
+
+def test_retry_retries_connection_error_then_reraises():
+    """A ConnectionError every attempt (server down through the whole backoff
+    window) must be retried on the schedule, then re-raised — not swallowed."""
+    with mock.patch.object(http, "time") as t, \
+            mock.patch.object(http._SESSION, "post") as post:
+        post.side_effect = requests.ConnectionError("connection refused")
+        try:
+            http.post_chat_completion("m", [], timeout=10, retry_5xx=True)
+            raised = False
+        except requests.ConnectionError:
+            raised = True
+    assert raised, "must re-raise after exhausting retries"
+    assert post.call_count == 4          # initial + 3 backoff retries
+    assert [c.args[0] for c in t.sleep.call_args_list] == [10.0, 30.0, 60.0]
+
+
+def test_retry_recovers_from_transient_connection_error():
+    """The redeploy race: the server is briefly down (ConnectionError), then the
+    restart comes back within the backoff window and the retry succeeds."""
+    with mock.patch.object(http, "time") as t, \
+            mock.patch.object(http._SESSION, "post") as post:
+        post.side_effect = [requests.ConnectionError("mid-restart"), _resp(200)]
+        resp = http.post_chat_completion("m", [], timeout=10, retry_5xx=True)
+    assert resp.status_code == 200
+    assert post.call_count == 2          # one failed connect, then success
+    assert t.sleep.call_count == 1
+
+
+def test_retry_retries_read_timeout():
+    """A read Timeout (requests queued behind a slow model swap) is transient."""
+    with mock.patch.object(http, "time") as t, \
+            mock.patch.object(http._SESSION, "post") as post:
+        post.side_effect = [requests.Timeout("read timed out"), _resp(200)]
+        resp = http.post_chat_completion("m", [], timeout=10, retry_5xx=True)
+    assert resp.status_code == 200
+    assert post.call_count == 2
+    assert t.sleep.call_count == 1
+
+
+def test_transport_error_not_retried_when_retry_disabled():
+    """Without retry_5xx the transport error propagates immediately (unchanged
+    behaviour for the non-retry callers)."""
+    with mock.patch.object(http._SESSION, "post") as post:
+        post.side_effect = requests.ConnectionError("refused")
+        try:
+            http.post_chat_completion("m", [], timeout=10)
+            raised = False
+        except requests.ConnectionError:
+            raised = True
+    assert raised
+    assert post.call_count == 1
 
 
 # ── internal calls bind to loopback, decoupled from the advertised LAN IP ─────
