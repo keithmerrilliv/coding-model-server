@@ -96,6 +96,9 @@ def test_not_denied_but_warns(command):
     "git status",
     "git log --oneline -5",
     "git diff HEAD",
+    # Bare env is inspection; printenv only ever prints (it cannot exec).
+    "env",
+    "printenv HOME",
 ])
 def test_auto_approvable(gated, command):
     ok, reason = _is_auto_approvable_command(command)
@@ -132,6 +135,13 @@ def test_auto_approvable(gated, command):
     "ls $(rm -rf /tmp/x)",
     # Not a plain binary name.
     "VAR=1 pytest",
+    # DEV-111: `env` execs its argument — the base-binary check saw only `env`
+    # and auto-approved arbitrary code in yolo mode.
+    "env python3 evil.py",
+    "env VAR=1 python3 evil.py",
+    "/usr/bin/env python3 evil.py",
+    "env -i sh",
+    "env -S 'python3 evil.py'",
 ])
 def test_not_auto_approvable(gated, command):
     ok, _ = _is_auto_approvable_command(command)
