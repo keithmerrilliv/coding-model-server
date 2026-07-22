@@ -215,9 +215,24 @@ BUILD_TEST_COMMANDS = frozenset({
 
 # `git` is allow-listed only for subcommands that cannot destroy work. Absent by
 # design: push, reset, clean, checkout, restore, rebase, filter-branch, gc, prune.
+# `config` is here but conditionally: the same subcommand reads AND writes, so
+# only its read forms pass (see the gate in _is_auto_approvable_command).
 GIT_READONLY_SUBCOMMANDS = frozenset({
     'status', 'log', 'diff', 'show', 'branch', 'remote', 'rev-parse', 'describe',
     'blame', 'ls-files', 'ls-remote', 'tag', 'shortlog', 'grep', 'config',
+})
+
+# Flags under which `git config` stays a read. Everything else — write flags
+# (--add/--unset/--edit/--remove-section/...), --file/--blob (which point git
+# at an arbitrary INI file, e.g. ~/.aws/credentials, and print it), and any
+# --flag=value form — falls through to a prompt. Writing without a write flag
+# needs a second positional (`git config KEY VALUE`), which the gate also
+# rejects, so `git config core.fsmonitor /tmp/evil` cannot slip through as a
+# "read".
+_GIT_CONFIG_READ_FLAGS = frozenset({
+    '--get', '--get-all', '--get-regexp', '--list', '-l',
+    '--local', '--global', '--system', '--show-origin', '--show-scope',
+    '--name-only', '--null', '-z',
 })
 
 # Shell metacharacters. A command containing any of these can chain or redirect
@@ -271,6 +286,12 @@ def _is_auto_approvable_command(command):
         subcommand = next((a for a in argv[1:] if not a.startswith('-')), None)
         if subcommand not in GIT_READONLY_SUBCOMMANDS:
             return False, f"'git {subcommand or ''}'.strip() is not a read-only git subcommand"
+        if subcommand == 'config':
+            rest = argv[argv.index('config') + 1:]
+            flags = [a for a in rest if a.startswith('-')]
+            positionals = [a for a in rest if not a.startswith('-')]
+            if any(f not in _GIT_CONFIG_READ_FLAGS for f in flags) or len(positionals) > 1:
+                return False, "'git config' auto-approves only read forms (--get*/--list/one key)"
 
     if base == 'env' and len(argv) > 1:
         # Bare `env` prints the environment; with anything more it stops being

@@ -96,6 +96,12 @@ def test_not_denied_but_warns(command):
     "git status",
     "git log --oneline -5",
     "git diff HEAD",
+    # git config read forms.
+    "git config --list",
+    "git config --get user.name",
+    "git config user.name",
+    "git config --global --get user.email",
+    "git config --get-regexp alias",
     # Bare env is inspection; printenv only ever prints (it cannot exec).
     "env",
     "printenv HOME",
@@ -127,6 +133,18 @@ def test_auto_approvable(gated, command):
     "git reset --hard HEAD~1",
     "git clean -fd",
     "git checkout .",
+    # DEV-114: `git config` writes with the same subcommand it reads with.
+    # KEY VALUE persists core.fsmonitor, which a later auto-approved
+    # `git status` executes as a subprocess.
+    "git config core.fsmonitor /tmp/evil",
+    "git config --global core.fsmonitor /tmp/evil",
+    "git config --add alias.s status",
+    "git config --unset user.name",
+    "git config --edit",
+    "git config -e",
+    "git config --remove-section alias",
+    "git config --file /home/u/.aws/credentials --list",
+    "git config --file=/home/u/.aws/credentials --list",
     # Chaining/redirection escapes the base-binary check entirely.
     "ls; rm -rf ~",
     "ls && rm -rf /tmp/x",
