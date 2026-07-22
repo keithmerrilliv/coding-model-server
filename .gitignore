@@ -2,7 +2,12 @@ __pycache__/
 *.py[cod]
 *$py.class
 venv/
+# Every .env variant is a secret (real values, local overrides, timestamped
+# backups like .env.bak-cors-*), so ignore them all — but keep the committed
+# .env.example templates (root + dashboard) visible.
 .env
+.env.*
+!**/.env.example
 memory_db/
 tasks_db/
 tasks_db.bak.*/
