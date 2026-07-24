@@ -91,9 +91,17 @@ Edit `~/.config/coding-model-server/.env` on **both hosts** and replace the
 `ADMIN_API_KEY=` line with the new value. The key must match between server
 and client.
 
-The server now refuses to start if `ADMIN_API_KEY` is empty. For local-dev
-only, you can opt out with `CODING_MODEL_ALLOW_UNAUTH=1` — do not set this on
-any host reachable from a network.
+The server refuses to start if `ADMIN_API_KEY` is empty or still set to the
+`.env.example` placeholder. The check runs in the app lifespan, so it applies
+on every launch path — systemd, `python -m coding_model_server.server`, and a
+bare `uvicorn coding_model_server.server:app` alike. For local-dev only, you
+can opt out with `CODING_MODEL_ALLOW_UNAUTH=1`; the opt-out is loopback-only
+(startup refuses it on a non-loopback `HOST`, and key-less requests from
+non-loopback clients are rejected per-request as defense in depth).
+
+For LAN access the supported pattern is loopback + SSH tunnel
+(`ssh -L 5000:localhost:5000 user@server`), or a strong key with the port
+firewalled to your subnet — never a non-loopback bind without a key.
 
 ---
 
@@ -226,7 +234,7 @@ A clean start prints `Connected to <your server IP>` and no
 | Area | File | Change |
 |---|---|---|
 | Bind address | `src/coding_model_server/server.py` | `HOST` default → `127.0.0.1` |
-| Auth enforcement | `src/coding_model_server/server.py` | Refuses startup with empty `ADMIN_API_KEY` unless `CODING_MODEL_ALLOW_UNAUTH=1` |
+| Auth enforcement | `src/coding_model_server/runtime.py` | Lifespan-enforced on every launch path (DEV-127): refuses empty or placeholder `ADMIN_API_KEY`; `CODING_MODEL_ALLOW_UNAUTH=1` is loopback-only and key-less requests reject non-loopback clients |
 | Shell auto-run | `src/coding_model_client/config.py` | `ALLOW_SHELL_MODE` default → `false` |
 | Env loading | `bin/start.sh`, `bin/start-client.sh` | Prefer `~/.config/coding-model-server/.env`; repo `.env` is a fallback with warning |
 | Systemd env path | `coding-model-server.service`, `coding-model-orchestrator.service` | `EnvironmentFile=-%h/.config/coding-model-server/.env` added |
@@ -412,6 +420,6 @@ list.
 - **Rate limiting**: still none. A misbehaving client can DoS the server even when authenticated.
 - **PDF ingest size cap**: `INGEST_MAX_FILE_SIZE` is declared in `.env.example` but not read in code.
 - **Mac runner has no sandbox**: Swift test code executes with the runner user's privileges. Revisit if/when a dedicated builder exists.
-- **`EnvironmentFile=-` fails open**: the systemd units tolerate a missing env file by design (the leading dash). If the `.env` is ever moved or mistyped, the server starts with an empty `ADMIN_API_KEY` instead of failing loudly. The startup guard added to `server.py` catches this (it refuses to boot unauthenticated), but the units themselves will not complain — check `journalctl` after any change to the env path.
+- **`EnvironmentFile=-` fails open**: the systemd units tolerate a missing env file by design (the leading dash). If the `.env` is ever moved or mistyped, the server starts with an empty `ADMIN_API_KEY` instead of failing loudly. The lifespan guard in `runtime.py` catches this (it refuses to boot unauthenticated), but the units themselves will not complain — check `journalctl` after any change to the env path.
 - **pbxproj editing for Xcode projects without existing XCTest targets**: not supported yet — the planner must target projects that already have a test target. SPM (`swift_test`) handles add-new-tests fine via text edits to `Package.swift`.
 - **Binary patches**: the orchestrator ships UTF-8 files only; binary assets (images, asset catalogs) can't currently be added/modified by the LLM. Worktree bases carry whatever binaries exist at `base_ref`.

@@ -45,6 +45,11 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     """Lifecycle manager: install log routing, start the GPU sampler, and
     initialize the heavy services onto runtime.services for routes to use."""
+    # Auth config gate first: raising here aborts startup on EVERY launch
+    # path, including `uvicorn coding_model_server.server:app`, which never
+    # runs the __main__ block below (DEV-127).
+    runtime.enforce_admin_key_config()
+
     # Install access-log routing here, after uvicorn's dictConfig has run.
     # See RoutePollAccessLines docstring for why module-load doesn't work.
     # Strip any prior copies first — addFilter doesn't dedupe, so a lifespan
@@ -251,15 +256,13 @@ if __name__ == "__main__":
     import sys
     import uvicorn
 
-    # Refuse to start with no admin key unless explicitly opted out.
-    # Empty ADMIN_API_KEY previously left every admin endpoint open — combined
-    # with HOST=0.0.0.0 that meant a default install was fully unauthenticated.
-    if not Config.ADMIN_API_KEY and os.getenv('CODING_MODEL_ALLOW_UNAUTH', '').lower() not in ('1', 'true', 'yes'):
-        logger.error(
-            "ADMIN_API_KEY is not set. All admin endpoints would be unauthenticated. "
-            "Set ADMIN_API_KEY in ~/.config/coding-model-server/.env, or set "
-            "CODING_MODEL_ALLOW_UNAUTH=1 to explicitly permit unauthenticated operation."
-        )
+    # Fail fast pre-bind with a clean message instead of a lifespan traceback.
+    # The lifespan runs the same check, so launch paths that skip this block
+    # (bare uvicorn) are covered too (DEV-127).
+    try:
+        runtime.enforce_admin_key_config()
+    except RuntimeError as e:
+        logger.error(str(e))
         sys.exit(1)
 
     # Validate configuration
