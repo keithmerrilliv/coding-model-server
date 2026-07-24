@@ -120,7 +120,7 @@ def write_file_content(payload):
         if protected:
             state.print_colored(f"\nAgent wants to write file: {full_path}", state.colors['FAIL'])
             state.print_colored(f"   WARNING: {protect_reason}", state.colors['FAIL'])
-            state.print_colored(f"   Protected path — requires explicit approval.", state.colors['FAIL'])
+            state.print_colored("   Protected path — requires explicit approval.", state.colors['FAIL'])
             try:
                 choice = input(f"{state.colors['BOLD']}Allow write to PROTECTED path? [y/N] > {state.colors['ENDC']}")
             except (EOFError, KeyboardInterrupt):
@@ -143,7 +143,7 @@ def write_file_content(payload):
             except Exception:
                 pass  # Fall through to preview if diff fails
         else:
-            state.print_colored(f"   (new file)", state.colors['CYAN'])
+            state.print_colored("   (new file)", state.colors['CYAN'])
             preview_lines = content.split('\n')[:5]
             preview = '\n'.join(preview_lines)
             total_lines = content.count('\n') + 1

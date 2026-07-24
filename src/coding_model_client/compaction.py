@@ -1,6 +1,4 @@
 """Context compaction — model-generated conversation summaries."""
-import re
-import json
 import logging
 
 import requests

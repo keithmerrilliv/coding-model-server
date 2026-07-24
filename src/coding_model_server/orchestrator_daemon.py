@@ -38,7 +38,6 @@ import shutil
 import signal
 import sys
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
@@ -63,10 +62,9 @@ from coding_model_autonomous import (
     SpecStatus,
     TaskStatus,
 )
-from coding_model_autonomous.models import ReviewGate, Spec
+from coding_model_autonomous.models import ReviewGate, Spec, Task
 from coding_model_autonomous.planner import (
     PlannerClarify,
-    PlannerError,
     PlannerYaml,
     call_planner,
 )
@@ -79,11 +77,9 @@ from coding_model_autonomous.jira_sync import JiraSync
 from coding_model_autonomous import executor
 from coding_model_autonomous.executor import (
     ALLOWED_IMPLEMENTER_AGENTS,
-    ArchitectResult,
     ImplementerResult,
     MAX_RETRIES,
     ParseError,
-    ReviewerResult,
     TIER_TO_IMPLEMENTER,
     _write_artifact,
     build_architect_message,

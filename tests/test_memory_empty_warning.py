@@ -9,7 +9,6 @@ worse answers.
 import logging
 from unittest import mock
 
-import pytest
 
 from coding_model_server import memory_service as ms
 

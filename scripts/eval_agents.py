@@ -195,7 +195,7 @@ def main():
         print(f"(answers checkpointed to {args.out})\n", flush=True)
 
     # Phase 2 -- judge each task in both orders; a flip means position bias, not merit.
-    print(f"### judging (each task twice, order swapped)\n", flush=True)
+    print("### judging (each task twice, order swapped)\n", flush=True)
     results, transcripts = [], {}
     for i, t in enumerate(tasks):
         tx, ty = answers[x][t["id"]]["text"], answers[y][t["id"]]["text"]

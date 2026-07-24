@@ -1,6 +1,6 @@
 import os
 import logging
-from tree_sitter_languages import get_language, get_parser
+from tree_sitter_languages import get_parser
 
 logger = logging.getLogger(__name__)
 

@@ -14,7 +14,6 @@ Usage:
   python3 cleanup_memory.py --vacuum    # Execute cleanup + VACUUM SQLite
 """
 import re
-import sys
 import argparse
 import sqlite3
 
@@ -94,7 +93,7 @@ def cleanup(dry_run=True, vacuum=False):
         print(f"  {reason}: {count:,}")
 
     if dry_run:
-        print(f"\nDry run — no changes made. Run without --dry-run to delete.")
+        print("\nDry run — no changes made. Run without --dry-run to delete.")
         conn.close()
         return
 
@@ -104,7 +103,7 @@ def cleanup(dry_run=True, vacuum=False):
         return
 
     # Map rowids to embedding_ids for ChromaDB deletion
-    print(f"\nLooking up embedding IDs...")
+    print("\nLooking up embedding IDs...")
     embedding_ids = []
     for i in range(0, len(delete_rowids), BATCH_SIZE):
         batch = delete_rowids[i:i + BATCH_SIZE]

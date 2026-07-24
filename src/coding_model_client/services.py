@@ -5,7 +5,6 @@ import subprocess
 import threading
 import atexit
 import logging
-from pathlib import Path
 from queue import Queue, Empty
 
 import requests

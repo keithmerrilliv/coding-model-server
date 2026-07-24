@@ -41,7 +41,6 @@ from __future__ import annotations
 import logging
 import os
 import threading
-import time
 from typing import Optional
 
 from coding_model_autonomous import (
@@ -50,11 +49,9 @@ from coding_model_autonomous import (
     EventKind,
     GateAlreadyDecidedError,
     GateStatus,
-    GateType,
     SpecStatus,
 )
 from coding_model_autonomous.jira_client import (
-    ISSUE_TYPE_EPIC,
     ISSUE_TYPE_TASK,
     JiraClient,
     STATUS_CANCELLED,

@@ -10,7 +10,6 @@ project's own server.
 
 import subprocess
 import time
-import signal
 import sys
 import os
 import json
@@ -18,7 +17,7 @@ import select
 import logging
 from queue import Queue, Empty
 from threading import RLock, Lock, Thread
-from typing import Dict, List, Optional, Any
+from typing import Dict, Optional, Any
 
 # Configure logging
 logging.basicConfig(

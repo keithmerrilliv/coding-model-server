@@ -65,7 +65,7 @@ def start_server():
         try:
             r = requests.get(f"http://127.0.0.1:{PORT}/health", timeout=2)
             if r.status_code == 200:
-                print(f"[smoke] healthy")
+                print("[smoke] healthy")
                 return proc
         except requests.RequestException:
             pass
