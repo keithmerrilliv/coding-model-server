@@ -29,8 +29,8 @@ sentence-transformers, …), and sets up the directory structure.
 
 You also need the **`tools/llama-server` binary** and its shared libraries. It is
 the only inference backend — every agent runs on it — and `setup.sh` does not
-fetch it for you. (`llama-cpp-python` is still declared in `pyproject.toml`, but
-nothing imports it; the in-process backend was retired in April 2026.)
+fetch it for you. (The in-process `llama-cpp-python` backend was retired in
+April 2026 and is no longer a dependency.)
 
 ### 1.2 Download Models
 
@@ -630,8 +630,8 @@ June 2026 upgrade shifted footprints by ~2.7 GB, which invalidated every
 
 > **Blackwell GPU users (RTX 5080/5090):** Build against CUDA 12.8, not 13.x. CUDA 13.x has a compiler bug that silently disables MMQ kernels, causing ~7x prefill regression with cuBLAS fallback. See llama.cpp issues #18331 and #18398.
 
-(`llama-cpp-python` remains in `pyproject.toml` but nothing imports it — the
-in-process backend is gone. Rebuilding it fixes nothing.)
+(The in-process `llama-cpp-python` backend is gone and no longer a
+dependency. Rebuilding it fixes nothing.)
 
 ### 5.4 Database Maintenance
 
