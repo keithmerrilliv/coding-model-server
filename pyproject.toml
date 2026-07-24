@@ -17,9 +17,6 @@ authors = [{ name = "Keith Merrill" }]
 # to add them. The chat client itself runs without anything beyond the
 # core requests + python-dotenv that ship with the server profile.
 dependencies = [
-    "llama-cpp-python>=0.3.20",
-    "transformers>=5.1.0",
-    "huggingface-hub>=1.4.0",
     "fastapi>=0.128.1",
     "uvicorn[standard]>=0.40.0",
     "requests>=2.32.3",
@@ -44,6 +41,11 @@ dependencies = [
 client = [
     "rich>=13.0",
     "beautifulsoup4>=4.12",
+]
+# scripts/download_models.py only; not needed at runtime (inference runs
+# through an external llama-server, not in-process).
+scripts = [
+    "huggingface-hub>=1.4.0",
 ]
 
 [project.scripts]

@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Download new model GGUFs from HuggingFace using huggingface_hub.
 
+Requires the `scripts` extra (`pip install -e ".[scripts]"`) — huggingface-hub
+is not a runtime dependency of the server.
+
 Supports resume on interrupt — safe to re-run if a download is interrupted.
 Progress bars shown per-file via huggingface_hub's built-in tqdm integration.
 
