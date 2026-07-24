@@ -79,6 +79,16 @@ def _parse_iso(s: Optional[str]) -> Optional[datetime]:
     return datetime.fromisoformat(s)
 
 
+class GateAlreadyDecidedError(Exception):
+    """A gate response lost the compare-and-set: the gate was no longer
+    pending when the UPDATE ran. Carries the standing gate so callers can
+    report the earlier decision without a second read."""
+
+    def __init__(self, gate: "ReviewGate"):
+        self.gate = gate
+        super().__init__(f"gate {gate.id} already {gate.status.value}")
+
+
 # ── Database ──────────────────────────────────────────────────────────────────
 
 class Database:
@@ -503,21 +513,31 @@ class Database:
             ).fetchone()
             if row is None:
                 raise KeyError(f"no gate {gate_id}")
-            conn.execute(
+            # Compare-and-set: only a still-pending gate may take a decision.
+            # Two deciders can race here (CLI/HTTP vs the Jira reverse-sync
+            # thread); without the status predicate the loser silently
+            # overwrites the winner and both decisions get partially acted on.
+            cur = conn.execute(
                 "UPDATE review_gates SET status = ?, reviewer_decision = ?, "
-                "reviewer_notes = ?, responded_at = ? WHERE id = ?",
-                (new_status.value, decision, notes, _iso(now), gate_id),
+                "reviewer_notes = ?, responded_at = ? "
+                "WHERE id = ? AND status = ?",
+                (new_status.value, decision, notes, _iso(now), gate_id,
+                 GateStatus.PENDING.value),
             )
-            self._record_event(
-                conn,
-                EventKind.GATE_RESPONDED,
-                spec_id=row["spec_id"],
-                task_id=row["task_id"],
-                gate_id=gate_id,
-                payload={"decision": decision, "notes": notes},
-            )
+            already_decided = cur.rowcount == 0
+            if not already_decided:
+                self._record_event(
+                    conn,
+                    EventKind.GATE_RESPONDED,
+                    spec_id=row["spec_id"],
+                    task_id=row["task_id"],
+                    gate_id=gate_id,
+                    payload={"decision": decision, "notes": notes},
+                )
         gate = self.get_gate(gate_id)
         assert gate is not None  # we just verified existence above
+        if already_decided:
+            raise GateAlreadyDecidedError(gate)
         return gate
 
     # ── events ───────────────────────────────────────────────────────────────

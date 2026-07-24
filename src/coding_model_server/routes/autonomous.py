@@ -11,6 +11,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 
 from coding_model_server.runtime import get_autonomous_db, verify_admin_key
+from coding_model_autonomous.db import GateAlreadyDecidedError
 from coding_model_autonomous.models import (
     GateRespondRequest,
     SpecSummary,
@@ -119,7 +120,14 @@ def respond_to_gate(gate_id: str, request: GateRespondRequest) -> dict:
     db = get_autonomous_db()
     if db.get_gate(gate_id) is None:
         raise HTTPException(status_code=404, detail=f"gate {gate_id} not found")
-    gate = db.respond_to_gate(gate_id, request.decision, notes=request.notes)
+    try:
+        gate = db.respond_to_gate(gate_id, request.decision, notes=request.notes)
+    except GateAlreadyDecidedError as e:
+        raise HTTPException(
+            status_code=409,
+            detail=(f"gate {gate_id} is already {e.gate.status.value}; "
+                    f"this {request.decision} response was not applied"),
+        )
     logger.info("Gate %s %s by reviewer", gate_id, request.decision)
     return gate.model_dump(mode="json")
 
