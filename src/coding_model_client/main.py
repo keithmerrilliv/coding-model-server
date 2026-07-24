@@ -1,15 +1,13 @@
 """Main interactive chat loop and entry point."""
 import re
-import os
 import sys
 import time
 import argparse
-import atexit
 
 from coding_model_client.config import config, COLORS, print_colored
 from coding_model_client.display import set_terminal_title
 from coding_model_client.models import AGENT_THEMES, fetch_available_models
-from coding_model_client.history import save_chat_history, load_chat_history, migrate_legacy_sessions, session_path
+from coding_model_client.history import load_chat_history, migrate_legacy_sessions, session_path
 from coding_model_client.readline_mgr import READLINE_AVAILABLE, setup_readline, add_to_history
 from coding_model_client.temp_manager import _add_temp_file
 from coding_model_client.services import (

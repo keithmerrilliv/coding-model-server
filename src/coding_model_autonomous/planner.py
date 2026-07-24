@@ -21,7 +21,6 @@ import textwrap
 
 import yaml
 from dataclasses import dataclass
-from typing import Optional
 
 from coding_model_autonomous._http import post_chat_completion
 

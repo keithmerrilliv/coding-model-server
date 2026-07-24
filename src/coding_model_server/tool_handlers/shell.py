@@ -11,7 +11,6 @@ import tempfile
 from typing import List
 
 from coding_model_server.tool_state import state
-from coding_model_server.tool_handlers.chunking import chunk_large_output, get_chunk_for_display
 from coding_model_server.tool_handlers.workspace import get_workspace
 from coding_model_server.tool_handlers.safety import (
     _check_dangerous_command,
@@ -151,7 +150,7 @@ def execute_remote_command(command, chunk_output=True):
             if over > 2:
                 return None  # Hard stop — agent won't learn, break the loop
             return msg  # Return feedback so agent learns to switch approach
-        state.print_colored(f"\nAgent is writing files via shell instead of <<<WRITE_FILE>>>.", state.colors['WARNING'])
+        state.print_colored("\nAgent is writing files via shell instead of <<<WRITE_FILE>>>.", state.colors['WARNING'])
         state.print_colored(f"   This bypasses diff preview and loop detection. ({state.shell_write_count}/{state.MAX_WRITES_PER_FILE})", state.colors['WARNING'])
 
     state.print_colored(f"\nAgent wants to run command: {command}", state.colors['WARNING'])
@@ -164,9 +163,9 @@ def execute_remote_command(command, chunk_output=True):
         return f"Command denied: {deny_reason}. This operation is not allowed."
 
     if state.config.ALLOW_SHELL_MODE:
-        state.print_colored(f"   Shell mode enabled (less safe)", state.colors['WARNING'])
+        state.print_colored("   Shell mode enabled (less safe)", state.colors['WARNING'])
     else:
-        state.print_colored(f"   Safe mode (shell=False)", state.colors['GREEN'])
+        state.print_colored("   Safe mode (shell=False)", state.colors['GREEN'])
 
     try:
         if not state.config.ALLOW_SHELL_MODE:
@@ -256,13 +255,13 @@ def execute_remote_command(command, chunk_output=True):
             if state.config.ALLOW_SHELL_MODE:
                 state.logger.debug("Running command in shell mode (cwd=%s): %s", workspace, command)
                 with open(tmp_path, 'w') as f:
-                    result = subprocess.run(command, shell=True, cwd=workspace, stdout=f, stderr=subprocess.STDOUT, text=True, errors='replace', timeout=state.config.COMMAND_TIMEOUT)
+                    subprocess.run(command, shell=True, cwd=workspace, stdout=f, stderr=subprocess.STDOUT, text=True, errors='replace', timeout=state.config.COMMAND_TIMEOUT)
             else:
                 command_args = parse_command_safely(command)
                 command_args = expand_paths_in_args(command_args)
                 state.logger.debug("Running command in safe mode (cwd=%s): %s", workspace, command_args)
                 with open(tmp_path, 'w') as f:
-                    result = subprocess.run(command_args, shell=False, cwd=workspace, stdout=f, stderr=subprocess.STDOUT, text=True, errors='replace', timeout=state.config.COMMAND_TIMEOUT)
+                    subprocess.run(command_args, shell=False, cwd=workspace, stdout=f, stderr=subprocess.STDOUT, text=True, errors='replace', timeout=state.config.COMMAND_TIMEOUT)
         except subprocess.TimeoutExpired:
             state.logger.error("Command timed out: %s", command[:100])
             return f"Error: Command timed out after {state.config.COMMAND_TIMEOUT} seconds. Command: {command[:100]}..."

@@ -6,7 +6,6 @@ import time
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 import chromadb
-from chromadb.config import Settings
 from sentence_transformers import SentenceTransformer
 try:
     from pypdf import PdfReader

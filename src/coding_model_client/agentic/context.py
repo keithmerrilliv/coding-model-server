@@ -10,7 +10,7 @@ behind two methods:
 import re
 from typing import Optional
 
-from coding_model_client.agentic.classifier import classify_query, QueryType, QUERY_BUDGETS
+from coding_model_client.agentic.classifier import classify_query, QUERY_BUDGETS
 from coding_model_client.agentic.budget import RetrievalBudget
 from coding_model_client.agentic.scratchpad import Scratchpad
 from coding_model_client.agentic.planner import RetrievalPlan

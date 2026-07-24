@@ -29,7 +29,7 @@ def _public_dns(monkeypatch):
         from urllib.parse import urlparse
         host = urlparse(url).hostname or ""
         if urlparse(url).scheme not in ("http", "https"):
-            return False, f"unsupported scheme"
+            return False, "unsupported scheme"
         if host in ("169.254.169.254", "127.0.0.1", "localhost") or "internal" in host:
             return False, f"refusing non-public host {host}"
         return True, ""

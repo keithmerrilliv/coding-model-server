@@ -47,6 +47,10 @@ client = [
 scripts = [
     "huggingface-hub>=1.4.0",
 ]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.14",
+]
 
 [project.scripts]
 # CLIs users invoke directly. Server + orchestrator are systemd-managed and
@@ -64,3 +68,16 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.lint]
+# CI gates on correctness only (undefined names, unused imports/variables,
+# syntax errors). Style rules are deliberately out of scope — this codebase
+# predates the linter and a style sweep would bury real regressions.
+select = ["F", "E9"]
+
+[tool.ruff.lint.per-file-ignores]
+# Package roots re-export their public API.
+"**/__init__.py" = ["F401"]
