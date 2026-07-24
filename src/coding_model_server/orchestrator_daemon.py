@@ -2119,18 +2119,19 @@ def _read_retry_attempts(spec_dir: Path) -> list[dict]:
 
 
 def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
-                   framework: str, framework_opts: dict) -> bool:
+                   framework: str, framework_opts: dict) -> tuple[bool, str]:
     """MAX_RETRIES escape hatch: synthesize the union of correct behaviors
     across all rotation attempts, then re-run the test phase against the
     synthesized output.
 
-    Returns True if synthesis produced output and tests passed; False
-    otherwise. Caller decides what to do with the verdict.
+    Returns (passed, test_output): passed is True only if synthesis produced
+    output and its tests passed the structural guard. Caller decides what to
+    do with the verdict.
     """
     attempts = _read_retry_attempts(spec_dir)
     if not attempts:
         logger.warning("spec %s: synthesis skipped — no retry history", spec.id)
-        return False
+        return False, ""
 
     spec_md_path = spec_dir / spec.source_md_path
     design_md_path = spec_dir / "design.md"
@@ -2153,14 +2154,14 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
                          max_tokens=synth_max_tokens, meta=meta)
     except Exception as exc:
         logger.error("spec %s: synthesis call failed: %s", spec.id, exc)
-        return False
+        return False, ""
     _note_truncation(db, spec, impl_task, "synthesizer", meta, synth_max_tokens)
 
     result = parse_implementer_response(raw)
     if isinstance(result, ParseError):
         logger.error("spec %s: synthesis response unparseable: %s",
                      spec.id, result.reason)
-        return False
+        return False, ""
 
     db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=impl_task.id,
                     payload={"role": "synthesizer",
@@ -2190,15 +2191,20 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
                            kind=ArtifactKind.CODE, path=rel_path)
     logger.info("spec %s: synthesis wrote %d files", spec.id, len(result.files))
 
-    tests_passed, test_output = run_tests(spec_dir, framework=framework,
-                                           **framework_opts)
+    tests_passed, test_output = _run_tests_with_guard(
+        spec.id, spec_dir, framework, framework_opts,
+        output_label="Original test runner output:",
+        fail_log=("spec %s: synthesis test_output failed structural "
+                  "validation (%s); forcing tests_passed=False to block "
+                  "hallucinated PASS"),
+    )
     try:
         (spec_dir / "test_output.txt").write_text(test_output)
     except OSError:
         pass
     logger.info("spec %s: synthesis test result: %s (%d chars)",
                 spec.id, "PASS" if tests_passed else "FAIL", len(test_output))
-    return tests_passed
+    return tests_passed, test_output
 
 
 def _legacy_attempt_retry(db: Database, spec: Spec, task, failure_detail: str) -> None:
@@ -2206,8 +2212,11 @@ def _legacy_attempt_retry(db: Database, spec: Spec, task, failure_detail: str) -
 
     At MAX_RETRIES exhaustion, attempts a synthesis pass first: merges the
     union of correct behaviors across all rotation attempts and re-runs
-    the test phase. Only if synthesis also fails does the spec get marked
-    FAILED. See project_autonomous_validation_2026_05_04 for rationale.
+    the test phase. A passing synthesis goes to a release_approval gate
+    (it was assembled after repeated failures and has no reviewer verdict,
+    so it must not skip the human gate); only if synthesis also fails does
+    the spec get marked FAILED. See project_autonomous_validation_2026_05_04
+    for rationale.
     """
     impl_tasks = db.list_tasks_for_spec_by_role(spec.id, "implementer")
     impl_task = impl_tasks[0] if impl_tasks else None
@@ -2237,11 +2246,29 @@ def _legacy_attempt_retry(db: Database, spec: Spec, task, failure_detail: str) -
             logger.warning("spec %s: synthesis: couldn't parse test_strategy (%s); "
                            "defaulting to pytest with no opts", spec.id, exc)
 
-        if _run_synthesis(db, spec, impl_task, db.spec_dir(spec.id), framework, framework_opts):
-            logger.info("spec %s: synthesis PASSED — marking spec done", spec.id)
+        synth_passed, synth_output = _run_synthesis(
+            db, spec, impl_task, db.spec_dir(spec.id), framework, framework_opts)
+        if synth_passed:
             db.update_task_status(impl_task.id, TaskStatus.DONE)
-            db.update_task_status(task.id, TaskStatus.DONE)
-            db.update_spec_status(spec.id, SpecStatus.DONE)
+            db.update_task_status(task.id, TaskStatus.BLOCKED_ON_REVIEW)
+            db.create_gate(
+                spec_id=spec.id,
+                task_id=task.id,
+                gate_type=GateType.RELEASE_APPROVAL,
+                prompt_md=(
+                    f"## Release approval: {spec.title}\n\n"
+                    f"Spec ID: `{spec.id}`\n\n"
+                    f"**Synthesized after {MAX_RETRIES} failed retries.** This "
+                    f"output merges the passing behaviors of every rotation "
+                    f"attempt; tests **PASSED** on it, but it has no reviewer "
+                    f"verdict.\n\n"
+                    f"### Test Output\n\n```\n{synth_output[:3000]}\n```\n\n"
+                    f"Approve to mark this spec as DONE, or reject to fail "
+                    f"the spec (implementer retries are exhausted).\n"
+                ),
+            )
+            logger.info("spec %s: synthesis PASSED — release_approval gate "
+                        "created", spec.id)
             return
 
         logger.error("spec %s: synthesis FAILED — marking spec failed", spec.id)
