@@ -48,6 +48,7 @@ from coding_model_autonomous import (
     Database,
     Event,
     EventKind,
+    GateAlreadyDecidedError,
     GateStatus,
     GateType,
     SpecStatus,
@@ -401,6 +402,12 @@ class JiraSync:
             self.db.respond_to_gate(gate_id, decision, notes=notes)
             logger.info("jira-sync: reverse-synced gate %s as %s "
                         "(from issue %s)", gate_id, decision, issue.key)
+        except GateAlreadyDecidedError as e:
+            # Someone (CLI/HTTP) decided while we were mid round-trip; their
+            # decision stands. Forward sync will re-align the Jira issue.
+            logger.info("jira-sync: gate %s already %s locally; ignoring "
+                        "%s from issue %s", gate_id, e.gate.status.value,
+                        decision, issue.key)
         except Exception:
             logger.exception("jira-sync: failed to apply reverse-sync "
                              "decision for gate %s", gate_id)

@@ -25,6 +25,7 @@ from coding_model_autonomous.models import (
 )
 from coding_model_autonomous.db import (
     Database,
+    GateAlreadyDecidedError,
     DEFAULT_DB_PATH,
     DEFAULT_WORKSPACE_ROOT,
 )
@@ -42,6 +43,7 @@ __all__ = [
     "Event",
     "EventKind",
     "Database",
+    "GateAlreadyDecidedError",
     "DEFAULT_DB_PATH",
     "DEFAULT_WORKSPACE_ROOT",
 ]
