@@ -1,0 +1,51 @@
+;; Sandbox profile for LLM-authored builds/tests run by mac_runner (DEV-126).
+;;
+;; The Linux orchestrator sandboxes its test runs (bubblewrap + seccomp); the
+;; Mac side ran swift/xcodebuild bare. This profile closes that asymmetry for
+;; the two things LLM-authored code must never do on the workstation:
+;;
+;;   * read credential material — SSH keys (including the tunnel key that
+;;     reaches the GPU host), keychains, cloud credentials, and the runner's
+;;     own config/API key;
+;;   * write anywhere in $HOME outside the build's own directories — no
+;;     LaunchAgents persistence, no dotfile implants.
+;;
+;; It is deliberately default-allow: xcodebuild's system surface (mach
+;; services, IOKit, simulators, toolchain paths) is vast and undocumented,
+;; and a default-deny profile that was never tuned on real builds bricks the
+;; runner. Subtractive rules keep builds working while removing the assets
+;; that matter. Later rules take precedence in SBPL, so the write re-allows
+;; below carve build directories back out of the $HOME write denial.
+;;
+;; Parameters (supplied by the runner via sandbox-exec -D):
+;;   HOME          the runner user's home directory
+;;   WORKTREE      the per-request git worktree being built/tested
+;;   DERIVED_DATA  xcodebuild's derivedDataPath
+;;
+;; Escape hatch: CODING_MODEL_RUNNER_SANDBOX=0 runs unwrapped.
+
+(version 1)
+
+(allow default)
+
+;; ── Credential material: unreadable ─────────────────────────────────────────
+(deny file-read*
+  (subpath (string-append (param "HOME") "/.ssh"))
+  (subpath (string-append (param "HOME") "/.aws"))
+  (subpath (string-append (param "HOME") "/.gnupg"))
+  (subpath (string-append (param "HOME") "/.config/coding-model-runner"))
+  (literal (string-append (param "HOME") "/.netrc"))
+  (subpath (string-append (param "HOME") "/Library/Keychains")))
+
+;; ── $HOME: read-only except the build's own directories ────────────────────
+(deny file-write* (subpath (param "HOME")))
+
+(allow file-write*
+  (subpath (param "WORKTREE"))
+  (subpath (param "DERIVED_DATA"))
+  ;; SPM + clang module caches, xcodebuild scratch. The runner's default
+  ;; WORKTREE_ROOT/DERIVED_DATA live under Caches too, so custom locations
+  ;; are covered by the params above and defaults by these.
+  (subpath (string-append (param "HOME") "/Library/Caches"))
+  (subpath (string-append (param "HOME") "/Library/Developer"))
+  (subpath (string-append (param "HOME") "/Library/org.swift.swiftpm")))
