@@ -36,6 +36,7 @@ import os
 import re
 import shutil
 import signal
+import threading
 import sys
 import time
 from pathlib import Path
@@ -391,6 +392,17 @@ class _ShutdownFlag:
         self.set = True
 
 
+# Module-level so long-running work deep inside a tick (the per-file
+# manifest chain) can notice a pending SIGTERM between agent calls instead
+# of letting systemd's stop timeout escalate to SIGKILL mid-run (DEV-141).
+_shutdown_flag = _ShutdownFlag()
+
+
+class ShutdownRequested(RuntimeError):
+    """Raised between per-file manifest calls when SIGTERM arrived; the
+    task is reset to PENDING so the next daemon start re-runs it."""
+
+
 def tick(db: Database) -> None:
     """One pass over the spec table. Idempotent — safe to call any time.
 
@@ -578,6 +590,13 @@ def _start_task(db: Database, spec: Spec, task) -> None:
             logger.error("spec %s: unknown role %r for task %s",
                          spec.id, task.role, task.id)
             db.update_task_status(task.id, TaskStatus.FAILED)
+    except ShutdownRequested as e:
+        # SIGTERM mid-manifest (DEV-141): stop cleanly, keep the work
+        # re-runnable. Deliberately does NOT burn a retry — shutting the
+        # daemon down is an operator action, not a task failure.
+        logger.info("spec %s: task %s (%s) interrupted by shutdown (%s) — "
+                    "resetting to PENDING", spec.id, task.id, task.role, e)
+        db.update_task_status(task.id, TaskStatus.PENDING)
     except _TRANSPORT_ERRORS as e:
         # Couldn't reach the server mid-inference (redeploy race / read timeout).
         # Mirror the RUNNING crash-recovery path: reset the task to PENDING and
@@ -999,6 +1018,13 @@ def _build_from_manifest(
     stale_fallbacks: list = []
     generated = 0
     for entry in entries:
+        # Manifest mode chains one blocking agent call per file — the
+        # longest uninterruptible stretch in the daemon. Check for a
+        # pending SIGTERM between files so systemd stop doesn't escalate
+        # to SIGKILL mid-manifest (DEV-141).
+        if _shutdown_flag.set:
+            raise ShutdownRequested(
+                f"shutdown requested after {generated} of {len(entries)} files")
         if only is not None and entry.path not in only and prior_files \
                 and entry.path in prior_files:
             content = prior_files[entry.path]  # reuse prior — not cited
@@ -2736,11 +2762,30 @@ def main() -> int:
     jira_sync = JiraSync(db, jira_client)
     jira_sync.start()
 
-    flag = _ShutdownFlag()
+    flag = _shutdown_flag
     flag.install_handlers()
 
-    last_heartbeat = 0.0
     HEARTBEAT_INTERVAL = 60.0
+
+    def _heartbeat_loop():
+        # DEV-141: heartbeats used to ride the tick thread, so they went
+        # silent for the entire length of a blocking agent call (single
+        # calls run up to 45 min) — the liveness signal died exactly when
+        # the daemon was busiest. A side thread keeps it honest; SQLite WAL
+        # + thread-local connections make the cross-thread write safe.
+        while not flag.set:
+            try:
+                db.record_event(EventKind.DAEMON_TICK,
+                                payload={"poll_interval": POLL_INTERVAL})
+            except Exception:
+                logger.exception("heartbeat write failed")
+            slept = 0.0
+            while slept < HEARTBEAT_INTERVAL and not flag.set:
+                time.sleep(0.5)
+                slept += 0.5
+
+    threading.Thread(target=_heartbeat_loop, name="daemon-heartbeat",
+                     daemon=True).start()
 
     try:
         while not flag.set:
@@ -2748,17 +2793,6 @@ def main() -> int:
                 tick(db)
             except Exception:
                 logger.exception("tick failed; continuing")
-
-            # Periodic heartbeat into the events table — useful for liveness
-            # checks and for the Jira sync worker to know the daemon is alive.
-            now = time.time()
-            if now - last_heartbeat >= HEARTBEAT_INTERVAL:
-                try:
-                    db.record_event(EventKind.DAEMON_TICK,
-                                    payload={"poll_interval": POLL_INTERVAL})
-                except Exception:
-                    logger.exception("heartbeat write failed")
-                last_heartbeat = now
 
             # Sleep in small chunks so SIGTERM is responsive.
             slept = 0.0

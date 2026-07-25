@@ -76,8 +76,11 @@ export async function fetchMetrics(windowSeconds = 60): Promise<ApiResponse<Metr
   return request<MetricsResponse>(`/v1/admin/metrics?window_seconds=${windowSeconds}`);
 }
 
-export async function fetchGpuStats(): Promise<ApiResponse<GpuStatsResponse>> {
-  return request<GpuStatsResponse>('/v1/admin/gpu_stats');
+export async function fetchGpuStats(since?: string): Promise<ApiResponse<GpuStatsResponse>> {
+  // `since` makes the 1Hz poll incremental (DEV-159): the server returns
+  // only samples newer than the given ISO timestamp instead of the full ring.
+  const qs = since ? `?since=${encodeURIComponent(since)}` : '';
+  return request<GpuStatsResponse>(`/v1/admin/gpu_stats${qs}`);
 }
 
 export async function fetchActiveModel(): Promise<ApiResponse<ActiveModelResponse>> {

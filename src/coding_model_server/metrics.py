@@ -314,9 +314,24 @@ class GpuSampler:
             self._static_vram_total = sample["vram_total_mib"]
         return sample
 
-    def snapshot(self) -> dict:
+    def snapshot(self, since: "str | None" = None,
+                 limit: "int | None" = None) -> dict:
+        """Ring snapshot, optionally incremental (DEV-159).
+
+        ``since``: ISO-8601 timestamp — only samples strictly newer are
+        returned. Lexicographic comparison is correct because samples carry
+        UTC ISO strings of uniform format. The dashboard passes its newest
+        seen timestamp so 1Hz polls carry one new sample instead of the
+        whole 120-entry ring (~99% redundant JSON per tab).
+        ``limit``: keep only the newest N — the panel renders 60, so
+        shipping the other half of the ring was pure waste.
+        """
         with self._lock:
             samples = list(self._ring)
+        if since:
+            samples = [s for s in samples if s["t"] > since]
+        if limit is not None and len(samples) > limit:
+            samples = samples[-limit:]
         return {
             "available": self._available,
             "interval_s": self._interval,

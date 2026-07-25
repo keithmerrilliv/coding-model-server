@@ -120,6 +120,10 @@ THEME_STYLES = {
     "dense_architect":     {"color": COLORS['HEADER'],  "icon": "\U0001f3af", "prompt": "Dense Arch"},
     "brainstorm":          {"color": COLORS['WARNING'], "icon": "\u26a1",     "prompt": "Brainstorm"},
     "native_implementer":               {"color": COLORS['GREEN'],   "icon": "\U0001f30a", "prompt": "Native"},
+    # DEV-154: these two existed in the server registry but not here, so
+    # they rendered with the default robot theme.
+    "deep_reviewer":     {"color": COLORS['CYAN'],    "icon": "\U0001f52c", "prompt": "Deep Review"},
+    "supervisor":        {"color": COLORS['HEADER'],  "icon": "\U0001f9ed", "prompt": "Supervisor"},
     "default":           {"color": COLORS['WARNING'], "icon": "\U0001f916", "prompt": "Agent"},
 }
 
