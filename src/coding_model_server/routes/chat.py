@@ -7,6 +7,7 @@ from runtime.
 """
 import asyncio
 import logging
+import os
 import threading
 from typing import List
 
@@ -24,6 +25,17 @@ from coding_model_server.schemas import ChatCompletionRequest, ChatMessage
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Below this many output tokens a completion is useless to every caller we
+# have — the marker/YAML formats can't even open and close. Overflow used to
+# clamp the budget to as little as 1 token and let generation proceed: the
+# caller got a silently truncated stub, the parser failed, and a full retry
+# rotation burned on a request that could never succeed (DEV-195).
+MIN_COMPLETION_TOKENS = int(os.getenv("CODING_MODEL_MIN_COMPLETION_TOKENS", "16"))
+
+
+class PromptTooLargeError(ValueError):
+    """The prompt leaves less than a minimally useful output budget."""
 
 
 def _maybe_inject_few_shot(request: ChatCompletionRequest, agent_config: dict) -> None:
@@ -159,6 +171,10 @@ def _estimate_and_clamp_tokens(system_prompt: str, messages: List[ChatMessage],
       to chars/2.5 — closer to reality on code/CJK than chars/3.5. The
       estimator is intentionally pessimistic; underestimating overshoots
       the budget and silently truncates mid-stream.
+
+    Raises PromptTooLargeError (→ HTTP 413) when the prompt leaves less
+    output room than the caller could possibly use — either what they asked
+    for or MIN_COMPLETION_TOKENS, whichever is smaller (DEV-195).
     """
     if tokenize_fn is not None:
         try:
@@ -172,8 +188,11 @@ def _estimate_and_clamp_tokens(system_prompt: str, messages: List[ChatMessage],
             # system turn. Round up; a few extra is cheaper than overflow.
             template_overhead = 8 * (len(messages) + 1)
             est = content_tokens + template_overhead + reserve
-            return est, max(min(max_tokens, n_ctx - est), 1)
+            _require_output_budget(est, n_ctx, max_tokens)
+            return est, min(max_tokens, n_ctx - est)
         except Exception as e:
+            if isinstance(e, PromptTooLargeError):
+                raise
             logger.warning(
                 "[%s] tokenize round-trip failed (%s) — falling back to chars/2.5",
                 req_id, e,
@@ -183,8 +202,31 @@ def _estimate_and_clamp_tokens(system_prompt: str, messages: List[ChatMessage],
         + sum(len(m.content or '') for m in messages)
     )
     est_prompt_tokens = int(est_prompt_chars / 2.5) + reserve
-    available = max(n_ctx - est_prompt_tokens, 1)
-    return est_prompt_tokens, min(max_tokens, available)
+    _require_output_budget(est_prompt_tokens, n_ctx, max_tokens)
+    return est_prompt_tokens, min(max_tokens, n_ctx - est_prompt_tokens)
+
+
+def _require_output_budget(est_prompt_tokens: int, n_ctx: int,
+                           max_tokens: int) -> None:
+    """413 instead of a silently useless completion budget.
+
+    The floor is min(requested max_tokens, MIN_COMPLETION_TOKENS): a caller
+    who explicitly asked for fewer tokens than the default floor is served
+    if we can deliver what they asked for. The error text deliberately
+    contains "exceed context window" — the interactive client's
+    _is_context_error matcher keys on that phrase and responds by trimming
+    history and retrying, which is exactly the right recovery.
+    """
+    available = n_ctx - est_prompt_tokens
+    needed = min(max_tokens, MIN_COMPLETION_TOKENS)
+    if available < needed:
+        raise PromptTooLargeError(
+            f"prompt (~{est_prompt_tokens} tokens incl. template overhead) "
+            f"would exceed context window: n_ctx={n_ctx} leaves "
+            f"{max(available, 0)} tokens for output, below the minimum "
+            f"useful completion of {needed}. Trim the history or use an "
+            f"agent with a larger n_ctx."
+        )
 
 
 def _compute_budget(effective_system: str, rag_suffix: str,
@@ -407,6 +449,13 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
 
     except HTTPException:
         raise
+    except PromptTooLargeError as e:
+        # The request could only ever produce a truncated stub (DEV-195).
+        # 413 with an actionable message beats letting the parser fail
+        # downstream and burning a retry rotation on a doomed request.
+        logger.warning("[%s] prompt too large: %s", req_id, e)
+        raw_request.state.error_category = "4xx_prompt_too_large"
+        raise HTTPException(status_code=413, detail=str(e))
     except InsufficientVramError as e:
         # Pre-flight check refused the swap. Tell the client to back off
         # rather than triggering a CUDA crash loop the way 2026-05-04 did.
