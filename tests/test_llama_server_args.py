@@ -177,6 +177,12 @@ def test_start_executes_post_popen_body(mgr, monkeypatch, tmp_path):
     # 4) don't spin up the real idle watchdog thread
     monkeypatch.setattr(mgr, "_start_watchdog", lambda: None)
 
+    # 5) DEV-157 pre-flight is unit-tested on its own; here the stubbed
+    #    session answers 200 for every URL, which the orphan check would
+    #    (correctly) treat as a foreign server squatting on the port.
+    monkeypatch.setattr(mgr, "_reap_orphan_llama_server", lambda: None)
+    monkeypatch.setattr(LlamaServerManager, "_PIDFILE", tmp_path / "llama.pid")
+
     mgr.start(model_config)  # would raise NameError before the fix
 
     assert mgr.current_model_path == "/models/m.gguf"
