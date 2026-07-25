@@ -2519,16 +2519,25 @@ def _handle_gate_rejection(db: Database, spec: Spec, task, gate) -> None:
 def _legacy_handle_gate_rejection(db: Database, spec: Spec, task, gate) -> None:
     """Handle a rejected review gate for a task."""
     if task.role == "architect":
-        # Re-run the architect with rejection notes as a clarification.
+        # Feed the rejection notes through the channel the architect
+        # actually reads. _run_architect only looks for feedback when
+        # retry_count > 0, via _latest_architect_feedback — which reads
+        # design_review_feedback.md, not CLARIFICATION gates. The old code
+        # parked the notes in a synthetic CLARIFICATION gate (a channel only
+        # the planner consumes) and never incremented the retry count, so
+        # the architect re-ran blind with rejection_notes=None and
+        # regenerated ~the same design, gate after gate (DEV-124).
         if gate.reviewer_notes:
-            synth = db.create_gate(
-                spec_id=spec.id,
-                gate_type=GateType.CLARIFICATION,
-                prompt_md="## Design rejection feedback",
-            )
-            db.respond_to_gate(synth.id, "approved", notes=gate.reviewer_notes)
+            try:
+                (db.spec_dir(spec.id) / "design_review_feedback.md").write_text(
+                    gate.reviewer_notes)
+            except OSError as e:
+                logger.warning("spec %s: could not persist design rejection "
+                               "notes: %s", spec.id, e)
+        db.increment_task_retry(task.id)
         db.update_task_status(task.id, TaskStatus.PENDING)
-        logger.info("spec %s: architect design rejected, re-running", spec.id)
+        logger.info("spec %s: architect design rejected, re-running with "
+                    "feedback (retry %d)", spec.id, task.retry_count + 1)
 
     elif task.role == "implementer":
         impl_task = task
