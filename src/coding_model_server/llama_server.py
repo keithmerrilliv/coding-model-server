@@ -13,6 +13,7 @@ import subprocess
 import time
 import uuid
 from collections import OrderedDict
+from pathlib import Path
 from threading import Lock, Thread
 from typing import Any, Dict, Iterator, List, Optional
 
@@ -42,6 +43,46 @@ class ModelBusyError(RuntimeError):
     to a 503 + Retry-After, exactly as it does for InsufficientVramError, so
     the orchestrator backs off and retries once the in-flight request drains.
     """
+
+
+class UpstreamCancel:
+    """Cross-thread handle for aborting an in-flight upstream stream (DEV-158).
+
+    proxy_stream runs in a worker thread and blocks in a socket read between
+    SSE lines; when the CLIENT disconnects, Starlette cancels the awaiting
+    task but the worker stays blocked until the next token arrives — during
+    a long prefill that means the GPU completes minutes of work for a dead
+    client while _active_requests pins other agents out with 503s. The
+    route's disconnect watcher calls close(), which closes the underlying
+    requests.Response and makes the blocked read raise immediately.
+
+    close() is idempotent and safe in either order relative to register():
+    a close that lands before the response exists closes it on arrival.
+    """
+
+    def __init__(self):
+        self._lock = Lock()
+        self._resp = None
+        self._closed = False
+
+    def register(self, resp) -> None:
+        with self._lock:
+            self._resp = resp
+            if self._closed:
+                self._close_locked()
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True
+            self._close_locked()
+
+    def _close_locked(self) -> None:
+        if self._resp is not None:
+            try:
+                self._resp.close()
+            except Exception:
+                pass
+            self._resp = None
 
 
 # State machine for the llama-server child process. Exposed via snapshot()
@@ -82,6 +123,11 @@ class LlamaServerManager:
         6: 'q5_0', 7: 'q5_1', 8: 'q8_0', 9: 'q8_1',
     }
 
+    # Written on every spawn so a llama-server orphaned by a hard daemon
+    # death (SIGKILL, OOM-killer) can be identified and reaped on the next
+    # start instead of squatting on the port with 14 GiB of VRAM (DEV-157).
+    _PIDFILE = Path.home() / ".cache" / "coding-model-server" / "llama-server.pid"
+
     def __init__(self):
         # Two-lock discipline:
         # - self.lock is held only for SHORT critical sections (state attribute
@@ -119,6 +165,16 @@ class LlamaServerManager:
         # start. Empty until each agent has been loaded once. Used by the
         # pre-flight check before a swap so we can refuse instead of crashing.
         self._measured_vram_delta_mib: Dict[str, int] = {}
+        # Consecutive InsufficientVramError refusals per agent. The recorded
+        # delta is measured from two nvidia-smi readings tens of seconds
+        # apart on a desktop GPU (Xorg/browser also allocate), so it can be
+        # inflated past any achievable free value — and it only refreshes on
+        # a SUCCESSFUL load, which the refusal itself prevents: a permanent
+        # brick with no correction path (DEV-156). After 3 straight refusals
+        # the record is treated as suspect and cleared so the next load
+        # attempt can re-measure.
+        self._vram_refusals: Dict[str, int] = {}
+        self._gpu_total_mib_cache: Optional[int] = None
         # LRU cache of tokenize results, keyed by md5(content). System
         # prompts + few-shot examples are stable across requests, so we
         # save a /tokenize round-trip on most calls.
@@ -264,11 +320,26 @@ class LlamaServerManager:
         with self.lock:
             self._state = _STATE_STARTING
 
+        # Reap any orphan holding the port BEFORE spawning: a child of a
+        # SIGKILLed daemon keeps serving the previous model and answering
+        # /health, so the new child dies on bind while the health poll below
+        # happily marks RUNNING against the stale server (DEV-157).
+        self._reap_orphan_llama_server()
+
         logger.info("Starting llama-server: %s", ' '.join(cmd))
+        # start_new_session: the child (and anything it spawns) lives in its
+        # own process group, so shutdown can kill the whole group and a hard
+        # daemon death leaves a group we can identify and reap by pid-file.
         process = subprocess.Popen(
             cmd, env=env,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            start_new_session=True,
         )
+        try:
+            self._PIDFILE.parent.mkdir(parents=True, exist_ok=True)
+            self._PIDFILE.write_text(f"{process.pid}\n")
+        except OSError as e:
+            logger.warning("could not write llama-server pid-file: %s", e)
         with self.lock:
             self.process = process
             self.current_model_path = model_config['path']
@@ -311,6 +382,25 @@ class LlamaServerManager:
             try:
                 resp = self._session.get(health_url, timeout=2)
                 if resp.status_code == 200:
+                    # Trust the 200 only while OUR child is alive: a stale
+                    # orphan can answer /health after our child died on bind,
+                    # which used to mark RUNNING with a dead Popen while the
+                    # stale process served the previous model (DEV-157).
+                    if process.poll() is not None:
+                        with self.lock:
+                            self._state = _STATE_IDLE
+                            self.process = None
+                            self.current_model_path = None
+                            self.current_model_config = None
+                            self.current_runtime_signature = None
+                            self.current_expects_thinking = True
+                            self.started_at = None
+                        raise RuntimeError(
+                            f"llama-server exited with code "
+                            f"{process.returncode} but port "
+                            f"{self.LLAMA_SERVER_PORT} still answers /health "
+                            f"— a stale server is squatting on the port"
+                        )
                     logger.info("llama-server healthy after %.1fs", time.time() - start_t)
                     expects_thinking = self._probe_expects_thinking()
                     with self.lock:
@@ -330,6 +420,57 @@ class LlamaServerManager:
         # self._swap_lock (which we hold) and clears state to idle.
         self._shutdown_unlocked()
         raise TimeoutError(f"llama-server did not become healthy within {self.HEALTH_TIMEOUT}s")
+
+    def _reap_orphan_llama_server(self) -> None:
+        """Kill a llama-server left over from a previous daemon (DEV-157).
+
+        The pid-file identifies OUR orphan; /proc/<pid>/cmdline is verified
+        before killing so a recycled pid never takes down an innocent
+        process. If the port is still served afterwards by something we
+        can't identify, refuse to start — a foreign server answering our
+        health checks is strictly worse than failing loudly.
+        """
+        pid: Optional[int] = None
+        try:
+            pid = int(self._PIDFILE.read_text().strip())
+        except (OSError, ValueError):
+            pass
+        if pid is not None and pid > 1:
+            try:
+                cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
+            except OSError:
+                cmdline = b""
+            if b"llama-server" in cmdline:
+                logger.warning(
+                    "reaping orphaned llama-server (pid %d) left by a "
+                    "previous daemon", pid,
+                )
+                try:
+                    os.killpg(pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError):
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except OSError:
+                        pass
+                deadline = time.time() + 10
+                while time.time() < deadline and os.path.exists(f"/proc/{pid}"):
+                    time.sleep(0.2)
+        try:
+            self._PIDFILE.unlink()
+        except OSError:
+            pass
+
+        try:
+            resp = self._session.get(
+                f"http://127.0.0.1:{self.LLAMA_SERVER_PORT}/health", timeout=1)
+        except (http_requests.ConnectionError, http_requests.Timeout):
+            return  # port free — the normal case
+        raise RuntimeError(
+            f"port {self.LLAMA_SERVER_PORT} already answers /health "
+            f"(HTTP {resp.status_code}) and the pid-file does not identify "
+            f"it as ours — refusing to spawn a child that would die on bind "
+            f"while the stale server passes our health checks"
+        )
 
     def _probe_expects_thinking(self) -> bool:
         """Does this model's chat template open a <think> block for the assistant?
@@ -410,21 +551,53 @@ class LlamaServerManager:
             self.started_at = None
 
         pid = proc.pid
+
+        def _signal_group(sig):
+            # The child runs in its own session (start_new_session=True), so
+            # the group id is its pid; killing the group takes down anything
+            # it spawned too (DEV-157). Fall back to the single process for
+            # children spawned before this change.
+            try:
+                os.killpg(pid, sig)
+            except (ProcessLookupError, PermissionError, OSError):
+                proc.send_signal(sig)
+
         logger.info("Shutting down llama-server (PID %d)...", pid)
         try:
-            proc.send_signal(signal.SIGTERM)
+            _signal_group(signal.SIGTERM)
             try:
                 proc.wait(timeout=10)
                 logger.info("llama-server (PID %d) terminated gracefully", pid)
             except subprocess.TimeoutExpired:
                 logger.warning("llama-server (PID %d) didn't exit, sending SIGKILL", pid)
-                proc.kill()
+                _signal_group(signal.SIGKILL)
                 proc.wait(timeout=5)
         except Exception as e:
             logger.error("Error shutting down llama-server: %s", e)
+        try:
+            self._PIDFILE.unlink()
+        except OSError:
+            pass
 
         with self.lock:
             self._state = _STATE_IDLE
+
+    def _gpu_total_mib(self) -> Optional[int]:
+        """Total VRAM (device 0), cached — it never changes at runtime."""
+        if self._gpu_total_mib_cache is not None:
+            return self._gpu_total_mib_cache
+        try:
+            result = subprocess.run(
+                ["nvidia-smi", "--query-gpu=memory.total",
+                 "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=2,
+            )
+            if result.returncode != 0:
+                return None
+            self._gpu_total_mib_cache = int(result.stdout.strip().splitlines()[0])
+        except (OSError, ValueError, subprocess.TimeoutExpired, IndexError):
+            return None
+        return self._gpu_total_mib_cache
 
     def _gpu_free_mib(self) -> Optional[int]:
         """Query free VRAM (device 0) via nvidia-smi. Returns None on failure.
@@ -616,10 +789,27 @@ class LlamaServerManager:
             return  # nvidia-smi unavailable — proceed and hope for the best
 
         if free < recorded:
+            # DEV-156: an inflated record (another process allocated between
+            # the two nvidia-smi readings) refuses FOREVER, because only a
+            # successful load refreshes it. Three consecutive refusals mark
+            # the record suspect: clear it and let this load attempt
+            # re-measure instead of staying bricked until a daemon restart.
+            refusals = self._vram_refusals.get(agent_id, 0) + 1
+            if refusals >= 3:
+                logger.warning(
+                    "[vram] %s refused %d times in a row (recorded=%d MiB, "
+                    "free=%d MiB) — record looks inflated; clearing it and "
+                    "attempting the load", agent_id, refusals, recorded, free,
+                )
+                self._vram_refusals.pop(agent_id, None)
+                self._measured_vram_delta_mib.pop(agent_id, None)
+                return
+            self._vram_refusals[agent_id] = refusals
             raise InsufficientVramError(
                 f"refusing to load {agent_id}: needs ~{recorded} MiB "
                 f"but only {free} MiB free"
             )
+        self._vram_refusals.pop(agent_id, None)
 
         if free < recorded + self._VRAM_MARGIN_MIB:
             logger.warning(
@@ -748,9 +938,20 @@ class LlamaServerManager:
                     free_after = self._gpu_free_mib()
                     if free_before is not None and free_after is not None:
                         delta = free_before - free_after
-                        if delta > 0:
+                        total = self._gpu_total_mib()
+                        if total is not None and delta > total:
+                            # Impossible footprint — another process allocated
+                            # between the two readings (DEV-156). Recording it
+                            # would guarantee eternal refusals.
+                            logger.warning(
+                                "[vram] %s measured delta %d MiB exceeds the "
+                                "card's %d MiB — cross-process interference; "
+                                "not recording", agent_id, delta, total,
+                            )
+                        elif delta > 0:
                             with self.lock:
                                 self._measured_vram_delta_mib[agent_id] = delta
+                                self._vram_refusals.pop(agent_id, None)
                             logger.info(
                                 "[vram] %s footprint: %d MiB (free %d -> %d)",
                                 agent_id, delta, free_before, free_after,
@@ -1071,8 +1272,13 @@ class LlamaServerManager:
                      tool_choice: Optional[Any] = None,
                      parallel_tool_calls: Optional[bool] = None,
                      req_id: Optional[str] = None,
-                     reserved: bool = False) -> Iterator[str]:
+                     reserved: bool = False,
+                     upstream_cancel: Optional[UpstreamCancel] = None) -> Iterator[str]:
         """Stream a chat completion via the llama-server subprocess.
+
+        ``upstream_cancel`` (DEV-158): the route registers the live upstream
+        response on it so its disconnect watcher can close the socket the
+        moment the client goes away, instead of waiting for the next token.
 
         ``req_id`` is the correlation ID assigned by the metrics middleware;
         we prefix it onto every log line so a grep on `req_xxxxxxxx` shows
@@ -1121,6 +1327,8 @@ class LlamaServerManager:
                     url, payload, stream=True,
                     model_config=model_config, rid=rid,
                 )
+                if upstream_cancel is not None:
+                    upstream_cancel.register(resp)
                 with resp:
                     if resp.status_code != 200:
                         # Log full error server-side; return a generic message
