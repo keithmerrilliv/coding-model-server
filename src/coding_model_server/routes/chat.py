@@ -268,6 +268,10 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
     # exit. Streaming responses transfer ownership to the wrapper generator
     # so the slot is released only when the stream finishes.
     slot_held = True
+    # `reservation_held` tracks the manager's in-flight slot, reserved inside
+    # ensure_running under _swap_lock (DEV-116). Like the admission slot, the
+    # streaming path hands it to the stream-teardown hook.
+    reservation_held = False
     try:
         model_name = Config.resolve_agent(request.model)
         if model_name not in Config.AGENTS:
@@ -300,9 +304,17 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
         # work. On the event-loop thread that freezes the whole process:
         # /health times out, the dashboard hangs, and every other in-flight SSE
         # stream stalls mid-token. Offload it like proxy_sync below.
+        #
+        # reserve_slot=True closes the TOCTOU between "the right model is up"
+        # and the proxy actually POSTing to it: without the reservation,
+        # another agent's ensure_running in that gap saw no active requests
+        # and swapped the child, so this request's stream silently received
+        # the other model's output (DEV-116).
         await asyncio.to_thread(
-            llama_server_manager.ensure_running, model_config, agent_id=request.model
+            llama_server_manager.ensure_running, model_config,
+            agent_id=request.model, reserve_slot=True,
         )
+        reservation_held = True
 
         n_ctx = model_config.get('n_ctx', 32768)
         # Estimate what actually reaches llama-server. `_build_openai_messages`
@@ -362,14 +374,21 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
                 est_prompt_tokens=est_prompt_tokens,
                 tools=request.tools, tool_choice=request.tool_choice,
                 parallel_tool_calls=request.parallel_tool_calls,
-                req_id=req_id)
-            # Hand the admission slot to the stream teardown: one idempotent
-            # release, two hooks. The wrapper's finally covers every path on
-            # a generator that started; the background task covers a stream
-            # cancelled before its first iteration, where the finally never
-            # runs and the slot would leak until restart (DEV-117).
-            release_once = _once(chat_admission.release)
+                req_id=req_id, reserved=True)
+
+            def _finish_stream():
+                chat_admission.release()
+                llama_server_manager.release_slot()
+
+            # Hand the admission slot AND the manager's in-flight reservation
+            # to the stream teardown: one idempotent release, two hooks. The
+            # wrapper's finally covers every path on a generator that
+            # started; the background task covers a stream cancelled before
+            # its first iteration, where the finally never runs and the slot
+            # would leak until restart (DEV-117).
+            release_once = _once(_finish_stream)
             slot_held = False
+            reservation_held = False
             return StreamingResponse(
                 _release_slot_on_stream_finish(inner, release_once),
                 media_type="text/event-stream",
@@ -383,7 +402,7 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
                 clamped_max, request.temperature, model_config=model_config,
                 tools=request.tools, tool_choice=request.tool_choice,
                 parallel_tool_calls=request.parallel_tool_calls,
-                req_id=req_id)
+                req_id=req_id, reserved=True)
         )
 
     except HTTPException:
@@ -428,7 +447,9 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         # Sync path + early-exit error paths release here. The streaming
-        # path sets slot_held=False after handing the admission slot to
-        # _release_slot_on_stream_finish, so this becomes a no-op.
+        # path sets both flags False after handing its slots to the stream
+        # teardown hook, so this becomes a no-op.
+        if reservation_held:
+            llama_server_manager.release_slot()
         if slot_held:
             chat_admission.release()
