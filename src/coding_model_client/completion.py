@@ -40,32 +40,52 @@ def wait_for_server():
 # History helpers (used only by get_completion)
 # ---------------------------------------------------------------------------
 
+def _trim_bounds(history):
+    """(sys_offset, trim_index) dropping the oldest ~25%, aligned to a user
+    turn, preserving a leading system prompt — without which repeated trims
+    under context pressure eventually evict the agent's role instructions."""
+    sys_offset = 1 if history[0].get("role") == "system" else 0
+    trim_index = max(sys_offset + 1, int(len(history) * 0.25))
+    while trim_index < len(history) - 1 and history[trim_index]["role"] != "user":
+        trim_index += 1
+    return sys_offset, trim_index
+
+
 def _trim_history_for_context(history):
-    """Trim history when context limit is reached.
+    """Build a trimmed, sanitized COPY of history for a context-limit retry.
 
-    Preserves history[0] if it's a system prompt — without this, repeated
-    trims under context pressure eventually evict the agent's role
-    instructions and the model loses its contract.
+    Never mutates *history* (DEV-135). get_completion's contract says the
+    caller's stored list is untouched; the old in-place version silently
+    dropped ~25% of the session (which then got saved to disk), and a trim
+    firing mid-continuation broke the orchestrator's
+    ``del history[-(continuation_count*2):]`` arithmetic. Callers that mean
+    to shrink stored history use trim_history_in_place explicitly.
     """
-    if len(history) > 2:
-        sys_offset = 1 if history[0].get("role") == "system" else 0
-        trim_index = max(sys_offset + 1, int(len(history) * 0.25))
-        while trim_index < len(history) - 1 and history[trim_index]["role"] != "user":
-            trim_index += 1
-        trimmed_past = history[trim_index:-1]
-        history[:] = history[:sys_offset] + trimmed_past + [history[-1]]
+    if len(history) <= 2:
+        return None
+    sys_offset, trim_index = _trim_bounds(history)
+    view = history[:sys_offset] + history[trim_index:-1] + [history[-1]]
 
-        sanitized_retry = []
-        valid_roles = {"system", "user", "assistant"}
-        for m in history:
-            content = m.get("content", "").strip()
-            role = m.get("role", "")
-            if content and role in valid_roles:
-                sanitized_retry.append({"role": role, "content": content})
-        if not sanitized_retry:
-            sanitized_retry.append({"role": "user", "content": "Hello"})
-        return sanitized_retry
-    return None
+    sanitized_retry = []
+    valid_roles = {"system", "user", "assistant"}
+    for m in view:
+        content = (m.get("content") or "").strip()
+        role = m.get("role", "")
+        if content and role in valid_roles:
+            sanitized_retry.append({"role": role, "content": content})
+    if not sanitized_retry:
+        sanitized_retry.append({"role": "user", "content": "Hello"})
+    return sanitized_retry
+
+
+def trim_history_in_place(history):
+    """Explicitly shrink stored history (the client loop's Tier-2 last
+    resort). Keeps the original message dicts — tool_calls and friends —
+    unlike the sanitized retry copy above."""
+    if len(history) <= 2:
+        return
+    sys_offset, trim_index = _trim_bounds(history)
+    history[:] = history[:sys_offset] + history[trim_index:-1] + [history[-1]]
 
 
 def _compress_history(messages, keep_recent=6, summary_len=200):

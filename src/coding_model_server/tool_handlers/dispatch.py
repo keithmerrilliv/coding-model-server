@@ -378,7 +378,10 @@ def ingest_pdf_content(payload):
                 "content": encoded_content
             }
 
-            upload_url = f"http://{state.config.LINUX_SERVER_IP}:5000/v1/files/upload"
+            upload_url = getattr(
+                state.config, "FILES_UPLOAD_URL",
+                f"http://{state.config.LINUX_SERVER_IP}:5000/v1/files/upload",
+            )
             state.print_colored(f"Uploading {local_path} to server...", state.colors['CYAN'])
 
             response = requests.post(upload_url, json=upload_payload, timeout=state.config.LONG_REQUEST_TIMEOUT)
