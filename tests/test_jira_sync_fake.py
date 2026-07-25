@@ -96,3 +96,48 @@ def test_reverse_leaves_untouched_issue_pending(db, sync, spec_and_gate):
     sync.tick()
     sync.tick()  # human hasn't acted; nothing may change
     assert db.get_gate(gate.id).status is GateStatus.PENDING
+
+
+# ── DEV-149: rejecting from a stock workflow (no "Rejected" status) ──────────
+
+def test_done_with_reject_comment_is_a_rejection(db, sync, spec_and_gate):
+    # Stock Jira Cloud workflows only reach Done — which used to read back
+    # as approval no matter what the human meant. The REJECT comment token
+    # flips it, and the comment (reasons included) becomes the notes.
+    spec, gate = spec_and_gate
+    sync.tick()
+    issue_key = db.get_gate(gate.id).jira_issue_key
+
+    sync.client.add_comment(issue_key, "REJECT — wrong approach, use the v2 API")
+    sync.client.transition_issue(issue_key, STATUS_DONE)
+    sync.tick()
+
+    gate = db.get_gate(gate.id)
+    assert gate.status is GateStatus.REJECTED
+    assert "v2 API" in gate.reviewer_notes
+
+
+def test_rejected_casing_variant_also_counts(db, sync, spec_and_gate):
+    spec, gate = spec_and_gate
+    sync.tick()
+    issue_key = db.get_gate(gate.id).jira_issue_key
+
+    sync.client.add_comment(issue_key, "rejected: tests are missing")
+    sync.client.transition_issue(issue_key, STATUS_DONE)
+    sync.tick()
+
+    assert db.get_gate(gate.id).status is GateStatus.REJECTED
+
+
+def test_plain_done_with_normal_comment_still_approves(db, sync, spec_and_gate):
+    # A comment that merely CONTAINS the word reject mid-sentence must not
+    # flip an approval — only a comment that STARTS with the token does.
+    spec, gate = spec_and_gate
+    sync.tick()
+    issue_key = db.get_gate(gate.id).jira_issue_key
+
+    sync.client.add_comment(issue_key, "I almost decided to reject, but ship it")
+    sync.client.transition_issue(issue_key, STATUS_DONE)
+    sync.tick()
+
+    assert db.get_gate(gate.id).status is GateStatus.APPROVED

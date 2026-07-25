@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
 from typing import Optional
 
@@ -93,6 +94,12 @@ def _spec_status_to_jira(status: SpecStatus) -> str:
 
 # ── Sync worker ──────────────────────────────────────────────────────────────
 
+# Case-insensitive REJECT token opening a Jira comment (DEV-149). Matches
+# "REJECT", "Rejected:", "reject — wrong approach", etc.; the rest of the
+# comment rides along as reviewer notes.
+_REJECT_TOKEN_RE = re.compile(r"\s*reject(ed)?\b", re.IGNORECASE)
+
+
 class JiraSync:
     """Background worker that mirrors SQLite events into Jira and back."""
 
@@ -122,6 +129,11 @@ class JiraSync:
         self._thread.start()
         logger.info("jira-sync thread started (poll=%.1fs, client=%s)",
                     self.poll_interval, type(self.client).__name__)
+        logger.info(
+            "jira-sync: to REJECT a gate from a stock workflow (no Rejected "
+            "status), add a comment starting with REJECT and close the issue "
+            "— a plain close reads as approval (DEV-149)"
+        )
 
     def stop(self, timeout: float = 5.0) -> None:
         self._shutdown.set()
@@ -386,7 +398,18 @@ class JiraSync:
             if issue is None:
                 continue
             if issue.status == STATUS_DONE:
-                self._respond_from_jira(gate.id, "approved", issue)
+                # Stock Jira Cloud workflows have only To Do / In Progress /
+                # Done — no "Rejected" status exists, so closing the issue
+                # was the ONLY terminal transition and every close read back
+                # as approval, even when the human meant to reject (DEV-149).
+                # Comment-token convention that works on any workflow: a
+                # latest comment starting with REJECT flips the close to a
+                # rejection, and that comment (reasons included) becomes the
+                # reviewer notes downstream.
+                if issue.comments and _REJECT_TOKEN_RE.match(issue.comments[-1] or ""):
+                    self._respond_from_jira(gate.id, "rejected", issue)
+                else:
+                    self._respond_from_jira(gate.id, "approved", issue)
             elif issue.status == STATUS_REJECTED:
                 self._respond_from_jira(gate.id, "rejected", issue)
             # Any other status (To Do, In Progress, In Review) means the
