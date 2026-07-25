@@ -1691,7 +1691,13 @@ MAC_RUNNER_API_KEY = os.getenv("MAC_RUNNER_API_KEY", "")
 
 # Relative paths inside spec_dir that should never be shipped to the Mac
 # runner as patch content (they're not part of the LLM's diff).
-_SPEC_SKIP_PATTERNS = (".pytest_cache", "__pycache__", ".DS_Store", "test_output.txt")
+# retry_history holds a full snapshot of every prior attempt
+# (_snapshot_retry): shipping it made mac-runner patch payloads grow
+# linearly with retries and materialized N stale copies of every source
+# file in the git worktree — duplicate-source compilation in glob-based
+# SPM targets (DEV-196).
+_SPEC_SKIP_PATTERNS = (".pytest_cache", "__pycache__", ".DS_Store",
+                       "test_output.txt", "retry_history")
 
 
 def _run_local_tests(spec_dir: Path, framework: str, timeout: int) -> tuple[bool, str]:
