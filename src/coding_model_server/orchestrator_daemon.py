@@ -519,6 +519,18 @@ def _bootstrap_tasks(db: Database, spec: Spec) -> None:
                      spec.id)
         db.update_spec_status(spec.id, SpecStatus.FAILED)
         return
+    # Non-mapping phase entries — `phases: [design, implement, test]` is
+    # plausible LLM output — used to AttributeError on phase.get() every
+    # tick: exception caught and logged, no tasks created, spec never
+    # failing and never progressing. Fail it once, loudly (DEV-140).
+    bad = [p for p in phases if not isinstance(p, dict)]
+    if bad:
+        logger.error(
+            "spec %s: plan phases must be mappings, got %s — marking failed",
+            spec.id, ", ".join(type(p).__name__ for p in bad),
+        )
+        db.update_spec_status(spec.id, SpecStatus.FAILED)
+        return
     for phase in phases:
         role = phase.get("role", "implementer")
         db.create_task(
@@ -546,7 +558,13 @@ def _start_task(db: Database, spec: Spec, task) -> None:
     and a review gate. This is synchronous — it blocks the tick thread
     for the entire duration of the inference call.
     """
-    db.update_task_status(task.id, TaskStatus.RUNNING)
+    # Compare-and-set claim (DEV-142): a second poller (manual debug run
+    # beside the systemd unit) racing this tick must lose here, not both
+    # call the agent and double-create gates/Jira issues.
+    if not db.claim_task(task.id):
+        logger.warning("spec %s: task %s was claimed by another poller — skipping",
+                       spec.id, task.id)
+        return
     spec_dir = db.spec_dir(spec.id)
 
     try:
@@ -1478,8 +1496,17 @@ def _collect_reviewer_code_files(db: Database, spec_id: str,
     still sees the path in `## Implementation Files` (preserves rule-5
     cite-check and rule-6 file-list hygiene) without crashing on a UTF-8 decode.
     """
-    code_files = []
+    # Artifact rows accumulate across retries (the retry wipe deletes files,
+    # not rows), so each path can have N+1 rows after N retries. Reading all
+    # of them duplicated every file N+1 times in the reviewer prompt —
+    # ballooning context on exactly the specs already in a retry loop
+    # (DEV-143). Rows are created_at-ordered; keep the latest per path.
+    latest_by_path: dict = {}
     for art in _list_code_artifacts(db, spec_id):
+        latest_by_path[art.path] = art
+
+    code_files = []
+    for art in latest_by_path.values():
         fpath = spec_dir / art.path
         if not fpath.exists():
             continue
@@ -2636,6 +2663,31 @@ def main() -> int:
     db = Database()
     logger.info("task store: %s", db.db_path)
     logger.info("workspace:  %s", db.workspace_root)
+
+    # Single-instance guard (DEV-142): the DB's one-writer story was an
+    # assumption, not enforced — a manual debug run beside the systemd unit
+    # gave two pollers double-processing every PENDING task. The flock dies
+    # with the process, so a crashed daemon never wedges the lock.
+    import fcntl
+    lock_path = Path(db.db_path).with_suffix(".lock")
+    lock_file = open(lock_path, "w")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        logger.error(
+            "another orchestrator daemon already holds %s — refusing to "
+            "start a second poller (stop the systemd unit first: "
+            "systemctl stop coding-model-orchestrator)", lock_path,
+        )
+        return 1
+    lock_file.write(f"{os.getpid()}\n")
+    lock_file.flush()
+
+    # Retention sweep (DEV-144): heartbeat rows land every 60s forever and
+    # nothing else deletes from events.
+    pruned = db.prune_daemon_ticks()
+    if pruned:
+        logger.info("pruned %d DAEMON_TICK heartbeat events (>14 days old)", pruned)
 
     # Phase b pre-flight: if the operator flipped the flag, surface up
     # front whether each configured provider will actually fire — otherwise

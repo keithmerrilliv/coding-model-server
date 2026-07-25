@@ -19,7 +19,7 @@ import secrets
 import sqlite3
 import threading
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator, Optional
 
@@ -162,6 +162,10 @@ class Database:
         sql = _SCHEMA_PATH.read_text()
         conn = self._conn()
         conn.executescript(sql)
+        # Migration (DEV-144): idx_events_id duplicated the INTEGER PRIMARY
+        # KEY rowid btree — pure insert overhead. Removed from schema.sql;
+        # drop it from DBs created before the removal.
+        conn.execute("DROP INDEX IF EXISTS idx_events_id")
 
     # ── spec workspace helpers ───────────────────────────────────────────────
 
@@ -352,6 +356,41 @@ class Database:
             (spec_id, role),
         ).fetchall()
         return [_row_to_task(r) for r in rows]
+
+    def claim_task(self, task_id: str) -> bool:
+        """Atomically claim a PENDING task for execution (CAS → RUNNING).
+
+        Returns False when the task was no longer PENDING — i.e. another
+        poller (a second daemon instance, a manual debug run) already
+        claimed it. The unconditional update let both pollers set RUNNING
+        and both call the agent: duplicate inference cost, duplicate gates,
+        duplicate Jira issues (DEV-142).
+        """
+        now = utc_now()
+        with self.transaction() as conn:
+            cur = conn.execute(
+                "UPDATE tasks SET status = ?, updated_at = ?, "
+                "started_at = COALESCE(started_at, ?) "
+                "WHERE id = ? AND status = ?",
+                (TaskStatus.RUNNING.value, _iso(now), _iso(now),
+                 task_id, TaskStatus.PENDING.value),
+            )
+            return cur.rowcount == 1
+
+    def prune_daemon_ticks(self, older_than_days: int = 14) -> int:
+        """Delete DAEMON_TICK heartbeat events older than *older_than_days*.
+
+        Heartbeats land every 60s forever (~525K rows/year) and nothing else
+        ever deletes from events (DEV-144). Real events are kept — only the
+        liveness ticks are swept. Returns the number of rows removed.
+        """
+        cutoff = utc_now() - timedelta(days=older_than_days)
+        with self.transaction() as conn:
+            cur = conn.execute(
+                "DELETE FROM events WHERE kind = ? AND created_at < ?",
+                (EventKind.DAEMON_TICK.value, _iso(cutoff)),
+            )
+            return cur.rowcount
 
     def update_task_status(self, task_id: str, status: TaskStatus) -> None:
         now = utc_now()

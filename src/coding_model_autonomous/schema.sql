@@ -92,4 +92,3 @@ CREATE INDEX IF NOT EXISTS idx_gates_status  ON review_gates(status);
 CREATE INDEX IF NOT EXISTS idx_gates_spec    ON review_gates(spec_id);
 CREATE INDEX IF NOT EXISTS idx_events_spec   ON events(spec_id);
 CREATE INDEX IF NOT EXISTS idx_events_kind   ON events(kind);
-CREATE INDEX IF NOT EXISTS idx_events_id     ON events(id);
