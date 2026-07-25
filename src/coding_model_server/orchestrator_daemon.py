@@ -2394,8 +2394,74 @@ def _legacy_attempt_retry(db: Database, spec: Spec, task, failure_detail: str) -
                 spec.id, impl_task.retry_count + 1, MAX_RETRIES)
 
 
+def _latest_task_clarification(db: Database, spec_id: str, task_id: str):
+    """Newest CLARIFICATION gate bound to *task_id*.
+
+    Supervisor request_clarification gates are the only CLARIFICATION gates
+    created with a task_id; the planner/architect feedback synthetics are
+    spec-level (task_id None) and must not match here.
+    """
+    gates = [g for g in db.list_gates_for_spec(spec_id, GateType.CLARIFICATION)
+             if g.task_id == task_id]
+    return gates[-1] if gates else None
+
+
+def _resume_from_clarification(db: Database, spec: Spec, task, answer: str) -> None:
+    """A human answered the supervisor's question — feed the answer back.
+
+    Re-invokes the supervisor with outcome=clarification_answered so the
+    answer drives the next transition. Before DEV-122 the answer was read
+    by nothing: the spec parked in EXECUTING forever.
+    """
+    logger.info("spec %s: clarification answered for task %s — resuming",
+                spec.id, task.id)
+    if not SUPERVISOR_ENABLED:
+        # Supervisor toggled off since the gate was created. Deterministic
+        # un-wedge: re-run the parked phase.
+        logger.warning("spec %s: supervisor disabled; re-running %s after "
+                       "clarification", spec.id, task.role)
+        db.update_task_status(task.id, TaskStatus.PENDING)
+        return
+    ctx = _build_supervisor_context(
+        db, spec, task,
+        outcome="clarification_answered",
+        reviewer_notes=answer,
+    )
+    try:
+        decision = _supervisor.decide(ctx)
+    except _supervisor.SupervisorError as e:
+        logger.warning("spec %s: supervisor failed on clarification resume "
+                       "(%s); re-running %s", spec.id, e, task.role)
+        db.update_task_status(task.id, TaskStatus.PENDING)
+        return
+    _apply_supervisor_decision(db, spec, task, decision, legacy_feedback=answer)
+
+
 def _check_execution_gate(db: Database, spec: Spec, task) -> None:
     """Check the review gate for a task in BLOCKED_ON_REVIEW."""
+    # A supervisor request_clarification parks the task here with a
+    # CLARIFICATION gate bound to it — that gate, not the role's review
+    # gate, is what this tick must read. Before DEV-122 only the role gate
+    # was consulted, so the human's answer was read by nothing (spec wedged
+    # in EXECUTING), while a REJECTED role gate below re-invoked the
+    # supervisor every tick until the transition budget aborted the spec.
+    clar = _latest_task_clarification(db, spec.id, task.id)
+    if clar is not None and clar.status != GateStatus.CANCELLED:
+        if clar.status == GateStatus.PENDING:
+            return  # waiting on the human's answer
+        if clar.status == GateStatus.APPROVED:
+            answer = clar.reviewer_notes or ""
+            db.cancel_gate(clar.id)  # consume first — never process twice
+            _resume_from_clarification(db, spec, task, answer)
+            return
+        # REJECTED: the gate says "reject to abort".
+        db.cancel_gate(clar.id)
+        logger.warning("spec %s: clarification rejected by human — aborting",
+                       spec.id)
+        db.update_task_status(task.id, TaskStatus.FAILED)
+        db.update_spec_status(spec.id, SpecStatus.FAILED)
+        return
+
     gate_type = _ROLE_TO_GATE_TYPE.get(task.role)
     if gate_type is None:
         logger.error("spec %s: no gate type for role %r", spec.id, task.role)
@@ -2412,6 +2478,16 @@ def _check_execution_gate(db: Database, spec: Spec, task) -> None:
         db.update_task_status(task.id, TaskStatus.DONE)
     elif gate.status == GateStatus.REJECTED:
         _handle_gate_rejection(db, spec, task, gate)
+        # If handling left the task parked in BLOCKED_ON_REVIEW (the
+        # request_clarification path), retire the rejected gate: leaving it
+        # REJECTED re-runs _handle_gate_rejection on it every tick —
+        # duplicate supervisor calls and CLARIFICATION gates (each mirrored
+        # to Jira) until the transition budget aborts the spec (DEV-122).
+        # Rejections that moved the task on (retry paths) keep their gate:
+        # _run_implementer reads REJECTED CODE_REVIEW gates for notes.
+        fresh = db.get_task(task.id)
+        if fresh is not None and fresh.status == TaskStatus.BLOCKED_ON_REVIEW:
+            db.cancel_gate(gate.id)
 
 
 def _handle_gate_rejection(db: Database, spec: Spec, task, gate) -> None:

@@ -540,6 +540,36 @@ class Database:
             raise GateAlreadyDecidedError(gate)
         return gate
 
+    def cancel_gate(self, gate_id: str) -> None:
+        """Mark a gate CANCELLED: the daemon has fully acted on its decision.
+
+        A decided gate that stays APPROVED/REJECTED can be re-read by a later
+        tick and re-processed — the DEV-122 failure mode was a REJECTED gate
+        re-invoking the supervisor every tick (duplicate CLARIFICATION gates,
+        each mirrored to Jira) until the transition budget aborted the spec.
+        Cancellation is the consumed marker; it is not a human decision, so
+        it bypasses respond_to_gate's PENDING-only CAS.
+        """
+        with self.transaction() as conn:
+            row = conn.execute(
+                "SELECT spec_id, task_id FROM review_gates WHERE id = ?",
+                (gate_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"no gate {gate_id}")
+            conn.execute(
+                "UPDATE review_gates SET status = ? WHERE id = ?",
+                (GateStatus.CANCELLED.value, gate_id),
+            )
+            self._record_event(
+                conn,
+                EventKind.GATE_RESPONDED,
+                spec_id=row["spec_id"],
+                task_id=row["task_id"],
+                gate_id=gate_id,
+                payload={"decision": "cancelled"},
+            )
+
     # ── events ───────────────────────────────────────────────────────────────
 
     def _record_event(self, conn: sqlite3.Connection, kind: EventKind, *,
