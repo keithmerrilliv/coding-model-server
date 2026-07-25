@@ -4,9 +4,18 @@ Extracted from server.py for organization. Imports are kept narrow so
 this module can be loaded without pulling in FastAPI/HTTP machinery.
 """
 import os
+from pathlib import Path
 from typing import List
 
 from coding_model_autonomous.supervisor import SYSTEM_PROMPT as _SUPERVISOR_SYSTEM_PROMPT
+
+# Root for model weights. Every model config also has its own MODEL_PATH_*
+# env override; this only de-personalizes the defaults (DEV-199) — derived
+# from the running user's home instead of a hardcoded username, so it
+# resolves identically on the deploy box.
+_MODELS_ROOT = os.getenv(
+    "CODING_MODEL_MODELS_ROOT", str(Path.home() / ".lmstudio" / "models")
+)
 
 
 # ============================================================================
@@ -304,7 +313,7 @@ Update these after each retrieval step. They help you stay organized and efficie
     # feedback_kv_quant_preference: 131K Q4_0 → 131K Q8_0, ub bumped to 4096.
     _MOE_30B_TURBO = _create_model_config(
         'MODEL_PATH_30B_TURBO',
-        '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
+        f'{_MODELS_ROOT}/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
         49, 131072, 4096,
         server_extra_args=['--chat-template', 'chatml', '--swa-full'],
         logit_bias=[[151657, -100.0], [151658, -100.0]],
@@ -330,7 +339,7 @@ Update these after each retrieval step. They help you stay organized and efficie
     # only 0.85 GB free). See project_llama_server_build_perf.
     _MOE_30B_FAST = _create_model_config(
         'MODEL_PATH_30B_FAST',
-        '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
+        f'{_MODELS_ROOT}/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
         49, 65536, 3584,
         server_extra_args=['--chat-template', 'chatml', '--swa-full'],
         logit_bias=[[151657, -100.0], [151658, -100.0]],
@@ -344,7 +353,7 @@ Update these after each retrieval step. They help you stay organized and efficie
     # n_batch/n_ubatch=4096 for faster prefill (8 GB headroom supports large batches).
     _MOE_80B_Q8 = _create_model_config(
         'MODEL_PATH_80B_Q8',
-        '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3-Coder-Next-GGUF/Q8_0/Qwen3-Coder-Next-Q8_0-00001-of-00003.gguf',
+        f'{_MODELS_ROOT}/unsloth/Qwen3-Coder-Next-GGUF/Q8_0/Qwen3-Coder-Next-Q8_0-00001-of-00003.gguf',
         48, 262144, 4096,
         server_extra_args=['--chat-template', 'chatml', '--swa-full'],
         logit_bias=[[151657, -100.0], [151658, -100.0]],
@@ -365,7 +374,7 @@ Update these after each retrieval step. They help you stay organized and efficie
     # shared across the Qwen3-Coder family (151657/151658).
     _MOE_30B_HD = _create_model_config(
         'MODEL_PATH_30B_HD',
-        '/home/keith-merrill/.lmstudio/models/lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q8_0.gguf',
+        f'{_MODELS_ROOT}/lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q8_0.gguf',
         49, 196608, 4096,
         server_extra_args=['--chat-template', 'chatml', '--swa-full'],
         logit_bias=[[151657, -100.0], [151658, -100.0]],
@@ -437,7 +446,7 @@ Update these after each retrieval step. They help you stay organized and efficie
     # MiniMax has less headroom (4.8 GB) — use 2048 ubatch (conservative)
     _MOE_230B = _create_model_config(
         'MODEL_PATH_230B',
-        '/home/keith-merrill/.lmstudio/models/unsloth/MiniMax-M2.5-GGUF/Q4_K_M/MiniMax-M2.5-Q4_K_M-00001-of-00004.gguf',
+        f'{_MODELS_ROOT}/unsloth/MiniMax-M2.5-GGUF/Q4_K_M/MiniMax-M2.5-Q4_K_M-00001-of-00004.gguf',
         62, 118784, 4096, n_ubatch=4096,
         server_extra_args=['--jinja', '--reasoning-format', 'none', '--swa-full'],
         logit_bias=[[200052, -100.0], [200053, -100.0]],
@@ -462,7 +471,7 @@ Update these after each retrieval step. They help you stay organized and efficie
     # 2 KV heads (aggressive GQA → tiny KV cache), 256 experts × 1024 FFN.
     _MOE_122B = _create_model_config(
         'MODEL_PATH_122B',
-        '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3.5-122B-A10B-GGUF/Q4_K_M/Qwen3.5-122B-A10B-Q4_K_M-00001-of-00003.gguf',
+        f'{_MODELS_ROOT}/unsloth/Qwen3.5-122B-A10B-GGUF/Q4_K_M/Qwen3.5-122B-A10B-Q4_K_M-00001-of-00003.gguf',
         49, 262144, 4096,
         server_extra_args=['--jinja', '--reasoning-format', 'none', '--swa-full'],
         cpu_moe=True, n_ubatch=3072,
@@ -544,7 +553,7 @@ Update these after each retrieval step. They help you stay organized and efficie
     # real (see DEV-94); the free-VRAM figure attached to it was not reliable.
     _MOE_35B = _create_model_config(
         'MODEL_PATH_35B',
-        '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf',
+        f'{_MODELS_ROOT}/unsloth/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf',
         41, 65536, 4608,
         server_extra_args=['--jinja', '--reasoning-format', 'none', '--swa-full'],
         type_k=8, type_v=8,
@@ -596,7 +605,7 @@ Update these after each retrieval step. They help you stay organized and efficie
     # supervisor. See [[project_mtp_test_scope]] / [[project_llama_server_upgrade]].
     _DENSE_27B = _create_model_config(
         'MODEL_PATH_27B',
-        '/home/keith-merrill/.lmstudio/models/unsloth/Qwen3.6-27B-MTP-GGUF/Qwen3.6-27B-Q4_K_M.gguf',
+        f'{_MODELS_ROOT}/unsloth/Qwen3.6-27B-MTP-GGUF/Qwen3.6-27B-Q4_K_M.gguf',
         36, 131072, 2048,
         server_extra_args=['--jinja', '--reasoning-format', 'none', '--swa-full',
                            '--spec-type', 'draft-mtp', '--spec-draft-n-max', '2'],
@@ -615,7 +624,7 @@ Update these after each retrieval step. They help you stay organized and efficie
     # KV at 1M Q8_0: ~3,264 MiB → ~8.6 GB free. Full 1M native context fits easily.
     _HYBRID_30B = _create_model_config(
         'MODEL_PATH_HYBRID_30B',
-        '/home/keith-merrill/.lmstudio/models/unsloth/Nemotron-3-Nano-30B-A3B-GGUF/Nemotron-3-Nano-30B-A3B-Q4_K_M.gguf',
+        f'{_MODELS_ROOT}/unsloth/Nemotron-3-Nano-30B-A3B-GGUF/Nemotron-3-Nano-30B-A3B-Q4_K_M.gguf',
         52, 1048576, 1024,
         server_extra_args=['--jinja', '--reasoning-format', 'none'],
         cpu_moe=True, n_ubatch=1024,
@@ -634,7 +643,7 @@ Update these after each retrieval step. They help you stay organized and efficie
     # ~1.7 GB VRAM free (GLM's smaller experts offload further than the others).
     _MOE_30B_FLASH = _create_model_config(
         'MODEL_PATH_30B_FLASH',
-        '/home/keith-merrill/.lmstudio/models/unsloth/GLM-4.7-Flash-GGUF/GLM-4.7-Flash-Q4_K_M.gguf',
+        f'{_MODELS_ROOT}/unsloth/GLM-4.7-Flash-GGUF/GLM-4.7-Flash-Q4_K_M.gguf',
         47, 65536, 2048,
         # NB: --reasoning-budget 0 was tried here to stop GLM-4.7 burning the
         # whole budget inside <think> as an implementer — it does NOT work: GLM

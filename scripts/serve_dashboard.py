@@ -13,7 +13,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-from http.server import HTTPServer, SimpleHTTPRequestHandler
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 logger = logging.getLogger("coding-model-dashboard")
@@ -80,8 +80,12 @@ def main() -> int:
     )
     parser.add_argument(
         "--host",
-        default=os.getenv("CODING_MODEL_DASHBOARD_HOST", "0.0.0.0"),
-        help="Bind host (default: 0.0.0.0; set to 127.0.0.1 for loopback only)",
+        # Loopback by default (DEV-192): the dashboard fronts an admin key
+        # that travels as a cleartext header, so LAN exposure is opt-in via
+        # CODING_MODEL_DASHBOARD_HOST=0.0.0.0 (or an SSH tunnel, preferred).
+        default=os.getenv("CODING_MODEL_DASHBOARD_HOST", "127.0.0.1"),
+        help="Bind host (default: 127.0.0.1; set CODING_MODEL_DASHBOARD_HOST"
+             "=0.0.0.0 to expose on the LAN)",
     )
     parser.add_argument(
         "--port",
@@ -105,7 +109,10 @@ def main() -> int:
         return 1
 
     SPAFallbackHandler.serve_root = root
-    httpd = HTTPServer((args.host, args.port), SPAFallbackHandler)
+    # Threading matters even for a static SPA: with the single-threaded
+    # HTTPServer one stalled client (half-open socket, slow LAN device)
+    # blocked index.html and every asset for everyone (DEV-197/DEV-172).
+    httpd = ThreadingHTTPServer((args.host, args.port), SPAFallbackHandler)
     logger.info("serving %s at http://%s:%d (SPA fallback enabled)", root, args.host, args.port)
     try:
         httpd.serve_forever()
