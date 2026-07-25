@@ -2689,6 +2689,20 @@ def main() -> int:
     if pruned:
         logger.info("pruned %d DAEMON_TICK heartbeat events (>14 days old)", pruned)
 
+    # Sandbox pre-flight (DEV-155): a degraded sandbox used to surface as
+    # one log line per test run, buried mid-spec. Say it once, at startup,
+    # where an operator actually looks — and refuse outright if asked to.
+    sandbox_ok, sandbox_detail = executor.seccomp_preflight()
+    if sandbox_ok:
+        logger.info("test sandbox pre-flight: %s", sandbox_detail)
+    else:
+        logger.warning("TEST SANDBOX DEGRADED: %s", sandbox_detail)
+        if os.getenv("CODING_MODEL_REQUIRE_SECCOMP", "0") == "1":
+            logger.error(
+                "CODING_MODEL_REQUIRE_SECCOMP=1 — refusing to start with a "
+                "degraded test sandbox")
+            return 1
+
     # Phase b pre-flight: if the operator flipped the flag, surface up
     # front whether each configured provider will actually fire — otherwise
     # a missing key only shows up as a runtime warning per spec.
