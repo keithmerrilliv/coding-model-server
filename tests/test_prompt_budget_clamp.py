@@ -18,6 +18,8 @@ import pytest
 from coding_model_server.config import Config
 from coding_model_server.llama_server import LlamaServerManager
 from coding_model_server.routes.chat import (
+    MIN_COMPLETION_TOKENS,
+    PromptTooLargeError,
     _estimate_and_clamp_tokens,
     _guidance_token_cost,
 )
@@ -132,13 +134,57 @@ def test_rag_suffix_counted_in_the_chars_fallback():
     assert est == int(1000 / 2.5)
 
 
-def test_clamp_floors_at_one_when_prompt_fills_the_window():
+# ── DEV-195: overflow is a 413, not a silently useless 1-token budget ────────
+
+def test_prompt_filling_the_window_raises_instead_of_a_1_token_stub():
+    # Pre-fix this clamped to 1: generation "succeeded", the caller got a
+    # truncated stub, the parser failed, and a retry rotation burned on a
+    # request that could never work.
+    with pytest.raises(PromptTooLargeError, match="exceed context window"):
+        _estimate_and_clamp_tokens(
+            "s" * 8000, [_Msg("user", "u")], 500, max_tokens=4000,
+            tokenize_fn=_fake_tokenize, reserve=345,
+        )
+
+
+def test_overflow_raises_on_the_chars_fallback_path_too():
+    def boom(_):
+        raise RuntimeError("tokenize down")
+
+    with pytest.raises(PromptTooLargeError):
+        _estimate_and_clamp_tokens(
+            "s" * 8000, [_Msg("user", "u")], 500, max_tokens=4000,
+            tokenize_fn=boom, reserve=345,
+        )
+
+
+def test_caller_asking_below_the_floor_is_served_if_it_fits():
+    # est = 970 + 16 template = 986; available = 14 < MIN_COMPLETION_TOKENS,
+    # but the caller only asked for 8 — deliverable, so no 413.
     est, clamped = _estimate_and_clamp_tokens(
-        "s" * 8000, [_Msg("user", "u")], 500, max_tokens=4000,
-        tokenize_fn=_fake_tokenize, reserve=345,
+        "s" * 3880, [_Msg("user", "u")], 1000, max_tokens=8,
+        tokenize_fn=_fake_tokenize, reserve=0,
     )
-    assert est > 500
-    assert clamped == 1
+    assert est + clamped <= 1000
+    assert clamped == 8
+
+
+def test_floor_matches_the_documented_minimum():
+    # available lands exactly one token under the floor → rejected; at the
+    # floor → served. Pins the boundary so the env knob stays meaningful.
+    n_ctx = 1000
+    for available, should_raise in ((MIN_COMPLETION_TOKENS - 1, True),
+                                    (MIN_COMPLETION_TOKENS, False)):
+        prompt_tokens = n_ctx - available - 16  # 16 = template overhead
+        args = ("s" * (prompt_tokens * 4), [_Msg("user", "u")], n_ctx)
+        if should_raise:
+            with pytest.raises(PromptTooLargeError):
+                _estimate_and_clamp_tokens(*args, max_tokens=4000,
+                                           tokenize_fn=_fake_tokenize, reserve=0)
+        else:
+            _, clamped = _estimate_and_clamp_tokens(
+                *args, max_tokens=4000, tokenize_fn=_fake_tokenize, reserve=0)
+            assert clamped == available
 
 
 # ── the guidance cost ────────────────────────────────────────────────────────
@@ -289,3 +335,39 @@ def test_folding_core_into_the_caller_system_message_still_fits_n_ctx():
     )
     on_the_wire = sum(_fake_tokenize(m.content) for m in messages) + 8 * (len(messages) + 1)
     assert on_the_wire + clamped <= n_ctx
+
+
+def test_route_converts_overflow_to_413(monkeypatch):
+    import asyncio
+    from unittest import mock
+
+    from fastapi import HTTPException
+
+    from coding_model_server.routes import chat
+    from coding_model_server.schemas import ChatCompletionRequest, ChatMessage
+
+    fake_mgr = mock.Mock()
+    fake_mgr.tokenize.side_effect = lambda t: 10_000_000  # dwarfs any n_ctx
+    monkeypatch.setattr(chat, "llama_server_manager", fake_mgr)
+    monkeypatch.setattr(chat, "chat_admission", mock.Mock())
+    monkeypatch.setattr(chat.runtime.services, "memory", None, raising=False)
+
+    class _State:
+        pass
+
+    class _Req:
+        def __init__(self):
+            self.state = _State()
+
+    raw = _Req()
+    request = ChatCompletionRequest(
+        model="implementer",
+        messages=[ChatMessage(role="user", content="hi")],
+        stream=False,
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(chat.chat_completions(request, raw))
+    assert exc_info.value.status_code == 413
+    # The client's _is_context_error trims history and retries on this phrase.
+    assert "exceed context window" in exc_info.value.detail
+    assert raw.state.error_category == "4xx_prompt_too_large"
