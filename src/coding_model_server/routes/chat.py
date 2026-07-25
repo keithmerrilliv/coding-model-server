@@ -18,7 +18,11 @@ from starlette.background import BackgroundTask
 
 from coding_model_server import runtime
 from coding_model_server.config import Config
-from coding_model_server.llama_server import InsufficientVramError, ModelBusyError
+from coding_model_server.llama_server import (
+    InsufficientVramError,
+    ModelBusyError,
+    UpstreamCancel,
+)
 from coding_model_server.runtime import chat_admission, llama_server_manager, verify_admin_key
 from coding_model_server.schemas import ChatCompletionRequest, ChatMessage
 
@@ -352,9 +356,12 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
         # another agent's ensure_running in that gap saw no active requests
         # and swapped the child, so this request's stream silently received
         # the other model's output (DEV-116).
+        # agent_id is the RESOLVED name (DEV-156): aliases used to give the
+        # same underlying agent several VRAM-footprint records, so a good
+        # measurement under one name never corrected a bad one under another.
         await asyncio.to_thread(
             llama_server_manager.ensure_running, model_config,
-            agent_id=request.model, reserve_slot=True,
+            agent_id=model_name, reserve_slot=True,
         )
         reservation_held = True
 
@@ -410,17 +417,44 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
         )
 
         if request.stream:
+            upstream_cancel = UpstreamCancel()
             inner = llama_server_manager.proxy_stream(
                 request.messages, augmented_system, request.model,
                 clamped_max, request.temperature, model_config=model_config,
                 est_prompt_tokens=est_prompt_tokens,
                 tools=request.tools, tool_choice=request.tool_choice,
                 parallel_tool_calls=request.parallel_tool_calls,
-                req_id=req_id, reserved=True)
+                req_id=req_id, reserved=True,
+                upstream_cancel=upstream_cancel)
+
+            stream_finished = threading.Event()
 
             def _finish_stream():
+                stream_finished.set()
                 chat_admission.release()
                 llama_server_manager.release_slot()
+
+            async def _watch_disconnect():
+                # DEV-158: the proxy worker thread blocks in a socket read
+                # between SSE lines — during a long prefill that's minutes
+                # with no bytes — so a client disconnect used to leave the
+                # GPU finishing the whole generation for a dead client while
+                # the in-flight count 503'd other agents. Poll the ASGI
+                # disconnect state and cut the upstream socket promptly.
+                try:
+                    while not stream_finished.is_set():
+                        if await raw_request.is_disconnected():
+                            logger.info(
+                                "[%s] client disconnected — closing upstream "
+                                "llama-server stream", req_id,
+                            )
+                            upstream_cancel.close()
+                            return
+                        await asyncio.sleep(1.0)
+                except asyncio.CancelledError:
+                    pass
+
+            asyncio.get_running_loop().create_task(_watch_disconnect())
 
             # Hand the admission slot AND the manager's in-flight reservation
             # to the stream teardown: one idempotent release, two hooks. The
