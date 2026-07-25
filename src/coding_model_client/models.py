@@ -32,27 +32,22 @@ def fetch_available_models():
 
 
 def _load_fallback_themes():
-    """Load default themes if server is unreachable."""
+    """Load default themes if server is unreachable.
+
+    Derived from THEME_STYLES keys (DEV-154): this used to be a THIRD
+    hand-maintained agent list, and it had already drifted — deep_reviewer
+    was missing entirely and the model names it described were a generation
+    stale. Offline, only the visual identity matters; real descriptions
+    come from /v1/models the moment the server is reachable.
+    """
     global AGENT_THEMES
     AGENT_THEMES.clear()
-    defaults = {
-        "implementer": "Implementer — Qwen3.5-35B (offline)",
-        "deep_implementer": "Implementer — Coder-Next Deep (offline)",
-        "fast_implementer": "Implementer — Coder-30B Fast (offline)",
-        "architect": "Architect — Qwen3.6-27B (offline)",
-        "reviewer": "Reviewer — Coder-30B HD (offline)",
-        "debugger": "Debugger — Coder-30B Turbo (offline)",
-        "moe_implementer": "Implementer — MiniMax M2.5 (offline)",
-        "moe_architect": "Architect — MiniMax M2.5 (offline)",
-        "dense_architect": "Architect — Qwen3.6-27B (offline)",
-        "brainstorm": "Brainstorm — Nemotron-3-Nano (offline)",
-        "native_implementer": "Implementer — GLM-4.7-Flash (offline)",
-    }
-    for mid, desc in defaults.items():
-        style = THEME_STYLES.get(mid, THEME_STYLES["default"])
+    for mid, style in THEME_STYLES.items():
+        if mid == "default":
+            continue
         AGENT_THEMES[mid] = {
             "color": style["color"],
             "icon": style["icon"],
             "prompt": style["prompt"],
-            "desc": desc,
+            "desc": f"{style['prompt']} (offline — server unreachable)",
         }

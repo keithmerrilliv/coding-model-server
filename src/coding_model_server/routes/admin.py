@@ -20,9 +20,13 @@ def admin_metrics(window_seconds: int = 60) -> dict:
 
 
 @router.get("/v1/admin/gpu_stats", dependencies=[Depends(verify_admin_key)])
-def admin_gpu_stats() -> dict:
-    """Rolling buffer of nvidia-smi samples for the dashboard's GPU panel."""
-    return gpu_sampler.snapshot()
+def admin_gpu_stats(since: "str | None" = None, limit: int = 60) -> dict:
+    """Rolling buffer of nvidia-smi samples for the dashboard's GPU panel.
+
+    ``since`` makes polls incremental (only newer samples); ``limit``
+    defaults to the 60 the panel actually renders (DEV-159).
+    """
+    return gpu_sampler.snapshot(since=since, limit=limit)
 
 
 @router.get("/v1/admin/active_model", dependencies=[Depends(verify_admin_key)])

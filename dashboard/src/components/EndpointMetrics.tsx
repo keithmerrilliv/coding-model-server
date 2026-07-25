@@ -3,7 +3,9 @@ import { fetchMetrics } from '../api/client';
 import Sparkline from './Sparkline';
 import type { MetricsResponse, EndpointMetric } from '../types/api';
 
-const POLL_MS = 1000;
+// 5s, was 1s: the server rebuilds every per-endpoint/per-agent bucket on each
+// call, and sub-second freshness has no value for 60s buckets (DEV-159).
+const POLL_MS = 5000;
 const WINDOW_S = 60;
 
 const fmt = (v: number | null | undefined, decimals = 0): string =>

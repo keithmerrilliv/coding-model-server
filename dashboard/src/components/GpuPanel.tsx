@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { fetchGpuStats } from '../api/client';
 import Sparkline from './Sparkline';
 import type { GpuStatsResponse, GpuSample } from '../types/api';
@@ -14,14 +14,27 @@ const last = <T,>(arr: T[]): T | undefined => arr[arr.length - 1];
 const GpuPanel: React.FC = () => {
   const [data, setData] = useState<GpuStatsResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Newest sample timestamp we hold — sent as `since` so each poll returns
+  // only NEW samples (typically one) instead of the whole ring (DEV-159).
+  const lastTsRef = useRef<string | undefined>(undefined);
 
   useEffect(() => {
     let cancelled = false;
     const poll = async () => {
-      const res = await fetchGpuStats();
+      const res = await fetchGpuStats(lastTsRef.current);
       if (cancelled) return;
-      if (res.error) setError(res.error);
-      else if (res.data) { setData(res.data); setError(null); }
+      if (res.error) { setError(res.error); return; }
+      if (!res.data) return;
+      const incoming = res.data;
+      setError(null);
+      setData(prev => {
+        const merged = prev && lastTsRef.current
+          ? [...prev.samples, ...incoming.samples].slice(-VISIBLE_SAMPLES)
+          : incoming.samples;
+        const newest = merged[merged.length - 1];
+        if (newest) lastTsRef.current = newest.t;
+        return { ...incoming, samples: merged };
+      });
     };
     poll();
     const id = setInterval(poll, GPU_POLL_MS);
