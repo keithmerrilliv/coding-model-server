@@ -1120,11 +1120,22 @@ class LlamaServerManager:
                 yield "data: [DONE]\n\n"
                 return
 
-            # Flush any remaining buffered content from the thinking stripper
-            remaining = think_stripper.flush()
+            # Flush the stripper with the truncation verdict. Only a clean
+            # finish ("stop", "tool_calls") may emit an unterminated think
+            # buffer as content; "length" or a stream that ended with no
+            # finish_reason at all means that buffer is raw reasoning — which
+            # can carry tool markers the client executes for real (DEV-119).
+            remaining = think_stripper.flush(
+                truncated=finish_reason not in ("stop", "tool_calls"))
             if remaining:
                 out_chunk = build_stream_chunk(completion_id, model_id, content=remaining)
                 yield f"data: {json.dumps(out_chunk)}\n\n"
+            if think_stripper.dropped_chars:
+                logger.warning(
+                    "[%s] suppressed %d chars of unterminated reasoning "
+                    "(finish_reason=%s, no </think> seen)",
+                    rid, think_stripper.dropped_chars, finish_reason,
+                )
 
             # Log the full response for diagnostics (repr escapes newlines for single-line journald)
             full_text = ''.join(accumulated_text)
@@ -1179,9 +1190,22 @@ class LlamaServerManager:
             result = resp.json()
             message = result["choices"][0].get("message", {})
             text = message.get("content") or ""
-            text = strip_thinking(text)
-            tool_calls = message.get("tool_calls")
             finish_reason = result["choices"][0].get("finish_reason", "stop")
+            if (self.current_expects_thinking and finish_reason == "length"
+                    and '</think>' not in text):
+                # Truncated while still thinking: the whole body is raw
+                # reasoning. An orphan-template model emits no literal tags
+                # in this state, so strip_thinking would pass every char
+                # through — including tool markers the client executes for
+                # real (DEV-119).
+                logger.warning(
+                    "[%s] response hit max_tokens mid-reasoning — suppressing "
+                    "%d chars of unterminated thinking", rid, len(text),
+                )
+                text = ""
+            else:
+                text = strip_thinking(text)
+            tool_calls = message.get("tool_calls")
             usage = result.get("usage", {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
 
             with self.lock:
