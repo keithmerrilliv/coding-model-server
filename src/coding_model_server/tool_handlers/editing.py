@@ -42,17 +42,35 @@ _SANITIZE_PATTERNS = [
 ]
 
 
+_CONTENT_FENCE_RE = re.compile(r'```.*?(?:```|\Z)', re.DOTALL)
+
+
+def _sanitize_segment(segment: str) -> str:
+    for pattern, replacement in _SANITIZE_PATTERNS:
+        segment = pattern.sub(replacement, segment)
+    # Collapse runs of 3+ blank lines left by stripped blocks
+    return re.sub(r'\n{3,}', '\n\n', segment)
+
+
 def _sanitize_generated_content(content: str) -> str:
     """Remove LLM generation artifacts from content before writing to disk.
 
     This is the single sanitization boundary between model output and the
     filesystem. All file writes (WRITE_FILE, EDIT_FILE) pass through here.
+
+    Fenced code blocks are preserved verbatim (DEV-131): a marker quoted
+    inside ``` fences is deliberate content — docs, tool references, test
+    fixtures — not a leaked artifact. Unfenced markers are still stripped;
+    a live tool marker loose in file content is never intentional.
     """
-    for pattern, replacement in _SANITIZE_PATTERNS:
-        content = pattern.sub(replacement, content)
-    # Collapse runs of 3+ blank lines left by stripped blocks
-    content = re.sub(r'\n{3,}', '\n\n', content)
-    return content
+    out = []
+    last = 0
+    for m in _CONTENT_FENCE_RE.finditer(content):
+        out.append(_sanitize_segment(content[last:m.start()]))
+        out.append(m.group(0))
+        last = m.end()
+    out.append(_sanitize_segment(content[last:]))
+    return ''.join(out)
 
 
 def _display_diff(old_text, new_text, filepath):

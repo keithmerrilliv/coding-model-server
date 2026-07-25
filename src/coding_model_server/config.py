@@ -116,7 +116,7 @@ class Config:
     BASE_TOOLS = [
         "<<<REMOTE_EXEC>>>command                          — run a shell command (Linux/macOS compatible)",
         "<<<READ_FILE>>>path                               — read file content (safe, fast)",
-        "<<<WRITE_FILE>>>path\\ncontent                     — write content to file (first line = path, rest = content)",
+        "<<<WRITE_FILE>>>path\\ncontent                     — write content to file (first line = path, rest = content; if the content itself contains <<<TOOL>>> markers, end it with <<<END_FILE>>>)",
         "<<<EDIT_FILE>>>path\\n<<<OLD>>>\\nold text\\n<<<NEW>>>\\nnew text  — surgical edit: find and replace text in file",
         "<<<LIST_DIR>>>path                                — list directory contents with sizes and dates",
         "<<<GLOB>>>pattern                                 — find files matching pattern (e.g., **/*.swift, src/*.py)",
