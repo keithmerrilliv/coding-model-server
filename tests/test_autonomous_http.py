@@ -215,3 +215,54 @@ def test_internal_host_explicit_override(monkeypatch):
         # default instead of leaking 192.168.1.9 to later test modules.
         monkeypatch.undo()
         importlib.reload(http)
+
+
+# ── DEV-137: Retry-After beats the fixed OOM schedule ────────────────────────
+
+def _resp_h(status, headers=None):
+    r = _resp(status)
+    r.headers = headers or {}
+    return r
+
+
+def test_retry_after_header_overrides_the_oom_schedule():
+    # The server's busy-swap 503 says Retry-After: 5 for a drain that
+    # clears in seconds; sleeping the 10/30/60 schedule added dead air to
+    # every stage transition that landed mid-swap.
+    sleeps = []
+    with mock.patch.object(http._SESSION, "post",
+                           side_effect=[_resp_h(503, {"Retry-After": "5"}),
+                                        _resp_h(200)]), \
+         mock.patch.object(http.time, "sleep", sleeps.append):
+        resp = http.post_chat_completion("m", [], timeout=10, retry_5xx=True)
+    assert resp.status_code == 200
+    assert sleeps == [5.0]
+
+
+def test_500_without_header_keeps_the_generous_schedule():
+    sleeps = []
+    with mock.patch.object(http._SESSION, "post",
+                           side_effect=[_resp_h(500), _resp_h(200)]), \
+         mock.patch.object(http.time, "sleep", sleeps.append):
+        http.post_chat_completion("m", [], timeout=10, retry_5xx=True)
+    assert sleeps == [10.0], "CUDA-OOM 500s keep the schedule the code was written for"
+
+
+def test_bogus_retry_after_falls_back_to_schedule():
+    sleeps = []
+    with mock.patch.object(http._SESSION, "post",
+                           side_effect=[_resp_h(503, {"Retry-After": "soon"}),
+                                        _resp_h(200)]), \
+         mock.patch.object(http.time, "sleep", sleeps.append):
+        http.post_chat_completion("m", [], timeout=10, retry_5xx=True)
+    assert sleeps == [10.0]
+
+
+def test_huge_retry_after_is_bounded():
+    sleeps = []
+    with mock.patch.object(http._SESSION, "post",
+                           side_effect=[_resp_h(503, {"Retry-After": "999"}),
+                                        _resp_h(200)]), \
+         mock.patch.object(http.time, "sleep", sleeps.append):
+        http.post_chat_completion("m", [], timeout=10, retry_5xx=True)
+    assert sleeps == [60.0], "a bogus/huge header must not park the pipeline"

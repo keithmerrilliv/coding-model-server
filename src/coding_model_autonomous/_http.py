@@ -84,11 +84,15 @@ def post_chat_completion(model, messages, *, timeout, skip_memory=True,
 
     resp = None
     n_attempts = len(_BACKOFFS) + 1
-    for attempt, delay in enumerate((0.0,) + _BACKOFFS):
-        if delay:
-            logger.info("post_chat_completion: retrying after %.0fs (attempt %d/%d)",
-                        delay, attempt + 1, n_attempts)
-            time.sleep(delay)
+    next_delay = 0.0
+    for attempt in range(n_attempts):
+        if next_delay:
+            logger.info("post_chat_completion: retrying after %.1fs (attempt %d/%d)",
+                        next_delay, attempt + 1, n_attempts)
+            time.sleep(next_delay)
+        # Default for the NEXT round: the CUDA-OOM schedule this was written
+        # for. A Retry-After below overrides it (DEV-137).
+        next_delay = _BACKOFFS[attempt] if attempt < len(_BACKOFFS) else 0.0
         try:
             resp = _SESSION.post(API_URL, json=payload, headers=headers, timeout=timeout)
         except (requests.ConnectionError, requests.Timeout) as e:
@@ -110,6 +114,17 @@ def post_chat_completion(model, messages, *, timeout, skip_memory=True,
             continue
         if resp.status_code < 500 or attempt == len(_BACKOFFS):
             break
+        # Honor Retry-After, bounded (DEV-137). Every autonomous stage
+        # transition is a model swap; the server's busy-swap 503 says
+        # "Retry-After: 5" for a drain that clears in seconds, and sleeping
+        # the 10/30/60 OOM schedule instead added tens of seconds of dead
+        # air per spec. 500s without the header keep the generous schedule.
+        retry_after = resp.headers.get("Retry-After")
+        if retry_after:
+            try:
+                next_delay = min(max(float(retry_after), 1.0), 60.0)
+            except (TypeError, ValueError):
+                pass  # absent/non-numeric header — keep the schedule delay
         logger.warning(
             "post_chat_completion: %d from server (attempt %d/%d, body=%s)",
             resp.status_code, attempt + 1, n_attempts,
