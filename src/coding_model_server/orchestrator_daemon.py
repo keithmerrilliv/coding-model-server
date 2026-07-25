@@ -964,6 +964,7 @@ def _build_from_manifest(
     reviewer feedback. When *only* is None, every file is generated."""
     written: list = []
     failures: list = []
+    stale_fallbacks: list = []
     generated = 0
     for entry in entries:
         if only is not None and entry.path not in only and prior_files \
@@ -975,6 +976,18 @@ def _build_from_manifest(
                 written, chosen_agent, clarifications, rejection_notes,
             )
             generated += 1
+        if content is None and prior_files and entry.path in prior_files:
+            # Regeneration of a cited file failed. Dropping it would leave a
+            # manifest-declared file absent from the workspace, and every
+            # test run after that fails on the missing module instead of a
+            # code defect — unrecoverable (DEV-106). The prior attempt's
+            # version is stale but keeps the file set complete; the reviewer
+            # can re-cite it next round.
+            content = prior_files[entry.path]
+            stale_fallbacks.append(entry.path)
+            logger.warning("spec %s: regeneration failed for cited file %s — "
+                           "falling back to the prior attempt's version",
+                           spec.id, entry.path)
         if content is None:
             failures.append(entry.path)
             logger.warning("spec %s: per-file generation failed for %s",
@@ -982,12 +995,13 @@ def _build_from_manifest(
             continue
         written.append((entry.path, content))
 
-    if failures:
+    if failures or stale_fallbacks:
         db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
                         payload={"role": "manifest",
                                  "agent": chosen_agent or executor.role_to_agent("implementer"),
                                  "anomaly": "per_file_failures",
-                                 "paths": failures})
+                                 "paths": failures,
+                                 "stale_fallbacks": stale_fallbacks})
     if not written:
         return ParseError(
             f"manifest mode produced no usable files ({len(failures)} failures)", raw)
@@ -1064,6 +1078,79 @@ def _generate_via_manifest(
     if not isinstance(result, ParseError):
         _persist_manifest(spec_dir, manifest.entries)
     return result
+
+
+def _verify_manifest_workspace(db, spec, task, spec_dir) -> "tuple[list, list]":
+    """Assert every manifest.json-declared path exists in the live workspace.
+
+    A targeted retry regenerates a subset and reuses the rest, and one
+    dropped file (per-file failure, snapshot gap) leaves the workspace
+    permanently missing a test-required module: node --test then fails with
+    ERR_MODULE_NOT_FOUND on every retry and the spec can never converge
+    (DEV-106, spec_54b2c1b3). Missing files are materialized from the newest
+    retry_history snapshot that has them; whatever cannot be restored is
+    surfaced loudly (error log + event + gate prompt) instead of proceeding
+    silently into a doomed test run.
+
+    Returns ``(restored, still_missing)`` path lists. No-op (empty lists)
+    when the attempt didn't use manifest mode — manifest.json is wiped by
+    _clean_spec_dir_for_retry and only re-persisted on a manifest build.
+    """
+    mpath = spec_dir / "manifest.json"
+    if not mpath.is_file():
+        return [], []
+    try:
+        declared = [d["path"] for d in json.loads(mpath.read_text())]
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        logger.warning("spec %s: unreadable manifest.json, skipping workspace "
+                       "verification: %s", spec.id, exc)
+        return [], []
+    missing = [p for p in declared if not (spec_dir / p).is_file()]
+    if not missing:
+        return [], []
+
+    def _snap_index(p):
+        try:
+            return int(p.name.rsplit("_", 1)[1])
+        except (IndexError, ValueError):
+            return -1
+
+    hist = spec_dir / "retry_history"
+    snaps = sorted(hist.glob("retry_*"), key=_snap_index, reverse=True) \
+        if hist.is_dir() else []
+    restored, still_missing = [], []
+    for rel in missing:
+        content = None
+        for snap in snaps:
+            fp = snap / rel
+            if fp.is_file():
+                try:
+                    content = fp.read_text()
+                    break
+                except OSError:
+                    continue
+        if content is None:
+            still_missing.append(rel)
+            continue
+        _write_artifact(spec_dir, rel, content)
+        db.create_artifact(spec_id=spec.id, task_id=task.id,
+                           kind=ArtifactKind.CODE, path=rel)
+        restored.append(rel)
+    if restored:
+        logger.warning("spec %s: restored %d manifest-declared file(s) missing "
+                       "from the workspace: %s", spec.id, len(restored),
+                       ", ".join(restored))
+    if still_missing:
+        logger.error("spec %s: manifest-declared file(s) MISSING from the "
+                     "workspace and unrecoverable from snapshots: %s",
+                     spec.id, ", ".join(still_missing))
+    db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
+                    payload={"role": "implementer",
+                             "anomaly": "manifest_files_missing",
+                             "restored": restored,
+                             "still_missing": still_missing,
+                             "retry": task.retry_count})
+    return restored, still_missing
 
 
 def _generate_one_file(
@@ -1245,8 +1332,25 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
         db.create_artifact(spec_id=spec.id, task_id=task.id,
                            kind=ArtifactKind.CODE, path=rel_path)
 
+    # Every manifest-declared file must actually be in the workspace now — a
+    # dropped one dooms the test loop to ERR_MODULE_NOT_FOUND forever
+    # (DEV-106). Restore what the snapshots have; flag the rest loudly.
+    restored, still_missing = _verify_manifest_workspace(db, spec, task, spec_dir)
+
     # Create code_review gate
     file_list = "\n".join(f"- `{p}`" for p, _ in result.files)
+    if restored:
+        file_list += "\n" + "\n".join(
+            f"- `{p}` (restored from a prior attempt's snapshot — not "
+            f"regenerated this round)" for p in restored)
+    missing_block = ""
+    if still_missing:
+        missing_block = (
+            "\n\n⚠ **MANIFEST FILES MISSING FROM THE WORKSPACE** — the "
+            "implementer never produced these declared files and no snapshot "
+            "has them; tests that import them can only fail:\n\n"
+            + "\n".join(f"- `{p}`" for p in still_missing) + "\n"
+        )
     db.update_task_status(task.id, TaskStatus.BLOCKED_ON_REVIEW)
     db.create_gate(
         spec_id=spec.id,
@@ -1256,7 +1360,8 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
             f"## Code review: {spec.title}\n\n"
             f"Spec ID: `{spec.id}`\n"
             f"Retry: {task.retry_count}\n\n"
-            f"The implementer produced the following files:\n\n{file_list}\n\n"
+            f"The implementer produced the following files:\n\n{file_list}\n"
+            f"{missing_block}\n"
             f"Approve to proceed to testing, or reject with notes.\n"
         ),
     )
