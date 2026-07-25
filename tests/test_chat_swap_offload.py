@@ -49,7 +49,7 @@ def _run_chat(monkeypatch, *, memory=None):
     """
     observed = {"tokenize_on_loop": []}
 
-    def _record_ensure_running(model_config, agent_id=None):
+    def _record_ensure_running(model_config, agent_id=None, reserve_slot=False):
         observed["ensure_running_on_loop"] = _has_running_loop()
 
     def _record_tokenize(text):

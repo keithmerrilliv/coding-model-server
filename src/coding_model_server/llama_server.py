@@ -621,7 +621,8 @@ class LlamaServerManager:
                 agent_id, free - recorded, self._VRAM_MARGIN_MIB, recorded,
             )
 
-    def ensure_running(self, model_config: dict, agent_id: Optional[str] = None):
+    def ensure_running(self, model_config: dict, agent_id: Optional[str] = None,
+                       reserve_slot: bool = False):
         """Ensure llama-server is running with the correct model. Handles model swaps.
 
         ``agent_id`` is recorded so the dashboard can show which logical agent
@@ -633,6 +634,17 @@ class LlamaServerManager:
         enough. Before every (re)start, ``_check_vram_or_raise`` consults
         the per-agent measured footprint and raises ``InsufficientVramError``
         rather than letting the child crash on a cudaMalloc failure.
+
+        ``reserve_slot=True`` counts the caller's upcoming proxy_* call in
+        ``_active_requests`` before ``_swap_lock`` is released. Without the
+        reservation there is a TOCTOU hole: a StreamingResponse generator
+        isn't iterated until after the route returns, so a second agent's
+        ensure_running saw has_active_requests()==False in that gap and
+        swapped the child — the first request then POSTed to a port serving
+        the other model and silently received wrong-model output (DEV-116).
+        The caller owns the reserved slot and must release it exactly once
+        via ``release_slot`` (and pass reserved=True to proxy_* so the proxy
+        doesn't double-count).
         """
         signature = self._runtime_signature(model_config)
         # _swap_lock is held for the entire transition (potentially many
@@ -659,6 +671,8 @@ class LlamaServerManager:
                     self.last_request_time = time.time()
                     if agent_id is not None:
                         self.current_agent_id = agent_id
+                    if reserve_slot:
+                        self._active_requests += 1
                     return
                 # Tear down whenever state from a previous child is still
                 # attached: alive (a genuine swap) or dead (stale state to
@@ -681,9 +695,10 @@ class LlamaServerManager:
                 #
                 # Gated on child_alive so it never blocks the two paths that
                 # legitimately swap with a request "active":
-                #   * chat_completions calls ensure_running BEFORE proxy_*
-                #     increments _active_requests, so the caller's own request
-                #     is never counted here — only *other* agents' requests are.
+                #   * the caller's own request is only counted AFTER this guard
+                #     passes (the reserve_slot increment below) — so this sees
+                #     only *other* requests: earlier reservations and in-flight
+                #     proxies.
                 #   * crash recovery (_post_with_recovery) reaches here only with
                 #     a dead child, so child_alive is False and there is no live
                 #     stream left to protect.
@@ -753,6 +768,25 @@ class LlamaServerManager:
                 # their failure paths; re-raise so the caller gets the
                 # original exception type for proper error categorization.
                 raise
+
+            # Reserve before _swap_lock is released so no other agent's
+            # ensure_running can sneak a swap in between "the right model is
+            # up" and the caller's proxy_* actually POSTing to it.
+            if reserve_slot:
+                with self.lock:
+                    self._active_requests += 1
+
+    def release_slot(self):
+        """Release a slot reserved by ``ensure_running(reserve_slot=True)``.
+
+        Exactly-once discipline is the caller's job (the chat route wraps
+        this in an idempotent teardown hook); the zero floor only stops a
+        stray release from going negative and wedging the busy guard open.
+        """
+        with self.lock:
+            self.last_request_time = time.time()
+            if self._active_requests > 0:
+                self._active_requests -= 1
 
     def snapshot(self) -> dict:
         """Return a JSON-safe view of the current llama-server state.
@@ -1014,18 +1048,27 @@ class LlamaServerManager:
                      tools: Optional[List[Dict[str, Any]]] = None,
                      tool_choice: Optional[Any] = None,
                      parallel_tool_calls: Optional[bool] = None,
-                     req_id: Optional[str] = None) -> Iterator[str]:
+                     req_id: Optional[str] = None,
+                     reserved: bool = False) -> Iterator[str]:
         """Stream a chat completion via the llama-server subprocess.
 
         ``req_id`` is the correlation ID assigned by the metrics middleware;
         we prefix it onto every log line so a grep on `req_xxxxxxxx` shows
         the full lifecycle of one request from entry through proxy to
         upstream errors.
+
+        ``reserved=True`` means the caller already holds this request's
+        _active_requests slot (ensure_running(reserve_slot=True)) and owns
+        its release — the proxy neither increments nor decrements. That
+        matters for a generator: this body doesn't run until first
+        iteration, so a finally-based decrement here would never fire for a
+        stream cancelled before it starts, leaking the count (DEV-116).
         """
         rid = req_id or "req_unknown"
         with self.lock:
             self.last_request_time = time.time()
-            self._active_requests += 1
+            if not reserved:
+                self._active_requests += 1
         try:
             # Emit progress event so client can display prompt size during prefill
             n_ctx = (model_config or {}).get('n_ctx', 32768)
@@ -1149,7 +1192,8 @@ class LlamaServerManager:
         finally:
             with self.lock:
                 self.last_request_time = time.time()
-                self._active_requests -= 1
+                if not reserved:
+                    self._active_requests -= 1
 
     def proxy_sync(self, messages: List[dict], system_prompt: str,
                    model_id: str, max_tokens: int, temperature: float,
@@ -1157,8 +1201,13 @@ class LlamaServerManager:
                    tools: Optional[List[Dict[str, Any]]] = None,
                    tool_choice: Optional[Any] = None,
                    parallel_tool_calls: Optional[bool] = None,
-                   req_id: Optional[str] = None) -> dict:
-        """Synchronous chat completion via the llama-server subprocess."""
+                   req_id: Optional[str] = None,
+                   reserved: bool = False) -> dict:
+        """Synchronous chat completion via the llama-server subprocess.
+
+        ``reserved`` — see proxy_stream: the caller already holds this
+        request's _active_requests slot and owns its release.
+        """
         rid = req_id or "req_unknown"
         with self.lock:
             self.last_request_time = time.time()
@@ -1171,7 +1220,8 @@ class LlamaServerManager:
         )
 
         with self.lock:
-            self._active_requests += 1
+            if not reserved:
+                self._active_requests += 1
         try:
             resp = self._post_with_recovery(
                 url, payload, stream=False,
@@ -1215,7 +1265,8 @@ class LlamaServerManager:
                                              tool_calls=tool_calls)
         finally:
             with self.lock:
-                self._active_requests -= 1
+                if not reserved:
+                    self._active_requests -= 1
 
     @staticmethod
     def _build_openai_messages(messages: List, system_prompt: str) -> List[dict]:
