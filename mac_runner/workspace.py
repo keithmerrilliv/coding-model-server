@@ -3,10 +3,15 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import re
 import subprocess
 import uuid
 from pathlib import Path
 from typing import Iterator
+
+# spec_id feeds the worktree path; anything outside this set could traverse
+# out of WORKTREE_ROOT — and the cleanup rm -rf would follow it (DEV-145).
+_SPEC_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 logger = logging.getLogger("mac_runner.workspace")
 
@@ -49,6 +54,13 @@ def worktree(
     --force is used on removal to discard any uncommitted files left by the
     test run (e.g. xcodebuild caches, .pytest_cache, generated fixtures).
     """
+    if not _SPEC_ID_RE.match(spec_id):
+        # `root / "../../etc-<uuid>"` resolves OUTSIDE the worktree root:
+        # git would create a checkout there and the exit cleanup would
+        # rm -rf it (DEV-145). Patch writing is jailed; the root wasn't.
+        raise WorkspaceError(
+            f"invalid spec_id {spec_id!r}: must match [A-Za-z0-9_-]+"
+        )
     git_marker = repo / ".git"
     if not git_marker.exists():
         raise WorkspaceError(f"not a git repo: {repo}")

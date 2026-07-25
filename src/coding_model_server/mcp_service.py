@@ -13,9 +13,8 @@ import time
 import sys
 import os
 import json
-import select
 import logging
-from queue import Queue, Empty
+from queue import Queue, Empty, Full
 from threading import RLock, Lock, Thread
 from typing import Dict, Optional, Any
 
@@ -58,19 +57,42 @@ class AppleDeepDocsService:
         self._pending_lock = Lock()
         self._reader: Optional[Thread] = None
         self._reader_stop = False
+        # Bounded queue feeding the dedicated writer thread (DEV-147). A
+        # wedged child that stops reading stdin fills the ~64KB pipe and
+        # blocks write/flush indefinitely; doing that write under self.lock
+        # pinned every subsequent call_tool (each on an anyio threadpool
+        # thread — the same pool serving all sync routes). The writer thread
+        # absorbs the block; callers only ever wait on a bounded put().
+        self._write_q: Optional[Queue] = None
+        self._writer: Optional[Thread] = None
 
     def _readline_with_timeout(self, timeout: float = 30) -> Optional[str]:
-        """Read a line from the MCP subprocess stdout with a timeout using select."""
+        """Read one line from the child's stdout, bounded by *timeout*.
+
+        A helper thread does the blocking readline and join(timeout) bounds
+        the wait. The previous select()-based version could falsely time out:
+        select reports the FD, but a complete line can already sit in
+        Python's stream buffer with nothing left on the fd (DEV-147). Only
+        used during the handshake — the reader thread owns the pipe after.
+        """
         if not self.process or not self.process.stdout:
             return None
+        holder: Dict[str, Optional[str]] = {}
+        stream = self.process.stdout
 
-        # Poll stdout for data
-        ready, _, _ = select.select([self.process.stdout], [], [], timeout)
-        if ready:
-            return self.process.stdout.readline()
-        
-        logger.error("MCP readline timed out after %.1f seconds", timeout)
-        return None
+        def _read():
+            try:
+                holder["line"] = stream.readline()
+            except Exception:
+                holder["line"] = None
+
+        t = Thread(target=_read, daemon=True, name="mcp-handshake-read")
+        t.start()
+        t.join(timeout)
+        if t.is_alive():
+            logger.error("MCP readline timed out after %.1f seconds", timeout)
+            return None
+        return holder.get("line")
 
     def _get_venv_python_path(self):
         """Get the correct Python executable path for the virtual environment based on OS"""
@@ -159,6 +181,15 @@ class AppleDeepDocsService:
             # handshake (which read stdout directly) is done — otherwise the two
             # would race for the same pipe.
             self._start_reader(self.process)
+            # Retire any writer bound to a previous (crashed) child, then
+            # start a fresh one on a fresh queue (DEV-147).
+            if self._write_q is not None:
+                try:
+                    self._write_q.put_nowait(None)
+                except Full:
+                    pass
+            self._write_q = Queue(maxsize=8)
+            self._start_writer(self.process, self._write_q)
             return True
         except Exception as e:
             logger.error(f"Error starting Apple Deep Docs MCP: {e}")
@@ -173,6 +204,34 @@ class AppleDeepDocsService:
             name="appledeepdocs-mcp-reader", daemon=True,
         )
         self._reader.start()
+
+    def _start_writer(self, proc, write_q):
+        """Spawn the stdin writer thread for `proc` (caller holds self.lock)."""
+        self._writer = Thread(
+            target=self._writer_loop, args=(proc, write_q),
+            name="appledeepdocs-mcp-writer", daemon=True,
+        )
+        self._writer.start()
+
+    def _writer_loop(self, proc, write_q):
+        """Own `proc`'s stdin: serialize writes so a wedged child blocks only
+        this thread, never a caller holding self.lock (DEV-147). Exits on the
+        None sentinel (a successor child was started)."""
+        while True:
+            item = write_q.get()
+            if item is None:
+                return
+            payload, req_id = item
+            try:
+                proc.stdin.write(payload + "\n")
+                proc.stdin.flush()
+            except Exception as e:
+                logger.error("MCP writer: stdin write failed for id %s: %s",
+                             req_id, e)
+                with self._pending_lock:
+                    waiter = self._pending.pop(req_id, None)
+                if waiter is not None:
+                    waiter.put({"_writer_error": str(e)})
 
     def _reader_loop(self, proc):
         """Own `proc`'s stdout: parse each JSON-RPC line and deliver it to the
@@ -255,9 +314,12 @@ class AppleDeepDocsService:
 
         response_q: "Queue" = Queue()
 
-        # Short critical section: allocate the id, register the waiter, and write
-        # the request. The response wait happens AFTER releasing the lock, so
-        # concurrent callers overlap instead of queueing for up to 180s each.
+        # Short critical section: allocate the id and register the waiter.
+        # The actual stdin write happens OUTSIDE self.lock via the writer
+        # thread's bounded queue (DEV-147): a wedged child fills the ~64KB
+        # pipe and blocks write/flush indefinitely, and doing that under
+        # self.lock pinned every subsequent call_tool — each on an anyio
+        # threadpool thread from the pool serving ALL sync routes.
         with self.lock:
             req_id = self.msg_id
             self.msg_id += 1
@@ -269,16 +331,19 @@ class AppleDeepDocsService:
                 "method": "tools/call",
                 "params": {"name": tool_name, "arguments": arguments},
             }
-            try:
-                payload = json.dumps(request)
-                logger.info(f"Sending MCP Request: {payload[:200]}...")
-                self.process.stdin.write(payload + "\n")
-                self.process.stdin.flush()
-            except Exception as e:
-                with self._pending_lock:
-                    self._pending.pop(req_id, None)
-                logger.error(f"Communication error with Deep Docs MCP: {e}")
-                return f"Error: Documentation fetch failed: {str(e)}"
+            payload = json.dumps(request)
+            write_q = self._write_q
+
+        try:
+            logger.info(f"Sending MCP Request: {payload[:200]}...")
+            write_q.put((payload, req_id), timeout=5)
+        except Full:
+            with self._pending_lock:
+                self._pending.pop(req_id, None)
+            logger.error("MCP writer backlog full — child appears wedged "
+                         "(not reading stdin)")
+            return ("Error: Documentation fetch failed: the Deep Docs MCP "
+                    "child is not accepting requests (writer backlog full).")
 
         try:
             try:
@@ -291,6 +356,10 @@ class AppleDeepDocsService:
                 # Reader delivered the process-died sentinel.
                 self.is_running = False
                 return "Error: MCP server process exited unexpectedly."
+
+            if isinstance(response, dict) and "_writer_error" in response:
+                return (f"Error: Documentation fetch failed: "
+                        f"{response['_writer_error']}")
 
             result = response.get("result", {})
             content = result.get("content", [])

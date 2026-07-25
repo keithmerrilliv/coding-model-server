@@ -173,12 +173,19 @@ def call_gemini(
         )
         return (resp.text or "").strip() or "(empty response)"
 
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        fut = pool.submit(_do_call)
-        try:
-            return fut.result(timeout=timeout)
-        except FuturesTimeoutError as e:
-            raise RuntimeError(f"Gemini call timed out after {timeout:.0f}s") from e
+    # NOT a context manager: __exit__ is shutdown(wait=True), which blocks
+    # until the worker finishes _do_call — on a stalled TLS connection with
+    # no SDK timeout that's indefinite, making fut.result's timeout cosmetic
+    # (DEV-148). shutdown(wait=False) returns control at the deadline; the
+    # abandoned daemon worker dies with its socket whenever the OS gives up.
+    pool = ThreadPoolExecutor(max_workers=1)
+    fut = pool.submit(_do_call)
+    try:
+        return fut.result(timeout=timeout)
+    except FuturesTimeoutError as e:
+        raise RuntimeError(f"Gemini call timed out after {timeout:.0f}s") from e
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 # ── Pre-flight helpers ───────────────────────────────────────────────────────

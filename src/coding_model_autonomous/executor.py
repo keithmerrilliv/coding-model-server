@@ -23,6 +23,7 @@ import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import textwrap
@@ -1552,6 +1553,29 @@ def _sandbox_available() -> bool:
     return sys.platform.startswith("linux") and shutil.which("bwrap") is not None
 
 
+def seccomp_preflight() -> "tuple[bool, str]":
+    """(fully_sandboxed, detail) — for a LOUD one-time daemon-startup check.
+
+    A missing libseccomp used to surface as one log line per test run,
+    buried mid-spec: bwrap kept running but the kernel-CVE surface the
+    filter targets (io_uring, userfaultfd, ptrace) was silently re-exposed
+    (DEV-155). The daemon logs this prominently at startup and can be made
+    to refuse via CODING_MODEL_REQUIRE_SECCOMP=1.
+    """
+    if not _sandbox_available():
+        return False, ("bwrap (bubblewrap) not found — local test runs will "
+                       "refuse unless CODING_MODEL_ALLOW_UNSANDBOXED_TESTS=1")
+    fd = seccomp_filter.build_seccomp_bpf_fd()
+    if fd is None:
+        return False, ("libseccomp unavailable (install python3-seccomp) — "
+                       "bwrap will run WITHOUT the kernel-syscall denylist")
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+    return True, "bwrap+seccomp"
+
+
 # Mountpoint (inside the sandbox) where the Node toolchain is bound for the
 # `node_test` framework. Must be TOP-LEVEL: the baseline binds mount /opt
 # read-only, so bwrap cannot mkdir a bind target nested under it.
@@ -1811,25 +1835,39 @@ def _run_local_tests(spec_dir: Path, framework: str, timeout: int) -> tuple[bool
         )
 
     try:
-        result = subprocess.run(
-            cmd, cwd=spec_dir, capture_output=True, text=True, timeout=timeout,
+        # Popen + communicate instead of subprocess.run: run()'s timeout
+        # kills only the DIRECT child, then blocks draining stdout — an
+        # LLM-written test that spawned a background process leaves an
+        # orphan holding the pipe, and the drain hangs the tick thread
+        # forever with no heartbeat (DEV-155). Own session + killpg takes
+        # the whole group down, after which the drain returns immediately.
+        proc = subprocess.Popen(
+            cmd, cwd=spec_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, start_new_session=True,
             pass_fds=(bpf_fd,) if bpf_fd is not None else (),
         )
-        stdout = _truncate(result.stdout or "")
-        stderr = _truncate(result.stderr or "")
-        output = stdout + "\n" + stderr
-        passed = result.returncode == 0
-    except subprocess.TimeoutExpired as e:
-        # Surface partial output on timeout so the supervisor / reviewer can
-        # diagnose; previously this discarded the partial stdout/stderr.
-        partial_stdout = _truncate((e.stdout or b"").decode("utf-8", errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or ""))
-        partial_stderr = _truncate((e.stderr or b"").decode("utf-8", errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or ""))
-        output = (
-            f"Tests timed out after {timeout}s\n"
-            f"--- partial stdout ---\n{partial_stdout}\n"
-            f"--- partial stderr ---\n{partial_stderr}"
-        )
-        passed = False
+        try:
+            out, err = proc.communicate(timeout=timeout)
+            output = _truncate(out or "") + "\n" + _truncate(err or "")
+            passed = proc.returncode == 0
+        except subprocess.TimeoutExpired as e:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                proc.kill()
+            # Group is dead; the drain returns. Surface partial output so
+            # the supervisor / reviewer can diagnose the hang.
+            try:
+                out, err = proc.communicate(timeout=10)
+            except Exception:
+                out = e.stdout if isinstance(e.stdout, str) else ""
+                err = e.stderr if isinstance(e.stderr, str) else ""
+            output = (
+                f"Tests timed out after {timeout}s\n"
+                f"--- partial stdout ---\n{_truncate(out or '')}\n"
+                f"--- partial stderr ---\n{_truncate(err or '')}"
+            )
+            passed = False
     except Exception as e:
         output = f"Test runner failed: {type(e).__name__}: {e}"
         passed = False
