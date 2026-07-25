@@ -24,8 +24,12 @@ def _init_with_count(count, caplog, persist_directory="/tmp/does-not-matter"):
     fake_client = mock.Mock()
     fake_client.get_or_create_collection.return_value = fake_collection
 
-    with mock.patch.object(ms, "SentenceTransformer", return_value=mock.Mock()), \
-         mock.patch.object(ms.chromadb, "PersistentClient", return_value=fake_client), \
+    # The heavy imports are lazy inside _init_db (DEV-139), so patch the
+    # SOURCE modules — the deferred `import chromadb` / `from
+    # sentence_transformers import ...` resolve to these at call time.
+    with mock.patch("sentence_transformers.SentenceTransformer",
+                    return_value=mock.Mock()), \
+         mock.patch("chromadb.PersistentClient", return_value=fake_client), \
          caplog.at_level(logging.INFO, logger=ms.logger.name):
         service = ms.MemoryService(persist_directory=persist_directory)
 
@@ -61,8 +65,9 @@ def test_count_failure_does_not_break_startup(caplog):
     fake_client = mock.Mock()
     fake_client.get_or_create_collection.return_value = fake_collection
 
-    with mock.patch.object(ms, "SentenceTransformer", return_value=mock.Mock()), \
-         mock.patch.object(ms.chromadb, "PersistentClient", return_value=fake_client), \
+    with mock.patch("sentence_transformers.SentenceTransformer",
+                    return_value=mock.Mock()), \
+         mock.patch("chromadb.PersistentClient", return_value=fake_client), \
          caplog.at_level(logging.INFO, logger=ms.logger.name):
         service = ms.MemoryService(persist_directory="/tmp/does-not-matter")
 

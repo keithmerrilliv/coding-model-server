@@ -5,8 +5,13 @@ import uuid
 import time
 from pathlib import Path
 from typing import List, Dict, Any, Optional
-import chromadb
-from sentence_transformers import SentenceTransformer
+
+# chromadb and sentence-transformers (which drags in torch + transformers,
+# ~6-15s and hundreds of MB RSS) are imported lazily inside _init_db
+# (DEV-139): importing them at module scope meant server.py's top-level
+# import paid the full cost BEFORE uvicorn could bind /health, extending
+# every redeploy outage window — though nothing on the chat path needs
+# these libraries until memory is actually used.
 try:
     from pypdf import PdfReader
 except ImportError:
@@ -48,6 +53,11 @@ class MemoryService:
 
     def _init_db(self, max_retries: int = 3):
         """Initialize ChromaDB and Embedding Model with retry for transient httpx errors."""
+        # Deferred heavyweight imports — see the module docstring note
+        # (DEV-139). First call pays the cost; the module import does not.
+        import chromadb
+        from sentence_transformers import SentenceTransformer
+
         for attempt in range(1, max_retries + 1):
             try:
                 logger.info(f"Initializing Memory Service at {self.persist_directory}... (attempt {attempt}/{max_retries})")
@@ -104,6 +114,62 @@ class MemoryService:
         if not self._embedding_model:
             raise RuntimeError("Embedding model not initialized")
         return self._embedding_model.encode(text, show_progress_bar=False).tolist()
+
+    def _add_batch(self, texts: List[str], metas: List[Dict[str, Any]]) -> int:
+        """Embed, dedup, and insert many chunks with three calls, not 3×N.
+
+        The per-chunk loop paid a separate CPU encode (per-call overhead
+        dominates; batching is 10-30× faster), a separate ChromaDB dedup
+        query, and a separate single-row add for every chunk — ~118
+        sequential round-trips for a 200K-char ingest, all while the
+        caller's request (and the agent turn behind it) waited (DEV-138).
+        Returns the number of chunks actually inserted.
+        """
+        if not self._embedding_model:
+            raise RuntimeError("Embedding model not initialized")
+
+        hashes = [self._content_hash(t) for t in texts]
+        try:
+            existing = self._collection.get(
+                where={"content_hash": {"$in": list(set(hashes))}})
+            existing_hashes = {
+                (m or {}).get("content_hash")
+                for m in (existing.get("metadatas") or [])
+            }
+        except Exception as e:
+            logger.warning("batch dedup lookup failed (%s) — inserting all", e)
+            existing_hashes = set()
+
+        timestamp = time.time()
+        date_str = time.strftime("%Y-%m-%d %H:%M:%S")
+        unique, seen = [], set()
+        for text, meta, h in zip(texts, metas, hashes):
+            if not text.strip() or h in existing_hashes or h in seen:
+                continue
+            seen.add(h)
+            full_meta = {
+                "timestamp": timestamp,
+                "date": date_str,
+                "source": "manual",
+                "content_hash": h,
+                **(meta or {}),
+            }
+            unique.append((text, full_meta))
+        if not unique:
+            return 0
+
+        embeddings = self._embedding_model.encode(
+            [t for t, _ in unique], show_progress_bar=False)
+        ids = [f"mem_{int(timestamp)}_{uuid.uuid4().hex[:12]}" for _ in unique]
+        self._collection.add(
+            documents=[t for t, _ in unique],
+            embeddings=[e.tolist() for e in embeddings],
+            metadatas=[m for _, m in unique],
+            ids=ids,
+        )
+        logger.info("Batch memory insert: %d chunks (%d duplicates skipped)",
+                    len(unique), len(texts) - len(unique))
+        return len(unique)
 
     def _content_hash(self, text: str) -> str:
         """SHA-256 hex digest of text, used for deduplication.
@@ -188,7 +254,7 @@ class MemoryService:
             # Single chunk fallback
             return self.add_memory(text, metadata={"source": source or "manual", **(metadata or {})})
 
-        added = 0
+        texts, metas = [], []
         for i, chunk in enumerate(chunks):
             chunk_meta = {
                 "source": chunk.get("metadata", {}).get("source", source or "manual"),
@@ -198,11 +264,14 @@ class MemoryService:
             }
             if metadata:
                 chunk_meta.update(metadata)
+            texts.append(chunk["text"])
+            metas.append(chunk_meta)
 
-            result = self.add_memory(chunk["text"], metadata=chunk_meta)
-            if "error" not in result:
-                added += 1
-
+        try:
+            added = self._add_batch(texts, metas)
+        except Exception as e:
+            logger.error("Batched ingest failed: %s", e)
+            return {"error": str(e)}
         return {"status": "success", "chunks_added": added}
 
     @staticmethod
@@ -250,12 +319,11 @@ class MemoryService:
                 return {"error": "No extractable text found in PDF"}
 
             chunks = self._simple_chunk(full_text, filename, PDF_CHUNK_SIZE, PDF_CHUNK_OVERLAP)
-            chunks_added = 0
-            for i, chunk in enumerate(chunks):
-                meta = {"source": filename, "type": "pdf", "chunk_index": i}
-                result = self.add_memory(chunk["text"], metadata=meta)
-                if "error" not in result:
-                    chunks_added += 1
+            chunks_added = self._add_batch(
+                [c["text"] for c in chunks],
+                [{"source": filename, "type": "pdf", "chunk_index": i}
+                 for i in range(len(chunks))],
+            )
 
             return {
                 "status": "success",
