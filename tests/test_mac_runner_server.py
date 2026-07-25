@@ -48,6 +48,9 @@ def client(tmp_path, repo, monkeypatch):
     monkeypatch.setattr(Config, "API_KEY", "test-key")
     monkeypatch.setattr(Config, "WORKTREE_ROOT", tmp_path / "wt")
     monkeypatch.setattr(Config, "DERIVED_DATA", tmp_path / "dd")
+    # Off by default so command assertions stay platform-independent; the
+    # DEV-126 sandbox tests opt in explicitly.
+    monkeypatch.setattr(Config, "SANDBOX", False)
     return TestClient(server.app)
 
 
@@ -134,3 +137,80 @@ def test_bad_key_is_rejected(client):
         json={"spec_id": "s1", "repo": "proj", "framework": "swift_test"},
     )
     assert resp.status_code == 401
+
+
+# ── DEV-126: LLM-authored builds run confined ────────────────────────────────
+
+def _capture_cmd(monkeypatch):
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+
+    _fake_subprocess(monkeypatch, fake_run)
+    return seen
+
+
+def _post_swift_test(client):
+    resp = client.post(
+        "/v1/run_tests",
+        headers={"X-Runner-Key": "test-key"},
+        json={"spec_id": "s1", "repo": "proj", "framework": "swift_test"},
+    )
+    assert resp.status_code == 200, resp.text
+
+
+def test_sandbox_wraps_the_command_when_available(client, monkeypatch):
+    seen = _capture_cmd(monkeypatch)
+    monkeypatch.setattr(Config, "SANDBOX", True)
+    monkeypatch.setattr(server, "_sandbox_available", lambda: True)
+
+    _post_swift_test(client)
+
+    cmd = seen["cmd"]
+    assert cmd[0] == server.SANDBOX_EXEC
+    assert cmd[1:3] == ["-f", str(Config.SANDBOX_PROFILE)]
+    assert cmd[-3:] == ["swift", "test", "--parallel"]
+    joined = " ".join(cmd)
+    assert "HOME=" in joined
+    assert "WORKTREE=" in joined
+    assert "DERIVED_DATA=" in joined
+
+
+def test_sandbox_missing_binary_falls_back_unwrapped(client, monkeypatch):
+    # Keeps the runner alive on hosts without sandbox-exec; the server logs
+    # a loud warning instead of silently pretending to be confined.
+    seen = _capture_cmd(monkeypatch)
+    monkeypatch.setattr(Config, "SANDBOX", True)
+    monkeypatch.setattr(server, "_sandbox_available", lambda: False)
+
+    _post_swift_test(client)
+
+    assert seen["cmd"] == ["swift", "test", "--parallel"]
+
+
+def test_sandbox_disabled_runs_unwrapped(client, monkeypatch):
+    seen = _capture_cmd(monkeypatch)
+    monkeypatch.setattr(Config, "SANDBOX", False)
+    monkeypatch.setattr(server, "_sandbox_available", lambda: True)
+
+    _post_swift_test(client)
+
+    assert seen["cmd"] == ["swift", "test", "--parallel"]
+
+
+def test_shipped_profile_denies_credentials_and_home_writes():
+    from pathlib import Path
+
+    profile = Path(server.__file__).parent / "sandbox.sb"
+    text = profile.read_text()
+    # $HOME is read-only by default...
+    assert '(deny file-write* (subpath (param "HOME")))' in text
+    # ...except the build's own directories, passed as parameters.
+    assert '(subpath (param "WORKTREE"))' in text
+    assert '(subpath (param "DERIVED_DATA"))' in text
+    # Credential material is unreadable, including the runner's own config.
+    assert '/.ssh' in text
+    assert "Keychains" in text
+    assert ".config/coding-model-runner" in text

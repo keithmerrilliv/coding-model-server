@@ -45,6 +45,16 @@ class Config:
         str(Path.home() / "Library" / "Caches" / "coding-model-runner" / "DerivedData"),
     ))
     REPOS_FILE = REPOS_FILE
+    # Wrap swift/xcodebuild in sandbox-exec so LLM-authored build/test code
+    # can't read credential material or write outside its build dirs
+    # (DEV-126). On by default; set CODING_MODEL_RUNNER_SANDBOX=0 to disable
+    # (e.g. while debugging a build the profile breaks).
+    SANDBOX = os.getenv("CODING_MODEL_RUNNER_SANDBOX", "1").lower() not in (
+        "0", "false", "no")
+    SANDBOX_PROFILE = Path(os.getenv(
+        "CODING_MODEL_RUNNER_SANDBOX_PROFILE",
+        str(Path(__file__).parent / "sandbox.sb"),
+    ))
 
     @classmethod
     def repos(cls) -> dict[str, Path]:

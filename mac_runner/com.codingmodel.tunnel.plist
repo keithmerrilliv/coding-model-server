@@ -24,9 +24,24 @@
         BatchMode means this agent can never answer a host-key or passphrase
         prompt; it just fails, logging "Host key verification failed" or
         "Permission denied (publickey)".
-     6. Load:   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.codingmodel.tunnel.plist
+     6. On the LINUX side, add this Mac's public key to ~/.ssh/authorized_keys
+        RESTRICTED. The tunnel key must not double as a general login: with a
+        plain entry, code execution on the Mac (exactly what this runner does
+        with LLM-authored patches) chains into a full shell on the GPU host.
+        Use:
+
+          restrict,command="/bin/false",port-forwarding,permitlisten="5050" ssh-ed25519 AAAA... mac-runner-tunnel
+
+        `restrict` disables pty/agent/X11 forwarding and exec;
+        `port-forwarding` re-enables only forwarding, and permitlisten
+        confines it to the single reverse-forward port the runner uses;
+        command="/bin/false" makes any interactive attempt exit immediately
+        instead of shelling in. (DEV-126)
+     7. Load:   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.codingmodel.tunnel.plist
         Unload: launchctl bootout   gui/$(id -u)/com.codingmodel.tunnel
-     7. Verify from the Linux box: curl -s http://127.0.0.1:5050/health
+     8. Verify from the Linux box: curl -s http://127.0.0.1:5050/health
+        and confirm the key is confined: ssh with it must print nothing and
+        exit (no shell), and a forward of any port other than 5050 must fail.
 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">

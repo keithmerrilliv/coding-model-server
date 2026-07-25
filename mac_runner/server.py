@@ -20,7 +20,13 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from .config import Config
-from .frameworks import DEFAULT_TIMEOUTS, build_cmd, FrameworkError
+from .frameworks import (
+    DEFAULT_TIMEOUTS,
+    FrameworkError,
+    SANDBOX_EXEC,
+    build_cmd,
+    wrap_sandbox,
+)
 from .workspace import worktree, WorkspaceError
 
 logging.basicConfig(
@@ -30,6 +36,11 @@ logging.basicConfig(
 logger = logging.getLogger("mac_runner.server")
 
 app = FastAPI(title="coding-model mac-runner", version="0.1.0")
+
+
+def _sandbox_available() -> bool:
+    """Separate seam so tests can exercise both paths off-macOS."""
+    return os.path.exists(SANDBOX_EXEC)
 
 
 class PatchFile(BaseModel):
@@ -107,6 +118,20 @@ def run_tests_endpoint(req: RunTestsRequest) -> RunTestsResponse:
                 cmd = build_cmd(req.framework, wt, Config.DERIVED_DATA, **opts)
             except FrameworkError as e:
                 raise HTTPException(400, str(e))
+
+            # The patch being built is LLM-authored code; confine it
+            # (DEV-126). The Linux orchestrator already sandboxes its runs —
+            # unsandboxed Mac execution was the asymmetry.
+            if Config.SANDBOX and _sandbox_available():
+                cmd = wrap_sandbox(
+                    cmd, profile=Config.SANDBOX_PROFILE, worktree=wt,
+                    derived_data=Config.DERIVED_DATA,
+                )
+            elif Config.SANDBOX:
+                logger.warning(
+                    "sandbox requested but %s not found — running "
+                    "LLM-authored tests UNSANDBOXED", SANDBOX_EXEC,
+                )
 
             logger.info("running %s in %s (timeout=%ds)", " ".join(cmd), wt, timeout)
             try:
