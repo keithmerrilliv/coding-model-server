@@ -55,6 +55,51 @@ def _confirm_outbound_fetch(tag, arg):
     return None
 
 
+_FENCE_RE = re.compile(r'```.*?(?:```|\Z)', re.DOTALL)
+_WRITE_EDIT_OPENER_RE = re.compile(r'<{1,3}(?:WRITE_FILE|EDIT_FILE)>{1,3}', re.IGNORECASE)
+_END_FILE_RE = re.compile(r'<{1,3}END_FILE>{1,3}', re.IGNORECASE)
+
+
+def _mask_protected_regions(text: str) -> str:
+    """Same-length copy of *text* with marker brackets neutralized inside
+    regions the command scanner must treat as opaque content (DEV-131):
+
+      * fenced code blocks — a response that QUOTES a tool marker inside
+        ``` fences (docs, examples, tests) must not have it executed;
+      * WRITE_FILE/EDIT_FILE payloads explicitly terminated by
+        <<<END_FILE>>> — lets the model write content that itself contains
+        live markers by declaring where the payload ends.
+
+    Only '<' and '>' are substituted (with NUL/SOH), so every offset in the
+    masked copy maps 1:1 onto the original: the scanner matches against the
+    masked text and slices actual content out of the original by span.
+    Without this, a WRITE_FILE whose content contained any known marker was
+    truncated at it and the tail DISPATCHED as a real command — writing a
+    corrupt file and executing quoted examples.
+    """
+    chars = list(text)
+
+    def _mask(start: int, end: int) -> None:
+        for i in range(start, end):
+            if chars[i] == '<':
+                chars[i] = '\x00'
+            elif chars[i] == '>':
+                chars[i] = '\x01'
+
+    for m in _FENCE_RE.finditer(text):
+        _mask(m.start(), m.end())
+
+    # Snapshot after fence masking: openers inside fences are already dead,
+    # and an END_FILE quoted inside a fence can't terminate a real payload.
+    fence_masked = ''.join(chars)
+    for m in _WRITE_EDIT_OPENER_RE.finditer(fence_masked):
+        term = _END_FILE_RE.search(fence_masked, m.end())
+        if term:
+            _mask(m.end(), term.start())
+
+    return ''.join(chars)
+
+
 def _normalize_standalone_search_replace(text):
     """Convert standalone git-style SEARCH/REPLACE blocks into <<<EDIT_FILE>>> blocks.
 
@@ -157,12 +202,18 @@ def process_remote_commands(response_text: str) -> Optional[str]:
     )
     _VALID_BRACKETS = frozenset({('<<<', '>>>'), ('<', '>>>'), ('<', '>')})
 
+    # Scan against a masked copy so markers inside fenced code or inside an
+    # END_FILE-terminated write payload are content, not command boundaries
+    # (DEV-131). Offsets are identical, so payloads are sliced from the
+    # original text by span.
+    masked_text = _mask_protected_regions(response_text)
+
     all_matches = []
-    for match in re.finditer(_COMMAND_RE, response_text, re.DOTALL | re.IGNORECASE):
+    for match in re.finditer(_COMMAND_RE, masked_text, re.DOTALL | re.IGNORECASE):
         open_brackets = match.group(1)
         tag = match.group(2).upper()
         close_brackets = match.group(3)
-        content = match.group(4).strip()
+        content = response_text[match.start(4):match.end(4)].strip()
 
         if (open_brackets, close_brackets) not in _VALID_BRACKETS:
             if state.logger:
@@ -189,7 +240,18 @@ def process_remote_commands(response_text: str) -> Optional[str]:
             results.append(f"\n... [OMITTED {len(all_matches) - i} ADDITIONAL COMMANDS TO PREVENT CONTEXT OVERFLOW] ...")
             break
 
-        arg = match.group(4)
+        # Slice the payload from the ORIGINAL text (the match ran on the
+        # masked copy — same offsets, but the mask bytes must not reach the
+        # handler).
+        arg = response_text[match.start(4):match.end(4)]
+        if tag in ('WRITE_FILE', 'EDIT_FILE'):
+            # An explicit <<<END_FILE>>> terminator ends the payload; prose
+            # between it and the next marker is not file content. Search on
+            # the masked slice so a terminator QUOTED inside a fence doesn't
+            # truncate the real payload.
+            term = _END_FILE_RE.search(masked_text, match.start(4), match.end(4))
+            if term:
+                arg = response_text[match.start(4):term.start()]
         # Strip closing tags the model generates (e.g. </REMOTE_EXEC>, </list_dir>).
         # These get captured as part of the content and corrupt shell commands
         # (the shell interprets </TAG> as input redirection < /TAG>).
@@ -228,6 +290,13 @@ def process_remote_commands(response_text: str) -> Optional[str]:
     return "\n\n".join(results) if results else None
 
 
+# Prose beyond this outside the fences means the response is an explanation
+# that HAPPENS to contain a shell example, not a command the model meant to
+# run. Short lead-ins ("Running the tests:") stay under it; a paragraph of
+# "to build this project you would run..." does not.
+_FALLBACK_MAX_PROSE_CHARS = 200
+
+
 def extract_fallback_commands(response_text: str) -> List[str]:
     """Extract shell commands from markdown code blocks when <<<REMOTE_EXEC>>> markers are missing.
 
@@ -236,7 +305,18 @@ def extract_fallback_commands(response_text: str) -> List[str]:
     Only extracts blocks explicitly tagged as shell languages (bash/shell/sh/zsh).
     Plain or non-shell code blocks (python, swift, etc.) are ignored to prevent
     catastrophic misexecution of code snippets as shell commands.
+
+    Extraction only applies when the response is essentially JUST the
+    fence(s): substantial prose around a ```bash block means the model was
+    explaining, not acting, and running its illustrative commands is the
+    DEV-136 failure ("to build you'd run: ...make distclean" → executed).
+    The caller additionally confirms before executing what this returns.
     """
+    # Measure prose outside ALL fenced blocks (any language).
+    prose = _FENCE_RE.sub('', response_text)
+    if len(prose.strip()) > _FALLBACK_MAX_PROSE_CHARS:
+        return []
+
     commands = []
 
     # REQUIRE a shell language hint -- the ? was removed to prevent matching

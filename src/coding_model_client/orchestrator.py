@@ -502,6 +502,24 @@ def process_agent_tasks(tasks, history, initial_model, agent_theme):
                             "\nAgent used code blocks instead of markers. Extracting commands...",
                             COLORS['WARNING']
                         )
+                        # Fallback commands are a heuristic guess at intent, not
+                        # an explicit tool call — confirm before running them,
+                        # in EVERY permission mode (DEV-136). Headless callers
+                        # (EOFError) skip rather than execute.
+                        for cmd in fallback_cmds:
+                            print_colored(f"    $ {cmd}", COLORS['CYAN'])
+                        try:
+                            _ok = input(
+                                f"{COLORS['BOLD']}Run {len(fallback_cmds)} "
+                                f"extracted command(s)? [y/N] > {COLORS['ENDC']}"
+                            )
+                        except (EOFError, KeyboardInterrupt):
+                            _ok = ""
+                        if _ok.lower() != "y":
+                            print_colored("    Skipped extracted commands.",
+                                          COLORS['WARNING'])
+                            fallback_cmds = []
+                    if fallback_cmds:
                         results = []
                         total_len = 0
                         global_max_len = 40000
