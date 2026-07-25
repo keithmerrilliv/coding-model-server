@@ -47,6 +47,10 @@ Outcome = Literal[
     "agent_error",
     "schema_violation",
     "stalled",
+    # A human answered a request_clarification gate; reviewer_notes carries
+    # the answer. The daemon re-invokes the supervisor with this outcome so
+    # the answer actually feeds the next transition (DEV-122).
+    "clarification_answered",
 ]
 Action = Literal[
     "advance",
@@ -206,7 +210,10 @@ retry→architect when only the design's content is wrong.
 3. CLARIFICATION. If progress is blocked on missing user intent that no agent \
 can resolve (ambiguous spec, conflicting requirements, unspecified API target), \
 choose `request_clarification`. Do not retry agents on questions only a human \
-can answer.
+can answer. When the outcome is `clarification_answered`, reviewer_notes carries \
+the human's answer to your earlier question: act on it — usually `retry` with \
+the answer folded into `feedback_to_inject`, or `advance`/`replan`/`abort` if \
+the answer warrants it. Never re-ask a question that was just answered.
 
 4. RETRY BUDGET. Each task has a `retry_count` and a hard cap. If the role has \
 already retried multiple times on the same kind of failure, escalate: `replan` \
