@@ -473,9 +473,23 @@ def _process_executing(db: Database, spec: Spec) -> None:
         _start_task(db, spec, current)
     elif current.status == TaskStatus.RUNNING:
         # Shouldn't happen in normal operation since agent calls block the
-        # tick. If we see RUNNING, the daemon crashed mid-call — reset.
+        # tick. If we see RUNNING, the daemon crashed mid-call. Each reset
+        # burns a retry (DEV-193): a task whose agent call deterministically
+        # crashes the daemon otherwise loops RUNNING → crash → systemd
+        # restart → PENDING forever — restarts more than 60s apart never
+        # trip StartLimitBurst, so nothing else bounds the loop.
+        if current.retry_count >= MAX_RETRIES:
+            logger.error("spec %s: task %s crash-recovered %d times "
+                         "(MAX_RETRIES=%d) — failing the spec instead of "
+                         "looping", spec.id, current.id, current.retry_count,
+                         MAX_RETRIES)
+            db.update_task_status(current.id, TaskStatus.FAILED)
+            db.update_spec_status(spec.id, SpecStatus.FAILED)
+            return
+        db.increment_task_retry(current.id)
         logger.warning("spec %s: task %s stuck in RUNNING (crash recovery?), "
-                       "resetting to PENDING", spec.id, current.id)
+                       "resetting to PENDING (recovery %d/%d)",
+                       spec.id, current.id, current.retry_count + 1, MAX_RETRIES)
         db.update_task_status(current.id, TaskStatus.PENDING)
     elif current.status == TaskStatus.BLOCKED_ON_REVIEW:
         _check_execution_gate(db, spec, current)
