@@ -122,6 +122,10 @@ def get_completion(history, model, agent_theme, agentic_context=None,
     """
     full_response = ""
     finish_reason = "stop"
+    # Whether the server actually SENT a finish_reason. "stop" above is only
+    # a default — if the connection dies mid-stream it must not be reported
+    # as a clean finish (DEV-130).
+    finish_reason_received = False
     server_error_occurred = False
     tool_calls_acc = {}  # index -> {id, type, function:{name, arguments}}
 
@@ -324,6 +328,7 @@ def get_completion(history, model, agent_theme, agentic_context=None,
                                         chunk_count += 1
                                     if choice.get("finish_reason"):
                                         finish_reason = choice["finish_reason"]
+                                        finish_reason_received = True
                                 elif "error" in data:
                                     stop_progress.set()
                                     error_msg = data['error'].get('message', 'Unknown error')
@@ -371,6 +376,7 @@ def get_completion(history, model, agent_theme, agentic_context=None,
                 server_error_occurred = False
                 full_response = ""
                 chunk_count = 0
+                finish_reason_received = False
                 start_time = time.time()
                 first_token_time = None
                 stop_progress = threading.Event()
@@ -382,6 +388,20 @@ def get_completion(history, model, agent_theme, agentic_context=None,
         except requests.exceptions.ConnectionError:
             stop_progress.set()
             if chunk_count > 0:
+                # The server dropped the connection after emitting content
+                # but (unless a finish_reason chunk already arrived) before
+                # finishing. The default "stop" would present the partial
+                # text as complete — silent truncation, invisible to the
+                # orchestrator, whose continuation only fires on "length".
+                # Report "length" so the continuation path recovers the
+                # rest (DEV-130).
+                if not finish_reason_received:
+                    finish_reason = "length"
+                    print_colored(
+                        "\n[Client] Connection lost mid-stream — partial "
+                        "response, requesting continuation.",
+                        COLORS['WARNING'],
+                    )
                 break
             if wait_for_server():
                 start_time = time.time()
@@ -396,6 +416,7 @@ def get_completion(history, model, agent_theme, agentic_context=None,
             if chunk_count > 0:
                 full_response = ""
                 chunk_count = 0
+                finish_reason_received = False
             start_time = time.time()
             stop_progress = threading.Event()
             progress_thread = threading.Thread(target=show_progress, daemon=True)
