@@ -7,11 +7,13 @@ from runtime.
 """
 import asyncio
 import logging
+import threading
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from requests import exceptions as http_requests_exceptions
+from starlette.background import BackgroundTask
 
 from coding_model_server import runtime
 from coding_model_server.config import Config
@@ -204,16 +206,45 @@ def _compute_budget(effective_system: str, rag_suffix: str,
     )
 
 
-def _release_slot_on_stream_finish(inner, admission):
-    """Wrap a streaming chat-completion generator so the admission slot is
-    released exactly once when the stream terminates — whether by normal
-    EOF, exception, or client disconnect (which closes the iterator and
-    raises GeneratorExit through the for-loop)."""
+def _once(fn):
+    """Wrap ``fn`` so repeated (or concurrent) calls run it exactly once.
+
+    The stream-teardown release is attached to two hooks that can both fire
+    for the same request; without this guard a double release would free a
+    slot some other request still holds.
+    """
+    lock = threading.Lock()
+    called = False
+
+    def call():
+        nonlocal called
+        with lock:
+            if called:
+                return
+            called = True
+        fn()
+
+    return call
+
+
+def _release_slot_on_stream_finish(inner, release_once):
+    """Wrap a streaming chat-completion generator so ``release_once`` fires
+    when the stream terminates — normal EOF, exception, or client disconnect
+    (which closes the iterator and raises GeneratorExit through the for-loop).
+
+    This alone is not enough: a sync generator that is never iterated never
+    enters the ``try``, and close() on an unstarted generator skips the
+    ``finally`` entirely. A client disconnect already queued when the
+    response starts cancels the stream before its first iteration — exactly
+    what a client timeout during a loop-blocking swap produces — so the
+    caller ALSO attaches ``release_once`` as the response's background task,
+    which Starlette runs on the cancelled path (DEV-117).
+    """
     try:
         for chunk in inner:
             yield chunk
     finally:
-        admission.release()
+        release_once()
 
 
 @router.post("/v1/chat/completions", dependencies=[Depends(verify_admin_key)])
@@ -332,14 +363,17 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
                 tools=request.tools, tool_choice=request.tool_choice,
                 parallel_tool_calls=request.parallel_tool_calls,
                 req_id=req_id)
-            # Hand the admission slot to the stream wrapper. The slot is
-            # released when the generator's finally fires — on normal
-            # completion, an internal exception, OR a client disconnect
-            # (FastAPI closes the iterator and triggers GeneratorExit).
+            # Hand the admission slot to the stream teardown: one idempotent
+            # release, two hooks. The wrapper's finally covers every path on
+            # a generator that started; the background task covers a stream
+            # cancelled before its first iteration, where the finally never
+            # runs and the slot would leak until restart (DEV-117).
+            release_once = _once(chat_admission.release)
             slot_held = False
             return StreamingResponse(
-                _release_slot_on_stream_finish(inner, chat_admission),
-                media_type="text/event-stream"
+                _release_slot_on_stream_finish(inner, release_once),
+                media_type="text/event-stream",
+                background=BackgroundTask(release_once),
             )
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
