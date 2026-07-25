@@ -201,7 +201,7 @@ def _check_history_budget(history, model="implementer", agent_theme=None):
     long sessions. Only run the full compress when raw size is in the
     danger band.
     """
-    from coding_model_client.completion import _trim_history_for_context, _compress_history
+    from coding_model_client.completion import trim_history_in_place, _compress_history
     from coding_model_client.compaction import compact_conversation
 
     # Cheap raw-size estimate; well below the 120K threshold short-circuit.
@@ -233,7 +233,7 @@ def _check_history_budget(history, model="implementer", agent_theme=None):
             f"\n[Client] History size ({total_chars // 1000}K chars) exceeds budget. Trimming...",
             COLORS['WARNING']
         )
-        _trim_history_for_context(history)
+        trim_history_in_place(history)
 
 
 # ---------------------------------------------------------------------------

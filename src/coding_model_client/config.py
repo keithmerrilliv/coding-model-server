@@ -8,13 +8,23 @@ import logging
 
 class Config:
     LINUX_SERVER_IP = os.getenv("CODING_MODEL_SERVER_IP", "192.168.50.101")
-    API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/chat/completions"
-    MEMORY_API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/memory"
-    INGEST_API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/memory/ingest"
-    SEARCH_API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/tools/search"
-    DEEP_DOCS_API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/tools/apple_deep_docs"
-    HEALTH_URL = f"http://{LINUX_SERVER_IP}:5000/health"
-    MODELS_URL = f"http://{LINUX_SERVER_IP}:5000/v1/models"
+    # One base URL, one port knob (DEV-151). The port literal used to be
+    # baked into every URL constant, so moving the server via
+    # CODING_MODEL_SERVER_PORT (the same env the autonomous package reads)
+    # stranded every interactive client. CODING_MODEL_SERVER_URL overrides
+    # the whole base for tunnels/hostnames.
+    SERVER_PORT = int(os.getenv("CODING_MODEL_SERVER_PORT", "5000"))
+    BASE_URL = os.getenv(
+        "CODING_MODEL_SERVER_URL", f"http://{LINUX_SERVER_IP}:{SERVER_PORT}"
+    ).rstrip("/")
+    API_URL = f"{BASE_URL}/v1/chat/completions"
+    MEMORY_API_URL = f"{BASE_URL}/v1/memory"
+    INGEST_API_URL = f"{BASE_URL}/v1/memory/ingest"
+    SEARCH_API_URL = f"{BASE_URL}/v1/tools/search"
+    DEEP_DOCS_API_URL = f"{BASE_URL}/v1/tools/apple_deep_docs"
+    HEALTH_URL = f"{BASE_URL}/health"
+    MODELS_URL = f"{BASE_URL}/v1/models"
+    FILES_UPLOAD_URL = f"{BASE_URL}/v1/files/upload"
     ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
 
     @property
