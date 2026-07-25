@@ -102,12 +102,25 @@ def _display_diff(old_text, new_text, filepath):
 
 
 def _create_checkpoint(filepath):
-    """Backup a file before modification for /undo support."""
+    """Backup a file before modification for /undo support.
+
+    A brand-new file gets a CREATION sentinel (checkpoint_path=None) so
+    /undo deletes it. Without the sentinel, creating a file pushed nothing,
+    and /undo popped the most recent EARLIER checkpoint — restoring an
+    unrelated file while the user believed they undid the creation (DEV-132).
+    """
     if not os.path.exists(filepath):
+        state.checkpoint_stack.append(
+            (filepath, None, datetime.now().strftime('%Y%m%d_%H%M%S')))
+        state.logger.info("Creation checkpoint recorded: %s", filepath)
         return
     os.makedirs(state.CHECKPOINT_DIR, exist_ok=True)
     path_hash = hashlib.md5(filepath.encode()).hexdigest()[:8]
-    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+    # Microsecond suffix: successive edits to one file inside a single agent
+    # response land milliseconds apart, and second-granularity names made the
+    # second copy2 OVERWRITE the first backup — losing the true original and
+    # leaving two stack entries pointing at one file (DEV-133).
+    ts = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
     basename = os.path.basename(filepath)
     checkpoint_name = f"{path_hash}_{ts}_{basename}"
     checkpoint_path = os.path.join(state.CHECKPOINT_DIR, checkpoint_name)
@@ -116,6 +129,8 @@ def _create_checkpoint(filepath):
     # FIFO cleanup
     while len(state.checkpoint_stack) > state.MAX_CHECKPOINTS:
         _, old_path, _ = state.checkpoint_stack.pop(0)
+        if old_path is None:
+            continue  # creation sentinel — no backing file to remove
         try:
             os.remove(old_path)
         except OSError:
@@ -128,6 +143,15 @@ def undo_last_checkpoint():
     if not state.checkpoint_stack:
         return "No checkpoints available to undo."
     original_path, checkpoint_path, ts = state.checkpoint_stack.pop()
+    if checkpoint_path is None:
+        # Creation sentinel: undoing a creation means deleting the file.
+        try:
+            os.remove(original_path)
+        except FileNotFoundError:
+            return f"{original_path} was already removed."
+        except OSError as e:
+            return f"Could not remove created file {original_path}: {e}"
+        return f"Removed newly-created {original_path} ({ts})"
     if not os.path.exists(checkpoint_path):
         return f"Checkpoint file missing: {checkpoint_path}"
     shutil.copy2(checkpoint_path, original_path)

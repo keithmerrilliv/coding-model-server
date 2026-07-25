@@ -71,6 +71,25 @@ def read_file_content(path):
         return f"Error reading file: {str(e)}"
 
 
+def _write_loop_exceeded(tag, norm_path, display_path):
+    """Shared write-loop counter for every mutation path (DEV-134).
+
+    The counter used to live inline in write_file_content only, so a model
+    thrashing one file via EDIT_FILE (different content each turn, invisible
+    to the response-level loop detector) could rewrite it unboundedly despite
+    the documented per-file cap. Returns True when the cap is exceeded.
+    """
+    state.write_counts[norm_path] = state.write_counts.get(norm_path, 0) + 1
+    if state.write_counts[norm_path] <= state.MAX_WRITES_PER_FILE:
+        return False
+    msg = (f"{tag} refused: '{os.path.basename(display_path)}' has been written "
+           f"{state.write_counts[norm_path] - 1} times already this session. "
+           f"This looks like a loop. Move on to the next task.")
+    state.logger.warning(msg)
+    state.print_colored(f"\n[Loop detected] {msg}", state.colors['FAIL'])
+    return True
+
+
 def write_file_content(payload):
     """Write content to a local file safely.
 
@@ -98,13 +117,7 @@ def write_file_content(payload):
         norm_path = os.path.normpath(full_path)
 
         # Write-loop detection: prevent agent from rewriting the same file endlessly
-        state.write_counts[norm_path] = state.write_counts.get(norm_path, 0) + 1
-        if state.write_counts[norm_path] > state.MAX_WRITES_PER_FILE:
-            msg = (f"WRITE_FILE refused: '{os.path.basename(path)}' has been written "
-                   f"{state.write_counts[norm_path] - 1} times already this session. "
-                   f"This looks like a loop. Move on to the next task.")
-            state.logger.warning(msg)
-            state.print_colored(f"\n[Loop detected] {msg}", state.colors['FAIL'])
+        if _write_loop_exceeded('WRITE_FILE', norm_path, path):
             # Return None — NOT a refusal message. Returning a message causes the
             # orchestrator to treat it as tool output and continue the loop forever.
             return None
@@ -243,6 +256,13 @@ def edit_file_content(payload):
 
         if not os.path.exists(full_path):
             return f"Error: File not found: {path}"
+
+        # An edit is a write for loop-detection too (DEV-134): the README's
+        # per-file cap held only for WRITE_FILE, so EDIT_FILE could thrash a
+        # file unboundedly. Same None convention — a refusal message would be
+        # fed back as tool output and keep the loop alive.
+        if _write_loop_exceeded('EDIT_FILE', os.path.normpath(full_path), path):
+            return None
 
         # Protected path check
         protected, protect_reason = _is_protected_path(full_path)
