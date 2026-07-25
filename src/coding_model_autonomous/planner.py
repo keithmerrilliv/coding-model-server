@@ -23,6 +23,7 @@ import yaml
 from dataclasses import dataclass
 
 from coding_model_autonomous._http import post_chat_completion
+from coding_model_server.streaming import strip_thinking as _server_strip_thinking
 
 logger = logging.getLogger(__name__)
 
@@ -233,16 +234,12 @@ _CLARIFY_OPEN_ONLY_RE = re.compile(
 )
 
 
-_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
-
-
 def _strip_thinking(text: str) -> str:
-    """Remove `<think>...</think>` blocks the model emits before its answer.
-
-    The Qwen3.x chat templates surface reasoning via these tags; we drop
-    them defensively before parsing structured planner output.
-    """
-    return _THINK_BLOCK_RE.sub("", text).strip()
+    """Defensive strip before parsing planner output (DEV-153): delegates to
+    streaming.strip_thinking, the single implementation that handles all
+    observed patterns (full block, orphan close, unclosed open, <REACT>) —
+    the local regex copy only covered full blocks."""
+    return _server_strip_thinking(text).strip()
 
 
 def parse_planner_response(text: str) -> PlannerResult:

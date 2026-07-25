@@ -10,6 +10,7 @@ singletons and lifespan-managed services live in coding_model_server.runtime.
 import logging
 import os
 import re
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -67,13 +68,24 @@ async def lifespan(app: FastAPI):
 
     logger.info("Server starting up...")
 
-    try:
-        logger.info("Initializing Memory Service...")
-        runtime.services.memory = MemoryService()
-        logger.info("Memory Service initialized successfully")
-    except Exception as e:
-        logger.error("Failed to initialize memory service: %s", e)
-        runtime.services.memory = None
+    # Memory init pays the chromadb + sentence-transformers/torch imports
+    # (~6-15s, hundreds of MB). Doing it inline delayed /health past every
+    # redeploy's health-wait window (DEV-139); nothing on the chat path
+    # needs memory until it's used, and every consumer already handles
+    # services.memory being None (requests during the warm-up window are
+    # simply served without RAG).
+    def _init_memory_service():
+        try:
+            logger.info("Initializing Memory Service (background)...")
+            runtime.services.memory = MemoryService()
+            logger.info("Memory Service initialized successfully")
+        except Exception as e:
+            logger.error("Failed to initialize memory service: %s", e)
+            runtime.services.memory = None
+
+    threading.Thread(
+        target=_init_memory_service, name="memory-init", daemon=True,
+    ).start()
 
     try:
         logger.info("Initializing Web Search Service...")

@@ -89,13 +89,29 @@ async def _maybe_inject_rag_context(
     )
     if not last_user_msg:
         return system_prompt, ""
+    retrieval = asyncio.ensure_future(
+        asyncio.to_thread(memory_service.get_context_string, last_user_msg)
+    )
     try:
-        context = await asyncio.wait_for(
-            asyncio.to_thread(memory_service.get_context_string, last_user_msg),
-            timeout=2.0,
-        )
+        # shield: the timeout must not mark the task cancelled — the worker
+        # thread can't be interrupted anyway, and we want to observe (and
+        # log) when the abandoned retrieval eventually finishes, because it
+        # keeps burning CPU exactly while llama-server prefills (DEV-150).
+        context = await asyncio.wait_for(asyncio.shield(retrieval), timeout=2.0)
     except asyncio.TimeoutError:
         logger.warning("Memory retrieval timed out (>2s), skipping RAG context")
+
+        def _log_late_completion(task: "asyncio.Task") -> None:
+            if task.cancelled():
+                return
+            exc = task.exception()
+            if exc is not None:
+                logger.warning("timed-out RAG retrieval later failed: %s", exc)
+            else:
+                logger.info("timed-out RAG retrieval completed after abandonment "
+                            "(wasted CPU during prefill)")
+
+        retrieval.add_done_callback(_log_late_completion)
         return system_prompt, ""
     except Exception as e:
         logger.error("Memory retrieval failed: %s", e)
@@ -342,9 +358,16 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
         # across requests and stays in the tokenize cache, while rag_suffix is
         # the small volatile block, counted separately (DEV-113).
         base_system_prompt = system_prompt
-        system_prompt, rag_suffix = await _maybe_inject_rag_context(system_prompt, request)
 
         model_config = agent_config['model_config']
+        # RAG retrieval (embedding encode + HNSW query, up to its 2s cap)
+        # used to be awaited strictly BEFORE the swap, so every request paid
+        # its latency serially instead of hiding it under the
+        # tens-of-seconds model load (DEV-150). Start it now, await it after
+        # ensure_running: the two overlap on worker threads.
+        rag_task = asyncio.ensure_future(
+            _maybe_inject_rag_context(system_prompt, request)
+        )
         # ensure_running holds _swap_lock across a SIGTERM wait, a VRAM-release
         # poll, and a /health loop that time.sleeps — up to ~140s of blocking
         # work. On the event-loop thread that freezes the whole process:
@@ -359,11 +382,16 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
         # agent_id is the RESOLVED name (DEV-156): aliases used to give the
         # same underlying agent several VRAM-footprint records, so a good
         # measurement under one name never corrected a bad one under another.
-        await asyncio.to_thread(
-            llama_server_manager.ensure_running, model_config,
-            agent_id=model_name, reserve_slot=True,
-        )
+        try:
+            await asyncio.to_thread(
+                llama_server_manager.ensure_running, model_config,
+                agent_id=model_name, reserve_slot=True,
+            )
+        except BaseException:
+            rag_task.cancel()
+            raise
         reservation_held = True
+        system_prompt, rag_suffix = await rag_task
 
         n_ctx = model_config.get('n_ctx', 32768)
         # Estimate what actually reaches llama-server. `_build_openai_messages`

@@ -35,6 +35,7 @@ from typing import Optional
 import requests
 
 from coding_model_server import external_judges
+from coding_model_server.streaming import strip_thinking as _server_strip_thinking
 
 from . import seccomp_filter
 from ._http import post_chat_completion
@@ -134,17 +135,17 @@ ROLE_TO_MAX_TOKENS = {
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
-
-
 def _strip_thinking(text: str) -> str:
-    """Remove ``<think>…</think>`` blocks the model emits before its answer.
+    """Defensive strip before parsing structured output (DEV-153).
 
-    Qwen3.x family ships with thinking enabled in their chat templates.
-    Server-side ThinkingStripper handles the streaming case; this is the
-    sync-parse fallback (compiled at import for repeated calls).
+    Delegates to streaming.strip_thinking — the one implementation that
+    handles all three observed real patterns (full block, orphan close,
+    unclosed open) plus <REACT>. The local regex copy only handled full
+    blocks, so as a defensive layer it didn't defend against the patterns
+    actually seen; if the server-side strip ever regresses, un-stripped
+    reasoning would have flowed straight into the YAML/FILE-marker parsers.
     """
-    return _THINK_BLOCK_RE.sub("", text).strip()
+    return _server_strip_thinking(text).strip()
 
 
 def _write_artifact(spec_dir: Path, rel_path: str, content: str) -> Path:
