@@ -129,7 +129,15 @@ class LlamaServerManager:
         # Race-free under CPython's GIL for ±1 increments.
         self._active_requests: int = 0
         self._watchdog_thread: Optional[Thread] = None
-        self._watchdog_running = False
+        # Generation token, not a boolean. Each _start_watchdog bumps it and
+        # binds the new thread to the new value; each shutdown bumps it to
+        # invalidate whoever is running. A shared "running" flag had a lost
+        #-wakeup race: a fast swap could start the new child while the old
+        # watchdog was still asleep, _start_watchdog early-returned because
+        # that thread was technically alive, and the old thread then woke,
+        # saw the flag its own shutdown had cleared, and exited — leaving
+        # the new child with no watchdog and ~14 GiB pinned (DEV-118).
+        self._watchdog_generation = 0
         # One shared HTTP session for every call to the llama-server child
         # (proxy, tokenize, health poll). Without it `requests` opened and tore
         # down a TCP connection per request on the hot proxy path. The pool is
@@ -391,7 +399,7 @@ class LlamaServerManager:
             if proc is None:
                 self._state = _STATE_IDLE
                 return
-            self._watchdog_running = False
+            self._watchdog_generation += 1  # invalidate the current watchdog
             self._state = _STATE_STOPPING
             self.process = None
             self.current_model_path = None
@@ -869,15 +877,29 @@ class LlamaServerManager:
         }
 
     def _start_watchdog(self):
-        """Start the idle watchdog thread."""
-        if self._watchdog_thread and self._watchdog_thread.is_alive():
-            return
-        self._watchdog_running = True
-        self._watchdog_thread = Thread(target=self._idle_watchdog, daemon=True)
+        """Start a watchdog for the child that just came up.
+
+        Always starts a fresh thread bound to a new generation — never
+        early-return on "a thread is still alive". The alive thread may
+        belong to the previous child and be one wake away from seeing its
+        stale generation and exiting; reusing it silently left the new
+        child unwatched (DEV-118). The superseded thread exits at its next
+        wake (≤30s), so the overlap is bounded and harmless.
+        """
+        with self.lock:
+            self._watchdog_generation += 1
+            gen = self._watchdog_generation
+        self._watchdog_thread = Thread(
+            target=self._idle_watchdog, args=(gen,), daemon=True)
         self._watchdog_thread.start()
 
-    def _idle_watchdog(self):
+    def _idle_watchdog(self, gen: int):
         """Background thread: shut down subprocess if idle for IDLE_TIMEOUT seconds.
+
+        ``gen`` pins this thread to one child's lifetime: the moment a
+        shutdown or a newer watchdog bumps the generation, this thread's
+        next wake exits without touching state that now belongs to a
+        successor.
 
         Skips kill while any request is in-flight. Without this guard the
         watchdog would race with long synchronous requests (architect /
@@ -890,11 +912,11 @@ class LlamaServerManager:
         cross-thread serialization where the watchdog sits behind a slow
         ensure_running call only to find there's nothing to kill.
         """
-        while self._watchdog_running:
+        while True:
             time.sleep(30)  # Check every 30s
-            if not self._watchdog_running:
-                break
             with self.lock:
+                if gen != self._watchdog_generation:
+                    break  # superseded — a newer child owns the watchdog now
                 if self._state != _STATE_RUNNING or self.process is None:
                     break
                 if self._active_requests > 0:
