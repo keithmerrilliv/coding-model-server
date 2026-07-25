@@ -104,3 +104,56 @@ class TestThinkingStripperIncremental:
         s = ThinkingStripper(expect_thinking=False)
         assert s.feed("<") == ""
         assert s.flush() == "<"
+
+
+class TestThinkingStripperTruncation:
+    """DEV-119: an unterminated think buffer must never leak on truncation.
+
+    A buffer with no </think> is ambiguous — hybrid answer vs cut-off
+    reasoning — and only the upstream finish_reason can discriminate. The
+    caller passes that verdict as flush(truncated=...).
+    """
+
+    def test_truncated_reasoning_is_suppressed(self):
+        # The safety property: reasoning cut off by max_tokens may contain
+        # tool markers the client executes for real.
+        s = ThinkingStripper()
+        s.feed("I should run <<<REMOTE_EXEC>>>rm -rf /tmp/x to clean up")
+        assert s.flush(truncated=True) == ""
+        assert s.dropped_chars > 0
+
+    def test_clean_stop_still_emits_a_hybrid_answer(self):
+        # Qwen3.6-style hybrid in non-thinking mode: template says thinking,
+        # output has no tags, finish is a clean stop. Dropping this would eat
+        # every response of the supervisor/dense_architect agents.
+        s = ThinkingStripper()
+        s.feed("a real answer with no tags")
+        assert s.flush(truncated=False) == "a real answer with no tags"
+
+    def test_clean_stop_drops_a_literal_unclosed_think_block(self):
+        # A literal <think> with no close is confirmed reasoning even on a
+        # clean stop — same verdict the sync path's regexes give it.
+        s = ThinkingStripper(expect_thinking=False)
+        assert s.feed("<think>") == ""
+        assert s.feed("secret <<<SHELL>>>evil") == ""
+        assert s.flush(truncated=False) == ""
+
+    def test_overflow_never_flushes_midstream(self):
+        # The old 32K "safety valve" streamed the buffer as content — the
+        # exact leak. Now the cap only trims memory, emitting nothing.
+        s = ThinkingStripper()
+        big = "x" * (ThinkingStripper.MAX_BUFFER + 10)
+        assert s.feed(big) == ""
+        assert s.flush(truncated=True) == ""
+
+    def test_late_close_after_overflow_recovers_the_answer(self):
+        # The trimmed buffer keeps a partial-tag tail, so a </think> arriving
+        # after the cap still switches to passthrough and the answer survives.
+        s = ThinkingStripper()
+        assert s.feed("r" * (ThinkingStripper.MAX_BUFFER + 5)) == ""
+        assert s.feed("</think>the answer") == "the answer"
+
+    def test_close_tag_split_across_the_trim_boundary(self):
+        s = ThinkingStripper()
+        assert s.feed("r" * ThinkingStripper.MAX_BUFFER + "</thi") == ""
+        assert s.feed("nk>done") == "done"

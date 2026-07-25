@@ -71,14 +71,26 @@ class ThinkingStripper:
     into a tool-executing client is not. Callers opt in to streaming only for
     models whose template proves there is nothing to strip.
 
-    If no </think> appears within MAX_BUFFER chars, assumes no thinking block
-    and flushes the buffer as real content.
+    A buffer that never sees </think> is ambiguous: a hybrid template (Qwen3.6
+    with enable_thinking off) produces a real answer with no tags, while a
+    generation truncated mid-reasoning produces raw chain-of-thought — possibly
+    containing tool markers the client would execute. The stream itself cannot
+    tell them apart; only the upstream finish_reason can. So the buffer is held
+    to end of stream, and flush(truncated=...) decides: a clean stop emits it
+    as the answer, a truncation drops it as reasoning.
     """
     BUFFERING = 0
     PASSTHROUGH = 1
     DECIDING = 2
 
-    MAX_BUFFER = 32768  # chars — Nemotron generates 8K+ thinking blocks
+    # Hard memory cap, not a heuristic. An earlier version flushed the buffer
+    # as content at 32K chars on the theory that a response that long with no
+    # </think> had no thinking block — but Nemotron-class models exceed 32K
+    # chars of reasoning, and that flush streamed raw chain-of-thought (tool
+    # markers included) to a client that executes markers for real (DEV-119).
+    # Now the buffer rides to end of stream; this cap only bounds pathology,
+    # far above any legit generation (n_ctx 196608 tokens ≈ 1.5MB chars).
+    MAX_BUFFER = 8 * 1024 * 1024
 
     # Bounds how long DECIDING may hold whitespace before it gives up and
     # streams. The tag probe alone bounds non-whitespace to _OPEN_LEN chars.
@@ -96,6 +108,10 @@ class ThinkingStripper:
         # find('</think>') restarts at index 0 every chunk, making the
         # accumulator O(n²) over buffer length.
         self._search_start = 0
+        # Chars discarded without being emitted — suppressed reasoning at
+        # flush, or buffer-front trimmed at the MAX_BUFFER cap. Callers log
+        # this so a suppressed response is diagnosable, not just empty.
+        self.dropped_chars = 0
 
     def feed(self, token: str) -> str:
         """Feed a token, return text to emit (empty string = suppress)."""
@@ -144,31 +160,45 @@ class ThinkingStripper:
         # Rescan only the tail that could hold a tag split across chunks.
         self._search_start = max(0, len(self.buffer) - (self._CLOSE_LEN - 1))
 
-        # Safety valve: if buffer grows too large without </think>,
-        # this response has no thinking block — flush as real content
+        # Memory cap: trim the front, keep scanning for a late </think>. The
+        # trimmed front is only lost if the stream ends cleanly with no close
+        # tag AND flush emits — a >8MB response, i.e. never in practice.
         if len(self.buffer) >= self.MAX_BUFFER:
-            self.state = self.PASSTHROUGH
-            result = self.buffer
-            self.buffer = ''
-            return result
+            keep = self._CLOSE_LEN - 1
+            self.dropped_chars += len(self.buffer) - keep
+            self.buffer = self.buffer[-keep:]
+            self._search_start = 0
 
         return ''
 
-    def flush(self) -> str:
+    def flush(self, truncated: bool = False) -> str:
         """Flush remaining buffer at end of stream.
 
-        If still in BUFFERING state, no </think> was ever seen.  This means
-        either: (a) the model doesn't use thinking tags (common — e.g. chatml
-        models), so the buffer is the entire valid response, or (b) an orphaned
-        <think> block was never closed (rare).  We return the buffer in both
-        cases — discarding it would drop valid tool calls for non-thinking models.
+        If still in BUFFERING state, no </think> was ever seen. Two ways that
+        happens: (a) the model doesn't use thinking tags despite its template
+        saying it might (hybrid in non-thinking mode), so the buffer is the
+        entire valid response; (b) the generation was cut off mid-reasoning
+        (max_tokens, upstream drop), so the buffer is raw chain-of-thought —
+        which can contain tool markers the client executes for real.
+
+        ``truncated`` is the discriminator, from the upstream finish_reason:
+        on a clean stop, emit the buffer (dropping it would eat every response
+        of a non-thinking hybrid); on truncation, suppress it (DEV-119). A
+        clean-stop buffer still goes through strip_thinking, so a literal
+        unclosed <think> block — confirmed reasoning — is dropped either way.
         """
-        if self.buffer:
-            result = self.buffer
-            self.buffer = ''
-            self.state = self.PASSTHROUGH
-            return result
-        return ''
+        if not self.buffer:
+            return ''
+        result, self.buffer = self.buffer, ''
+        if self.state == self.BUFFERING:
+            if truncated:
+                self.dropped_chars += len(result)
+                return ''
+            cleaned = strip_thinking(result)
+            self.dropped_chars += len(result) - len(cleaned)
+            result = cleaned
+        self.state = self.PASSTHROUGH
+        return result
 
 
 # ============================================================================
