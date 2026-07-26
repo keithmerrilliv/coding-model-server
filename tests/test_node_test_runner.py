@@ -9,6 +9,7 @@ orchestrator:
      so a genuine run isn't force-failed as "no summary detected".
 """
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -131,6 +132,97 @@ def test_wrap_in_sandbox_skips_bind_for_system_node(tmp_path, monkeypatch):
 
     assert "/coding-model-node" not in " ".join(args)
     assert _path_value(args) == "/usr/local/bin:/usr/bin:/bin"
+
+
+_NVM_NODE = sorted(Path.home().glob(".nvm/versions/node/*/bin/node"))
+
+
+def _node_version(node_bin) -> str:
+    return subprocess.run([str(node_bin), "--version"],
+                          capture_output=True, text=True).stdout.strip()
+
+
+# The bound toolchain is only PROVABLY in use if it differs from whatever Node
+# the sandbox already has on PATH via /usr. When they match, this test cannot
+# tell the two apart and would pass without the bind doing anything.
+_SYS_NODE = shutil.which("node", path="/usr/local/bin:/usr/bin:/bin")
+_BIND_IS_DISTINGUISHABLE = bool(_NVM_NODE) and (
+    _SYS_NODE is None or _node_version(_NVM_NODE[-1]) != _node_version(_SYS_NODE))
+
+
+@pytest.mark.skipif(shutil.which("bwrap") is None, reason="bwrap not installed")
+@pytest.mark.skipif(not _NVM_NODE, reason="no nvm Node to bind into the sandbox")
+@pytest.mark.skipif(not _BIND_IS_DISTINGUISHABLE,
+                    reason="nvm and system Node are the same version — the bind "
+                           "would be unobservable, so this test would be vacuous")
+def test_sandbox_runs_the_BOUND_node_not_the_system_one(tmp_path, monkeypatch):
+    """DEV-103's acceptance criterion, executed rather than asserted about.
+
+    Every other test here runs unsandboxed on purpose, and the sandbox tests
+    only inspect the argv `_wrap_in_sandbox` builds. That leaves the real risk
+    untested: whether bwrap ACCEPTS those arguments and whether `node` actually
+    resolves from the BOUND toolchain once /home is masked by tmpfs.
+
+    Asserting merely that a JS test passes in the sandbox does not show that.
+    This box also has a system Node at /usr/bin, which is already inside the
+    sandbox via the /usr bind — so a green run proves nothing about the bind.
+    (Confirmed: with the bind removed, a naive version of this test still
+    passed.) Pinning process.version to the bound toolchain's version is what
+    makes it discriminating: drop the bind and the system Node answers with a
+    different version, and this fails.
+    """
+    node_root = _NVM_NODE[-1].parent.parent
+    expected = _node_version(_NVM_NODE[-1])
+    monkeypatch.setattr(test_runner, "SANDBOX_NODE_ROOT", node_root)
+    # No CODING_MODEL_ALLOW_UNSANDBOXED_TESTS here — the point is the sandbox.
+    monkeypatch.delenv("CODING_MODEL_ALLOW_UNSANDBOXED_TESTS", raising=False)
+
+    spec_dir = tmp_path / "spec"
+    spec_dir.mkdir()
+    (spec_dir / "logic.test.js").write_text(
+        "const test = require('node:test');\n"
+        "const assert = require('node:assert');\n"
+        "test('runs in the sandbox', () => { assert.strictEqual(2 + 2, 4); });\n"
+        f"test('uses the bound toolchain', () => {{ "
+        f"assert.strictEqual(process.version, '{expected}'); }});\n"
+    )
+
+    passed, output = test_runner._run_local_tests(spec_dir, "node_test", 60)
+
+    assert passed, (
+        f"sandboxed node:test run failed (expected the bound {expected}):\n{output}")
+    assert "# pass 2" in output
+    assert "# fail 0" in output
+
+
+@pytest.mark.skipif(shutil.which("bwrap") is None, reason="bwrap not installed")
+@pytest.mark.skipif(not _NVM_NODE, reason="no nvm Node to bind into the sandbox")
+def test_sandboxed_node_test_has_no_network(tmp_path, monkeypatch):
+    """The sandbox runs --unshare-all, so LLM-written tests cannot reach the
+    network. Worth proving on the Node path specifically: `node --test` is new
+    here, and a sandbox that silently stopped isolating would look identical to
+    one that works."""
+    node_root = _NVM_NODE[-1].parent.parent
+    monkeypatch.setattr(test_runner, "SANDBOX_NODE_ROOT", node_root)
+    monkeypatch.delenv("CODING_MODEL_ALLOW_UNSANDBOXED_TESTS", raising=False)
+
+    spec_dir = tmp_path / "spec"
+    spec_dir.mkdir()
+    # Connecting to a routable address must fail inside an unshared netns.
+    (spec_dir / "net.test.js").write_text(
+        "const test = require('node:test');\n"
+        "const assert = require('node:assert');\n"
+        "const net = require('node:net');\n"
+        "test('no network', (t, done) => {\n"
+        "  const s = net.connect(53, '1.1.1.1');\n"
+        "  s.on('connect', () => { s.destroy(); done(new Error('network reachable')); });\n"
+        "  s.on('error', () => { done(); });\n"
+        "});\n"
+    )
+
+    passed, output = test_runner._run_local_tests(spec_dir, "node_test", 60)
+
+    assert passed, f"expected the connection to be refused inside the sandbox:\n{output}"
 
 
 # ── 3. structural guard ──────────────────────────────────────────────────────
