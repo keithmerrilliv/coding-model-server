@@ -44,7 +44,16 @@ from pathlib import Path
 import requests
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+try:
+    load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+except OSError:
+    # Unreadable is fine and expected under systemd: the unit already
+    # delivers these values via EnvironmentFile (read by the manager BEFORE
+    # the namespace is set up), and the .env paths are listed in
+    # InaccessiblePaths so LLM-authored test code can't read the secrets if
+    # the bwrap sandbox is bypassed (DEV-174). This call is the fallback for
+    # manual runs; a PermissionError here must not kill the daemon at import.
+    pass
 
 # Transport errors that mean "couldn't reach the server" rather than "the work
 # failed". _http already backs off and retries these; if one still escapes, the

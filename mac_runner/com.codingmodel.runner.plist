@@ -19,6 +19,9 @@
     <string>mac_runner.server</string>
   </array>
 
+  <!-- NOT stale: the Mac checkout really lives at ~/Dev/qwen-server (the
+       GitHub remote is still qwen-server.git). Renaming this without
+       renaming the directory breaks the runner. See docs/SECURITY_MIGRATION.md. -->
   <key>WorkingDirectory</key>
   <string>/Users/km4/Dev/qwen-server</string>
 
@@ -33,8 +36,18 @@
 
   <key>RunAtLoad</key>
   <true/>
+  <!-- SuccessfulExit=false + ThrottleInterval: a bare KeepAlive=true made a
+       fast-exiting runner (e.g. sys.exit(1) on an empty
+       CODING_MODEL_RUNNER_API_KEY) a quiet crash-loop at launchd's ~10s
+       default. Now a clean exit stays exited, and failures retry on a 30s
+       floor that is visible in the logs. (DEV-167) -->
   <key>KeepAlive</key>
-  <true/>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
 
   <key>StandardOutPath</key>
   <string>/Users/km4/Library/Logs/coding-model-runner.out.log</string>
