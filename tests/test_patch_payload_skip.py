@@ -7,7 +7,7 @@ growing linearly) and materialized retry_history/ inside the Mac git
 worktree — glob-based SPM targets then compiled N stale copies of every
 source file alongside the current one.
 """
-from coding_model_autonomous.executor import _collect_patch_files
+from coding_model_autonomous.test_runner import _collect_patch_files
 
 
 def _make_spec_dir(tmp_path):

@@ -84,13 +84,22 @@ from coding_model_autonomous.jira_client import (
     JiraClient,
 )
 from coding_model_autonomous.jira_sync import JiraSync
-from coding_model_autonomous import executor
+from coding_model_autonomous import adversarial, executor, test_runner
+from coding_model_autonomous.test_runner import run_tests
+from coding_model_autonomous.retry_policy import (
+    _PRESERVE_ON_RETRY,
+    _clean_spec_dir_for_retry,
+    _latest_supervisor_feedback,
+    _load_prior_decisions,
+    _read_retry_attempts,
+    _rotation_pick,
+    _select_implementer_agent,
+    _snapshot_retry,
+)
 from coding_model_autonomous.executor import (
-    ALLOWED_IMPLEMENTER_AGENTS,
     ImplementerResult,
     MAX_RETRIES,
     ParseError,
-    TIER_TO_IMPLEMENTER,
     _write_artifact,
     build_architect_message,
     build_implementer_message,
@@ -103,7 +112,6 @@ from coding_model_autonomous.executor import (
     parse_implementer_response,
     parse_manifest_response,
     parse_reviewer_response,
-    run_tests,
     summarize_written_files,
 )
 from coding_model_autonomous import supervisor as _supervisor
@@ -842,76 +850,10 @@ def _verify_review_citations(review_md: str, spec_dir: Path) -> tuple[str, int, 
     return annotated, checked, unverified
 
 
-_PRESERVE_ON_RETRY: frozenset[str] = frozenset({
-    # Pipeline inputs / outputs of earlier phases — must persist so the
-    # next implementer sees the same plan + design + complexity decision.
-    "spec.md", "plan.yaml", "design.md", "complexity.json",
-    # Diagnostic artifacts from prior runs. Not used as inputs (rejection
-    # notes come from the gate, not these files), but useful for postmortem.
-    "failure_report.md", "review_report.md", "test_output.txt",
-})
 
 
-def _snapshot_retry(spec_dir: Path, retry_index: int) -> None:
-    """Copy the current state of spec_dir into retry_history/retry_<N>/
-    (excluding retry_history itself). Called BEFORE cleanup so each retry's
-    output is preserved for the synthesis pass.
-    """
-    snap = spec_dir / "retry_history" / f"retry_{retry_index}"
-    snap.mkdir(parents=True, exist_ok=True)
-    for path in spec_dir.iterdir():
-        if path.name == "retry_history":
-            continue
-        target = snap / path.name
-        try:
-            if path.is_dir():
-                shutil.copytree(path, target, dirs_exist_ok=True)
-            else:
-                shutil.copy2(path, target)
-        except OSError as exc:
-            logger.warning("snapshot retry_%d: failed to copy %s: %s",
-                           retry_index, path, exc)
 
 
-def _clean_spec_dir_for_retry(spec_dir: Path, retry_count: int) -> None:
-    """Wipe implementer / reviewer artifacts from spec_dir, keeping the
-    inputs (spec, plan, design) and prior-run diagnostics.
-
-    Snapshots the prior retry's state into retry_history/retry_<N-1>/
-    BEFORE wiping, so the synthesis pass at MAX_RETRIES has the full
-    rotation corpus to work from.
-
-    Why: the orchestrator does not isolate retries — earlier retries leave
-    files (implementer code, reviewer-written pytest tests) behind. When
-    retry-N picks a different file layout than retry-(N-1) (e.g. flat
-    `test_*.py` vs `tests/test_*.py`), pytest sees duplicate module names
-    and aborts collection with `import file mismatch` before any test
-    actually runs. Surfaced 2026-05-04 in spec_099515d1 retry-1; see
-    project_orchestrator_spec_dir_contamination.md.
-
-    Called at the start of _run_implementer for retry_count > 0. retry-0
-    runs against an empty (post-design) spec dir so cleanup is a no-op.
-    """
-    if retry_count == 0:
-        return
-    _snapshot_retry(spec_dir, retry_count - 1)
-    removed = 0
-    for path in spec_dir.iterdir():
-        if path.name in _PRESERVE_ON_RETRY or path.name == "retry_history":
-            continue
-        try:
-            if path.is_dir():
-                shutil.rmtree(path)
-            else:
-                path.unlink()
-            removed += 1
-        except OSError as exc:
-            logger.warning("spec dir cleanup: failed to remove %s: %s",
-                           path, exc)
-    logger.info(
-        "spec dir cleaned for retry=%d (snapshot retry_%d, %d items removed, %d preserved)",
-        retry_count, retry_count - 1, removed, len(_PRESERVE_ON_RETRY),
-    )
 
 
 # ── Implementation generation: single-call vs manifest/per-file (#4) ──────────
@@ -1627,7 +1569,7 @@ def _run_reviewer_adversarial(db: Database, spec: Spec, task, spec_dir,
     """
     tests_passed = True
     try:
-        adv_results = executor.generate_adversarial_tests(
+        adv_results = adversarial.generate_adversarial_tests(
             spec_dir, spec_md, design_md, code_files,
             reviewer_tests=result.test_files,
             reviewer_test_output=test_output,
@@ -1850,7 +1792,7 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
 
     # Phase b: adversarial test generation. Gated to retry-0 PASS runs; the
     # heavy lifting (and its fail-open handling) lives in the helper.
-    if (executor.ADVERSARIAL_TESTS_ENABLED
+    if (adversarial.ADVERSARIAL_TESTS_ENABLED
             and tests_passed
             and result.verdict == "PASS"
             and task.retry_count == 0
@@ -1954,115 +1896,14 @@ def _build_supervisor_context(db: Database, spec: Spec, task, outcome: str,
     }
 
 
-def _select_implementer_agent(spec_dir) -> "str | None":
-    """Read complexity.json and pick the implementer agent.
-
-    Precedence: architect's specific `recommended_agent` (if it's in the
-    whitelist) → tier default (if tier is recognized) → None (caller uses the
-    env-default IMPLEMENTER_AGENT). Returns None silently on any error so a
-    malformed or absent complexity.json never blocks the pipeline.
-    """
-    import json as _json
-    cpath = spec_dir / "complexity.json"
-    if not cpath.exists():
-        return None
-    try:
-        c = _json.loads(cpath.read_text())
-    except (OSError, _json.JSONDecodeError):
-        return None
-    rec = (c.get("recommended_agent") or "").strip()
-    if rec in ALLOWED_IMPLEMENTER_AGENTS:
-        return rec
-    tier = (c.get("tier") or "").strip().lower()
-    return TIER_TO_IMPLEMENTER.get(tier)
 
 
-# Rotation chain for implementer retries. Ordered for vendor/family diversity:
-# Qwen3.6 → Qwen3-Coder-Next → MiniMax → Qwen3-Coder. GLM (Zhipu) was removed
-# 2026-06-07: as a reasoning model it burns the per-file/manifest budget on
-# reasoning (even with --reasoning-budget 0, which it ignores — see config.py)
-# and truncates without emitting usable code. See project_implementer_rotation.md
-# and project_glm_perfile_truncation.md for the evidence.
-_IMPLEMENTER_ROTATION = [
-    "implementer", "deep_implementer",
-    "moe_implementer", "fast_implementer",
-]
 
 
-def _rotation_pick(initial_agent: "str | None", retry_count: int) -> "str | None":
-    """Advance to the next implementer in the rotation chain on retry.
-
-    Retry 0 returns ``initial_agent`` unchanged — the architect's complexity
-    recommendation wins on first attempt. From retry 1 onward, walks the
-    rotation chain so each retry uses a different model and we get out of
-    any single-model fragility pattern (see
-    project_implementer_revision_fragility.md).
-
-    The chain starts with ``initial_agent`` so retry index N maps to the
-    Nth agent in a stable order; consecutive retries never repeat the same
-    model.
-    """
-    if retry_count == 0 or not initial_agent:
-        return initial_agent
-    if initial_agent in _IMPLEMENTER_ROTATION:
-        chain = [initial_agent] + [a for a in _IMPLEMENTER_ROTATION if a != initial_agent]
-    else:
-        chain = _IMPLEMENTER_ROTATION
-    return chain[retry_count % len(chain)]
 
 
-def _latest_supervisor_feedback(db: Database, spec_id: str,
-                                *, target_role: str) -> str | None:
-    """Most recent supervisor `feedback_to_inject` for *target_role* on this spec.
-
-    Used by `_run_reviewer` (and any role whose retry path can't carry feedback
-    through a synthetic gate) to read the supervisor's directive on retry.
-    Returns None if no matching decision is found.
-    """
-    import json
-    rows = db.list_events_by_kind(
-        spec_id=spec_id, kind=EventKind.SUPERVISOR_DECISION, limit=20,
-    )
-    for r in rows:  # most-recent first
-        if not r.payload_json:
-            continue
-        try:
-            payload = json.loads(r.payload_json)
-        except json.JSONDecodeError:
-            continue
-        if (payload.get("action") == "retry"
-                and payload.get("target_role") == target_role
-                and payload.get("feedback_to_inject")):
-            return payload["feedback_to_inject"]
-    return None
 
 
-def _load_prior_decisions(db: Database, spec_id: str) -> list[dict]:
-    """Most-recent N supervisor decisions for *spec_id*, oldest-first.
-
-    Decoded from the events table's payload_json, capped to the supervisor
-    transition budget so we never render more than the model could have made.
-    """
-    import json
-    rows = db.list_events_by_kind(
-        spec_id=spec_id,
-        kind=EventKind.SUPERVISOR_DECISION,
-        limit=_supervisor.MAX_SUPERVISOR_TRANSITIONS,
-    )
-    out = []
-    for r in reversed(rows):  # oldest-first for natural reading order
-        if not r.payload_json:
-            continue
-        try:
-            payload = json.loads(r.payload_json)
-        except json.JSONDecodeError:
-            continue
-        out.append({
-            "action": payload.get("action", "?"),
-            "target_role": payload.get("target_role"),
-            "reason": payload.get("reason", ""),
-        })
-    return out
 
 
 def _retry_role_with_feedback(db: Database, spec: Spec, target_role: str,
@@ -2234,65 +2075,6 @@ def _attempt_retry(db: Database, spec: Spec, task, failure_detail: str) -> None:
 _SYNTHESIS_AGENT = os.getenv("AUTONOMOUS_SYNTHESIS_AGENT", "deep_reviewer")
 
 
-def _read_retry_attempts(spec_dir: Path) -> list[dict]:
-    """Walk retry_history/ + the current live spec_dir and return one dict
-    per attempt for the synthesis prompt. Each dict carries:
-        retry: int — 0-indexed attempt number
-        agent: str — best-effort guess from the snapshot (or "current")
-        files: dict[relpath, content] — implementer source (no test_*.py)
-        test_summary: str — last ~1500 chars of test_output.txt for that attempt
-    """
-    history = spec_dir / "retry_history"
-    attempts: list[dict] = []
-
-    def _gather(root: Path, retry_index: int) -> dict:
-        files: dict[str, str] = {}
-        test_output = ""
-        for path in root.rglob("*"):
-            if not path.is_file():
-                continue
-            rel = path.relative_to(root)
-            # Skip anything under retry_history — the snapshots from prior
-            # retries are surfaced as separate entries already.
-            if rel.parts and rel.parts[0] == "retry_history":
-                continue
-            name = rel.name
-            # Drop pipeline metadata; keep only deliverable code + tests.
-            if name in {"spec.md", "plan.yaml", "design.md", "complexity.json",
-                        "review_report.md", "failure_report.md"}:
-                continue
-            # Only the spec_dir-level test_output.txt counts (not any
-            # snapshot copy, which we already filtered above).
-            if name == "test_output.txt" and rel.parent == Path():
-                test_output = path.read_text(errors="replace")
-                continue
-            try:
-                files[str(rel)] = path.read_text(errors="replace")
-            except OSError:
-                continue
-        return {
-            "retry": retry_index,
-            "agent": "snapshot",
-            "files": files,
-            "test_summary": test_output[-1500:] if test_output else "",
-        }
-
-    if history.exists():
-        for sub in sorted(history.iterdir()):
-            if not sub.is_dir() or not sub.name.startswith("retry_"):
-                continue
-            try:
-                idx = int(sub.name.split("_", 1)[1])
-            except ValueError:
-                continue
-            attempts.append(_gather(sub, idx))
-
-    # Include the live spec_dir as the latest attempt.
-    live = _gather(spec_dir, retry_index=len(attempts))
-    live["agent"] = "current"
-    if live["files"]:
-        attempts.append(live)
-    return attempts
 
 
 def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
@@ -2727,7 +2509,7 @@ def main() -> int:
     # Sandbox pre-flight (DEV-155): a degraded sandbox used to surface as
     # one log line per test run, buried mid-spec. Say it once, at startup,
     # where an operator actually looks — and refuse outright if asked to.
-    sandbox_ok, sandbox_detail = executor.seccomp_preflight()
+    sandbox_ok, sandbox_detail = test_runner.seccomp_preflight()
     if sandbox_ok:
         logger.info("test sandbox pre-flight: %s", sandbox_detail)
     else:
@@ -2741,19 +2523,19 @@ def main() -> int:
     # Phase b pre-flight: if the operator flipped the flag, surface up
     # front whether each configured provider will actually fire — otherwise
     # a missing key only shows up as a runtime warning per spec.
-    if executor.ADVERSARIAL_TESTS_ENABLED:
-        providers = executor._resolve_providers()
+    if adversarial.ADVERSARIAL_TESTS_ENABLED:
+        providers = adversarial._resolve_providers()
         provider_summary = ", ".join(
-            f"{p}={executor._provider_model(p)}" for p in providers
+            f"{p}={adversarial._provider_model(p)}" for p in providers
         )
-        adv_ok, adv_reason = executor.adversarial_tests_available()
+        adv_ok, adv_reason = adversarial.adversarial_tests_available()
         if adv_ok:
             logger.info(
                 "phase-b adversarial test generation ENABLED (providers=[%s], "
                 "max_tokens=%d, timeout=%.0fs)",
                 provider_summary,
-                executor.ADVERSARIAL_MAX_TOKENS,
-                executor.ADVERSARIAL_TIMEOUT,
+                adversarial.ADVERSARIAL_MAX_TOKENS,
+                adversarial.ADVERSARIAL_TIMEOUT,
             )
         else:
             logger.warning(
