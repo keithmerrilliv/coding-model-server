@@ -301,6 +301,15 @@ def test_package_resolution_runs_outside_the_sandbox_and_the_build_inside(
         "the build runs the LLM-authored patch and must stay confined")
     assert "-disableAutomaticPackageResolution" in build, (
         "the sandboxed step must not re-resolve, or it nests again")
+    # The toolchain sandboxes itself in TWO places. Macro plugins are the
+    # second: swift-frontend runs them under sandbox-exec, so any dependency
+    # using a macro nests and fails with "swift-plugin-server produced
+    # malformed response". Found only by running a real build (DEV-294).
+    macro_flag = [a for a in build if a.startswith("OTHER_SWIFT_FLAGS=")]
+    assert macro_flag, "macro plugins nest unless swift-frontend is told not to sandbox"
+    assert "-disable-sandbox" in macro_flag[0]
+    assert "$(inherited)" in macro_flag[0], (
+        "must not clobber a project's own OTHER_SWIFT_FLAGS")
 
 
 def test_swift_test_disables_swiftpms_own_sandbox(client, monkeypatch):

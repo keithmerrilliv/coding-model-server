@@ -45,6 +45,15 @@ def build_xcodebuild_test_cmd(worktree: Path, derived_data: Path, **opts: Any) -
         # evaluation itself and macOS cannot nest sandboxes. Disabling it here
         # keeps the sandboxed step from trying again and failing with EPERM.
         "-disableAutomaticPackageResolution",
+        # The SECOND place the toolchain sandboxes itself: swift-frontend runs
+        # macro plugins under sandbox-exec, which nests exactly like SwiftPM's
+        # manifest sandbox and fails the same way —
+        #   External macro implementation type '...' could not be found;
+        #   'swift-plugin-server' produced malformed response
+        # with sandbox_apply EPERM underneath. Any dependency using a macro
+        # (mlx-swift's @TaskLocal here) breaks the build. $(inherited) so a
+        # project's own OTHER_SWIFT_FLAGS survive being overridden here.
+        "OTHER_SWIFT_FLAGS=$(inherited) -disable-sandbox",
         # LLM-generated test targets should not require signed binaries.
         "CODE_SIGNING_ALLOWED=NO",
         "CODE_SIGNING_REQUIRED=NO",
