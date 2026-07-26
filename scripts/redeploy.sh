@@ -32,8 +32,10 @@ BACKUP="/root/coding-model-unit-backup-${TS}"
 
 # Mode: full redeploy (syncs unit files + daemon-reload -> needs root) vs
 # restart-only (just bounce the services). Restart-only needs NO sudo thanks to
-# the coding-model polkit rule (/etc/polkit-1/rules.d/49-coding-model.rules), and
-# is enough for code changes since the venv is an editable install.
+# the coding-model polkit rule — kept in this repo at polkit/49-coding-model.rules
+# and installed to /etc/polkit-1/rules.d/ by a full redeploy. If restart-only
+# starts timing out, that rule has most likely gone missing (DEV-293).
+# Restart-only is enough for code changes since the venv is an editable install.
 RESTART_ONLY=0
 [[ "${1:-}" == "--restart-only" || "${1:-}" == "-r" ]] && RESTART_ONLY=1
 
@@ -98,8 +100,9 @@ fi
 
 # Restart in dependency order: server (owns the GPU + inference) -> orchestrator
 # (calls the server) -> dashboard (polls it). Only restart what we manage.
-# Capture the server PID first so the /health poll can distinguish the freshly
-# started process from a still-draining old one (which keeps answering /health).
+# Capture every unit's PID first: it lets the /health poll tell a freshly
+# started server from a still-draining old one (which keeps answering /health),
+# and it is how the status block proves each restart actually happened.
 declare -A OLD_PIDS
 for s in coding-model-server coding-model-orchestrator coding-model-dashboard; do
   OLD_PIDS["${s}"]="$(systemctl show -p MainPID --value "${s}" 2>/dev/null || echo 0)"
@@ -109,17 +112,30 @@ echo "==> Restarting services (non-blocking; readiness confirmed by the /health 
 for s in coding-model-server coding-model-orchestrator coding-model-dashboard; do
   printf '    restarting %s ...\n' "${s}"
   # --no-block skips waiting for the graceful SIGTERM drain (up to the unit's
-  # TimeoutStopSec) to COMPLETE. But the enqueue is still a D-Bus round-trip to
-  # systemd (via polkit), and under load — e.g. while PID 1 is tearing down the
-  # server's ~180 GB cgroup — that call itself can return "Connection timed out"
-  # (non-zero). Under `set -e` a single such blip would abort the whole redeploy,
-  # skipping the remaining services AND the /health poll below. So retry the
-  # enqueue a few times, and never let it kill the run: the PID-change + /health
-  # poll is the real readiness gate and will catch a restart that didn't take.
+  # TimeoutStopSec) to COMPLETE. The enqueue itself is still a D-Bus round-trip
+  # to systemd, authorized by polkit, and it can fail with "Connection timed
+  # out". Under `set -e` a single failure would abort the whole redeploy,
+  # skipping the remaining services AND the /health poll — so retry a few times
+  # and never let it kill the run. The PID comparison in the status block below
+  # is the real gate and will catch a restart that didn't take.
+  #
+  # On the cause of that timeout: this comment used to blame D-Bus load (PID 1
+  # tearing down the server's ~180 GB cgroup). That was a GUESS, and it was
+  # wrong — it cost real debugging time in DEV-293. What actually happened is
+  # that the polkit rule granting this user manage-units had gone missing, so
+  # polkit fell back to INTERACTIVE authentication and each non-interactive
+  # call blocked until the auth timeout. A missing rule looks exactly like a
+  # busy bus from here. If these timeouts return, check polkit FIRST:
+  #   ls -l /etc/polkit-1/rules.d/49-coding-model.rules   # repo: polkit/
+  #   journalctl -b | grep -i 'polkitd.*manage-units' | tail
+  # A "FAILED to authenticate" line confirms it; reinstall with a full
+  # `sudo bash scripts/redeploy.sh`. Load may still be a real cause, which is
+  # why the retry stays — but it is the second thing to suspect, not the first.
   enqueued=0
   for attempt in 1 2 3; do
     if systemctl restart --no-block "${s}"; then enqueued=1; break; fi
-    echo "    (enqueue attempt ${attempt}/3 failed — systemd/D-Bus busy; retrying in 3s)"
+    echo "    (enqueue attempt ${attempt}/3 failed — check the polkit rule first," \
+         "see the comment above; retrying in 3s)"
     sleep 3
   done
   [[ "${enqueued}" == "1" ]] \
