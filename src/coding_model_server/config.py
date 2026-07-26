@@ -98,6 +98,13 @@ class Config:
     HOST = os.getenv('HOST', '127.0.0.1')
     ADMIN_API_KEY = os.getenv('ADMIN_API_KEY', '')
     INGEST_ALLOWED_DIR = os.getenv('INGEST_ALLOWED_DIR', '')
+    # Per-file byte cap for ingestion. Documented since forever but read by
+    # nothing (DEV-164), so an operator who set it got no protection: the
+    # only limit was the 100MB base64 upload cap, and PDF ingest had none.
+    # 0 disables the cap. Default 100MB matches the upload ceiling rather
+    # than the old .env.example's 100000 (100KB), which would have started
+    # rejecting PDFs that ingest fine today.
+    INGEST_MAX_FILE_SIZE = int(os.getenv('INGEST_MAX_FILE_SIZE', 100 * 1024 * 1024))
     
     # llama-server thread split. 24 = physical core count (8 P-cores + 16
     # E-cores); hyperthreads hurt decode. Prefill (batch) benefits from

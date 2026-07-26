@@ -57,8 +57,8 @@ because every one of them is a VRAM-budget decision that has been measured.
 | `MEMORY_RELEVANCE_THRESHOLD` | `0.35` | Minimum similarity for a memory to be injected into a chat request. |
 | `PDF_CHUNK_SIZE` | `1000` | Characters per chunk when ingesting a PDF. |
 | `PDF_CHUNK_OVERLAP` | `200` | Overlap between PDF chunks. |
-| `INGEST_MAX_FILE_SIZE` | `100000` | Max bytes per file for the scraping ingest path. |
-| `APPLE_DEEP_DOCS_PATH` | *(unset)* | Path the Apple Deep Docs scraper writes to / reads from. |
+| `INGEST_MAX_FILE_SIZE` | `104857600` (100MB) | Per-file byte cap enforced by `/v1/memory/ingest`. `0` disables. |
+| `APPLE_DEEP_DOCS_PATH` | *(unset → `tools/appledeepdoc-mcp`)* | Directory holding the Apple Deep Docs MCP server (`main.py` + `venv/`). |
 
 ### Autonomous mode (orchestrator)
 

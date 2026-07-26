@@ -97,7 +97,11 @@ async def lifespan(app: FastAPI):
 
     try:
         logger.info("Initializing Apple Deep Docs Service...")
-        mcp_path = os.path.join(os.getcwd(), "tools/appledeepdoc-mcp")
+        # APPLE_DEEP_DOCS_PATH was documented but read by nothing (DEV-164);
+        # the hardcoded CWD-relative path also broke whenever the unit's
+        # WorkingDirectory differed. None lets the service resolve its own
+        # repo-relative default.
+        mcp_path = os.getenv("APPLE_DEEP_DOCS_PATH") or None
         svc = AppleDeepDocsService(mcp_path)
         if svc.start():
             runtime.services.apple_deep_docs = svc
