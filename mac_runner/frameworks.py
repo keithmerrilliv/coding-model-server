@@ -17,7 +17,12 @@ class FrameworkError(ValueError):
 
 
 def build_swift_test_cmd(worktree: Path, **opts: Any) -> list[str]:
-    cmd = ["swift", "test", "--parallel"]
+    # --disable-sandbox stops SwiftPM applying ITS OWN sandbox to manifest
+    # evaluation. macOS cannot nest sandboxes: with our sandbox-exec wrapper
+    # already applied, SwiftPM's inner sandbox_apply fails with EPERM and the
+    # run dies before compiling anything (DEV-294). This does not widen what
+    # the build can reach — our profile still confines the whole process tree.
+    cmd = ["swift", "test", "--parallel", "--disable-sandbox"]
     if filt := opts.get("filter"):
         cmd.extend(["--filter", filt])
     return cmd
@@ -35,17 +40,67 @@ def build_xcodebuild_test_cmd(worktree: Path, derived_data: Path, **opts: Any) -
         "-destination", destination,
         "-configuration", configuration,
         "-derivedDataPath", str(derived_data),
+        # Resolution happens in a separate, UNSANDBOXED pre-step (see
+        # build_resolve_cmd / DEV-294) because SwiftPM sandboxes manifest
+        # evaluation itself and macOS cannot nest sandboxes. Disabling it here
+        # keeps the sandboxed step from trying again and failing with EPERM.
+        "-disableAutomaticPackageResolution",
         # LLM-generated test targets should not require signed binaries.
         "CODE_SIGNING_ALLOWED=NO",
         "CODE_SIGNING_REQUIRED=NO",
         "CODE_SIGN_IDENTITY=",
     ]
-    if ws := opts.get("workspace"):
-        cmd.extend(["-workspace", ws])
-    elif project := opts.get("project"):
-        cmd.extend(["-project", project])
-    # If neither specified, xcodebuild auto-detects a .xcodeproj/.xcworkspace in cwd.
+    cmd.extend(_project_selector(opts))
     return cmd
+
+
+def _project_selector(opts: dict[str, Any]) -> list[str]:
+    """-workspace/-project flags, or nothing to let xcodebuild auto-detect."""
+    if ws := opts.get("workspace"):
+        return ["-workspace", ws]
+    if project := opts.get("project"):
+        return ["-project", project]
+    return []
+
+
+def build_resolve_cmd(framework: str, worktree: Path, derived_data: Path,
+                      **opts: Any) -> "list[str] | None":
+    """Command that resolves package dependencies, to run OUTSIDE the sandbox.
+
+    DEV-294: the runner wraps builds in sandbox-exec (DEV-126), but SwiftPM
+    spawns its own sandbox-exec to evaluate Package.swift manifests. macOS does
+    not permit nesting — the inner sandbox_apply returns EPERM — so every
+    xcodebuild against a project with SwiftPM dependencies died during
+    "Resolve Package Graph", before compiling a line. That is all three
+    registered repos.
+
+    Splitting the work is what makes both halves possible:
+
+      * resolution runs unsandboxed, so SwiftPM's own manifest sandbox applies
+        normally. Manifest evaluation IS code execution, so it matters that it
+        stays confined by something — here it is SwiftPM's sandbox rather than
+        ours.
+      * the build/test step, which runs the LLM-authored patch, stays inside
+        our profile. That is the code DEV-126 exists to contain, and it is
+        unaffected by this change.
+
+    Returns None when the framework needs no separate resolve step.
+    """
+    if framework == "xcodebuild_test":
+        scheme = opts.get("scheme")
+        if not scheme:
+            raise FrameworkError("xcodebuild_test requires 'scheme'")
+        return [
+            "xcodebuild", "-resolvePackageDependencies",
+            "-scheme", scheme,
+            "-derivedDataPath", str(derived_data),
+            *_project_selector(opts),
+        ]
+    if framework == "swift_test":
+        # swift_test passes --disable-sandbox, so SwiftPM never nests and the
+        # build resolves inline. No pre-step needed.
+        return None
+    return None
 
 
 def build_cmd(framework: str, worktree: Path, derived_data: Path, **opts: Any) -> list[str]:

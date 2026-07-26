@@ -25,6 +25,7 @@ from .frameworks import (
     FrameworkError,
     SANDBOX_EXEC,
     build_cmd,
+    build_resolve_cmd,
     wrap_sandbox,
 )
 from .workspace import worktree, WorkspaceError
@@ -36,6 +37,11 @@ logging.basicConfig(
 logger = logging.getLogger("mac_runner.server")
 
 app = FastAPI(title="coding-model mac-runner", version="0.1.0")
+
+# Cap on the unsandboxed package-resolution pre-step (DEV-294). Bounded
+# separately from the test timeout: resolution can hit the network, and a hung
+# fetch should not consume the whole budget the actual test run needs.
+RESOLVE_TIMEOUT = int(os.getenv("CODING_MODEL_RUNNER_RESOLVE_TIMEOUT", "300"))
 
 
 def _sandbox_available() -> bool:
@@ -130,6 +136,43 @@ def run_tests_endpoint(req: RunTestsRequest) -> RunTestsResponse:
             except FrameworkError as e:
                 raise HTTPException(400, str(e))
 
+            # Resolve SwiftPM dependencies BEFORE sandboxing (DEV-294).
+            # SwiftPM sandboxes manifest evaluation itself and macOS cannot
+            # nest sandboxes, so doing this inside our profile fails with
+            # "sandbox_apply: Operation not permitted" every time. Only the
+            # build/test step — the part that runs the LLM-authored patch —
+            # needs our confinement, and it still gets it below.
+            resolve_output = ""
+            try:
+                resolve_cmd = build_resolve_cmd(
+                    req.framework, wt, Config.DERIVED_DATA, **opts)
+            except FrameworkError as e:
+                raise HTTPException(400, str(e))
+            if resolve_cmd is not None:
+                logger.info("resolving packages (unsandboxed): %s",
+                            " ".join(resolve_cmd))
+                try:
+                    rr = subprocess.run(
+                        resolve_cmd, cwd=wt, capture_output=True, text=True,
+                        timeout=min(timeout, RESOLVE_TIMEOUT),
+                    )
+                    if rr.returncode != 0:
+                        # Not fatal on its own: the build may still succeed from
+                        # a warm cache, and if it cannot, xcodebuild's own error
+                        # is more useful than anything we would synthesise here.
+                        # Kept so a resolution failure is visible in the output
+                        # rather than showing up as a mystifying build error.
+                        logger.warning("package resolution exited %d", rr.returncode)
+                        resolve_output = (
+                            "[package resolution failed — the build may fail "
+                            f"for this reason]\n{rr.stdout}\n{rr.stderr}\n\n")
+                except subprocess.TimeoutExpired:
+                    logger.warning("package resolution timed out")
+                    resolve_output = "[package resolution timed out]\n\n"
+                except FileNotFoundError:
+                    logger.error("%s not found on PATH", resolve_cmd[0])
+                    resolve_output = f"[{resolve_cmd[0]!r} not found on PATH]\n\n"
+
             # The patch being built is LLM-authored code; confine it
             # (DEV-126). The Linux orchestrator already sandboxes its runs —
             # unsandboxed Mac execution was the asymmetry.
@@ -150,7 +193,7 @@ def run_tests_endpoint(req: RunTestsRequest) -> RunTestsResponse:
                     cmd, cwd=wt, capture_output=True, text=True, timeout=timeout,
                 )
                 passed = result.returncode == 0
-                output = (result.stdout or "") + "\n" + (result.stderr or "")
+                output = resolve_output + (result.stdout or "") + "\n" + (result.stderr or "")
                 exit_code: Optional[int] = result.returncode
             except subprocess.TimeoutExpired as e:
                 passed = False

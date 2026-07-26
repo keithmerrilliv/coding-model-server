@@ -80,7 +80,7 @@ def test_swift_test_builds_and_launches_the_command(client, monkeypatch):
     assert resp.status_code == 200, resp.text
     assert resp.json()["passed"] is True
     # The framework arg reached build_cmd exactly once, so the command got built.
-    assert seen["cmd"] == ["swift", "test", "--parallel"]
+    assert seen["cmd"] == ["swift", "test", "--parallel", "--disable-sandbox"]
 
 
 def test_filter_is_forwarded_to_swift_test(client, monkeypatch):
@@ -99,7 +99,8 @@ def test_filter_is_forwarded_to_swift_test(client, monkeypatch):
               "filter": "MyTests"},
     )
 
-    assert seen["cmd"] == ["swift", "test", "--parallel", "--filter", "MyTests"]
+    assert seen["cmd"] == ["swift", "test", "--parallel", "--disable-sandbox",
+                           "--filter", "MyTests"]
 
 
 def test_missing_toolchain_reports_cleanly_instead_of_500(client, monkeypatch):
@@ -171,7 +172,8 @@ def test_sandbox_wraps_the_command_when_available(client, monkeypatch):
     cmd = seen["cmd"]
     assert cmd[0] == server.SANDBOX_EXEC
     assert cmd[1:3] == ["-f", str(Config.SANDBOX_PROFILE)]
-    assert cmd[-3:] == ["swift", "test", "--parallel"]
+    assert cmd[cmd.index("swift"):] == ["swift", "test", "--parallel",
+                                       "--disable-sandbox"]
     joined = " ".join(cmd)
     assert "HOME=" in joined
     assert "WORKTREE=" in joined
@@ -187,7 +189,7 @@ def test_sandbox_missing_binary_falls_back_unwrapped(client, monkeypatch):
 
     _post_swift_test(client)
 
-    assert seen["cmd"] == ["swift", "test", "--parallel"]
+    assert seen["cmd"] == ["swift", "test", "--parallel", "--disable-sandbox"]
 
 
 def test_sandbox_disabled_runs_unwrapped(client, monkeypatch):
@@ -197,7 +199,7 @@ def test_sandbox_disabled_runs_unwrapped(client, monkeypatch):
 
     _post_swift_test(client)
 
-    assert seen["cmd"] == ["swift", "test", "--parallel"]
+    assert seen["cmd"] == ["swift", "test", "--parallel", "--disable-sandbox"]
 
 
 def test_shipped_profile_denies_credentials_and_home_writes():
@@ -258,3 +260,92 @@ def test_worktree_add_uses_a_double_dash_separator(client, monkeypatch, repo):
     assert argv, "worktree add was never invoked"
     assert "--" in argv, "operands must be guarded by a -- separator"
     assert argv.index("--") < len(argv) - 2, "-- must precede path and base_ref"
+
+
+# ── DEV-294: sandbox nesting ─────────────────────────────────────────────────
+#
+# The runner wraps builds in sandbox-exec (DEV-126), but SwiftPM spawns its own
+# sandbox-exec to evaluate Package.swift. macOS cannot nest sandboxes, so the
+# inner sandbox_apply returned EPERM and every xcodebuild against a project with
+# package dependencies died in "Resolve Package Graph" before compiling.
+#
+# The fix splits the work, so the property worth pinning is not "resolution
+# happens" but WHICH STEP IS CONFINED: resolution outside, build inside.
+
+def test_package_resolution_runs_outside_the_sandbox_and_the_build_inside(
+        client, monkeypatch):
+    monkeypatch.setattr(Config, "SANDBOX", True)
+    monkeypatch.setattr(server, "_sandbox_available", lambda: True)
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+
+    _fake_subprocess(monkeypatch, fake_run)
+    resp = client.post(
+        "/v1/run_tests",
+        headers={"X-Runner-Key": "test-key"},
+        json={"spec_id": "s1", "repo": "proj", "framework": "xcodebuild_test",
+              "scheme": "Demo"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert len(calls) == 2, f"expected resolve + build, got {calls}"
+
+    resolve, build = calls
+    assert "-resolvePackageDependencies" in resolve
+    assert resolve[0] != server.SANDBOX_EXEC, (
+        "resolution must NOT be sandboxed — SwiftPM sandboxes manifest "
+        "evaluation itself and macOS cannot nest sandboxes")
+    assert build[0] == server.SANDBOX_EXEC, (
+        "the build runs the LLM-authored patch and must stay confined")
+    assert "-disableAutomaticPackageResolution" in build, (
+        "the sandboxed step must not re-resolve, or it nests again")
+
+
+def test_swift_test_disables_swiftpms_own_sandbox(client, monkeypatch):
+    """swift_test needs no pre-step: --disable-sandbox stops SwiftPM nesting,
+    and our profile still confines the whole process tree."""
+    monkeypatch.setattr(Config, "SANDBOX", True)
+    monkeypatch.setattr(server, "_sandbox_available", lambda: True)
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+
+    _fake_subprocess(monkeypatch, fake_run)
+    resp = client.post(
+        "/v1/run_tests",
+        headers={"X-Runner-Key": "test-key"},
+        json={"spec_id": "s1", "repo": "proj", "framework": "swift_test"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert len(calls) == 1, f"swift_test needs no resolve pre-step, got {calls}"
+    assert "--disable-sandbox" in calls[0]
+    assert calls[0][0] == server.SANDBOX_EXEC
+
+
+def test_resolution_failure_is_surfaced_not_swallowed(client, monkeypatch):
+    """A failed resolve is non-fatal — the build may run from a warm cache —
+    but it must appear in the output, or a build failure caused by it looks
+    inexplicable."""
+    monkeypatch.setattr(Config, "SANDBOX", False)
+
+    def fake_run(cmd, **kw):
+        if "-resolvePackageDependencies" in cmd:
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="no network")
+        return subprocess.CompletedProcess(cmd, 0, stdout="tests ok", stderr="")
+
+    _fake_subprocess(monkeypatch, fake_run)
+    resp = client.post(
+        "/v1/run_tests",
+        headers={"X-Runner-Key": "test-key"},
+        json={"spec_id": "s1", "repo": "proj", "framework": "xcodebuild_test",
+              "scheme": "Demo"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert "package resolution failed" in body["output"]
+    assert "no network" in body["output"]
+    assert "tests ok" in body["output"]
