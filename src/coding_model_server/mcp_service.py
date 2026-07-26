@@ -6,6 +6,11 @@ Manages the Apple Deep Docs MCP server subprocess (JSON-RPC over stdio) and
 exposes a unified interface used by both the FastAPI server and a small CLI.
 Named mcp_service to reflect that it's an MCP *client*, not a manager of this
 project's own server.
+
+The transport (reader/writer threads, response demux, fail-all-on-death) lives
+in stdio_jsonrpc.StdioJsonRpcClient — shared with the client package's
+Cupertino client (DEV-146). Only the spawn, the handshake, and this service's
+error phrasing are here.
 """
 
 import subprocess
@@ -14,9 +19,8 @@ import sys
 import os
 import json
 import logging
-from queue import Queue, Empty, Full
-from threading import RLock, Lock, Thread
-from typing import Dict, Optional, Any
+
+from coding_model_server.stdio_jsonrpc import StdioJsonRpcClient, StdioRpcError
 
 # Configure logging
 logging.basicConfig(
@@ -25,10 +29,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-class AppleDeepDocsService:
-    """Service for interacting with the Apple Deep Docs MCP server"""
+class AppleDeepDocsService(StdioJsonRpcClient):
+    """Service for interacting with the Apple Deep Docs MCP server."""
+
+    # 3 min — generous for slow doc fetches.
+    MAX_TOTAL_WALL_TIME = 180
 
     def __init__(self, mcp_path: str = None):
+        super().__init__("appledeepdocs-mcp")
         if mcp_path is None:
             # Default to tools/appledeepdoc-mcp at the repo root; this file
             # lives at src/coding_model_server/.
@@ -38,61 +46,10 @@ class AppleDeepDocsService:
             self.mcp_path = os.path.join(repo_root, "tools", "appledeepdoc-mcp")
         else:
             self.mcp_path = mcp_path
-            
-        self.process = None
-        self.msg_id = 1
-        # RLock so call_tool can hold the lock and call start() inside it
-        # without deadlocking. It now guards only the fast operations —
-        # process lifecycle, the msg_id counter, and the stdin write — NOT the
-        # response wait. A dedicated reader thread (below) owns stdout and hands
-        # each response to the waiting caller's queue, so concurrent call_tool
-        # requests no longer serialize behind one another for up to 180s.
-        self.lock = RLock()
         self.venv_python = self._get_venv_python_path()
+        # Public liveness flag the CLI and /health surface. Kept in sync with
+        # the base's lifecycle via the _on_started/_on_stopped hooks.
         self.is_running = False
-        # req_id -> Queue on which the reader thread delivers that request's
-        # response (or a None sentinel if the process dies). Guarded by its own
-        # lock so the reader can route without contending for self.lock.
-        self._pending: Dict[int, "Queue"] = {}
-        self._pending_lock = Lock()
-        self._reader: Optional[Thread] = None
-        self._reader_stop = False
-        # Bounded queue feeding the dedicated writer thread (DEV-147). A
-        # wedged child that stops reading stdin fills the ~64KB pipe and
-        # blocks write/flush indefinitely; doing that write under self.lock
-        # pinned every subsequent call_tool (each on an anyio threadpool
-        # thread — the same pool serving all sync routes). The writer thread
-        # absorbs the block; callers only ever wait on a bounded put().
-        self._write_q: Optional[Queue] = None
-        self._writer: Optional[Thread] = None
-
-    def _readline_with_timeout(self, timeout: float = 30) -> Optional[str]:
-        """Read one line from the child's stdout, bounded by *timeout*.
-
-        A helper thread does the blocking readline and join(timeout) bounds
-        the wait. The previous select()-based version could falsely time out:
-        select reports the FD, but a complete line can already sit in
-        Python's stream buffer with nothing left on the fd (DEV-147). Only
-        used during the handshake — the reader thread owns the pipe after.
-        """
-        if not self.process or not self.process.stdout:
-            return None
-        holder: Dict[str, Optional[str]] = {}
-        stream = self.process.stdout
-
-        def _read():
-            try:
-                holder["line"] = stream.readline()
-            except Exception:
-                holder["line"] = None
-
-        t = Thread(target=_read, daemon=True, name="mcp-handshake-read")
-        t.start()
-        t.join(timeout)
-        if t.is_alive():
-            logger.error("MCP readline timed out after %.1f seconds", timeout)
-            return None
-        return holder.get("line")
 
     def _get_venv_python_path(self):
         """Get the correct Python executable path for the virtual environment based on OS"""
@@ -101,278 +58,108 @@ class AppleDeepDocsService:
         else:  # Unix-like (Linux, macOS)
             return os.path.join(self.mcp_path, "venv", "bin", "python")
 
-    def start(self):
-        """Start the MCP server process and perform handshake if not already running.
+    # ── transport hooks ──────────────────────────────────────────────────
 
-        Lock-protected start: previously the alive check was outside the lock,
-        so two concurrent callers could both observe "not running" and each
-        Popen a fresh subprocess. The second one would overwrite self.process
-        and leak the first.
-        """
-        with self.lock:
-            if self.process and self.process.poll() is None:
-                self.is_running = True
-                return True
-            return self._start_unlocked()
-
-    def _start_unlocked(self):
-        """Internal: caller must hold self.lock."""
-        try:
-            main_py = os.path.join(self.mcp_path, "main.py")
-            if not os.path.exists(self.venv_python):
-                logger.error(f"Apple Deep Docs venv not found at {self.venv_python}")
-                return False
-
-            # Use DEVNULL for stderr to avoid deadlocks from full buffers
-            self.process = subprocess.Popen(
-                [self.venv_python, main_py],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                text=True,
-                bufsize=1,
-                cwd=self.mcp_path
-            )
-
-            # Perform MCP Handshake
-            logger.info("Performing MCP handshake with Apple Deep Docs...")
-
-            # 1. Send initialize
-            init_request = {
-                "jsonrpc": "2.0",
-                "id": 0,
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {},
-                    "clientInfo": {"name": "coding-model-server", "version": "2.0"}
-                }
-            }
-            self.process.stdin.write(json.dumps(init_request) + "\n")
-            self.process.stdin.flush()
-
-            # 2. Wait for initialize response
-            while True:
-                line = self._readline_with_timeout(timeout=30)
-                if not line:
-                    logger.error("Failed to receive initialize response from MCP")
-                    return False
-                line = line.strip()
-                if not line: continue
-                try:
-                    resp = json.loads(line)
-                    if resp.get("id") == 0:
-                        logger.info("MCP initialize successful")
-                        break
-                except Exception:
-                    continue
-            
-            # 3. Send initialized notification
-            initialized_notif = {
-                "jsonrpc": "2.0",
-                "method": "notifications/initialized"
-            }
-            self.process.stdin.write(json.dumps(initialized_notif) + "\n")
-            self.process.stdin.flush()
-            
-            logger.info("Apple Deep Docs MCP server ready")
-            self.is_running = True
-            # Hand stdout to the reader thread only now that the synchronous
-            # handshake (which read stdout directly) is done — otherwise the two
-            # would race for the same pipe.
-            self._start_reader(self.process)
-            # Retire any writer bound to a previous (crashed) child, then
-            # start a fresh one on a fresh queue (DEV-147).
-            if self._write_q is not None:
-                try:
-                    self._write_q.put_nowait(None)
-                except Full:
-                    pass
-            self._write_q = Queue(maxsize=8)
-            self._start_writer(self.process, self._write_q)
-            return True
-        except Exception as e:
-            logger.error(f"Error starting Apple Deep Docs MCP: {e}")
-            self.is_running = False
-            return False
-
-    def _start_reader(self, proc):
-        """Spawn the stdout demux thread for `proc` (caller holds self.lock)."""
-        self._reader_stop = False
-        self._reader = Thread(
-            target=self._reader_loop, args=(proc,),
-            name="appledeepdocs-mcp-reader", daemon=True,
+    def _spawn(self):
+        main_py = os.path.join(self.mcp_path, "main.py")
+        if not os.path.exists(self.venv_python):
+            logger.error(f"Apple Deep Docs venv not found at {self.venv_python}")
+            return None
+        # DEVNULL for stderr to avoid deadlocks from full buffers
+        return subprocess.Popen(
+            [self.venv_python, main_py],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            bufsize=1,
+            cwd=self.mcp_path,
         )
-        self._reader.start()
 
-    def _start_writer(self, proc, write_q):
-        """Spawn the stdin writer thread for `proc` (caller holds self.lock)."""
-        self._writer = Thread(
-            target=self._writer_loop, args=(proc, write_q),
-            name="appledeepdocs-mcp-writer", daemon=True,
-        )
-        self._writer.start()
+    def _handshake(self, proc) -> bool:
+        """MCP initialize / initialized exchange, before the reader takes stdout."""
+        logger.info("Performing MCP handshake with Apple Deep Docs...")
+        init_request = {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "coding-model-server", "version": "2.0"},
+            },
+        }
+        proc.stdin.write(json.dumps(init_request) + "\n")
+        proc.stdin.flush()
 
-    def _writer_loop(self, proc, write_q):
-        """Own `proc`'s stdin: serialize writes so a wedged child blocks only
-        this thread, never a caller holding self.lock (DEV-147). Exits on the
-        None sentinel (a successor child was started)."""
         while True:
-            item = write_q.get()
-            if item is None:
-                return
-            payload, req_id = item
+            line = self._readline_with_timeout(timeout=30)
+            if not line:
+                logger.error("Failed to receive initialize response from MCP")
+                return False
+            line = line.strip()
+            if not line:
+                continue
             try:
-                proc.stdin.write(payload + "\n")
-                proc.stdin.flush()
-            except Exception as e:
-                logger.error("MCP writer: stdin write failed for id %s: %s",
-                             req_id, e)
-                with self._pending_lock:
-                    waiter = self._pending.pop(req_id, None)
-                if waiter is not None:
-                    waiter.put({"_writer_error": str(e)})
+                resp = json.loads(line)
+            except Exception:
+                continue
+            if resp.get("id") == 0:
+                logger.info("MCP initialize successful")
+                break
 
-    def _reader_loop(self, proc):
-        """Own `proc`'s stdout: parse each JSON-RPC line and deliver it to the
-        queue registered for its id.
+        proc.stdin.write(
+            json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")
+        proc.stdin.flush()
+        return True
 
-        This is what lets call_tool wait off-lock. A single reader means only
-        one consumer of the shared stdout pipe, so responses can't be swallowed
-        by the wrong caller (the old design had every caller read the pipe and
-        discard lines whose id didn't match — two at once ate each other's
-        replies).
-        """
-        stdout = proc.stdout
-        try:
-            while not self._reader_stop:
-                try:
-                    line = stdout.readline()
-                except (ValueError, OSError):
-                    break  # pipe closed under us
-                if line == "":
-                    break  # EOF — the child exited
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    resp = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                rid = resp.get("id")
-                if rid is None:
-                    continue  # server-initiated notification — nobody waiting
-                with self._pending_lock:
-                    q = self._pending.get(rid)
-                if q is not None:
-                    q.put(resp)
-        finally:
-            # Reader is exiting (EOF, stop, or error): wake every waiter with a
-            # sentinel so they fail fast instead of blocking to their timeout.
-            if proc.poll() is not None:
-                self.is_running = False
-            self._fail_all_pending()
+    def _on_started(self):
+        self.is_running = True
+        logger.info("Apple Deep Docs MCP server ready")
 
-    def _fail_all_pending(self):
-        with self._pending_lock:
-            waiters = list(self._pending.values())
-        for q in waiters:
-            q.put(None)  # None = connection lost; call_tool maps it to an error
+    def _on_stopped(self):
+        self.is_running = False
 
     def stop(self):
-        """Stop the MCP server process"""
-        if self.process:
-            self._reader_stop = True
-            try:
-                self.process.terminate()
-                self.process.wait(timeout=5)
-            except (subprocess.TimeoutExpired, OSError):
-                try:
-                    self.process.kill()
-                    self.process.wait(timeout=2)
-                except OSError:
-                    pass
-            finally:
-                self.process = None
-                self.is_running = False
-            # readline() returns EOF once the child is gone, so the reader loop
-            # falls out on its own; join briefly so a restart gets a clean slate.
-            if self._reader is not None:
-                self._reader.join(timeout=5)
-                self._reader = None
-            self._fail_all_pending()
+        had_process = self.process is not None
+        super().stop()
+        if had_process:
             logger.info("Apple Deep Docs MCP server stopped")
 
-    # 3 min — generous for slow doc fetches. This is now a per-request wait, not
-    # a lock hold, so a slow request no longer blocks every other call_tool.
-    MAX_TOTAL_WALL_TIME = 180
+    # ── tool surface ─────────────────────────────────────────────────────
 
-    def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> str:
-        """Call a specific tool on the MCP server and return the result as text"""
-        if not self.start():
-            return "Error: Apple Deep Docs MCP server failed to start."
+    def call_tool(self, tool_name: str, arguments) -> str:
+        """Call a specific tool on the MCP server and return the result as text.
 
-        response_q: "Queue" = Queue()
-
-        # Short critical section: allocate the id and register the waiter.
-        # The actual stdin write happens OUTSIDE self.lock via the writer
-        # thread's bounded queue (DEV-147): a wedged child fills the ~64KB
-        # pipe and blocks write/flush indefinitely, and doing that under
-        # self.lock pinned every subsequent call_tool — each on an anyio
-        # threadpool thread from the pool serving ALL sync routes.
-        with self.lock:
-            req_id = self.msg_id
-            self.msg_id += 1
-            with self._pending_lock:
-                self._pending[req_id] = response_q
-            request = {
-                "jsonrpc": "2.0",
-                "id": req_id,
-                "method": "tools/call",
-                "params": {"name": tool_name, "arguments": arguments},
-            }
-            payload = json.dumps(request)
-            write_q = self._write_q
-
+        Error strings are this service's own — the transport raises
+        StdioRpcError with a `kind` and each caller phrases its own message.
+        """
         try:
-            logger.info(f"Sending MCP Request: {payload[:200]}...")
-            write_q.put((payload, req_id), timeout=5)
-        except Full:
-            with self._pending_lock:
-                self._pending.pop(req_id, None)
-            logger.error("MCP writer backlog full — child appears wedged "
-                         "(not reading stdin)")
-            return ("Error: Documentation fetch failed: the Deep Docs MCP "
-                    "child is not accepting requests (writer backlog full).")
-
-        try:
-            try:
-                response = response_q.get(timeout=self.MAX_TOTAL_WALL_TIME)
-            except Empty:
+            response = self.request(
+                "tools/call", {"name": tool_name, "arguments": arguments})
+        except StdioRpcError as e:
+            if e.kind == "start":
+                return "Error: Apple Deep Docs MCP server failed to start."
+            if e.kind == "timeout":
                 return (f"Error: MCP server response not received within "
                         f"{self.MAX_TOTAL_WALL_TIME}s.")
-
-            if response is None:
-                # Reader delivered the process-died sentinel.
-                self.is_running = False
+            if e.kind == "died":
                 return "Error: MCP server process exited unexpectedly."
+            if e.kind == "backlog":
+                return ("Error: Documentation fetch failed: the Deep Docs MCP "
+                        "child is not accepting requests (writer backlog full).")
+            return f"Error: Documentation fetch failed: {e}"
 
-            if isinstance(response, dict) and "_writer_error" in response:
-                return (f"Error: Documentation fetch failed: "
-                        f"{response['_writer_error']}")
+        result = response.get("result", {})
+        content = result.get("content", [])
+        text_parts = [
+            item.get("text", "") for item in content
+            if item.get("type") == "text"
+        ]
+        if text_parts:
+            return "\n\n".join(text_parts)
+        return json.dumps(result, indent=2)
 
-            result = response.get("result", {})
-            content = result.get("content", [])
-            text_parts = [
-                item.get("text", "") for item in content
-                if item.get("type") == "text"
-            ]
-            if text_parts:
-                return "\n\n".join(text_parts)
-            return json.dumps(result, indent=2)
-        finally:
-            with self._pending_lock:
-                self._pending.pop(req_id, None)
 
 # Global instance for CLI / shared use
 _instance = None
