@@ -116,6 +116,20 @@ def ingest_memory_endpoint(request: IngestRequest):
     elif not is_in_temp:
         raise HTTPException(status_code=403, detail=f"Path must be under {temp_dir} (set INGEST_ALLOWED_DIR to allow other paths)")
 
+    # Honor the documented per-file cap (DEV-164) — PDF ingest previously
+    # had no size limit at all, so a multi-GB file would be read whole.
+    if Config.INGEST_MAX_FILE_SIZE:
+        try:
+            size = os.path.getsize(resolved)
+        except OSError as e:
+            raise HTTPException(status_code=400, detail=f"Cannot stat path: {e}")
+        if size > Config.INGEST_MAX_FILE_SIZE:
+            raise HTTPException(
+                status_code=413,
+                detail=(f"File too large ({size} bytes); INGEST_MAX_FILE_SIZE "
+                        f"is {Config.INGEST_MAX_FILE_SIZE}"),
+            )
+
     result = runtime.services.memory.ingest_pdf(resolved)
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])

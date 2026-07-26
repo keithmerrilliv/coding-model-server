@@ -76,14 +76,28 @@ config = Config()
 # Logging
 # ---------------------------------------------------------------------------
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(os.path.expanduser("~/.coding_model_client.log")),
-        logging.StreamHandler(),
-    ]
-)
+CLIENT_LOG_FILE = os.path.expanduser("~/.coding_model_client.log")
+
+
+def setup_logging(level=logging.INFO):
+    """Configure root logging for the interactive client.
+
+    Called from main() — NOT at import (DEV-166). At module scope this
+    hijacked root logging and created a $HOME log file as a side effect of
+    importing ANY client module: the eight test modules that import client
+    code paid it, and it fought the daemon's own basicConfig when the
+    packages shared a process. Library modules only getLogger(__name__).
+    """
+    logging.basicConfig(
+        level=level,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(CLIENT_LOG_FILE),
+            logging.StreamHandler(),
+        ],
+    )
+
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------

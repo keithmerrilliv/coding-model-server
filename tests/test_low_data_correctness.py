@@ -157,3 +157,76 @@ class TestPinnedFetch:
         services._get_revalidating_redirects("http://example.com:8080/x", timeout=5)
 
         assert "93.184.216.34:8080" in get.call_args.args[0]
+
+
+# ── DEV-164/165/166: config knobs, /scrape target, import side effects ───────
+
+def test_ingest_size_cap_is_enforced(tmp_path, monkeypatch):
+    """DEV-164: the documented per-file cap was read by no code, so PDF
+    ingest had no size limit at all."""
+    from fastapi import HTTPException
+
+    from coding_model_server import runtime
+    from coding_model_server.config import Config
+    from coding_model_server.routes import memory as memory_routes
+    from coding_model_server.schemas import IngestRequest
+
+    big = tmp_path / "huge.pdf"
+    big.write_bytes(b"x" * 5000)
+    monkeypatch.setattr(Config, "INGEST_MAX_FILE_SIZE", 1000)
+    monkeypatch.setattr(Config, "INGEST_ALLOWED_DIR", str(tmp_path))
+    monkeypatch.setattr(runtime.services, "memory", mock.Mock(), raising=False)
+
+    with pytest.raises(HTTPException) as exc:
+        memory_routes.ingest_memory_endpoint(IngestRequest(path=str(big)))
+    assert exc.value.status_code == 413
+    assert "INGEST_MAX_FILE_SIZE" in exc.value.detail
+
+
+def test_ingest_under_the_cap_proceeds(tmp_path, monkeypatch):
+    from coding_model_server import runtime
+    from coding_model_server.config import Config
+    from coding_model_server.routes import memory as memory_routes
+    from coding_model_server.schemas import IngestRequest
+
+    small = tmp_path / "ok.pdf"
+    small.write_bytes(b"x" * 10)
+    fake_mem = mock.Mock()
+    fake_mem.ingest_pdf.return_value = {"status": "success", "chunks": 1}
+    monkeypatch.setattr(Config, "INGEST_MAX_FILE_SIZE", 1000)
+    monkeypatch.setattr(Config, "INGEST_ALLOWED_DIR", str(tmp_path))
+    monkeypatch.setattr(runtime.services, "memory", fake_mem, raising=False)
+
+    result = memory_routes.ingest_memory_endpoint(IngestRequest(path=str(small)))
+    assert result["status"] == "success"
+
+
+def test_scrape_command_targets_a_real_script():
+    """DEV-165: /scrape pointed at scraping/main.py, which never existed."""
+    import pathlib
+
+    from coding_model_client import commands
+
+    src = pathlib.Path(commands.__file__).read_text()
+    # The built command itself — not the module's own references to the
+    # client's main.py — must name a script that exists.
+    cmd_lines = [ln for ln in src.splitlines() if "scrape_cmd = " in ln]
+    assert cmd_lines, "the /scrape command builder disappeared"
+    assert "main.py" not in cmd_lines[0], "the phantom entry point must be gone"
+    assert "scrape_all_apple_frameworks.py" in cmd_lines[0]
+    repo_root = pathlib.Path(commands.__file__).resolve().parents[2]
+    assert (repo_root / "scraping" / "scrape_all_apple_frameworks.py").is_file()
+
+
+def test_importing_client_config_does_not_configure_root_logging():
+    """DEV-166: importing any client module used to hijack root logging and
+    create a $HOME log file as an import side effect."""
+    import pathlib
+
+    from coding_model_client import config as client_config
+
+    src = pathlib.Path(client_config.__file__).read_text()
+    module_level = [ln for ln in src.splitlines()
+                    if ln.startswith("logging.basicConfig")]
+    assert not module_level, "basicConfig must live inside setup_logging()"
+    assert hasattr(client_config, "setup_logging")

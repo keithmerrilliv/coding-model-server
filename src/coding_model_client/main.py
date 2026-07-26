@@ -4,7 +4,7 @@ import sys
 import time
 import argparse
 
-from coding_model_client.config import config, COLORS, print_colored
+from coding_model_client.config import config, COLORS, print_colored, setup_logging
 from coding_model_client.display import set_terminal_title
 from coding_model_client.models import AGENT_THEMES, fetch_available_models
 from coding_model_client.history import load_chat_history, migrate_legacy_sessions, session_path
@@ -255,6 +255,11 @@ def chat(model="implementer", session_name=None):
 # ---------------------------------------------------------------------------
 
 def main():
+    # Root logging is configured HERE, not at import of config.py (DEV-166):
+    # importing a client module must not hijack logging or create a $HOME
+    # log file for test runners and library consumers.
+    setup_logging()
+
     parser = argparse.ArgumentParser(description="Coding Model Remote Client")
     parser.add_argument("--model", type=str, default="implementer", help="Agent model to use")
     parser.add_argument("--name", type=str, default=None, help="Name this session")

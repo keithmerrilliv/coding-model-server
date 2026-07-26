@@ -126,7 +126,10 @@ def handle_user_command(user_input, history, model, agent_theme):
             print_colored(f"Starting documentation scraper for '{parts[1].strip()}' on the server...", COLORS['CYAN'])
         else:
             print_colored("Starting Metal documentation scraper on the server...", COLORS['CYAN'])
-        scrape_cmd = f"cd scraping && python3 main.py{framework_arg}"
+        # scraping/main.py has never existed — /scrape failed 100% of the
+        # time (DEV-165). scrape_all_apple_frameworks.py is the real entry
+        # point and takes optional framework names as argv.
+        scrape_cmd = f"cd scraping && python3 scrape_all_apple_frameworks.py{framework_arg}"
         result = _tool_handlers.execute_remote_command(scrape_cmd)
         print_colored(f"\n{result}\n", COLORS['GREEN'])
         return True, model
