@@ -10,7 +10,7 @@ runs, so every retry FAILed on a harness artefact rather than the code.
 by full path so duplicate basenames coexist. This test fails (collection error,
 `passed is False`) without that flag and passes with it.
 """
-from coding_model_autonomous import executor
+from coding_model_autonomous import test_runner
 
 
 def test_run_local_tests_tolerates_duplicate_test_basenames(tmp_path, monkeypatch):
@@ -27,7 +27,7 @@ def test_run_local_tests_tolerates_duplicate_test_basenames(tmp_path, monkeypatc
     # the sandbox.
     monkeypatch.setenv("CODING_MODEL_ALLOW_UNSANDBOXED_TESTS", "1")
 
-    passed, output = executor._run_local_tests(spec_dir, "pytest", 60)
+    passed, output = test_runner._run_local_tests(spec_dir, "pytest", 60)
 
     assert passed, f"duplicate-basename collection should succeed; got:\n{output}"
     assert "import file mismatch" not in output

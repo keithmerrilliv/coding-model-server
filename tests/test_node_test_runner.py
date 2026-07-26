@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from coding_model_autonomous import executor
+from coding_model_autonomous import test_runner
 from coding_model_server import orchestrator_daemon as od
 
 
@@ -32,7 +32,7 @@ def test_node_test_dispatch_runs_green(tmp_path, monkeypatch):
     # bwrap (which may be absent/broken in CI). node resolves from the dev PATH.
     monkeypatch.setenv("CODING_MODEL_ALLOW_UNSANDBOXED_TESTS", "1")
 
-    passed, output = executor._run_local_tests(spec_dir, "node_test", 60)
+    passed, output = test_runner._run_local_tests(spec_dir, "node_test", 60)
 
     assert passed, f"node:test run should pass; got:\n{output}"
     assert "# fail 0" in output
@@ -49,14 +49,14 @@ def test_node_test_dispatch_reports_failure(tmp_path, monkeypatch):
     )
     monkeypatch.setenv("CODING_MODEL_ALLOW_UNSANDBOXED_TESTS", "1")
 
-    passed, output = executor._run_local_tests(spec_dir, "node_test", 60)
+    passed, output = test_runner._run_local_tests(spec_dir, "node_test", 60)
 
     assert not passed, f"a failing assertion must fail the run; got:\n{output}"
     assert "not ok 1" in output
 
 
 def test_default_timeouts_has_node_test():
-    assert executor.DEFAULT_TIMEOUTS.get("node_test") == 120
+    assert test_runner.DEFAULT_TIMEOUTS.get("node_test") == 120
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
@@ -82,7 +82,7 @@ def test_node_test_excludes_retry_history(tmp_path, monkeypatch):
     )
     monkeypatch.setenv("CODING_MODEL_ALLOW_UNSANDBOXED_TESTS", "1")
 
-    passed, output = executor._run_local_tests(spec_dir, "node_test", 60)
+    passed, output = test_runner._run_local_tests(spec_dir, "node_test", 60)
 
     assert passed, f"retry_history snapshot must be excluded; got:\n{output}"
     assert "stale snapshot" not in output
@@ -99,9 +99,9 @@ def _path_value(args: list[str]) -> str:
 def test_wrap_in_sandbox_binds_node_when_configured(tmp_path, monkeypatch):
     spec_dir = tmp_path / "spec"
     spec_dir.mkdir()
-    monkeypatch.setattr(executor, "SANDBOX_NODE_ROOT", Path("/fake/node/root"))
+    monkeypatch.setattr(test_runner, "SANDBOX_NODE_ROOT", Path("/fake/node/root"))
 
-    args = executor._wrap_in_sandbox(["node", "--test"], spec_dir)
+    args = test_runner._wrap_in_sandbox(["node", "--test"], spec_dir)
 
     # The toolchain is bound at the top-level mountpoint (not nested under the
     # read-only /opt bind) and placed first on PATH.
@@ -113,9 +113,9 @@ def test_wrap_in_sandbox_binds_node_when_configured(tmp_path, monkeypatch):
 def test_wrap_in_sandbox_no_node_bind_when_unset(tmp_path, monkeypatch):
     spec_dir = tmp_path / "spec"
     spec_dir.mkdir()
-    monkeypatch.setattr(executor, "SANDBOX_NODE_ROOT", None)
+    monkeypatch.setattr(test_runner, "SANDBOX_NODE_ROOT", None)
 
-    args = executor._wrap_in_sandbox(["python", "-m", "pytest"], spec_dir)
+    args = test_runner._wrap_in_sandbox(["python", "-m", "pytest"], spec_dir)
 
     assert "/coding-model-node" not in " ".join(args)
     assert _path_value(args) == "/usr/local/bin:/usr/bin:/bin"
@@ -125,9 +125,9 @@ def test_wrap_in_sandbox_skips_bind_for_system_node(tmp_path, monkeypatch):
     # A Node whose bin is already a bound, on-PATH dir needs no extra bind.
     spec_dir = tmp_path / "spec"
     spec_dir.mkdir()
-    monkeypatch.setattr(executor, "SANDBOX_NODE_ROOT", Path("/usr"))
+    monkeypatch.setattr(test_runner, "SANDBOX_NODE_ROOT", Path("/usr"))
 
-    args = executor._wrap_in_sandbox(["node", "--test"], spec_dir)
+    args = test_runner._wrap_in_sandbox(["node", "--test"], spec_dir)
 
     assert "/coding-model-node" not in " ".join(args)
     assert _path_value(args) == "/usr/local/bin:/usr/bin:/bin"

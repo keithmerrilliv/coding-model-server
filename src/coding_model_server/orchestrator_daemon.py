@@ -84,7 +84,8 @@ from coding_model_autonomous.jira_client import (
     JiraClient,
 )
 from coding_model_autonomous.jira_sync import JiraSync
-from coding_model_autonomous import executor
+from coding_model_autonomous import adversarial, executor, test_runner
+from coding_model_autonomous.test_runner import run_tests
 from coding_model_autonomous.executor import (
     ALLOWED_IMPLEMENTER_AGENTS,
     ImplementerResult,
@@ -103,7 +104,6 @@ from coding_model_autonomous.executor import (
     parse_implementer_response,
     parse_manifest_response,
     parse_reviewer_response,
-    run_tests,
     summarize_written_files,
 )
 from coding_model_autonomous import supervisor as _supervisor
@@ -1627,7 +1627,7 @@ def _run_reviewer_adversarial(db: Database, spec: Spec, task, spec_dir,
     """
     tests_passed = True
     try:
-        adv_results = executor.generate_adversarial_tests(
+        adv_results = adversarial.generate_adversarial_tests(
             spec_dir, spec_md, design_md, code_files,
             reviewer_tests=result.test_files,
             reviewer_test_output=test_output,
@@ -1850,7 +1850,7 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
 
     # Phase b: adversarial test generation. Gated to retry-0 PASS runs; the
     # heavy lifting (and its fail-open handling) lives in the helper.
-    if (executor.ADVERSARIAL_TESTS_ENABLED
+    if (adversarial.ADVERSARIAL_TESTS_ENABLED
             and tests_passed
             and result.verdict == "PASS"
             and task.retry_count == 0
@@ -2727,7 +2727,7 @@ def main() -> int:
     # Sandbox pre-flight (DEV-155): a degraded sandbox used to surface as
     # one log line per test run, buried mid-spec. Say it once, at startup,
     # where an operator actually looks — and refuse outright if asked to.
-    sandbox_ok, sandbox_detail = executor.seccomp_preflight()
+    sandbox_ok, sandbox_detail = test_runner.seccomp_preflight()
     if sandbox_ok:
         logger.info("test sandbox pre-flight: %s", sandbox_detail)
     else:
@@ -2741,19 +2741,19 @@ def main() -> int:
     # Phase b pre-flight: if the operator flipped the flag, surface up
     # front whether each configured provider will actually fire — otherwise
     # a missing key only shows up as a runtime warning per spec.
-    if executor.ADVERSARIAL_TESTS_ENABLED:
-        providers = executor._resolve_providers()
+    if adversarial.ADVERSARIAL_TESTS_ENABLED:
+        providers = adversarial._resolve_providers()
         provider_summary = ", ".join(
-            f"{p}={executor._provider_model(p)}" for p in providers
+            f"{p}={adversarial._provider_model(p)}" for p in providers
         )
-        adv_ok, adv_reason = executor.adversarial_tests_available()
+        adv_ok, adv_reason = adversarial.adversarial_tests_available()
         if adv_ok:
             logger.info(
                 "phase-b adversarial test generation ENABLED (providers=[%s], "
                 "max_tokens=%d, timeout=%.0fs)",
                 provider_summary,
-                executor.ADVERSARIAL_MAX_TOKENS,
-                executor.ADVERSARIAL_TIMEOUT,
+                adversarial.ADVERSARIAL_MAX_TOKENS,
+                adversarial.ADVERSARIAL_TIMEOUT,
             )
         else:
             logger.warning(

@@ -1,6 +1,6 @@
 """Seccomp-BPF denylist for the autonomous test sandbox.
 
-The filter is loaded by executor._wrap_in_sandbox via bwrap's
+The filter is loaded by test_runner._wrap_in_sandbox via bwrap's
 ``--seccomp <fd>``. Default action is ALLOW (denylist semantics): the
 blocked syscalls cover namespace/mount escape, kernel module load,
 ptrace, eBPF, io_uring, time manipulation, keyrings, and other

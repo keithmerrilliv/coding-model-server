@@ -70,7 +70,7 @@ def _patches(verdict, *, tests_pass, test_output):
         "run_tests": mock.patch.object(d, "run_tests",
                                        return_value=(tests_pass, test_output)),
         # keep phase-b out of the way unless a test opts in
-        "adv": mock.patch.object(d.executor, "ADVERSARIAL_TESTS_ENABLED", False),
+        "adv": mock.patch.object(d.adversarial, "ADVERSARIAL_TESTS_ENABLED", False),
     }
 
 
