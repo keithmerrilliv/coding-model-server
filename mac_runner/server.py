@@ -82,7 +82,18 @@ async def verify_runner_key(x_runner_key: Optional[str] = Header(None)) -> None:
 
 @app.get("/health")
 async def health() -> dict:
-    return {"status": "ok", "repos": sorted(Config.repos().keys())}
+    """Unauthenticated liveness only.
+
+    The repo list moved behind auth (DEV-170): it leaked the operator's
+    project codenames to anyone who could reach :5050.
+    """
+    return {"status": "ok"}
+
+
+@app.get("/v1/repos", dependencies=[Depends(verify_runner_key)])
+async def list_repos() -> dict:
+    """Registered repo names — authenticated (see health())."""
+    return {"repos": sorted(Config.repos().keys())}
 
 
 @app.post(

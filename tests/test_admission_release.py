@@ -97,3 +97,78 @@ def test_release_fires_exactly_once_when_both_hooks_run(monkeypatch):
     asyncio.run(_drain())
     asyncio.run(resp.background())
     assert len(releases) == 1
+
+
+# ── DEV-168: streaming metrics measure generation, not header latency ────────
+
+def test_stream_records_generation_time_and_defers_middleware(monkeypatch):
+    """A streaming response returns from call_next at http.response.start —
+    before a single token exists. The middleware sample would be header
+    latency; the teardown records the real one."""
+    from coding_model_server.routes import chat as chat_mod
+
+    admission = mock.Mock()
+    samples = []
+    monkeypatch.setattr(
+        chat_mod.request_metrics, "record",
+        lambda *a, **k: samples.append(a))
+
+    resp = _drive_stream(monkeypatch, admission)
+    assert getattr(resp.raw_headers, "__class__", None) is not None  # sanity
+
+    async def _drain():
+        async for _ in resp.body_iterator:
+            pass
+
+    asyncio.run(_drain())
+    asyncio.run(resp.background())
+
+    assert len(samples) == 1, "exactly one stream-completion sample"
+    method, path, subkey, duration_ms, status = samples[0][:5]
+    assert (method, path) == ("POST", "/v1/chat/completions")
+    assert status == 200
+    assert duration_ms >= 0
+
+
+def test_in_band_error_chunk_is_recorded_as_a_failure(monkeypatch):
+    """proxy_stream reports upstream failures as data: {"error": ...} inside
+    a 200 — those used to be filed as successes, so the error sparkline
+    missed exactly the failures that matter."""
+    from coding_model_server.routes import chat as chat_mod
+
+    samples = []
+    monkeypatch.setattr(
+        chat_mod.request_metrics, "record",
+        lambda *a, **k: samples.append(a))
+
+    fake_mgr = mock.Mock()
+    fake_mgr.tokenize.side_effect = lambda text: len(text or "") // 4
+
+    def _stream_with_error(*args, **kwargs):
+        yield 'data: {"error": {"message": "upstream inference error"}}\n\n'
+        yield "data: [DONE]\n\n"
+
+    fake_mgr.proxy_stream.side_effect = _stream_with_error
+    monkeypatch.setattr(chat_mod, "llama_server_manager", fake_mgr)
+    monkeypatch.setattr(chat_mod, "chat_admission", mock.Mock())
+    monkeypatch.setattr(chat_mod.runtime.services, "memory", None, raising=False)
+
+    request = ChatCompletionRequest(
+        model="implementer",
+        messages=[ChatMessage(role="user", content="hi")],
+        stream=True,
+    )
+    resp = asyncio.run(chat_mod.chat_completions(request, _FakeRequest()))
+
+    async def _drain():
+        async for _ in resp.body_iterator:
+            pass
+
+    asyncio.run(_drain())
+    asyncio.run(resp.background())
+
+    assert samples, "a completion sample must be recorded"
+    status = samples[0][4]
+    category = samples[0][5] if len(samples[0]) > 5 else None
+    assert status == 502, "an in-band error frame is a failure, not a 200"
+    assert category == "5xx_stream_error"

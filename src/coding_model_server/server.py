@@ -231,9 +231,15 @@ async def metrics_middleware(request: Request, call_next):
     route_path = getattr(route, "path", path) if route else path
     subkey = getattr(request.state, "metric_subkey", None)
     category = getattr(request.state, "error_category", None)
-    request_metrics.record(
-        request.method, route_path, subkey, duration_ms, status, category
-    )
+    # A streaming response returns from call_next at http.response.start —
+    # BEFORE a single token is generated. Recording here would log header
+    # latency as if it were generation time, and in-band {"error": ...}
+    # chunks would be filed as 200 successes (DEV-168). The stream teardown
+    # records the real sample instead; see routes/chat.py.
+    if not getattr(request.state, "defer_metrics", False):
+        request_metrics.record(
+            request.method, route_path, subkey, duration_ms, status, category
+        )
     response.headers["X-Request-ID"] = req_id
     return response
 

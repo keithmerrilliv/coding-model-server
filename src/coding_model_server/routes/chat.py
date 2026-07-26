@@ -9,6 +9,7 @@ import asyncio
 import logging
 import os
 import threading
+import time
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -18,6 +19,7 @@ from starlette.background import BackgroundTask
 
 from coding_model_server import runtime
 from coding_model_server.config import Config
+from coding_model_server.metrics import request_metrics
 from coding_model_server.llama_server import (
     InsufficientVramError,
     ModelBusyError,
@@ -289,6 +291,19 @@ def _once(fn):
     return call
 
 
+def _watch_for_error_chunk(inner, seen_error):
+    """Pass chunks through, flagging in-band SSE error frames (DEV-168).
+
+    proxy_stream reports upstream failures as ``data: {"error": ...}``
+    inside a 200 response, so without this the metrics layer files them as
+    successes — the error sparkline misses exactly the failures that matter.
+    """
+    for chunk in inner:
+        if not seen_error[0] and chunk.startswith('data: {"error"'):
+            seen_error[0] = True
+        yield chunk
+
+
 def _release_slot_on_stream_finish(inner, release_once):
     """Wrap a streaming chat-completion generator so ``release_once`` fires
     when the stream terminates — normal EOF, exception, or client disconnect
@@ -456,11 +471,27 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
                 upstream_cancel=upstream_cancel)
 
             stream_finished = threading.Event()
+            # The middleware's sample would be header latency, not generation
+            # time; defer to the teardown below (DEV-168).
+            raw_request.state.defer_metrics = True
+            seen_error = [False]
+            stream_started = time.perf_counter()
 
             def _finish_stream():
                 stream_finished.set()
                 chat_admission.release()
                 llama_server_manager.release_slot()
+                # The real sample: full generation duration, and a 502 when
+                # the stream carried an in-band error frame.
+                try:
+                    request_metrics.record(
+                        "POST", "/v1/chat/completions", request.model,
+                        (time.perf_counter() - stream_started) * 1000.0,
+                        502 if seen_error[0] else 200,
+                        "5xx_stream_error" if seen_error[0] else None,
+                    )
+                except Exception:
+                    logger.exception("[%s] stream metrics record failed", req_id)
 
             async def _watch_disconnect():
                 # DEV-158: the proxy worker thread blocks in a socket read
@@ -494,7 +525,8 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
             slot_held = False
             reservation_held = False
             return StreamingResponse(
-                _release_slot_on_stream_finish(inner, release_once),
+                _release_slot_on_stream_finish(
+                    _watch_for_error_chunk(inner, seen_error), release_once),
                 media_type="text/event-stream",
                 background=BackgroundTask(release_once),
             )

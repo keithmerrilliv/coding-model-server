@@ -214,3 +214,47 @@ def test_shipped_profile_denies_credentials_and_home_writes():
     assert '/.ssh' in text
     assert "Keychains" in text
     assert ".config/coding-model-runner" in text
+
+
+# ── DEV-170 / DEV-171: health disclosure and git option confusion ────────────
+
+def test_health_does_not_enumerate_repos(client):
+    resp = client.get("/health")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body == {"status": "ok"}, "repo names must not leak unauthenticated"
+
+
+def test_repo_list_requires_auth(client):
+    assert client.get("/v1/repos").status_code == 401
+    ok = client.get("/v1/repos", headers={"X-Runner-Key": "test-key"})
+    assert ok.status_code == 200
+    assert ok.json()["repos"] == ["proj"]
+
+
+def test_worktree_add_uses_a_double_dash_separator(client, monkeypatch, repo):
+    # base_ref is request-controlled; as a trailing positional a value
+    # starting with "-" would be parsed by git as a flag.
+    from mac_runner import workspace
+
+    seen = {}
+    real_git = workspace._git
+
+    def spy(repo_path, *args, **kwargs):
+        if args and args[0] == "worktree" and args[1] == "add":
+            seen["argv"] = args
+        return real_git(repo_path, *args, **kwargs)
+
+    monkeypatch.setattr(workspace, "_git", spy)
+    _fake_subprocess(monkeypatch, lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, "ok", ""))
+
+    client.post(
+        "/v1/run_tests",
+        headers={"X-Runner-Key": "test-key"},
+        json={"spec_id": "s1", "repo": "proj", "framework": "swift_test"},
+    )
+
+    argv = seen.get("argv")
+    assert argv, "worktree add was never invoked"
+    assert "--" in argv, "operands must be guarded by a -- separator"
+    assert argv.index("--") < len(argv) - 2, "-- must precede path and base_ref"

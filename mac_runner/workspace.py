@@ -71,7 +71,11 @@ def worktree(
     path = root / unique
     logger.info("creating worktree %s from %s@%s", path, repo, base_ref)
     try:
-        _git(repo, "worktree", "add", "--detach", str(path), base_ref)
+        # "--" before the operands: base_ref is request-controlled, and as a
+        # trailing positional a value starting with "-" would be parsed by
+        # git as a flag (option confusion — no shell is involved, so not
+        # command injection) (DEV-171).
+        _git(repo, "worktree", "add", "--detach", "--", str(path), base_ref)
     except subprocess.CalledProcessError as e:
         raise WorkspaceError(f"git worktree add failed: {e.stderr.strip()}") from e
 
