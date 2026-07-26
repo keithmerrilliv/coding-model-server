@@ -8,6 +8,7 @@ hatch is pinned separately in test_synthesis_gate.py.
 import pytest
 
 import coding_model_server.orchestrator_daemon as d
+from coding_model_autonomous import retry_policy
 from coding_model_autonomous.db import Database
 from coding_model_autonomous.models import GateStatus, GateType, SpecStatus, TaskStatus
 
@@ -64,28 +65,28 @@ def test_no_implementer_task_fails_spec(db):
 
 class TestRotationPick:
     def test_retry_zero_keeps_architect_recommendation(self):
-        assert d._rotation_pick("moe_implementer", 0) == "moe_implementer"
+        assert retry_policy._rotation_pick("moe_implementer", 0) == "moe_implementer"
 
     def test_none_initial_agent_stays_none(self):
-        assert d._rotation_pick(None, 3) is None
+        assert retry_policy._rotation_pick(None, 3) is None
 
     def test_consecutive_retries_never_repeat(self):
-        picks = [d._rotation_pick("implementer", n) for n in range(8)]
+        picks = [retry_policy._rotation_pick("implementer", n) for n in range(8)]
         for a, b in zip(picks, picks[1:]):
             assert a != b
 
     def test_chain_starts_with_initial_agent(self):
         # Retry index N maps to the Nth agent of a chain headed by the
         # initial agent, so the first retry moves OFF the failing model.
-        first_retry = d._rotation_pick("deep_implementer", 1)
+        first_retry = retry_policy._rotation_pick("deep_implementer", 1)
         assert first_retry != "deep_implementer"
-        assert first_retry in d._IMPLEMENTER_ROTATION
+        assert first_retry in retry_policy._IMPLEMENTER_ROTATION
 
     def test_unknown_initial_agent_falls_back_to_rotation(self):
-        pick = d._rotation_pick("dense_architect", 2)
-        assert pick == d._IMPLEMENTER_ROTATION[2 % len(d._IMPLEMENTER_ROTATION)]
+        pick = retry_policy._rotation_pick("dense_architect", 2)
+        assert pick == retry_policy._IMPLEMENTER_ROTATION[2 % len(retry_policy._IMPLEMENTER_ROTATION)]
 
     def test_wraps_modulo_chain_length(self):
-        chain_len = len(d._IMPLEMENTER_ROTATION)
-        assert (d._rotation_pick("implementer", chain_len)
-                == d._rotation_pick("implementer", 2 * chain_len))
+        chain_len = len(retry_policy._IMPLEMENTER_ROTATION)
+        assert (retry_policy._rotation_pick("implementer", chain_len)
+                == retry_policy._rotation_pick("implementer", 2 * chain_len))
