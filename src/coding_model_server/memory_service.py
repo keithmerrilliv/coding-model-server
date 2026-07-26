@@ -160,13 +160,18 @@ class MemoryService:
 
         embeddings = self._embedding_model.encode(
             [t for t, _ in unique], show_progress_bar=False)
-        ids = [f"mem_{int(timestamp)}_{uuid.uuid4().hex[:12]}" for _ in unique]
-        self._collection.add(
+        # ID = content hash, so an upsert is the dedup (DEV-162): the
+        # get-then-add pair let two concurrent identical inserts both pass
+        # the check and both write. Same-content re-ingest now overwrites
+        # its own row instead of adding a duplicate.
+        ids = [m["content_hash"] for _, m in unique]
+        self._collection.upsert(
             documents=[t for t, _ in unique],
             embeddings=[e.tolist() for e in embeddings],
             metadatas=[m for _, m in unique],
             ids=ids,
         )
+        self._warn_if_collection_large()
         logger.info("Batch memory insert: %d chunks (%d duplicates skipped)",
                     len(unique), len(texts) - len(unique))
         return len(unique)
@@ -188,18 +193,18 @@ class MemoryService:
             return {"error": "Text cannot be empty"}
 
         try:
-            # Dedup check: skip if identical content already stored
+            # The content hash IS the document id, so dedup is atomic at the
+            # storage layer (DEV-162). The old get-then-add pair let two
+            # concurrent identical POSTs both pass the check and both insert.
             content_hash = self._content_hash(text)
-            existing = self._collection.get(where={"content_hash": content_hash}, limit=1)
+            existing = self._collection.get(ids=[content_hash], limit=1)
             if existing and existing["ids"]:
                 logger.info("Duplicate memory skipped (hash %s)", content_hash[:8])
                 return {"status": "duplicate", "id": existing["ids"][0]}
 
             timestamp = time.time()
-            mem_id = f"mem_{int(timestamp)}_{uuid.uuid4().hex[:12]}"
-
             embedding = self._get_embedding(text)
-            
+
             # Default metadata
             meta = {
                 "timestamp": timestamp,
@@ -209,20 +214,44 @@ class MemoryService:
             }
             if metadata:
                 meta.update(metadata)
-                
-            self._collection.add(
+
+            # upsert, not add: a racing writer that inserted the same hash
+            # between the check above and here overwrites with identical
+            # content instead of creating a second row.
+            self._collection.upsert(
                 documents=[text],
                 embeddings=[embedding],
                 metadatas=[meta],
-                ids=[mem_id]
+                ids=[content_hash],
             )
-            
-            logger.info(f"Memory saved: {mem_id}")
-            return {"status": "success", "id": mem_id}
-            
+
+            logger.info("Memory saved: %s", content_hash[:8])
+            self._warn_if_collection_large()
+            return {"status": "success", "id": content_hash}
+
         except Exception as e:
             logger.error(f"Error adding memory: {e}")
             return {"error": str(e)}
+
+    # Collections grow without bound (every SAVE_MEMORY, PDF, and codebase
+    # ingest accumulates). No automatic eviction — deleting memories is a
+    # judgment call — but the operator gets a warning as retrieval quality
+    # and per-query scan cost start to degrade (DEV-162).
+    MEMORY_COUNT_WARN_THRESHOLD = int(
+        os.getenv("CODING_MODEL_MEMORY_COUNT_WARN", "100000"))
+
+    def _warn_if_collection_large(self) -> None:
+        try:
+            count = self._collection.count()
+        except Exception:
+            return
+        if count >= self.MEMORY_COUNT_WARN_THRESHOLD:
+            logger.warning(
+                "memory collection holds %d documents (>= warn threshold %d) — "
+                "retrieval quality and query cost degrade as it grows; consider "
+                "pruning old sources or raising CODING_MODEL_MEMORY_COUNT_WARN",
+                count, self.MEMORY_COUNT_WARN_THRESHOLD,
+            )
 
     def add_memory_chunked(self, text: str, source: str, metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Add text to the database using language-aware chunking when possible.

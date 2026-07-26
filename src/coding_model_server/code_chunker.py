@@ -152,15 +152,19 @@ class CodeChunker:
             return self.simple_chunk(content, file_path)
 
         lang_name = self.get_lang_name(ext)
+        # Parse and slice the SAME bytes object (DEV-161): node offsets are
+        # byte offsets, so indexing the str with them shifted every chunk
+        # boundary after the first multibyte character.
+        content_b = content.encode('utf-8')
         try:
-            tree = parser.parse(bytes(content, 'utf-8'))
+            tree = parser.parse(content_b)
         except Exception as e:
             logger.warning(f"tree-sitter parse failed for {file_path}: {e}")
             return self.simple_chunk(content, file_path)
         root_node = tree.root_node
 
         chunks = []
-        self._recursive_chunk(root_node, content, file_path, lang_name, chunks, max_chars)
+        self._recursive_chunk(root_node, content_b, file_path, lang_name, chunks, max_chars)
 
         # If no chunks were extracted (e.g. no recognized node types), do simple chunk
         if not chunks:
@@ -185,23 +189,28 @@ class CodeChunker:
             return self.simple_chunk(text, source, max_chars)
 
         lang_name = self.get_lang_name(ext)
+        # See chunk_file: slice the same bytes the parser saw (DEV-161).
+        text_b = text.encode('utf-8')
         try:
-            tree = parser.parse(bytes(text, 'utf-8'))
+            tree = parser.parse(text_b)
         except Exception as e:
             logger.warning(f"tree-sitter parse failed for {source}: {e}")
             return self.simple_chunk(text, source, max_chars)
         root_node = tree.root_node
 
         chunks = []
-        self._recursive_chunk(root_node, text, source, lang_name, chunks, max_chars)
+        self._recursive_chunk(root_node, text_b, source, lang_name, chunks, max_chars)
 
         if not chunks:
             return self.simple_chunk(text, source, max_chars)
 
         return chunks
 
-    def _recursive_chunk(self, node, content, file_path, lang_name, chunks, max_chars, context=""):
-        node_text = content[node.start_byte:node.end_byte]
+    def _recursive_chunk(self, node, content_b, file_path, lang_name, chunks, max_chars, context=""):
+        """Walk the parse tree, emitting chunks. ``content_b`` is the utf-8
+        BYTES the parser was given — node.start_byte/end_byte index into it
+        (DEV-161). Each slice is decoded back to str for storage."""
+        node_text = content_b[node.start_byte:node.end_byte].decode('utf-8', 'replace')
         
         # If this node is a chunk type and its size is reasonable
         if node.type in self.chunk_types.get(lang_name, set()):
@@ -221,7 +230,7 @@ class CodeChunker:
                 has_subchunks = False
                 for child in node.children:
                     if child.end_byte - child.start_byte > 100: # Ignore tiny children
-                        self._recursive_chunk(child, content, file_path, lang_name, chunks, max_chars, new_context)
+                        self._recursive_chunk(child, content_b, file_path, lang_name, chunks, max_chars, new_context)
                         has_subchunks = True
                 
                 if not has_subchunks:
@@ -233,7 +242,7 @@ class CodeChunker:
         chunks_before = len(chunks)
         for child in node.children:
             if child.end_byte - child.start_byte > 200:
-                self._recursive_chunk(child, content, file_path, lang_name, chunks, max_chars, context)
+                self._recursive_chunk(child, content_b, file_path, lang_name, chunks, max_chars, context)
 
         # If no children produced chunks, but the node itself has text
         if len(chunks) == chunks_before and node.type != 'module' and len(node_text.strip()) > 100:

@@ -21,20 +21,24 @@ def _resp(status, location=None):
 
 @pytest.fixture(autouse=True)
 def _public_dns(monkeypatch):
-    """Make _is_safe_public_url resolve on host, not real DNS:
-    anything with 'internal' or an IP-literal metadata/loopback host is unsafe."""
-    real = services._is_safe_public_url
+    """Resolve on host, not real DNS: anything with 'internal' or an
+    IP-literal metadata/loopback host is unsafe. Patches the validator that
+    also returns the pinned IPs (DEV-163), plus the boolean wrapper the
+    entry points gate on."""
+    real = services._validate_public_url
 
     def fake(url):
         from urllib.parse import urlparse
         host = urlparse(url).hostname or ""
         if urlparse(url).scheme not in ("http", "https"):
-            return False, "unsupported scheme"
+            return False, "unsupported scheme", []
         if host in ("169.254.169.254", "127.0.0.1", "localhost") or "internal" in host:
-            return False, f"refusing non-public host {host}"
-        return True, ""
+            return False, f"refusing non-public host {host}", []
+        return True, "", ["93.184.216.34"]
 
-    monkeypatch.setattr(services, "_is_safe_public_url", fake)
+    monkeypatch.setattr(services, "_validate_public_url", fake)
+    monkeypatch.setattr(services, "_is_safe_public_url",
+                        lambda url: fake(url)[:2])
     return real
 
 
