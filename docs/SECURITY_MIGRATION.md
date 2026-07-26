@@ -305,7 +305,9 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.codingmodel.tunnel.p
 > elsewhere (or your username isn't `km4`) edit those two keys before
 > bootstrapping, or the agent will fail to start.
 >
-> The tunnel plist likewise hardcodes `keith-merrill@192.168.1.64`, its log paths
+> The tunnel plist leaves the Linux host as a `LINUX_USER@LINUX_HOST` placeholder
+> (it previously hardcoded a since-stale `192.168.1.64`; derive the address per the
+> instructions in the plist rather than copying one). It likewise pins its log paths
 > under `/Users/km4`, and `/opt/homebrew/bin/autossh` (that path is Apple
 > Silicon; Intel Homebrew installs to `/usr/local/bin/autossh`). launchd does not
 > search `PATH` for `argv[0]`, so that one must be absolute and correct.

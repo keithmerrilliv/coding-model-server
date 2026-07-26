@@ -11,12 +11,36 @@
 
      1. brew install autossh
      2. Copy to ~/Library/LaunchAgents/com.codingmodel.tunnel.plist
-     3. Replace keith-merrill@192.168.1.64 with your Linux user@host, and km4
+     3. Replace LINUX_USER@LINUX_HOST below with your Linux user@host, and km4
         with your macOS username.
+
+        Do NOT copy an address out of this file or an old ticket. This slot
+        held a hardcoded 192.168.1.64 that was already stale, and the Linux
+        box's address has churned repeatedly (Velop mesh removed, wired
+        NetGear, both a 10.x and a 192.168.1.x range live at once). Derive it
+        instead, on the MAC:
+
+          ping -c1 LINUX_HOSTNAME.local     # if mDNS answers, prefer the name
+          # otherwise, from the Linux box:  ip route get <this-mac-ip>
+          #   -> "10.0.0.198 dev wlp7s0 src 10.0.0.123" means use 10.0.0.123
+
+        The Linux box has TWO interfaces and only the one sharing the Mac's
+        subnet can carry this: as of 2026-07-25 that is 10.0.0.123 (wlp7s0),
+        while 192.168.1.3 (enp6s0) has no route to the Mac at all. Both of
+        those are DHCP, so pin them with router reservations or this breaks
+        again on the next lease. Confirm before installing:
+
+          ssh -o BatchMode=yes LINUX_USER@LINUX_HOST true   # must exit 0
+
+        Two more things that make an address look wrong when it is not:
+        the Linux ufw allows port 22 only from specific subnets, so the Mac
+        must be inside one (a mismatch presents as a TIMEOUT, not a refusal);
+        and mDNS on that box currently publishes IPv6 only, so `.local` may
+        resolve to an address ssh cannot use over this LAN.
      4. autossh is /opt/homebrew/bin/autossh on Apple Silicon, /usr/local/bin/autossh
         on Intel. ProgramArguments needs the absolute path — launchd does not
         search PATH for argv[0].
-     5. Connect once by hand first — `ssh keith-merrill@192.168.1.64 true` — so the
+     5. Connect once by hand first — `ssh LINUX_USER@LINUX_HOST true` — so the
         server's host key lands in ~/.ssh/known_hosts, and confirm the key you
         use either has no passphrase or was loaded into the login keychain by
         `ssh-add` with its apple-use-keychain flag. (That flag is spelled with a
@@ -83,7 +107,11 @@
 
     <string>-R</string>
     <string>5050:localhost:5050</string>
-    <string>keith-merrill@192.168.1.64</string>
+
+    <!-- Substitute per step 3. Left as an obvious placeholder on purpose: a
+         real-looking address here gets copied verbatim and silently points at
+         a host that moved. -->
+    <string>LINUX_USER@LINUX_HOST</string>
   </array>
 
   <key>EnvironmentVariables</key>
