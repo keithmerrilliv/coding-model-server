@@ -50,6 +50,7 @@ scripts = [
 dev = [
     "pytest>=8.0",
     "ruff>=0.14",
+    "mypy>=1.11",
 ]
 
 [project.scripts]
@@ -68,6 +69,15 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+
+[tool.mypy]
+# Scoped deliberately (DEV-169): type-hint coverage is bimodal, and these
+# two packages are already at 98-100% annotated. Gating them locks that in
+# without drowning CI in the 40-49% packages' pre-existing findings —
+# ratchet coding_model_server / coding_model_client in later.
+files = ["src/coding_model_autonomous", "mac_runner"]
+python_version = "3.12"
+ignore_missing_imports = true
 
 [tool.ruff]
 target-version = "py312"

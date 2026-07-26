@@ -79,6 +79,19 @@ def _parse_iso(s: Optional[str]) -> Optional[datetime]:
     return datetime.fromisoformat(s)
 
 
+def _parse_iso_required(s: str) -> datetime:
+    """Parse a column the schema declares NOT NULL.
+
+    Separate from _parse_iso so the row→model converters type-check without
+    Optional laundering (DEV-169): a NULL in created_at/updated_at means the
+    row was written outside the DB layer, and failing loudly beats handing a
+    None into a field typed datetime.
+    """
+    if s is None:
+        raise ValueError("required timestamp column is NULL")
+    return datetime.fromisoformat(s)
+
+
 class GateAlreadyDecidedError(Exception):
     """A gate response lost the compare-and-set: the gate was no longer
     pending when the UPDATE ran. Carries the standing gate so callers can
@@ -710,8 +723,8 @@ def _row_to_spec(row: sqlite3.Row) -> Spec:
         normalized_yaml=row["normalized_yaml"],
         status=SpecStatus(row["status"]),
         jira_epic_key=row["jira_epic_key"],
-        created_at=_parse_iso(row["created_at"]),
-        updated_at=_parse_iso(row["updated_at"]),
+        created_at=_parse_iso_required(row["created_at"]),
+        updated_at=_parse_iso_required(row["updated_at"]),
     )
 
 
@@ -730,8 +743,8 @@ def _row_to_task(row: sqlite3.Row) -> Task:
         started_at=_parse_iso(row["started_at"]),
         completed_at=_parse_iso(row["completed_at"]),
         retry_count=row["retry_count"],
-        created_at=_parse_iso(row["created_at"]),
-        updated_at=_parse_iso(row["updated_at"]),
+        created_at=_parse_iso_required(row["created_at"]),
+        updated_at=_parse_iso_required(row["updated_at"]),
     )
 
 
@@ -743,7 +756,7 @@ def _row_to_artifact(row: sqlite3.Row) -> Artifact:
         kind=ArtifactKind(row["kind"]),
         path=row["path"],
         sha256=row["sha256"],
-        created_at=_parse_iso(row["created_at"]),
+        created_at=_parse_iso_required(row["created_at"]),
     )
 
 
@@ -758,7 +771,7 @@ def _row_to_gate(row: sqlite3.Row) -> ReviewGate:
         reviewer_decision=row["reviewer_decision"],
         reviewer_notes=row["reviewer_notes"],
         jira_issue_key=row["jira_issue_key"],
-        created_at=_parse_iso(row["created_at"]),
+        created_at=_parse_iso_required(row["created_at"]),
         responded_at=_parse_iso(row["responded_at"]),
     )
 
@@ -771,5 +784,5 @@ def _row_to_event(row: sqlite3.Row) -> Event:
         gate_id=row["gate_id"],
         kind=EventKind(row["kind"]),
         payload_json=row["payload_json"],
-        created_at=_parse_iso(row["created_at"]),
+        created_at=_parse_iso_required(row["created_at"]),
     )
