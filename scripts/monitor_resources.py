@@ -12,10 +12,18 @@ try:
 except ImportError:
     HAS_PYNVML = False
 
-# Configuration
-LOG_FILE = "/home/keith-merrill/Dev/coding-model-server/var/server_stats.csv"
-DB_PATH = "/home/keith-merrill/Dev/coding-model-server/var/memory_db"
-POWERCAP_PATH = "/sys/class/powercap/intel-rapl:0/energy_uj"
+# Configuration. Paths are env-driven with the same defaults the server
+# uses (DEV-173): DB_PATH was a literal, so relocating the memory DB via
+# CODING_MODEL_MEMORY_DB made the monitor report the wrong — or zero —
+# rag_db_bytes while looking perfectly healthy.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+LOG_FILE = os.getenv(
+    "CODING_MODEL_STATS_CSV", os.path.join(_REPO_ROOT, "var", "server_stats.csv"))
+DB_PATH = os.getenv(
+    "CODING_MODEL_MEMORY_DB", os.path.join(_REPO_ROOT, "var", "memory_db"))
+POWERCAP_PATH = os.getenv(
+    "CODING_MODEL_POWERCAP_PATH",
+    "/sys/class/powercap/intel-rapl:0/energy_uj")
 INTERVAL = 5.0
 MAX_LOG_SIZE_MB = 10  # Rotate when log exceeds this size
 MAX_ROTATED_FILES = 3  # Keep this many rotated files

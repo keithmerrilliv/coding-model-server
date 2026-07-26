@@ -18,5 +18,8 @@ jobs:
         run: pip install -e ".[dev]"
       - name: Lint
         run: ruff check src tests scripts
+      - name: Typecheck
+        # Scoped to the fully-annotated packages — see [tool.mypy] (DEV-169).
+        run: mypy
       - name: Test
         run: pytest -q
