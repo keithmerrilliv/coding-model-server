@@ -48,7 +48,7 @@ MAX_FILE_SIZE = 100_000  # 100 KB — skip generated/minified files
 # Memory & ingestion
 # ---------------------------------------------------------------------------
 
-def _is_safe_public_url(url: str) -> tuple[bool, str]:
+def _validate_public_url(url: str) -> tuple[bool, str, "list[str]"]:
     """SSRF guard: only allow http/https URLs to public IPs.
 
     Blocks LLM-driven fetches to:
@@ -57,32 +57,72 @@ def _is_safe_public_url(url: str) -> tuple[bool, str]:
       - link-local (169.254.0.0/16, fe80::/10)
       - RFC1918 / private (10/8, 172.16/12, 192.168/16, fc00::/7)
       - other reserved ranges (multicast, etc.)
-    Returns (is_safe, reason). reason is empty on success.
+
+    Returns (is_safe, reason, validated_ips). The IP list is the point: the
+    caller CONNECTS to one of these instead of letting requests re-resolve
+    the hostname, closing the DNS-rebinding window between check and fetch
+    (DEV-163) — a rebinding domain could answer public here and
+    169.254.169.254 microseconds later.
     """
     import socket
     import ipaddress
     from urllib.parse import urlparse
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
-        return False, f"unsupported scheme {parsed.scheme!r}"
+        return False, f"unsupported scheme {parsed.scheme!r}", []
     if not parsed.hostname:
-        return False, "missing hostname"
+        return False, "missing hostname", []
     try:
         addrs = socket.getaddrinfo(parsed.hostname, None)
     except socket.gaierror as e:
-        return False, f"DNS lookup failed: {e}"
+        return False, f"DNS lookup failed: {e}", []
+    validated: list[str] = []
     for family, _t, _p, _c, sockaddr in addrs:
         ip_str = sockaddr[0]
         try:
             ip = ipaddress.ip_address(ip_str)
         except ValueError:
-            return False, f"invalid IP {ip_str!r}"
+            return False, f"invalid IP {ip_str!r}", []
         if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved or ip.is_unspecified:
-            return False, f"refusing non-public IP {ip}"
-    return True, ""
+            return False, f"refusing non-public IP {ip}", []
+        validated.append(ip_str)
+    if not validated:
+        return False, "hostname resolved to no addresses", []
+    return True, "", validated
+
+
+def _is_safe_public_url(url: str) -> tuple[bool, str]:
+    """Boolean-only view of the guard, for callers that just gate."""
+    safe, reason, _ = _validate_public_url(url)
+    return safe, reason
 
 
 _MAX_REDIRECT_HOPS = 5
+
+
+def _pinned_get(url: str, ip: str, *, timeout):
+    """GET *url* connecting to the already-validated *ip* (DEV-163).
+
+    The URL's host is swapped for the literal IP and the original hostname
+    rides in the Host header, so requests never re-resolves the name — a
+    rebinding domain cannot answer public to the guard and private to the
+    fetch. Redirects stay disabled; the caller validates each hop.
+
+    HTTPS is exempt: pinning the IP breaks SNI/certificate validation, and
+    trading TLS identity for rebinding protection is a bad swap. TLS already
+    binds the response to the certified hostname, so a rebind lands on a
+    host that cannot present a valid cert for it.
+    """
+    from urllib.parse import urlparse, urlunparse
+    parsed = urlparse(url)
+    if parsed.scheme != "http":
+        return _SESSION.get(url, timeout=timeout, allow_redirects=False)
+    host_header = parsed.netloc
+    literal = f"[{ip}]" if ":" in ip else ip
+    netloc = f"{literal}:{parsed.port}" if parsed.port else literal
+    pinned_url = urlunparse(parsed._replace(netloc=netloc))
+    return _SESSION.get(pinned_url, timeout=timeout, allow_redirects=False,
+                        headers={"Host": host_header})
 
 
 def _get_revalidating_redirects(url, *, timeout):
@@ -99,10 +139,10 @@ def _get_revalidating_redirects(url, *, timeout):
 
     current = url
     for _ in range(_MAX_REDIRECT_HOPS + 1):
-        safe, reason = _is_safe_public_url(current)
+        safe, reason, ips = _validate_public_url(current)
         if not safe:
             raise ValueError(f"SSRF guard rejected URL ({reason})")
-        response = _SESSION.get(current, timeout=timeout, allow_redirects=False)
+        response = _pinned_get(current, ips[0], timeout=timeout)
         if response.status_code not in (301, 302, 303, 307, 308):
             return response
         location = response.headers.get("Location")
