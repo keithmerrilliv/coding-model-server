@@ -1,0 +1,55 @@
+// Sudo-free systemctl start/stop/restart of the coding-model units, for the
+// service owner only. Installed to /etc/polkit-1/rules.d/49-coding-model.rules
+// by `sudo bash scripts/redeploy.sh`.
+//
+// This file lives in the repo because it did not, once: it was hand-created on
+// the box in 2026-07-11, later vanished (the rules.d directory was found empty
+// on 2026-07-25), and nothing could restore it. Its absence did NOT fail
+// loudly — polkit just fell back to interactive authentication, so every
+// non-interactive `systemctl restart` blocked until the auth timeout and
+// `redeploy.sh --restart-only` half-applied while still reporting every unit
+// "active" (DEV-293).
+//
+// polkit 124 (Ubuntu 24.04) evaluates rules.d in lexical order and stops at the
+// first rule returning a result, so anything sorting before 49- can shadow this.
+// The script engine is Duktape/ES5: use `var`, no arrow functions, no let/const,
+// no Array.includes.
+//
+// Deliberately NOT gated on subject.local/subject.active. Requiring an active
+// local session is the usual hardening, but it would re-break exactly what this
+// exists for — an unattended redeploy over SSH or from a timer has neither.
+// The grant is already narrow: one action, one user, four units, and only the
+// lifecycle verbs. daemon-reload (reload-daemon) and enable/disable
+// (manage-unit-files) are NOT granted and still need root.
+
+polkit.addRule(function(action, subject) {
+    if (action.id !== "org.freedesktop.systemd1.manage-units") {
+        return polkit.Result.NOT_HANDLED;
+    }
+    if (subject.user !== "keith-merrill") {
+        return polkit.Result.NOT_HANDLED;
+    }
+
+    var units = {
+        "coding-model-server.service": true,
+        "coding-model-orchestrator.service": true,
+        "coding-model-dashboard.service": true,
+        "coding-model-monitor.service": true
+    };
+    var verbs = {
+        "start": true,
+        "stop": true,
+        "restart": true,
+        "try-restart": true,
+        "reload": true,
+        "reload-or-restart": true
+    };
+
+    if (units[action.lookup("unit")] === true &&
+        verbs[action.lookup("verb")] === true) {
+        return polkit.Result.YES;
+    }
+
+    // Fall through so other rules (and the normal admin prompt) still apply.
+    return polkit.Result.NOT_HANDLED;
+});

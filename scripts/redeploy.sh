@@ -75,6 +75,23 @@ else
     fi
   done
 
+  # The polkit rule is what makes --restart-only sudo-free. It used to exist
+  # only as a hand-made file on the box, and when it went missing nothing
+  # noticed: polkit silently fell back to interactive auth and restart-only
+  # started half-applying (DEV-293). Sync it from the repo like a unit file.
+  echo "==> Syncing polkit rule (grants sudo-free restart of these units)"
+  polkit_src="${REPO}/polkit/49-coding-model.rules"
+  polkit_dst="/etc/polkit-1/rules.d/49-coding-model.rules"
+  if [[ ! -f "${polkit_src}" ]]; then
+    echo "    ! repo rule missing: ${polkit_src} (skipping)"
+  elif cmp -s "${polkit_src}" "${polkit_dst}" 2>/dev/null; then
+    echo "    = polkit rule: already up to date"
+  else
+    [[ -f "${polkit_dst}" ]] && cp -a "${polkit_dst}" "${BACKUP}/"
+    install -m 0644 -o root -g root "${polkit_src}" "${polkit_dst}"
+    echo "    + polkit rule: installed (polkitd picks it up automatically)"
+  fi
+
   echo "==> systemctl daemon-reload"
   systemctl daemon-reload
 fi
@@ -83,7 +100,11 @@ fi
 # (calls the server) -> dashboard (polls it). Only restart what we manage.
 # Capture the server PID first so the /health poll can distinguish the freshly
 # started process from a still-draining old one (which keeps answering /health).
-OLD_SERVER_PID="$(systemctl show -p MainPID --value coding-model-server 2>/dev/null || echo 0)"
+declare -A OLD_PIDS
+for s in coding-model-server coding-model-orchestrator coding-model-dashboard; do
+  OLD_PIDS["${s}"]="$(systemctl show -p MainPID --value "${s}" 2>/dev/null || echo 0)"
+done
+OLD_SERVER_PID="${OLD_PIDS[coding-model-server]}"
 echo "==> Restarting services (non-blocking; readiness confirmed by the /health poll below)"
 for s in coding-model-server coding-model-orchestrator coding-model-dashboard; do
   printf '    restarting %s ...\n' "${s}"
@@ -139,10 +160,44 @@ else
   echo "    !! /health did not respond — check: journalctl -u coding-model-server -n 50"
 fi
 
-echo "==> Status"
+# Report by MainPID, not `is-active`. A restart that never happened leaves the
+# OLD process running and perfectly healthy, so is-active says "active" and the
+# deploy looks fine while the new code is nowhere near production — which is
+# exactly how DEV-152 shipped to a half-applied box (DEV-293). A unit whose PID
+# did not change is a FAILED deploy and must be loud, and fatal.
+echo "==> Status (by MainPID — a restart that didn't take keeps the old PID)"
+FAILED_UNITS=()
 for s in coding-model-server coding-model-orchestrator coding-model-dashboard; do
-  printf "    %-22s %s\n" "${s}" "$(systemctl is-active "${s}")"
+  old="${OLD_PIDS[${s}]:-0}"
+  new=""
+  # --no-block means the restart may still be in flight; give it a grace window.
+  for _ in $(seq 1 15); do
+    new="$(systemctl show -p MainPID --value "${s}" 2>/dev/null || echo 0)"
+    [[ "${new}" != "0" && "${new}" != "${old}" ]] && break
+    sleep 2
+  done
+  state="$(systemctl is-active "${s}")"
+  if [[ "${new}" != "0" && "${new}" != "${old}" ]]; then
+    printf "    %-26s %-10s restarted (PID %s -> %s)\n" "${s}" "${state}" "${old}" "${new}"
+  else
+    printf "    %-26s %-10s !! NOT RESTARTED (still PID %s)\n" "${s}" "${state}" "${old}"
+    FAILED_UNITS+=("${s}")
+  fi
 done
+
+if (( ${#FAILED_UNITS[@]} > 0 )); then
+  echo
+  echo "!! ${#FAILED_UNITS[@]} unit(s) did not restart: ${FAILED_UNITS[*]}"
+  echo "   They are still running the OLD code. This deploy did NOT take."
+  if [[ "${RESTART_ONLY}" == "1" ]]; then
+    echo "   Most likely the polkit rule is missing, so systemctl fell back to"
+    echo "   interactive auth and the enqueue timed out. Check:"
+    echo "     ls -l /etc/polkit-1/rules.d/49-coding-model.rules"
+    echo "     journalctl -b | grep -i 'polkitd.*manage-units' | tail"
+    echo "   Reinstall it (and the units) with:  sudo bash ${BASH_SOURCE[0]}"
+  fi
+  exit 1
+fi
 
 if [[ "${RESTART_ONLY}" != "1" ]]; then
   echo
