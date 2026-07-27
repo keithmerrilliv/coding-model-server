@@ -190,6 +190,21 @@ DEFAULT_TIMEOUTS: dict[str, int] = {
     "xcodebuild_test": 900,
 }
 
+KNOWN_FRAMEWORKS: frozenset[str] = frozenset(DEFAULT_TIMEOUTS) | {"none"}
+
+# Names an LLM planner reaches for when asked to test Apple code. None of these
+# are dispatch keys, and an unmapped one silently became a local pytest run
+# (DEV-392), so map them onto the real Mac-runner frameworks. `xctest` means the
+# XCTest bundle of an Xcode scheme, which is xcodebuild_test.
+_APPLE_FRAMEWORK_ALIASES: dict[str, str] = {
+    "xctest": "xcodebuild_test",
+    "xcode": "xcodebuild_test",
+    "xcodebuild": "xcodebuild_test",
+    "swift": "swift_test",
+    "swiftpm": "swift_test",
+    "swift-testing": "swift_test",
+}
+
 MAC_RUNNER_URL = os.getenv("MAC_RUNNER_URL", "http://127.0.0.1:5050")
 MAC_RUNNER_API_KEY = os.getenv("MAC_RUNNER_API_KEY", "")
 
@@ -471,6 +486,21 @@ def run_tests(
 
     Returns (passed, combined_output).
     """
+    framework = _APPLE_FRAMEWORK_ALIASES.get(framework, framework)
+
+    # An unrecognised framework used to fall through to the local branch, whose
+    # own else-arm is pytest. A plan asking for Apple tests therefore ran pytest
+    # against whatever happened to be in the spec dir and reported the result as
+    # authoritative — a placeholder `def test_stub(): pass` scored a PASS and a
+    # spec with only XCTest files scored "no tests ran" (DEV-392). Refuse instead.
+    if framework not in KNOWN_FRAMEWORKS:
+        return False, (
+            f"unknown test framework {framework!r}. Known frameworks: "
+            f"{', '.join(sorted(KNOWN_FRAMEWORKS))}. Apple targets must use "
+            f"'xcodebuild_test' (app/scheme) or 'swift_test' (SwiftPM); refusing "
+            f"to fall back to a local runner, which would test the wrong thing."
+        )
+
     effective_timeout = timeout if timeout is not None else DEFAULT_TIMEOUTS.get(framework, 120)
 
     if framework in ("swift_test", "xcodebuild_test"):

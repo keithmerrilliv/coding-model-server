@@ -120,9 +120,15 @@ PLANNER_SYSTEM_PROMPT = textwrap.dedent("""\
       - "Verbatim text of the operator's answer to question 1"
       - "Verbatim text of the operator's answer to question 2"
     test_strategy:
-      framework: pytest            # pytest | node_test | xctest | jest | none
+      framework: pytest            # pytest | node_test | jest | swift_test | xcodebuild_test | none
       required: true
       notes: "any extra context"
+      # Apple targets ONLY (framework: xcodebuild_test or swift_test) — these are
+      # forwarded verbatim as arguments to the Mac runner, so they must be real
+      # YAML keys here, never prose inside `notes`:
+      repo: electric-sheep         # REQUIRED. Symbolic name from the Mac runner's repos.yml
+      scheme: ElectricSheep        # REQUIRED for xcodebuild_test
+      destination: "platform=macOS"
     constraints:
       dependencies_allowed: true   # external packages permitted?
       notes: "any other constraints from the spec"
@@ -175,6 +181,12 @@ PLANNER_SYSTEM_PROMPT = textwrap.dedent("""\
        fold clarifications into other fields. Keep the operator's
        original wording. Omit the `clarifications:` field entirely
        when there are no clarifications to record.
+       EXCEPTION: a round whose question text begins with
+       "## Plan rejection feedback" is NOT an answer about the spec — it is
+       a reviewer telling you to revise THIS YAML. Apply it to the plan and
+       do NOT copy it into `clarifications:`. Copying it there hands
+       plan-editing instructions to the implementer as if they were product
+       requirements, which has caused implementers to act on them (DEV-391).
     10. For JavaScript/TypeScript specs whose tests run on THIS server
        (execution_target: server — e.g. web/WebGPU/Node projects), set
        test_strategy.framework: node_test. The sandbox has NO network and

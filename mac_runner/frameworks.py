@@ -28,6 +28,31 @@ def build_swift_test_cmd(worktree: Path, **opts: Any) -> list[str]:
     return cmd
 
 
+def _only_testing_args(opts: dict[str, Any]) -> list[str]:
+    """Translate `filter` into xcodebuild's -only-testing: selectors.
+
+    Without this, `xcodebuild test -scheme X` runs EVERY test target in the
+    scheme. Every Xcode app template ships a UI-test target alongside the unit
+    tests, and a UI test needs to launch the app against a window server — under
+    the runner it dies with "Early unexpected exit ... Test crashed with signal
+    kill before establishing connection", failing the whole run no matter how
+    good the unit tests are (DEV-394). `filter` was already accepted by the
+    server and honoured for `swift test`, but silently ignored here.
+
+    Accepts one selector or a comma/space separated list, each either a bare
+    target ("ElectricSheepTests") or a narrower path
+    ("ElectricSheepTests/ForcingStrategyTests/testMaskZeroesNonTopK").
+    """
+    raw = opts.get("filter")
+    if not raw:
+        return []
+    selectors = [s for s in str(raw).replace(",", " ").split() if s]
+    args: list[str] = []
+    for sel in selectors:
+        args.extend(["-only-testing:" + sel])
+    return args
+
+
 def build_xcodebuild_test_cmd(worktree: Path, derived_data: Path, **opts: Any) -> list[str]:
     scheme = opts.get("scheme")
     if not scheme:
@@ -60,6 +85,7 @@ def build_xcodebuild_test_cmd(worktree: Path, derived_data: Path, **opts: Any) -
         "CODE_SIGN_IDENTITY=",
     ]
     cmd.extend(_project_selector(opts))
+    cmd.extend(_only_testing_args(opts))
     return cmd
 
 
