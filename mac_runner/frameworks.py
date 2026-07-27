@@ -79,23 +79,27 @@ def build_xcodebuild_test_cmd(worktree: Path, derived_data: Path, **opts: Any) -
         # (mlx-swift's @TaskLocal here) breaks the build. $(inherited) so a
         # project's own OTHER_SWIFT_FLAGS survive being overridden here.
         "OTHER_SWIFT_FLAGS=$(inherited) -disable-sandbox",
-        # LLM-generated test targets must not need a real signing identity, but
-        # they DO need to be signed: on Apple Silicon the kernel refuses to exec
-        # an unsigned arm64 binary. CODE_SIGNING_ALLOWED=NO produced exactly
-        # that, so the xctest host was SIGKILLed on launch ("Test crashed with
-        # signal kill before establishing connection") and Gatekeeper raised the
-        # "... is damaged and can't be opened. You should move it to the Trash"
-        # dialog ON THE RUNNER'S DESKTOP — an interactive prompt on a machine
-        # nobody is sitting at, which also blocks the run (DEV-395).
-        # Ad-hoc signing ("-") satisfies the kernel with no certificate,
-        # keychain access or network, which is what local test builds want.
+    ]
+    # Signing. The binary MUST be signed: on Apple Silicon the kernel refuses
+    # to exec unsigned arm64 code, so CODE_SIGNING_ALLOWED=NO got the xctest
+    # host SIGKILLed on launch and made Gatekeeper raise the "is damaged ...
+    # move it to the Trash" dialog on the runner's desktop (DEV-395).
+    # environment.resolve_environment supplies a real identity when the Mac
+    # holds one — required to install on a physical device — and otherwise
+    # ad-hoc "-", which satisfies the kernel with no certificate or keychain.
+    identity = opts.get("signing_identity") or "-"
+    cmd += [
         "CODE_SIGNING_ALLOWED=YES",
         "CODE_SIGNING_REQUIRED=NO",
-        "CODE_SIGN_IDENTITY=-",
-        "CODE_SIGN_ENTITLEMENTS=",
-        "DEVELOPMENT_TEAM=",
-        "PROVISIONING_PROFILE_SPECIFIER=",
+        f"CODE_SIGN_IDENTITY={identity}",
     ]
+    if team := opts.get("development_team"):
+        cmd.append(f"DEVELOPMENT_TEAM={team}")
+        # Let Xcode mint/select a profile rather than demanding a pinned one.
+        cmd.append("-allowProvisioningUpdates")
+    else:
+        cmd += ["CODE_SIGN_ENTITLEMENTS=", "DEVELOPMENT_TEAM=",
+                "PROVISIONING_PROFILE_SPECIFIER="]
     cmd.extend(_project_selector(opts))
     cmd.extend(_only_testing_args(opts))
     return cmd

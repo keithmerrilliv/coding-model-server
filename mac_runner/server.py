@@ -28,6 +28,7 @@ from .frameworks import (
     build_resolve_cmd,
     wrap_sandbox,
 )
+from .environment import resolve_environment
 from .workspace import worktree, WorkspaceError
 
 logging.basicConfig(
@@ -124,6 +125,14 @@ def run_tests_endpoint(req: RunTestsRequest) -> RunTestsResponse:
     # framework is passed positionally to build_cmd; leaving it in opts too
     # makes it a duplicate argument.
     opts = req.model_dump(exclude_none=True, exclude={"framework"})
+    # Discover what this Mac can offer: a real signing identity in preference
+    # to ad-hoc, and an attached physical device in preference to a simulator
+    # (DEV-395/DEV-396). Anything the plan set explicitly is left alone.
+    if req.framework == "xcodebuild_test":
+        opts = resolve_environment(opts)
+        if device := opts.pop("destination_device", None):
+            logger.info("testing on attached device %s (%s)",
+                        device, opts.get("destination"))
 
     start = time.monotonic()
     try:
