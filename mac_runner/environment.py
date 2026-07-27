@@ -68,13 +68,24 @@ def find_signing_identity() -> tuple[str, Optional[str]]:
         for _sha, name in found:
             if name.startswith(wanted):
                 team = m.group(1) if (m := _TEAM_RE.search(name)) else None
-                logger.info("using signing identity %r (team=%s)", name, team)
-                return name, team
+                # Return the GENERIC name ("Apple Development"), not the
+                # fully-qualified common name. Xcode projects default to
+                # automatic signing, and handing xcodebuild a specific
+                # certificate fails every target in the graph with
+                # "<target> has conflicting provisioning settings. <target> is
+                # automatically signed, but code signing identity ... has been
+                # manually specified" — including every SwiftPM dependency.
+                # The generic form is what automatic signing expects.
+                logger.info("using signing identity %r (from %r, team=%s)",
+                            wanted, name, team)
+                return wanted, team
 
     name = found[0][1]
     team = m.group(1) if (m := _TEAM_RE.search(name)) else None
-    logger.info("using signing identity %r (team=%s)", name, team)
-    return name, team
+    generic = name.split(":", 1)[0].strip() or name
+    logger.info("using signing identity %r (from %r, team=%s)",
+                generic, name, team)
+    return generic, team
 
 
 # "Keith's Vision Pro (2.0) (00008112-001A2B3C0123456E)" under "== Devices =="
