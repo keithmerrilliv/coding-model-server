@@ -79,10 +79,22 @@ def build_xcodebuild_test_cmd(worktree: Path, derived_data: Path, **opts: Any) -
         # (mlx-swift's @TaskLocal here) breaks the build. $(inherited) so a
         # project's own OTHER_SWIFT_FLAGS survive being overridden here.
         "OTHER_SWIFT_FLAGS=$(inherited) -disable-sandbox",
-        # LLM-generated test targets should not require signed binaries.
-        "CODE_SIGNING_ALLOWED=NO",
+        # LLM-generated test targets must not need a real signing identity, but
+        # they DO need to be signed: on Apple Silicon the kernel refuses to exec
+        # an unsigned arm64 binary. CODE_SIGNING_ALLOWED=NO produced exactly
+        # that, so the xctest host was SIGKILLed on launch ("Test crashed with
+        # signal kill before establishing connection") and Gatekeeper raised the
+        # "... is damaged and can't be opened. You should move it to the Trash"
+        # dialog ON THE RUNNER'S DESKTOP — an interactive prompt on a machine
+        # nobody is sitting at, which also blocks the run (DEV-395).
+        # Ad-hoc signing ("-") satisfies the kernel with no certificate,
+        # keychain access or network, which is what local test builds want.
+        "CODE_SIGNING_ALLOWED=YES",
         "CODE_SIGNING_REQUIRED=NO",
-        "CODE_SIGN_IDENTITY=",
+        "CODE_SIGN_IDENTITY=-",
+        "CODE_SIGN_ENTITLEMENTS=",
+        "DEVELOPMENT_TEAM=",
+        "PROVISIONING_PROFILE_SPECIFIER=",
     ]
     cmd.extend(_project_selector(opts))
     cmd.extend(_only_testing_args(opts))
