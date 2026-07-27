@@ -163,24 +163,40 @@ def resolve_environment(opts: dict) -> dict:
     """
     resolved = dict(opts)
 
-    if not resolved.get("signing_identity"):
-        identity, team = find_signing_identity()
-        resolved["signing_identity"] = identity
-        if team and not resolved.get("development_team"):
-            resolved["development_team"] = team
-
+    # Destination first: whether we are targeting hardware decides how to sign.
     destination = resolved.get("destination") or "platform=macOS"
-    if "id=" not in destination:
+    targeting_device = "id=" in destination
+    if not targeting_device:
         device = find_attached_device(destination)
         if device is not None:
             name, platform, udid = device
             resolved["destination"] = f"platform={platform},id={udid}"
             resolved["destination_device"] = name
-            if resolved["signing_identity"] == "-":
-                # Ad-hoc will not install on hardware. Say so plainly rather
-                # than letting xcodebuild fail with a signing error nobody on
-                # the Linux side can interpret.
-                logger.warning(
-                    "device %s selected but no signing identity is available; "
-                    "the install will likely be rejected", name)
+            targeting_device = True
+
+    if resolved.get("signing_identity"):
+        return resolved
+
+    if not targeting_device:
+        # macOS and simulator runs need a signature only to satisfy the Apple
+        # Silicon kernel, and ad-hoc does that. Deliberately DO NOT use the real
+        # identity here: a real identity on an automatically-signed project
+        # drives Xcode into provisioning, which on a headless Mac fails every
+        # target with "No Accounts: Add a new account in Accounts settings."
+        # Manual style keeps Xcode out of provisioning altogether.
+        resolved["signing_identity"] = "-"
+        resolved["signing_style"] = "Manual"
+        return resolved
+
+    # A physical device WILL reject an ad-hoc build, so here the real identity
+    # is worth the provisioning machinery — and needs an Apple ID in Xcode.
+    identity, team = find_signing_identity()
+    resolved["signing_identity"] = identity
+    resolved["signing_style"] = "Automatic"
+    if team and not resolved.get("development_team"):
+        resolved["development_team"] = team
+    if identity == "-":
+        logger.warning(
+            "device run selected but no signing identity is available; "
+            "the install will be rejected")
     return resolved

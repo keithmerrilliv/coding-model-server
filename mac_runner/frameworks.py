@@ -88,16 +88,22 @@ def build_xcodebuild_test_cmd(worktree: Path, derived_data: Path, **opts: Any) -
     # holds one — required to install on a physical device — and otherwise
     # ad-hoc "-", which satisfies the kernel with no certificate or keychain.
     identity = opts.get("signing_identity") or "-"
+    style = opts.get("signing_style") or "Manual"
     cmd += [
         "CODE_SIGNING_ALLOWED=YES",
         "CODE_SIGNING_REQUIRED=NO",
         f"CODE_SIGN_IDENTITY={identity}",
+        f"CODE_SIGN_STYLE={style}",
     ]
-    if team := opts.get("development_team"):
+    if style == "Automatic" and (team := opts.get("development_team")):
+        # Device installs need a real profile. This requires an Apple ID signed
+        # into Xcode on the runner; without one every target fails with
+        # "No Accounts: Add a new account in Accounts settings."
         cmd.append(f"DEVELOPMENT_TEAM={team}")
-        # Let Xcode mint/select a profile rather than demanding a pinned one.
         cmd.append("-allowProvisioningUpdates")
     else:
+        # Manual + ad-hoc: satisfies the kernel, needs no account, no profile
+        # and no network — the right config for macOS/simulator test runs.
         cmd += ["CODE_SIGN_ENTITLEMENTS=", "DEVELOPMENT_TEAM=",
                 "PROVISIONING_PROFILE_SPECIFIER="]
     cmd.extend(_project_selector(opts))
