@@ -177,21 +177,30 @@ def resolve_environment(opts: dict) -> dict:
     if resolved.get("signing_identity"):
         return resolved
 
-    if not targeting_device:
-        # macOS and simulator runs need a signature only to satisfy the Apple
-        # Silicon kernel, and ad-hoc does that. Deliberately DO NOT use the real
-        # identity here: a real identity on an automatically-signed project
-        # drives Xcode into provisioning, which on a headless Mac fails every
-        # target with "No Accounts: Add a new account in Accounts settings."
-        # Manual style keeps Xcode out of provisioning altogether.
-        resolved["signing_identity"] = "-"
-        resolved["signing_style"] = "Manual"
-        return resolved
-
-    # A physical device WILL reject an ad-hoc build, so here the real identity
-    # is worth the provisioning machinery — and needs an Apple ID in Xcode.
     identity, team = find_signing_identity()
     resolved["signing_identity"] = identity
+
+    if not targeting_device:
+        # MANUAL style with the real certificate. Both other options put UI on
+        # the runner's screen, which defeats a headless runner:
+        #   unsigned  -> "is damaged ... move it to the Trash"  (DEV-395)
+        #   ad-hoc    -> "unidentified developer, open anyway?" (DEV-397)
+        # A build signed by a real Apple Development cert is trusted on the Mac
+        # that owns that cert, so nothing is prompted. Manual style is what
+        # keeps Xcode out of provisioning — Automatic is what produced
+        # "No Accounts: Add a new account in Accounts settings" on a Mac with
+        # no Apple ID in Xcode. A macOS test bundle needs no profile, so the
+        # certificate alone is sufficient.
+        resolved["signing_style"] = "Manual"
+        if identity == "-":
+            logger.warning(
+                "no code-signing identity in the keychain — falling back to "
+                "ad-hoc, which will raise an 'unidentified developer' prompt "
+                "on this Mac's screen")
+        return resolved
+
+    # A physical device additionally needs a provisioning profile, which does
+    # require an Apple ID signed into Xcode on this Mac.
     resolved["signing_style"] = "Automatic"
     if team and not resolved.get("development_team"):
         resolved["development_team"] = team
