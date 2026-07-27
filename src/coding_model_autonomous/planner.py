@@ -129,6 +129,13 @@ PLANNER_SYSTEM_PROMPT = textwrap.dedent("""\
       repo: electric-sheep         # REQUIRED. Symbolic name from the Mac runner's repos.yml
       scheme: ElectricSheep        # REQUIRED for xcodebuild_test
       destination: "platform=macOS"
+      # REQUIRED for xcodebuild_test: without it xcodebuild runs EVERY target in
+      # the scheme, including the UI-test target every Xcode app template ships.
+      # A UI test must launch the app against a window server, which the runner
+      # cannot provide, so it crashes and fails the run however good the unit
+      # tests are (DEV-394). Name the unit-test target, or a narrower
+      # Target/Class/testMethod path.
+      filter: ElectricSheepTests
     constraints:
       dependencies_allowed: true   # external packages permitted?
       notes: "any other constraints from the spec"
