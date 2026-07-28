@@ -179,6 +179,11 @@ def resolve_environment(opts: dict) -> dict:
 
     identity, team = find_signing_identity()
     resolved["signing_identity"] = identity
+    # The team travels with the certificate in BOTH modes. Manual signing needs
+    # it just as much as Automatic — omitting it fails every target with
+    # "Signing for <target> requires a development team."
+    if team and not resolved.get("development_team"):
+        resolved["development_team"] = team
 
     if not targeting_device:
         # MANUAL style with the real certificate. Both other options put UI on

@@ -1,8 +1,11 @@
 """Per-framework command builders for the mac runner."""
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger("mac_runner.frameworks")
 
 # Per-framework default timeouts (seconds). Cold xcodebuild can be slow;
 # swift test is faster but still heavier than pytest.
@@ -95,17 +98,26 @@ def build_xcodebuild_test_cmd(worktree: Path, derived_data: Path, **opts: Any) -
         f"CODE_SIGN_IDENTITY={identity}",
         f"CODE_SIGN_STYLE={style}",
     ]
-    if style == "Automatic" and (team := opts.get("development_team")):
-        # Device installs need a real profile. This requires an Apple ID signed
-        # into Xcode on the runner; without one every target fails with
-        # "No Accounts: Add a new account in Accounts settings."
-        cmd.append(f"DEVELOPMENT_TEAM={team}")
-        cmd.append("-allowProvisioningUpdates")
-    else:
-        # Manual + ad-hoc: satisfies the kernel, needs no account, no profile
-        # and no network — the right config for macOS/simulator test runs.
+    team = opts.get("development_team")
+    if identity == "-":
+        # Ad-hoc needs no team and no profile. Clearing them stops the project's
+        # own committed values from demanding a provisioning round trip.
         cmd += ["CODE_SIGN_ENTITLEMENTS=", "DEVELOPMENT_TEAM=",
                 "PROVISIONING_PROFILE_SPECIFIER="]
+    elif team:
+        # A real certificate ALWAYS needs its team, Manual style included:
+        # without it every target fails with "Signing for <t> requires a
+        # development team." Clearing the team here is what broke the previous
+        # attempt. -allowProvisioningUpdates is added only for Automatic, since
+        # that is the flag that sends Xcode looking for an Apple ID.
+        cmd.append(f"DEVELOPMENT_TEAM={team}")
+        if style == "Automatic":
+            cmd.append("-allowProvisioningUpdates")
+    else:
+        # Real identity but no team parsed from it — let the project's own
+        # settings stand rather than clearing them to something unsignable.
+        logger.warning("signing identity %r has no team; leaving project "
+                       "signing settings untouched", identity)
     cmd.extend(_project_selector(opts))
     cmd.extend(_only_testing_args(opts))
     return cmd
