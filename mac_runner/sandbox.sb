@@ -50,7 +50,14 @@
 ;; not the login keychain, which holds every saved password on the machine and
 ;; would be handed wholesale to LLM-authored test code. When the parameter is
 ;; empty this rule matches nothing and the deny above stands unchanged.
+;; `literal`, not `subpath`: a keychain is a FILE, and subpath matches a
+;; directory tree, so the first attempt matched nothing and the deny above
+;; silently stood — the build kept reporting the certificate missing. Both
+;; forms are listed because `security create-keychain foo.keychain` produces
+;; foo.keychain-db on current macOS, and which name ends up configured varies.
 (allow file-read*
+  (literal (param "SIGNING_KEYCHAIN"))
+  (literal (string-append (param "SIGNING_KEYCHAIN") "-db"))
   (subpath (param "SIGNING_KEYCHAIN")))
 
 ;; ── $HOME: read-only except the build's own directories ────────────────────
