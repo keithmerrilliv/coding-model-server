@@ -37,6 +37,22 @@
   (literal (string-append (param "HOME") "/.netrc"))
   (subpath (string-append (param "HOME") "/Library/Keychains")))
 
+;; ── Signing certificate: readable, and ONLY when a signing keychain is named ─
+;; codesign runs inside this sandbox and needs the certificate's private key.
+;; With the blanket keychain deny above it cannot see any identity, so every
+;; xcodebuild run failed with "No certificate for team '...' matching '<sha>'
+;; found" — while the runner, which resolves identities OUTSIDE the sandbox,
+;; reported the certificate present. Six signing theories died on that
+;; discrepancy (DEV-398).
+;;
+;; SBPL is last-match-wins, so this re-allows exactly one keychain file. Point
+;; SIGNING_KEYCHAIN at a DEDICATED keychain holding only the signing identity —
+;; not the login keychain, which holds every saved password on the machine and
+;; would be handed wholesale to LLM-authored test code. When the parameter is
+;; empty this rule matches nothing and the deny above stands unchanged.
+(allow file-read*
+  (subpath (param "SIGNING_KEYCHAIN")))
+
 ;; ── $HOME: read-only except the build's own directories ────────────────────
 (deny file-write* (subpath (param "HOME")))
 

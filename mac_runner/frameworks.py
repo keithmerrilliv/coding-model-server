@@ -184,19 +184,30 @@ SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 
 
 def wrap_sandbox(cmd: list[str], *, profile: Path, worktree: Path,
-                 derived_data: Path, home: "Path | None" = None) -> list[str]:
+                 derived_data: Path, home: "Path | None" = None,
+                 signing_keychain: "Path | str | None" = None) -> list[str]:
     """Prefix *cmd* with a sandbox-exec invocation of *profile* (DEV-126).
 
     The profile confines LLM-authored build/test code: credential paths are
     unreadable and $HOME is read-only outside the worktree / DerivedData /
     build caches. Parameters are passed with -D so custom worktree and
     DerivedData locations stay writable.
+
+    signing_keychain re-allows read access to exactly one keychain so codesign,
+    which runs inside this sandbox, can reach the signing identity's private
+    key (DEV-398). Leave it unset to keep every keychain unreadable; the
+    profile's allow rule then matches nothing. Prefer a dedicated keychain
+    holding only the signing certificate over the login keychain.
     """
     home = home or Path.home()
+    # An empty value must not expand to a real path — "" would let the
+    # subpath rule match everything. A path that cannot exist matches nothing.
+    keychain = str(signing_keychain) if signing_keychain else "/nonexistent/no-signing-keychain"
     return [
         SANDBOX_EXEC, "-f", str(profile),
         "-D", f"HOME={home}",
         "-D", f"WORKTREE={worktree}",
         "-D", f"DERIVED_DATA={derived_data}",
+        "-D", f"SIGNING_KEYCHAIN={keychain}",
         *cmd,
     ]

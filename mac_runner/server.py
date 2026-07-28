@@ -186,9 +186,22 @@ def run_tests_endpoint(req: RunTestsRequest) -> RunTestsResponse:
             # (DEV-126). The Linux orchestrator already sandboxes its runs —
             # unsandboxed Mac execution was the asymmetry.
             if Config.SANDBOX and _sandbox_available():
+                if (req.framework == "xcodebuild_test"
+                        and opts.get("signing_identity", "-") != "-"
+                        and not Config.SIGNING_KEYCHAIN):
+                    # Signing inside the sandbox cannot work without a readable
+                    # keychain, and the resulting xcodebuild error names a
+                    # missing certificate rather than the real cause (DEV-398).
+                    logger.warning(
+                        "signing with a real identity but "
+                        "CODING_MODEL_RUNNER_SIGNING_KEYCHAIN is unset — "
+                        "codesign cannot read the private key inside the "
+                        "sandbox and the build will fail claiming the "
+                        "certificate does not exist")
                 cmd = wrap_sandbox(
                     cmd, profile=Config.SANDBOX_PROFILE, worktree=wt,
                     derived_data=Config.DERIVED_DATA,
+                    signing_keychain=Config.SIGNING_KEYCHAIN,
                 )
             elif Config.SANDBOX:
                 logger.warning(

@@ -56,6 +56,18 @@ class Config:
         str(Path(__file__).parent / "sandbox.sb"),
     ))
 
+    # Keychain the sandbox may read so codesign can reach the signing
+    # identity's private key (DEV-398). Unset means no keychain is readable and
+    # signed builds cannot work inside the sandbox. Point this at a DEDICATED
+    # keychain containing only the signing certificate — the login keychain
+    # holds every saved password on the machine and would be exposed wholesale
+    # to LLM-authored test code. Create one with:
+    #   security create-keychain -p '' build.keychain
+    #   security import <cert>.p12 -k build.keychain -T /usr/bin/codesign
+    #   security unlock-keychain -p '' build.keychain
+    #   security list-keychains -d user -s build.keychain login.keychain-db
+    SIGNING_KEYCHAIN = os.getenv("CODING_MODEL_RUNNER_SIGNING_KEYCHAIN", "")
+
     @classmethod
     def repos(cls) -> dict[str, Path]:
         """Load symbolic-name → absolute-path map from repos.yml."""
