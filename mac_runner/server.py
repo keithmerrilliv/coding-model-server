@@ -29,6 +29,7 @@ from .frameworks import (
     wrap_sandbox,
 )
 from .environment import resolve_environment
+from .integration import IntegrationError, check_patch_integrated
 from .workspace import worktree, WorkspaceError
 
 logging.basicConfig(
@@ -140,6 +141,20 @@ def run_tests_endpoint(req: RunTestsRequest) -> RunTestsResponse:
             repo_path, req.base_ref, req.spec_id,
             Config.WORKTREE_ROOT, patch_dicts,
         ) as wt:
+            # A patch written where the project does not look is compiled by
+            # nobody, and the repo's own green tests then report the run as a
+            # PASS (DEV-399). Catch that here, before spending a build on it.
+            try:
+                check_patch_integrated(wt, patch_dicts, req.framework)
+            except IntegrationError as e:
+                logger.error("spec %s: patch not integrated — %s", req.spec_id, e)
+                return RunTestsResponse(
+                    passed=False,
+                    output=f"[integration check] {e}",
+                    exit_code=None,
+                    duration_sec=round(time.monotonic() - start, 2),
+                )
+
             try:
                 cmd = build_cmd(req.framework, wt, Config.DERIVED_DATA, **opts)
             except FrameworkError as e:
