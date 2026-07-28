@@ -48,8 +48,21 @@ def _run(cmd: list[str]) -> Optional[str]:
     return (r.stdout or "") + (r.stderr or "")
 
 
-def find_signing_identity() -> tuple[str, Optional[str]]:
+def find_signing_identity(*, prefer_hash: bool = True) -> tuple[str, Optional[str]]:
     """Return (identity, team) to hand xcodebuild.
+
+    With prefer_hash (the default, for CODE_SIGN_STYLE=Manual) the certificate's
+    SHA-1 is returned rather than its name. Names are not reliable here: under
+    Manual style Xcode resolves a generic "Apple Development" to the legacy
+    platform-specific type and then fails with
+
+        No signing certificate "Mac Development" found: No "Mac Development"
+        signing certificate matching team ID "..." with a private key was found
+
+    even though a modern unified "Apple Development" cert for that team is
+    sitting in the keychain. A SHA-1 names one exact certificate, so there is
+    nothing left to resolve. Automatic style wants the generic name instead,
+    because Xcode picks the certificate itself.
 
     Falls back to ("-", None) — ad-hoc — when the Mac holds no usable
     certificate. Ad-hoc still satisfies the Apple Silicon kernel, so a build
@@ -63,6 +76,19 @@ def find_signing_identity() -> tuple[str, Optional[str]]:
     if not found:
         logger.info("no code-signing identity in keychain — ad-hoc signing")
         return "-", None
+
+    if prefer_hash:
+        for wanted in _IDENTITY_PREFERENCE:
+            for sha, name in found:
+                if name.startswith(wanted):
+                    team = m.group(1) if (m := _TEAM_RE.search(name)) else None
+                    logger.info("using certificate %s (%s, team=%s)",
+                                sha, name, team)
+                    return sha, team
+        sha, name = found[0]
+        team = m.group(1) if (m := _TEAM_RE.search(name)) else None
+        logger.info("using certificate %s (%s, team=%s)", sha, name, team)
+        return sha, team
 
     for wanted in _IDENTITY_PREFERENCE:
         for _sha, name in found:
@@ -177,7 +203,9 @@ def resolve_environment(opts: dict) -> dict:
     if resolved.get("signing_identity"):
         return resolved
 
-    identity, team = find_signing_identity()
+    # Manual style takes the SHA-1 (exact certificate, no name resolution);
+    # Automatic takes the generic name and lets Xcode choose.
+    identity, team = find_signing_identity(prefer_hash=not targeting_device)
     resolved["signing_identity"] = identity
     # The team travels with the certificate in BOTH modes. Manual signing needs
     # it just as much as Automatic — omitting it fails every target with
