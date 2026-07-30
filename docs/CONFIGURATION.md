@@ -228,6 +228,43 @@ Variables loaded from `~/.config/coding-model-runner/.env`.
 | `CODING_MODEL_RUNNER_REPOS_FILE` | `~/.config/coding-model-runner/repos.yml` | Symbolic-name → absolute-path map; the runner refuses any repo not listed here. |
 | `CODING_MODEL_RUNNER_ENV_FILE` | *(unset)* | Override the .env path the runner loads. |
 | `CODING_MODEL_RUNNER_ALLOW_UNAUTH` | *(unset)* | Set to `1` to let the runner start without an API key (dev only). |
+| `CODING_MODEL_RUNNER_SANDBOX` | `1` | Wrap `swift`/`xcodebuild` in `sandbox-exec` so LLM-authored build/test code cannot read credentials or write outside its build dirs (DEV-126). Set to `0` only to debug a build the profile breaks — it removes that containment entirely. |
+| `CODING_MODEL_RUNNER_SANDBOX_PROFILE` | `mac_runner/sandbox.sb` | Override the SBPL profile. |
+| `CODING_MODEL_RUNNER_SIGNING_KEYCHAIN` | *(unset)* | Keychain the sandbox may read so `codesign` can reach the signing identity's private key (DEV-398). **Required whenever the runner signs with a real identity and the sandbox is on** — without it the build fails claiming the certificate does not exist. Point it at a **dedicated** keychain holding only the signing certificate, never the login keychain (which holds every saved password on the machine). |
+| `CODING_MODEL_RUNNER_RESOLVE_TIMEOUT` | `300` | Cap on the unsandboxed SwiftPM package-resolution pre-step (DEV-294). |
+
+#### Sandboxing on the Mac runner
+
+The runner confines LLM-authored builds with `sandbox-exec`. Three separate
+parts of the Apple toolchain sandbox *themselves*, and macOS cannot nest
+sandboxes, so each had to be handled:
+
+| Nesting site | Handling |
+|---|---|
+| SwiftPM manifest evaluation | Package resolution runs as an **unsandboxed pre-step**; the build stays confined (DEV-294) |
+| `swift-frontend` macro plugins | `OTHER_SWIFT_FLAGS=$(inherited) -disable-sandbox` (DEV-294) |
+| App-hosted XCTest launching its `TEST_HOST` | Test host is built **without App Sandbox** — `ENABLE_APP_SANDBOX=NO` + `CODE_SIGN_ENTITLEMENTS=` (DEV-403) |
+
+The third one is worth understanding before you touch it. An app-hosted XCTest
+bundle runs by launching its host app; if that app carries
+`com.apple.security.app-sandbox`, macOS applies App Sandbox at exec — a nested
+`sandbox_apply` that fails inside our wrapper. The symptom is *not* a permission
+error: xcodebuild builds and signs cleanly, then reports `The test runner hung
+before establishing connection` after ~6 minutes, with nothing in the unified
+log. Tuning `sandbox.sb` cannot fix it, because nothing is being denied.
+
+Deliberate trade-off: the binary under test is not the binary you ship. A
+project whose behaviour depends on being sandboxed will not have that exercised.
+
+**Re-enabling the sandbox after it has been turned off** (it was disabled as an
+interim measure while DEV-403 was open):
+
+1. Remove `CODING_MODEL_RUNNER_SANDBOX=0` from `~/.config/coding-model-runner/.env`.
+2. If the Mac holds a real signing identity, set `CODING_MODEL_RUNNER_SIGNING_KEYCHAIN`
+   to a dedicated keychain — otherwise signing fails inside the sandbox and the
+   error blames a missing certificate (DEV-398). `mac_runner/config.py` documents
+   the `security` commands to create one.
+3. Restart the runner and confirm a run passes; the log line names the mode.
 
 ### Planner `test_strategy` block
 

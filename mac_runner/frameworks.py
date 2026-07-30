@@ -82,6 +82,38 @@ def build_xcodebuild_test_cmd(worktree: Path, derived_data: Path, **opts: Any) -
         # (mlx-swift's @TaskLocal here) breaks the build. $(inherited) so a
         # project's own OTHER_SWIFT_FLAGS survive being overridden here.
         "OTHER_SWIFT_FLAGS=$(inherited) -disable-sandbox",
+        # The THIRD nesting site, and the one that kept xcodebuild_test broken
+        # after DEV-294 fixed the other two (DEV-403).
+        #
+        # An app-hosted XCTest bundle (TEST_HOST) runs by LAUNCHING the host
+        # app. If that app carries com.apple.security.app-sandbox, macOS must
+        # apply App Sandbox to it at exec — a nested sandbox_apply, which fails
+        # with EPERM inside our sandbox-exec wrapper exactly as SwiftPM's
+        # manifest sandbox and swift-frontend's macro-plugin sandbox did. The
+        # host then never initialises and never connects back, so xcodebuild
+        # sits until the launch timeout and reports:
+        #   The test runner hung before establishing connection.
+        # having built and signed perfectly. There is no denial trail in the
+        # unified log, which is what made this expensive to attribute.
+        #
+        # Tuning sandbox.sb cannot fix it — it is not a file denial. Building
+        # the TEST host without App Sandbox can: nothing nests, and the
+        # LLM-authored code stays confined by sandbox-exec, which is the
+        # containment DEV-126 actually exists to provide.
+        #
+        # Both settings are required. ENABLE_APP_SANDBOX=NO alone is not
+        # enough when the project ships an explicit .entitlements file — the
+        # entitlement is embedded from that file at signing regardless — so the
+        # entitlements are cleared too. Clearing them can only ever WIDEN what
+        # the host may do, so it cannot break a test that used to pass.
+        #
+        # TRADE-OFF, deliberate: the binary under test is not the binary you
+        # ship. A project whose behaviour depends on being sandboxed (container
+        # paths, file-access limits) will not have that exercised here. That is
+        # the price of running these tests confined at all; the alternative on
+        # the table was disabling sandbox-exec for every Apple run.
+        "ENABLE_APP_SANDBOX=NO",
+        "CODE_SIGN_ENTITLEMENTS=",
     ]
     # Signing. The binary MUST be signed: on Apple Silicon the kernel refuses
     # to exec unsigned arm64 code, so CODE_SIGNING_ALLOWED=NO got the xctest
@@ -102,8 +134,9 @@ def build_xcodebuild_test_cmd(worktree: Path, derived_data: Path, **opts: Any) -
     if identity == "-":
         # Ad-hoc needs no team and no profile. Clearing them stops the project's
         # own committed values from demanding a provisioning round trip.
-        cmd += ["CODE_SIGN_ENTITLEMENTS=", "DEVELOPMENT_TEAM=",
-                "PROVISIONING_PROFILE_SPECIFIER="]
+        # (CODE_SIGN_ENTITLEMENTS is already cleared above for DEV-403 — it now
+        # applies to the real-identity path too, not just ad-hoc.)
+        cmd += ["DEVELOPMENT_TEAM=", "PROVISIONING_PROFILE_SPECIFIER="]
     elif team:
         # A real certificate ALWAYS needs its team, Manual style included:
         # without it every target fails with "Signing for <t> requires a

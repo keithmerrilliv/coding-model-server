@@ -358,3 +358,133 @@ def test_resolution_failure_is_surfaced_not_swallowed(client, monkeypatch):
     assert "package resolution failed" in body["output"]
     assert "no network" in body["output"]
     assert "tests ok" in body["output"]
+
+
+# ── DEV-403: app-hosted XCTest vs. sandbox-exec ──────────────────────────────
+#
+# The THIRD place the Apple toolchain sandboxes itself, and the one that kept
+# xcodebuild_test broken after DEV-294 fixed the other two.
+#
+# An app-hosted XCTest bundle runs by LAUNCHING its TEST_HOST app. If that app
+# carries com.apple.security.app-sandbox, macOS applies App Sandbox at exec — a
+# nested sandbox_apply, which fails inside our wrapper. The host never connects
+# back and xcodebuild reports "The test runner hung before establishing
+# connection" after ~354s, having built and signed cleanly, with no denial trail
+# in the unified log.
+#
+# The runner had been shipped with CODING_MODEL_RUNNER_SANDBOX=0 as an interim
+# workaround, which forfeited the DEV-126 containment entirely. These tests pin
+# the real fix: build the TEST host without App Sandbox so nothing nests, and
+# keep sandbox-exec on.
+
+def _xcodebuild_build_cmd(client, monkeypatch, **extra):
+    """Run an xcodebuild_test dispatch and return the sandboxed BUILD argv."""
+    monkeypatch.setattr(Config, "SANDBOX", True)
+    monkeypatch.setattr(server, "_sandbox_available", lambda: True)
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+
+    _fake_subprocess(monkeypatch, fake_run)
+    payload = {"spec_id": "s1", "repo": "proj", "framework": "xcodebuild_test",
+               "scheme": "Demo"}
+    payload.update(extra)
+    resp = client.post("/v1/run_tests",
+                       headers={"X-Runner-Key": "test-key"}, json=payload)
+    assert resp.status_code == 200, resp.text
+    # resolve pre-step, then the confined build
+    return calls[-1]
+
+
+def test_test_host_is_built_without_app_sandbox(client, monkeypatch):
+    build = _xcodebuild_build_cmd(client, monkeypatch)
+
+    assert "ENABLE_APP_SANDBOX=NO" in build, (
+        "an app-sandboxed TEST_HOST needs a nested sandbox_apply to launch, "
+        "which EPERMs inside sandbox-exec and hangs the run")
+    # Necessary as well as ENABLE_APP_SANDBOX: when a project ships an explicit
+    # .entitlements file the app-sandbox entitlement is embedded from it at
+    # signing regardless of the build setting.
+    assert "CODE_SIGN_ENTITLEMENTS=" in build
+
+    # The whole point of the fix rather than the interim workaround: the
+    # LLM-authored code is still confined.
+    assert build[0] == server.SANDBOX_EXEC, (
+        "DEV-403 must be fixed by de-sandboxing the TEST HOST, not by "
+        "dropping sandbox-exec — that was the interim state it replaces")
+
+
+def test_entitlements_are_cleared_for_a_real_signing_identity_too(
+        client, monkeypatch):
+    """The discriminating case.
+
+    Entitlements used to be cleared only on the ad-hoc signing path. On a Mac
+    that holds a real Apple Development certificate the runner picks that
+    identity instead (DEV-395/DEV-398), the project's own entitlements survive,
+    the app-sandbox entitlement is embedded — and the run hangs exactly as
+    before. A fix that only covers ad-hoc looks green here and fails on the
+    machine that matters.
+    """
+    # Signing is DISCOVERED, not requested: resolve_environment shells out to
+    # `security find-identity`. Patch that seam so the rest of the resolution
+    # logic runs for real, as it would on the Mac Studio.
+    from mac_runner import environment
+    monkeypatch.setattr(
+        environment, "find_signing_identity",
+        lambda **kw: ("075636C8AB6B0375521B4421253299F4A2ECBF79", "YHU56PAQP4"))
+    monkeypatch.setattr(environment, "find_attached_device", lambda dest: None)
+
+    build = _xcodebuild_build_cmd(client, monkeypatch)
+
+    assert "CODE_SIGN_IDENTITY=075636C8AB6B0375521B4421253299F4A2ECBF79" in build, (
+        "guard: this test is only meaningful on the real-identity path")
+    assert "CODE_SIGN_ENTITLEMENTS=" in build
+    assert "ENABLE_APP_SANDBOX=NO" in build
+    # The real-identity path must still keep its team, or every target fails
+    # with "Signing for <t> requires a development team" (DEV-398).
+    assert "DEVELOPMENT_TEAM=YHU56PAQP4" in build
+
+
+def test_entitlements_cleared_exactly_once(client, monkeypatch):
+    """Ad-hoc previously set CODE_SIGN_ENTITLEMENTS= itself. Now that it is set
+    for every path, a leftover second copy would be dead weight on the command
+    line and a sign the two code paths drifted."""
+    build = _xcodebuild_build_cmd(client, monkeypatch)
+    assert build.count("CODE_SIGN_ENTITLEMENTS=") == 1
+
+
+def test_swift_test_does_not_touch_app_sandbox(client, monkeypatch):
+    """Scope check. swift_test builds a SwiftPM package with no TEST_HOST app,
+    so there is nothing to launch and nothing to nest — these settings would be
+    meaningless noise, and ENABLE_APP_SANDBOX is not even a SwiftPM concept."""
+    monkeypatch.setattr(Config, "SANDBOX", True)
+    monkeypatch.setattr(server, "_sandbox_available", lambda: True)
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+
+    _fake_subprocess(monkeypatch, fake_run)
+    resp = client.post(
+        "/v1/run_tests", headers={"X-Runner-Key": "test-key"},
+        json={"spec_id": "s1", "repo": "proj", "framework": "swift_test"},
+    )
+    assert resp.status_code == 200, resp.text
+
+    build = calls[-1]
+    assert not [a for a in build if a.startswith("ENABLE_APP_SANDBOX")]
+    assert build[0] == server.SANDBOX_EXEC
+
+
+def test_sandbox_is_on_by_default(monkeypatch):
+    """DEV-403's interim state was CODING_MODEL_RUNNER_SANDBOX=0 on the runner.
+    The code default must remain ON, so a runner that simply drops the override
+    comes back confined rather than silently staying open."""
+    monkeypatch.delenv("CODING_MODEL_RUNNER_SANDBOX", raising=False)
+    import importlib
+    from mac_runner import config as config_mod
+    importlib.reload(config_mod)
+    assert config_mod.Config.SANDBOX is True
