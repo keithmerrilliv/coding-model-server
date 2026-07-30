@@ -112,6 +112,22 @@ class Config:
     DEFAULT_N_THREADS = int(os.getenv('MODEL_N_THREADS', 24))
     DEFAULT_N_THREADS_BATCH = int(os.getenv('MODEL_N_THREADS_BATCH', 32))
 
+    # Whether llama-server maps the GGUF (--mmap) or reads a private copy
+    # (--no-mmap). Default 1 preserves the historical hard-wired --mmap.
+    #
+    # There is a real tradeoff and no universally right answer, which is why
+    # this is a knob rather than a constant (DEV-105). --mmap is page-cache
+    # friendly, so a warm reload costs nothing; but with expert offload
+    # (cpu_moe / n_cpu_moe) llama.cpp itself warns "tensor overrides to CPU
+    # are used with mmap enabled — consider using --no-mmap for better
+    # performance". --no-mmap gives that offloaded decode its speed back at
+    # the cost of ~2x RAM per load and a cold read, unless the file is
+    # pre-warmed in page cache. Flip it per model with `mmap: false` in the
+    # model config; `scripts/measure_model_load.sh --infer` produces the
+    # tok/s numbers the choice should be made on.
+    DEFAULT_USE_MMAP = os.getenv('MODEL_USE_MMAP', '1').strip().lower() not in (
+        '0', 'false', 'no', 'off')
+
     # Upper bound on a single llama-server inference call. Must be >= the
     # longest autonomous role timeout (coding_model_autonomous/executor.py defaults
     # ARCHITECT/REVIEWER to 2700s) so that the inner request doesn't fail

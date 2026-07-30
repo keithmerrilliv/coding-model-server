@@ -16,6 +16,7 @@ from unittest import mock
 import pytest
 import requests as http_requests
 
+from coding_model_server.config import Config
 from coding_model_server.llama_server import LlamaServerManager
 
 
@@ -100,6 +101,54 @@ def test_n_cpu_moe_emits_flag_and_overrides_cpu_moe(mgr):
     # absent -> neither offload flag
     none = mgr._build_server_args("/b", {"path": "/m.gguf"})
     assert "--n-cpu-moe" not in none and "--cpu-moe" not in none
+
+
+class TestMmapFlag:
+    """DEV-105 — --mmap was hard-wired, so the mmap/no-mmap tradeoff under
+    expert offload ("tensor overrides to CPU are used with mmap enabled —
+    consider using --no-mmap") could not be acted on without a code change.
+    Default stays --mmap; the knob is what's new."""
+
+    def test_defaults_to_mmap(self, mgr):
+        args = mgr._build_server_args("/b", {"path": "/m.gguf"})
+        assert "--mmap" in args and "--no-mmap" not in args
+
+    def test_per_model_opt_out(self, mgr):
+        args = mgr._build_server_args("/b", {"path": "/m.gguf", "mmap": False})
+        assert "--no-mmap" in args and "--mmap" not in args
+
+    def test_global_default_flips_it(self, mgr, monkeypatch):
+        monkeypatch.setattr(Config, "DEFAULT_USE_MMAP", False)
+        assert "--no-mmap" in mgr._build_server_args("/b", {"path": "/m.gguf"})
+        # An explicit per-model value still wins over the global default —
+        # the offloaded-MoE case is exactly the one that needs to differ.
+        assert "--mmap" in mgr._build_server_args(
+            "/b", {"path": "/m.gguf", "mmap": True})
+
+    def test_exactly_one_mmap_flag_is_emitted(self, mgr):
+        # Both flags in one argv would leave the winner up to llama-server's
+        # arg parsing order rather than this config.
+        for mc in ({"path": "/m.gguf"}, {"path": "/m.gguf", "mmap": False}):
+            args = mgr._build_server_args("/b", mc)
+            assert sum(a in ("--mmap", "--no-mmap") for a in args) == 1
+
+    def test_runtime_signature_separates_mmap_variants(self, mgr):
+        # Two agents on the SAME GGUF differing only in mmap must not reuse
+        # each other's child — the signature is what forces the swap.
+        base = {"path": "/m.gguf", "n_ctx": 32768}
+        assert (mgr._runtime_signature({**base, "mmap": True})
+                != mgr._runtime_signature({**base, "mmap": False}))
+
+    def test_runtime_signature_separates_n_cpu_moe_variants(self, mgr):
+        # Same class of bug: n_cpu_moe changes argv (--n-cpu-moe N) but was
+        # absent from the signature, so a swap between two agents sharing a
+        # GGUF and differing only in expert-offload depth silently reused the
+        # first one's child.
+        base = {"path": "/m.gguf", "n_ctx": 32768}
+        assert (mgr._runtime_signature({**base, "n_cpu_moe": 26})
+                != mgr._runtime_signature({**base, "n_cpu_moe": 12}))
+        assert (mgr._runtime_signature({**base, "n_cpu_moe": 26})
+                != mgr._runtime_signature(base))
 
 
 def test_no_draft_flags_when_absent(mgr):

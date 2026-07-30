@@ -249,7 +249,11 @@ class LlamaServerManager:
             '-t', str(Config.DEFAULT_N_THREADS),
             '-tb', str(Config.DEFAULT_N_THREADS_BATCH),
             '-fa', 'auto',
-            '--mmap',
+            # --mmap / --no-mmap: see Config.DEFAULT_USE_MMAP for the tradeoff.
+            # Per-model `mmap` wins over the global default so an offloaded MoE
+            # can opt out without changing the setting for the whole roster.
+            '--mmap' if model_config.get('mmap', Config.DEFAULT_USE_MMAP)
+            else '--no-mmap',
             '--cache-type-k', cache_k,
             '--cache-type-v', cache_v,
             '--host', '127.0.0.1',
@@ -874,6 +878,11 @@ class LlamaServerManager:
             mc.get('type_k'),
             mc.get('type_v'),
             bool(mc.get('cpu_moe')),
+            mc.get('n_cpu_moe'),
+            # --mmap vs --no-mmap is per-model (DEV-105) and changes how the
+            # child loads its weights, so two agents on the same GGUF that
+            # disagree here must not reuse each other's process.
+            bool(mc.get('mmap', Config.DEFAULT_USE_MMAP)),
             json.dumps(mc.get('logit_bias'), sort_keys=True)
             if mc.get('logit_bias') is not None else None,
             tuple(mc.get('server_extra_args') or ()),
