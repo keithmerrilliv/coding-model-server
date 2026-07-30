@@ -1390,6 +1390,17 @@ _JEST_SUMMARY_RE = re.compile(r"Tests?:\s+\d+\s+\w+", re.IGNORECASE)
 # Node's built-in test runner (node:test) TAP footer: lines like
 # "# tests 2", "# pass 1", "# fail 1". Any one of these confirms a real run.
 _NODE_TEST_SUMMARY_RE = re.compile(r"^# (?:tests|pass|fail)\s+\d+", re.MULTILINE)
+# Vitest summary block (DEV-104):
+#     Test Files  1 passed (1)
+#          Tests  3 passed (3)
+# Deliberately anchored on the "Tests"/"Test Files" counter rather than the
+# `Test Files` line alone: vitest prints "Test Files  no tests" when it
+# collects nothing, which must NOT read as a successful run. Requiring a
+# digit-led outcome means an empty collection fails the guard.
+_VITEST_SUMMARY_RE = re.compile(
+    r"^\s*(?:Test Files|Tests)\s+\d+\s+(?:passed|failed|skipped|todo)",
+    re.MULTILINE,
+)
 
 
 def _extract_actionable_test_output(output: str, framework: str, max_chars: int = 8000) -> str:
@@ -1419,6 +1430,21 @@ def _extract_actionable_test_output(output: str, framework: str, max_chars: int 
                 return extracted
             # Keep the head (first failures) + the tail (summary) — the middle
             # is just more failures of the same kind in most cases.
+            head = extracted[: max_chars - 1200]
+            tail = extracted[-1200:]
+            return head + "\n\n[... output truncated ...]\n\n" + tail
+    elif fw in ("jest", "vitest"):
+        # Both label a failing suite with a line starting `FAIL <path>`, and
+        # both put the per-assertion diagnostics after it. The preamble before
+        # the first FAIL is transform/config chatter the implementer cannot act
+        # on, and on a large suite it is big enough to push the real failures
+        # past a tail-only truncation (DEV-104) — the same trap the pytest
+        # branch above exists to avoid.
+        marker = output.find("\nFAIL ")
+        if marker != -1:
+            extracted = output[marker + 1:]
+            if len(extracted) <= max_chars:
+                return extracted
             head = extracted[: max_chars - 1200]
             tail = extracted[-1200:]
             return head + "\n\n[... output truncated ...]\n\n" + tail
@@ -1459,6 +1485,9 @@ def _validate_test_output_structure(test_output: str, framework: str) -> tuple[b
     elif fw == "jest":
         if not _JEST_SUMMARY_RE.search(test_output):
             return False, "no jest summary line ('Tests: ...') detected"
+    elif fw == "vitest":
+        if not _VITEST_SUMMARY_RE.search(test_output):
+            return False, "no vitest summary line ('Tests  N passed') detected"
     elif fw == "node_test":
         if not _NODE_TEST_SUMMARY_RE.search(test_output):
             return False, "no node:test summary line ('# tests/# pass/# fail N') detected"

@@ -85,10 +85,42 @@ def _resolve_sandbox_node_root() -> Optional[Path]:
 SANDBOX_NODE_ROOT = _resolve_sandbox_node_root()
 
 
+def _resolv_conf_bind() -> list[str]:
+    """bwrap args making DNS work in a `--share-net` sandbox.
+
+    `/etc` is bound read-only, which looks like it should be enough — but on
+    systemd-resolved hosts (Ubuntu/Debian default) `/etc/resolv.conf` is a
+    SYMLINK into `/run/systemd/resolve/`, and `/run` is not bound. The link
+    therefore dangles inside the sandbox, every lookup fails with EAI_AGAIN,
+    and npm hangs retrying until it hits the install timeout with no output at
+    all — a silent, very confusing failure (DEV-104).
+
+    The fix is to bind the symlink's TARGET at its own path, so the link that
+    `/etc` already provides resolves. Binding over `/etc/resolv.conf` directly
+    does NOT work: bwrap cannot create a mount point on a dangling symlink and
+    aborts with "Can't create file at /etc/resolv.conf".
+
+    The stub resolver it points at (127.0.0.53) is reachable because
+    `--share-net` keeps the host's network namespace, loopback included.
+    """
+    src = Path("/etc/resolv.conf")
+    try:
+        real = src.resolve()
+    except OSError:
+        return []
+    if real == src or not real.exists():
+        # A plain file: already covered by the read-only /etc bind.
+        return []
+    return ["--ro-bind-try", str(real), str(real)]
+
+
 def _wrap_in_sandbox(
     cmd: list[str],
     spec_dir: Path,
     seccomp_fd: Optional[int] = None,
+    *,
+    share_net: bool = False,
+    extra_binds: Optional[list[str]] = None,
 ) -> list[str]:
     """Wrap `cmd` in a bubblewrap sandbox.
 
@@ -114,6 +146,18 @@ def _wrap_in_sandbox(
 
     Tests that legitimately need network or host access won't work under this
     sandbox; set CODING_MODEL_ALLOW_UNSANDBOXED_TESTS=1 to opt out at your own risk.
+
+    *share_net* re-shares ONLY the network namespace (bwrap's `--share-net`,
+    which is defined exactly as a modifier to `--unshare-all`). It exists for
+    one caller — the dependency-install phase of `_provision_node_modules`
+    (DEV-104), which has to reach the npm registry. Every other confinement
+    stays in force for that phase: `/home` and `/root` are still tmpfs-masked,
+    so `~/.npmrc` (and the auth tokens in it), `~/.ssh` and `.env` files remain
+    invisible, and only *spec_dir* is writable. TEST execution never sets it —
+    a test that could reach the network could exfiltrate whatever it read.
+
+    *extra_binds* are raw bwrap arguments spliced in before the *spec_dir*
+    bind, for the optional persistent npm cache (see _npm_cache_args).
     """
     # Walk up from sys.executable WITHOUT resolving symlinks — venv pythons
     # are typically a symlink chain (`venv/bin/python -> python3 -> /usr/bin/python3`)
@@ -150,6 +194,13 @@ def _wrap_in_sandbox(
         "--setenv", "LANG", "C.UTF-8",
         "--setenv", "PYTHONUNBUFFERED", "1",
         "--setenv", "PYTHONDONTWRITEBYTECODE", "1",
+        # Deterministic, parseable output. Both jest and vitest colourise and
+        # animate when they think they're on a TTY, and the ANSI escapes land
+        # in the middle of the very summary lines the structural guard matches
+        # (orchestrator_daemon._validate_test_output_structure). They honour
+        # these two vars regardless of TTY detection.
+        "--setenv", "CI", "true",
+        "--setenv", "NO_COLOR", "1",
         # Baseline filesystem — read-only
         "--ro-bind", "/usr", "/usr",
         "--ro-bind-try", "/lib", "/lib",
@@ -169,9 +220,15 @@ def _wrap_in_sandbox(
         "--tmpfs", "/root",
         "--ro-bind", str(venv_root), str(venv_root),
         *node_bind,
+        *(extra_binds or []),
         "--bind", str(spec_abs), str(spec_abs),
         "--chdir", str(spec_abs),
     ]
+    # `--share-net` is only meaningful after `--unshare-all`, which is why it
+    # is appended here rather than swapped in above.
+    if share_net:
+        args.append("--share-net")
+        args.extend(_resolv_conf_bind())
     if seccomp_fd is not None:
         args.extend(["--seccomp", str(seccomp_fd)])
     args.append("--")
@@ -184,11 +241,23 @@ def _wrap_in_sandbox(
 DEFAULT_TIMEOUTS: dict[str, int] = {
     "pytest": 120,
     "python": 120,
-    "jest": 120,
+    "jest": 180,
+    "vitest": 180,
     "node_test": 120,
     "swift_test": 300,
     "xcodebuild_test": 900,
 }
+
+# Frameworks whose tests import from `node_modules`, so the spec needs a
+# dependency-install phase before they can run (DEV-104). `node_test` is
+# deliberately NOT here: DEV-103's zero-dependency path must never reach the
+# network, and keeping it out is what guarantees that.
+NODE_MODULES_FRAMEWORKS: frozenset[str] = frozenset({"jest", "vitest"})
+
+# Budget for `npm ci`/`npm install`. Separate from the test timeout: a cold
+# React install fetches a few hundred MB and would otherwise eat the budget
+# the tests themselves need.
+NPM_INSTALL_TIMEOUT = int(os.getenv("CODING_MODEL_NPM_INSTALL_TIMEOUT", "300"))
 
 KNOWN_FRAMEWORKS: frozenset[str] = frozenset(DEFAULT_TIMEOUTS) | {"none"}
 
@@ -219,15 +288,255 @@ _SPEC_SKIP_PATTERNS = (".pytest_cache", "__pycache__", ".DS_Store",
                        "test_output.txt", "retry_history")
 
 
+# Cap on captured output. Without this, a runaway test that prints a
+# tight loop of MB/s straight to stdout buffers everything in memory
+# and OOMs the orchestrator. 4 MiB is plenty for real test traces.
+MAX_OUTPUT_BYTES = 4 * 1024 * 1024
+
+
+def _truncate(s: str) -> str:
+    b = s.encode("utf-8", errors="replace")
+    if len(b) <= MAX_OUTPUT_BYTES:
+        return s
+    return (
+        b[: MAX_OUTPUT_BYTES // 2].decode("utf-8", errors="replace")
+        + f"\n... [truncated {len(b) - MAX_OUTPUT_BYTES} bytes of output] ...\n"
+        + b[-MAX_OUTPUT_BYTES // 2 :].decode("utf-8", errors="replace")
+    )
+
+
+def _run_confined(
+    raw_cmd: list[str],
+    spec_dir: Path,
+    timeout: int,
+    *,
+    what: str,
+    share_net: bool = False,
+    extra_binds: Optional[list[str]] = None,
+) -> tuple[bool, str]:
+    """Run *raw_cmd* under bwrap+seccomp; return (exited_zero, combined_output).
+
+    Extracted from _run_local_tests (DEV-104) so the dependency-install phase
+    gets the identical confinement and process handling — the killpg-on-timeout
+    and output cap below matter at least as much for `npm install`, which
+    happily spawns a tree of children and can emit unbounded progress output.
+
+    *share_net* is forwarded to _wrap_in_sandbox; only the install phase sets
+    it. *what* names the activity for logs and the bwrap-missing diagnostic.
+    """
+    allow_unsandboxed = os.getenv("CODING_MODEL_ALLOW_UNSANDBOXED_TESTS", "").lower() in ("1", "true", "yes")
+
+    # The env var takes priority over bwrap detection: if the user explicitly
+    # opted out, honor it — even when bwrap is installed but broken (e.g.
+    # AppArmor restricting unprivileged user namespaces, which silently
+    # makes every bwrap invocation fail with "Operation not permitted"
+    # before pytest gets a chance to run).
+    bpf_fd: Optional[int] = None
+    if allow_unsandboxed:
+        cmd = raw_cmd
+        sandbox_mode = "UNSANDBOXED (CODING_MODEL_ALLOW_UNSANDBOXED_TESTS=1)"
+        logger.warning(
+            "running LLM-generated %s WITHOUT a sandbox — it has full "
+            "access to this user's environment", what
+        )
+    elif _sandbox_available():
+        bpf_fd = seccomp_filter.build_seccomp_bpf_fd()
+        cmd = _wrap_in_sandbox(raw_cmd, spec_dir, seccomp_fd=bpf_fd,
+                               share_net=share_net, extra_binds=extra_binds)
+        if bpf_fd is None:
+            sandbox_mode = "bwrap (no seccomp — libseccomp unavailable)"
+            logger.warning(
+                "seccomp filter unavailable; bwrap will run without --seccomp. "
+                "Install python3-seccomp on the host to enable kernel-syscall "
+                "filtering for LLM-generated tests."
+            )
+        else:
+            sandbox_mode = "bwrap+seccomp"
+        if share_net:
+            sandbox_mode += " +net"
+    else:
+        msg = (
+            f"Refusing to run LLM-generated {what}: bwrap (bubblewrap) is not "
+            "available and CODING_MODEL_ALLOW_UNSANDBOXED_TESTS is not set. Install "
+            "bubblewrap (e.g. `apt install bubblewrap` on Debian/Ubuntu) on "
+            "the Linux server, or set CODING_MODEL_ALLOW_UNSANDBOXED_TESTS=1 to opt "
+            "out (not recommended — tests run with the orchestrator's own "
+            "privileges)."
+        )
+        logger.error(msg)
+        return False, msg
+
+    logger.info("running %s via %s: %s (timeout=%ds)",
+                what, sandbox_mode, " ".join(raw_cmd), timeout)
+
+    try:
+        # Popen + communicate instead of subprocess.run: run()'s timeout
+        # kills only the DIRECT child, then blocks draining stdout — an
+        # LLM-written test that spawned a background process leaves an
+        # orphan holding the pipe, and the drain hangs the tick thread
+        # forever with no heartbeat (DEV-155). Own session + killpg takes
+        # the whole group down, after which the drain returns immediately.
+        proc = subprocess.Popen(
+            cmd, cwd=spec_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, start_new_session=True,
+            pass_fds=(bpf_fd,) if bpf_fd is not None else (),
+        )
+        try:
+            out, err = proc.communicate(timeout=timeout)
+            output = _truncate(out or "") + "\n" + _truncate(err or "")
+            ok = proc.returncode == 0
+        except subprocess.TimeoutExpired as e:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                proc.kill()
+            # Group is dead; the drain returns. Surface partial output so
+            # the supervisor / reviewer can diagnose the hang.
+            try:
+                out, err = proc.communicate(timeout=10)
+            except Exception:
+                out = e.stdout if isinstance(e.stdout, str) else ""
+                err = e.stderr if isinstance(e.stderr, str) else ""
+            output = (
+                f"{what} timed out after {timeout}s\n"
+                f"--- partial stdout ---\n{_truncate(out or '')}\n"
+                f"--- partial stderr ---\n{_truncate(err or '')}"
+            )
+            ok = False
+    except Exception as e:
+        output = f"Test runner failed running {what}: {type(e).__name__}: {e}"
+        ok = False
+    finally:
+        if bpf_fd is not None:
+            try:
+                os.close(bpf_fd)
+            except OSError:
+                pass
+
+    return ok, output.strip()
+
+
+def _npm_cache_args(spec_dir: Path) -> tuple[list[str], list[str]]:
+    """(bwrap binds, npm flags) for the install phase's package cache.
+
+    By default the cache lives under HOME=/tmp, which is a tmpfs inside the
+    sandbox — so every spec re-downloads its dependency tree from scratch and
+    nothing survives to be tampered with between runs. Setting
+    CODING_MODEL_NPM_CACHE_DIR binds a persistent host directory instead,
+    which turns a cold multi-minute React install into a warm one. That is a
+    deliberate trade: the cache is then shared mutable state across specs.
+    npm still verifies every entry against its integrity hash on read, and
+    `--ignore-scripts` means cached content cannot execute at install time,
+    so a poisoned entry would have to survive as ordinary imported code —
+    which is exactly the position we are already in with LLM-authored tests.
+    """
+    raw = os.getenv("CODING_MODEL_NPM_CACHE_DIR", "").strip()
+    if not raw:
+        return [], []
+    cache = Path(raw).expanduser()
+    try:
+        cache.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        logger.warning("CODING_MODEL_NPM_CACHE_DIR=%s is unusable (%s) — "
+                       "falling back to an ephemeral in-sandbox cache", cache, e)
+        return [], []
+    return ["--bind", str(cache), str(cache)], ["--cache", str(cache)]
+
+
+def _provision_node_modules(spec_dir: Path) -> tuple[bool, str]:
+    """Install a jest/vitest spec's dependencies in a network-gated sandbox.
+
+    DEV-104. This is the ONLY phase of the pipeline that is allowed to reach
+    the network, and it is confined on every other axis: `/home` and `/root`
+    are tmpfs-masked (so the operator's `~/.npmrc` registry tokens, `~/.ssh`
+    and `.env` files are not visible to it), only *spec_dir* is writable, and
+    the same seccomp denylist applies.
+
+    `--ignore-scripts` is passed UNCONDITIONALLY and has no override. npm
+    lifecycle hooks (preinstall/install/postinstall/prepare) are arbitrary
+    code execution by whatever the LLM happened to name in `package.json` —
+    the precise thing this sandbox exists to prevent — and they run at install
+    time, when we are still holding the network open. A CLI flag also
+    outranks a project-local `.npmrc`, so a spec cannot re-enable them by
+    writing `ignore-scripts=false` next to its `package.json`. The cost is
+    packages with native build steps (node-gyp); React, jest, vitest, jsdom
+    and Testing Library are all pure JS and unaffected.
+
+    Returns (ok, output). A no-op success when the spec has no package.json.
+    """
+    if not (spec_dir / "package.json").is_file():
+        # Nothing declared. Let the runner proceed — the framework's own
+        # "cannot find module" error is a better diagnostic than anything
+        # we would invent here.
+        return True, ""
+
+    cache_binds, cache_flags = _npm_cache_args(spec_dir)
+
+    # `npm ci` is the pinned, reproducible path, but it hard-fails when the
+    # lockfile disagrees with package.json — which is the normal outcome when
+    # a model hand-writes both. Planner guidance tells specs not to author a
+    # lockfile; when one is absent we resolve fresh instead.
+    has_lock = (spec_dir / "package-lock.json").is_file()
+    raw_cmd = [
+        "npm", "ci" if has_lock else "install",
+        "--ignore-scripts",
+        "--no-audit", "--no-fund",
+        "--loglevel", "warn",
+        *cache_flags,
+    ]
+
+    ok, output = _run_confined(
+        raw_cmd, spec_dir, NPM_INSTALL_TIMEOUT,
+        what="dependency install", share_net=True, extra_binds=cache_binds,
+    )
+    if not ok:
+        return False, (
+            f"Dependency install failed (`{' '.join(raw_cmd)}`). Tests cannot "
+            f"run without node_modules. Note that install scripts are disabled "
+            f"and the sandbox has no access to anything outside the spec "
+            f"directory.\n\n{output}"
+        )
+    logger.info("provisioned node_modules for %s", spec_dir.name)
+    return True, output
+
+
 def _run_local_tests(spec_dir: Path, framework: str, timeout: int) -> tuple[bool, str]:
-    """Run pytest/jest/node_test locally (bwrap sandbox on Linux).
+    """Run pytest/jest/vitest/node_test locally (bwrap sandbox on Linux).
 
     LLM-generated test code runs inside a bubblewrap sandbox by default. If
     bwrap is unavailable, the test run fails with a clear diagnostic unless
     CODING_MODEL_ALLOW_UNSANDBOXED_TESTS is explicitly set.
+
+    jest/vitest specs get a network-gated dependency-install phase first
+    (_provision_node_modules); the test run itself is always offline.
     """
+    if framework in NODE_MODULES_FRAMEWORKS:
+        ok, install_output = _provision_node_modules(spec_dir)
+        if not ok:
+            return False, install_output
+
     if framework == "jest":
-        raw_cmd = ["npx", "jest", "--no-coverage", "--roots", str(spec_dir)]
+        # The local binary, not `npx jest`: npx would try to FETCH jest when
+        # it isn't installed, and the test sandbox has no network, so that
+        # fails with a confusing registry error instead of a plain
+        # "jest is not installed" (DEV-104).
+        #
+        # Overriding --testPathIgnorePatterns REPLACES jest's defaults, so
+        # /node_modules/ has to be restated alongside retry_history — without
+        # it jest would collect the test files of every installed package.
+        raw_cmd = [
+            "node_modules/.bin/jest", "--no-coverage", "--ci",
+            "--testPathIgnorePatterns", "/node_modules/", "/retry_history/",
+        ]
+    elif framework == "vitest":
+        # `run` is mandatory — bare `vitest` starts a watch server and never
+        # exits, which would burn the whole timeout and report a hang.
+        # --exclude likewise replaces vitest's defaults, so node_modules is
+        # restated for the same reason as jest above.
+        raw_cmd = [
+            "node_modules/.bin/vitest", "run",
+            "--exclude", "**/node_modules/**", "--exclude", "**/retry_history/**",
+        ]
     elif framework == "node_test":
         # Node's built-in test runner (node:test). Zero external deps and no
         # network: the sandbox provides `node` on PATH via the bound Node
@@ -272,108 +581,9 @@ def _run_local_tests(spec_dir: Path, framework: str, timeout: int) -> tuple[bool
             str(spec_dir),
         ]
 
-    allow_unsandboxed = os.getenv("CODING_MODEL_ALLOW_UNSANDBOXED_TESTS", "").lower() in ("1", "true", "yes")
-
-    # The env var takes priority over bwrap detection: if the user explicitly
-    # opted out, honor it — even when bwrap is installed but broken (e.g.
-    # AppArmor restricting unprivileged user namespaces, which silently
-    # makes every bwrap invocation fail with "Operation not permitted"
-    # before pytest gets a chance to run).
-    bpf_fd: Optional[int] = None
-    if allow_unsandboxed:
-        cmd = raw_cmd
-        sandbox_mode = "UNSANDBOXED (CODING_MODEL_ALLOW_UNSANDBOXED_TESTS=1)"
-        logger.warning(
-            "running LLM-generated tests WITHOUT a sandbox — tests have full "
-            "access to this user's environment"
-        )
-    elif _sandbox_available():
-        bpf_fd = seccomp_filter.build_seccomp_bpf_fd()
-        cmd = _wrap_in_sandbox(raw_cmd, spec_dir, seccomp_fd=bpf_fd)
-        if bpf_fd is None:
-            sandbox_mode = "bwrap (no seccomp — libseccomp unavailable)"
-            logger.warning(
-                "seccomp filter unavailable; bwrap will run without --seccomp. "
-                "Install python3-seccomp on the host to enable kernel-syscall "
-                "filtering for LLM-generated tests."
-            )
-        else:
-            sandbox_mode = "bwrap+seccomp"
-    else:
-        msg = (
-            "Refusing to run LLM-generated tests: bwrap (bubblewrap) is not "
-            "available and CODING_MODEL_ALLOW_UNSANDBOXED_TESTS is not set. Install "
-            "bubblewrap (e.g. `apt install bubblewrap` on Debian/Ubuntu) on "
-            "the Linux server, or set CODING_MODEL_ALLOW_UNSANDBOXED_TESTS=1 to opt "
-            "out (not recommended — tests run with the orchestrator's own "
-            "privileges)."
-        )
-        logger.error(msg)
-        return False, msg
-
-    logger.info("running tests via %s: %s (timeout=%ds)",
-                sandbox_mode, " ".join(raw_cmd), timeout)
-
-    # Cap on captured output. Without this, a runaway test that prints a
-    # tight loop of MB/s straight to stdout buffers everything in memory
-    # and OOMs the orchestrator. 4 MiB is plenty for real test traces.
-    MAX_OUTPUT_BYTES = 4 * 1024 * 1024
-
-    def _truncate(s: str) -> str:
-        b = s.encode("utf-8", errors="replace")
-        if len(b) <= MAX_OUTPUT_BYTES:
-            return s
-        return (
-            b[: MAX_OUTPUT_BYTES // 2].decode("utf-8", errors="replace")
-            + f"\n... [truncated {len(b) - MAX_OUTPUT_BYTES} bytes of output] ...\n"
-            + b[-MAX_OUTPUT_BYTES // 2 :].decode("utf-8", errors="replace")
-        )
-
-    try:
-        # Popen + communicate instead of subprocess.run: run()'s timeout
-        # kills only the DIRECT child, then blocks draining stdout — an
-        # LLM-written test that spawned a background process leaves an
-        # orphan holding the pipe, and the drain hangs the tick thread
-        # forever with no heartbeat (DEV-155). Own session + killpg takes
-        # the whole group down, after which the drain returns immediately.
-        proc = subprocess.Popen(
-            cmd, cwd=spec_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, start_new_session=True,
-            pass_fds=(bpf_fd,) if bpf_fd is not None else (),
-        )
-        try:
-            out, err = proc.communicate(timeout=timeout)
-            output = _truncate(out or "") + "\n" + _truncate(err or "")
-            passed = proc.returncode == 0
-        except subprocess.TimeoutExpired as e:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError, OSError):
-                proc.kill()
-            # Group is dead; the drain returns. Surface partial output so
-            # the supervisor / reviewer can diagnose the hang.
-            try:
-                out, err = proc.communicate(timeout=10)
-            except Exception:
-                out = e.stdout if isinstance(e.stdout, str) else ""
-                err = e.stderr if isinstance(e.stderr, str) else ""
-            output = (
-                f"Tests timed out after {timeout}s\n"
-                f"--- partial stdout ---\n{_truncate(out or '')}\n"
-                f"--- partial stderr ---\n{_truncate(err or '')}"
-            )
-            passed = False
-    except Exception as e:
-        output = f"Test runner failed: {type(e).__name__}: {e}"
-        passed = False
-    finally:
-        if bpf_fd is not None:
-            try:
-                os.close(bpf_fd)
-            except OSError:
-                pass
-
-    return passed, output.strip()
+    # No share_net: the test run itself is always offline, for every
+    # framework. Only _provision_node_modules above opens the network.
+    return _run_confined(raw_cmd, spec_dir, timeout, what="tests")
 
 
 def _collect_patch_files(spec_dir: Path) -> tuple[list[dict], Optional[str]]:
@@ -476,7 +686,9 @@ def run_tests(
     """Run tests for a spec.
 
     Dispatches by framework:
-      - pytest / python / jest / node_test → local (bwrap sandbox on Linux)
+      - pytest / python / node_test → local (bwrap sandbox on Linux)
+      - jest / vitest            → local, preceded by a network-gated
+                                   dependency-install phase (DEV-104)
       - swift_test               → Mac runner HTTP dispatch; requires `repo`
       - xcodebuild_test          → Mac runner HTTP dispatch; requires `repo` + `scheme`
 

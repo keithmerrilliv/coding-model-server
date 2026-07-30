@@ -26,6 +26,9 @@ whatever `.env.example` happens to ship.
 | `INGEST_ALLOWED_DIR` | *(unset)* | Directory under which `/v1/memory/ingest` accepts paths (in addition to system temp). Realpath-resolved before the prefix check, so symlinks can't escape. |
 | `MAC_RUNNER_URL` | `http://127.0.0.1:5050` | Where the orchestrator dispatches `swift_test` / `xcodebuild_test` jobs. Default assumes an SSH reverse tunnel from the Mac. |
 | `MAC_RUNNER_API_KEY` | *(empty)* | Shared secret — must match `CODING_MODEL_RUNNER_API_KEY` in the Mac runner's `~/.config/coding-model-runner/.env`. |
+| `CODING_MODEL_SANDBOX_NODE_ROOT` | *(auto)* | Node install root bound into the test sandbox, so `node_test`/`jest`/`vitest` specs have a `node` on PATH. Usually required: the orchestrator's systemd PATH has no Node, and nvm installs it under `/home`, which the sandbox masks with tmpfs. |
+| `CODING_MODEL_NPM_INSTALL_TIMEOUT` | `300` | Seconds allowed for the `jest`/`vitest` dependency-install phase. Budgeted separately from the test timeout — a cold React install fetches a few hundred MB. |
+| `CODING_MODEL_NPM_CACHE_DIR` | *(unset)* | Host directory bound in as npm's package cache. Unset means the cache lives on the sandbox's tmpfs and is discarded every run, so each spec re-downloads its tree. Setting it makes cold installs warm, at the cost of shared mutable state across specs. See [JS dependency provisioning](#js-dependency-provisioning). |
 
 ### Models
 | Variable | Default | Description |
@@ -233,7 +236,7 @@ The planner emits a `test_strategy` map that the daemon forwards to
 
 | Key | Required? | Description |
 |---|---|---|
-| `framework` | yes | `pytest` \| `jest` \| `swift_test` \| `xcodebuild_test` |
+| `framework` | yes | `pytest` \| `node_test` \| `jest` \| `vitest` \| `swift_test` \| `xcodebuild_test` |
 | `required` | optional, default `true` | Whether a failing test blocks the review gate |
 | `repo` | swift / xcode only | Symbolic repo name from `repos.yml` |
 | `base_ref` | optional, default `HEAD` | Git ref to create the worktree from |
@@ -246,6 +249,51 @@ The planner emits a `test_strategy` map that the daemon forwards to
 The Xcode path expects a project that is **committed to the repo** — the runner
 only materializes a git worktree and applies patches; nothing regenerates an
 `.xcodeproj` on the Mac side.
+
+### JS dependency provisioning
+
+There are two JavaScript paths, and they differ in exactly one way: whether the
+spec is allowed to have dependencies.
+
+| Framework | Dependencies | Network | Use for |
+|---|---|---|---|
+| `node_test` | none, ever | never | The default. Pure-logic cores testable with `node:test` + `node:assert`. |
+| `vitest` / `jest` | installed per-spec | install phase only | Specs that genuinely need packages — React/JSX component tests above all. |
+
+For `vitest`/`jest` the runner adds an install phase **before** the test run:
+
+1. **Install phase** — `npm ci` (when the spec ships a lockfile) or `npm install`,
+   inside bubblewrap with `--share-net`. This is the only part of the pipeline
+   that may reach the network. Every other confinement still applies: `/home`
+   and `/root` are tmpfs-masked, so the operator's `~/.npmrc` registry tokens,
+   `~/.ssh` and `.env` files are invisible to it; only the spec directory is
+   writable; the same seccomp denylist is loaded.
+2. **Test phase** — the existing `--unshare-all` sandbox, no network, with
+   `node_modules` already on disk.
+
+**`--ignore-scripts` is passed unconditionally and there is no override.** npm
+lifecycle hooks (`preinstall`/`install`/`postinstall`/`prepare`) are arbitrary
+code execution chosen by whatever the model wrote into `package.json`, and they
+would run at install time — while the network is open. A CLI flag also outranks
+project config in npm's precedence chain, so a spec cannot re-enable them by
+writing `ignore-scripts=false` into an `.npmrc` beside its `package.json`
+(pinned by a test). The cost is packages needing a native build step
+(node-gyp); React, react-dom, vitest, jest, jsdom and Testing Library are all
+pure JS and unaffected.
+
+Prefer **vitest** for anything with JSX/TSX — its built-in esbuild transform
+needs no babel or ts-jest configuration. Pair it with `environment: 'jsdom'`
+in a `vitest.config.js` for component tests.
+
+Specs should **not** hand-write a `package-lock.json`. A lockfile that
+disagrees with `package.json` makes `npm ci` fail outright, which is the usual
+outcome when a model authors both; with no lockfile the installer resolves
+fresh. The planner prompt states this.
+
+If `npm` hangs and the phase dies at `CODING_MODEL_NPM_INSTALL_TIMEOUT` with no
+output, suspect DNS: on systemd-resolved hosts `/etc/resolv.conf` is a symlink
+into `/run`, which the sandbox does not bind, so lookups fail `EAI_AGAIN`. The
+runner binds the symlink's target for `--share-net` sandboxes to prevent this.
 
 ## Shell auto-approval
 

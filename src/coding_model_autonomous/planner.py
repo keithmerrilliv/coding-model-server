@@ -120,7 +120,7 @@ PLANNER_SYSTEM_PROMPT = textwrap.dedent("""\
       - "Verbatim text of the operator's answer to question 1"
       - "Verbatim text of the operator's answer to question 2"
     test_strategy:
-      framework: pytest            # pytest | node_test | jest | swift_test | xcodebuild_test | none
+      framework: pytest            # pytest | node_test | jest | vitest | swift_test | xcodebuild_test | none
       required: true
       notes: "any extra context"
       # Apple targets ONLY (framework: xcodebuild_test or swift_test) — these are
@@ -195,15 +195,36 @@ PLANNER_SYSTEM_PROMPT = textwrap.dedent("""\
        plan-editing instructions to the implementer as if they were product
        requirements, which has caused implementers to act on them (DEV-391).
     10. For JavaScript/TypeScript specs whose tests run on THIS server
-       (execution_target: server — e.g. web/WebGPU/Node projects), set
-       test_strategy.framework: node_test. The sandbox has NO network and
-       NO dependency-install step, so tests MUST use Node's built-in runner
-       (`node:test` + `node:assert`) with ZERO external packages — no jest,
-       vitest, ts-jest, or any `package.json` dependency. Test files must be
-       plain `*.test.js` (or pre-compiled to JS) discoverable by `node --test`.
-       Design the spec so the testable logic core is pure JS with no DOM/GPU/
-       browser globals. Reserve the `jest` framework for repos that already
-       vendor their own node_modules.
+       (execution_target: server — e.g. web/WebGPU/Node projects), PREFER
+       test_strategy.framework: node_test. It is the zero-dependency path:
+       Node's built-in runner (`node:test` + `node:assert`), no
+       `package.json` dependencies at all, test files plain `*.test.js`
+       discoverable by `node --test`. Design the spec so the testable logic
+       core is pure JS with no DOM/GPU/browser globals, and node_test covers
+       it. Choose it whenever it is sufficient — it is faster and cannot fail
+       on a registry outage.
+
+    11. Only when a spec genuinely CANNOT be tested without external packages
+       — React/JSX component rendering being the main case — choose
+       test_strategy.framework: vitest (preferred) or jest. These get a
+       dependency-install phase that runs `npm ci`/`npm install` in a
+       network-gated sandbox before the offline test run. Rules for such a spec:
+         - It MUST author a `package.json` listing every test dependency
+           under `devDependencies` with explicit version ranges.
+         - Do NOT author a `package-lock.json` by hand. A hand-written
+           lockfile that disagrees with package.json makes `npm ci` fail
+           outright; with no lockfile present the installer resolves fresh.
+         - npm lifecycle scripts (preinstall/install/postinstall/prepare) are
+           ALWAYS disabled and cannot be re-enabled. Do not depend on any
+           package that needs a native build step (node-gyp); pure-JS
+           packages only. React, react-dom, vitest, jest, jsdom and
+           @testing-library/* are all fine.
+         - Prefer vitest for anything involving JSX/TSX: its built-in esbuild
+           transform handles JSX and TypeScript with no babel/ts-jest config.
+           Pair it with `environment: 'jsdom'` (add `jsdom` to
+           devDependencies) for component tests, in a `vitest.config.js`.
+         - Keep pure logic in modules with no DOM imports so most of the
+           suite stays fast and deterministic.
     """)
 
 
