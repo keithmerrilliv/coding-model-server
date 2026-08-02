@@ -81,7 +81,7 @@ Intervals are hardcoded, not configurable:
 | `GET /health` | 10s |
 | `GET /v1/autonomous/specs`, `/v1/autonomous/specs/:id` | 10s |
 | `GET /v1/admin/gpu_stats` | 1s |
-| `GET /v1/admin/metrics?window_seconds=` | 1s |
+| `GET /v1/admin/metrics?window_seconds=` | 5s (was 1s; the server rebuilds every bucket per call — DEV-159) |
 | `GET /v1/admin/active_model` | 2s |
 | `GET /v1/models` | on load |
 | `POST /v1/autonomous/gates/:id/respond` | on user action |
