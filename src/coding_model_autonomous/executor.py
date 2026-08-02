@@ -28,18 +28,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-import requests
 import yaml
 
 from coding_model_server.streaming import strip_thinking as _server_strip_thinking
 
 from ._http import post_chat_completion
-
-# Module-level session: reuses TCP+TLS connections across the
-# architect → implementer → reviewer → supervisor sequence, saving
-# 5-30 ms per call. Keepalive matters most over real network; even
-# on localhost the socket-setup elimination is measurable.
-_SESSION = requests.Session()
 
 logger = logging.getLogger("orchestrator.executor")
 
