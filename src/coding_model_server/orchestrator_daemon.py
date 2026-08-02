@@ -2344,6 +2344,32 @@ def _attempt_retry(db: Database, spec: Spec, task, failure_detail: str) -> None:
 
 _SYNTHESIS_AGENT = os.getenv("AUTONOMOUS_SYNTHESIS_AGENT", "deep_reviewer")
 
+# A synthesized artifact failing only a small minority of tests gets ONE
+# targeted repair round before the spec fails (DEV-406 — spec_96d7e07f's
+# synthesis scored 15/17 and hard-failed a 2h47m run). >1.0 disables.
+_SYNTHESIS_REPAIR_MIN_RATE = float(
+    os.getenv("AUTONOMOUS_SYNTHESIS_REPAIR_MIN_RATE", "0.8"))
+
+
+def _test_pass_rate(test_output: str) -> "float | None":
+    """Best-effort pass fraction from a runner summary; None if unparseable.
+
+    None (not 0.0) on no-parse: an unreadable summary must not qualify for
+    a repair round it can't be measured against.
+    """
+    tap_total = re.search(r"^# tests (\d+)$", test_output, re.MULTILINE)
+    tap_pass = re.search(r"^# pass (\d+)$", test_output, re.MULTILINE)
+    if tap_total and tap_pass and int(tap_total.group(1)) > 0:
+        return int(tap_pass.group(1)) / int(tap_total.group(1))
+    passed = re.search(r"(\d+) passed", test_output)
+    failed = re.search(r"(\d+) failed", test_output)
+    if passed:
+        n_pass = int(passed.group(1))
+        n_fail = int(failed.group(1)) if failed else 0
+        if n_pass + n_fail > 0:
+            return n_pass / (n_pass + n_fail)
+    return None
+
 
 
 
@@ -2433,6 +2459,62 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
         pass
     logger.info("spec %s: synthesis test result: %s (%d chars)",
                 spec.id, "PASS" if tests_passed else "FAIL", len(test_output))
+    if tests_passed:
+        return True, test_output
+
+    # A near-miss gets ONE targeted repair round before the spec fails
+    # (DEV-406). Bounded strictly: one extra agent call, only above the
+    # pass-rate threshold, and a converted pass still flows through the
+    # caller's release_approval gate exactly like a first-try synthesis
+    # pass — never straight to DONE.
+    rate = _test_pass_rate(test_output)
+    if rate is None or rate < _SYNTHESIS_REPAIR_MIN_RATE:
+        return tests_passed, test_output
+    logger.info("spec %s: synthesis near-miss (%.0f%% pass) — one targeted "
+                "repair round", spec.id, rate * 100)
+    repair_messages = executor.build_synthesis_repair_message(
+        spec_md, design_md, result.files,
+        _extract_actionable_test_output(test_output, framework),
+    )
+    repair_meta: dict = {}
+    try:
+        repair_raw = call_agent("implementer", repair_messages,
+                                agent=_SYNTHESIS_AGENT,
+                                max_tokens=synth_max_tokens, meta=repair_meta)
+    except Exception as exc:
+        logger.error("spec %s: synthesis repair call failed: %s", spec.id, exc)
+        return False, test_output
+    _note_truncation(db, spec, impl_task, "synthesis_repair", repair_meta,
+                     synth_max_tokens)
+    repair = parse_implementer_response(repair_raw)
+    if isinstance(repair, ParseError):
+        logger.warning("spec %s: synthesis repair unparseable (%s) — keeping "
+                       "the original failure", spec.id, repair.reason)
+        return False, test_output
+
+    # Overlay only the files the repair emitted; everything else stays.
+    for rel_path, content in repair.files:
+        _write_artifact(spec_dir, rel_path, content)
+        db.create_artifact(spec_id=spec.id, task_id=impl_task.id,
+                           kind=ArtifactKind.CODE, path=rel_path)
+    db.record_event(EventKind.AGENT_RAN, spec_id=spec.id,
+                    task_id=impl_task.id,
+                    payload={"role": "synthesis_repair",
+                             "agent": _SYNTHESIS_AGENT,
+                             "pre_repair_pass_rate": round(rate, 3),
+                             "files": len(repair.files)})
+    tests_passed, test_output = _run_tests_with_guard(
+        spec.id, spec_dir, framework, framework_opts,
+        output_label="Post-repair test runner output:",
+        fail_log=("spec %s: post-repair test_output failed structural "
+                  "validation (%s); forcing tests_passed=False"),
+    )
+    try:
+        (spec_dir / "test_output.txt").write_text(test_output)
+    except OSError:
+        pass
+    logger.info("spec %s: synthesis repair result: %s", spec.id,
+                "PASS" if tests_passed else "FAIL — spec fails as before")
     return tests_passed, test_output
 
 

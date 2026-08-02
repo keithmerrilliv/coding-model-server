@@ -1601,3 +1601,35 @@ def build_synthesis_message(
         {"role": "system", "content": SYNTHESIS_SYSTEM_PROMPT},
         {"role": "user", "content": "".join(parts)},
     ]
+
+
+def build_synthesis_repair_message(
+    spec_md: str,
+    design_md: str,
+    files: "list[tuple[str, str]]",
+    failing_output: str,
+) -> list[dict[str, str]]:
+    """One targeted repair round on a near-passing synthesized artifact.
+
+    Unlike synthesis (which merges all attempts), the repair sees only the
+    synthesized files plus the failing-test excerpt, and is told to change
+    the minimum — a 15/17 artifact should not be re-imagined (DEV-406).
+    """
+    parts = [
+        "## Specification\n\n", spec_md,
+        "\n\n## Architecture Design\n\n", design_md,
+        "\n\n## Current implementation (passes most tests)\n\n",
+    ]
+    for relpath, content in files:
+        parts.append(f"### {relpath}\n\n```\n{content}\n```\n\n")
+    parts.append(
+        "## Failing tests\n\n```\n" + failing_output + "\n```\n\n---\n\n"
+        "This implementation already passes most of its tests. Fix ONLY "
+        "what the failures above require — do not restructure or rewrite "
+        "passing behavior. Output <<<FILE: path>>>…<<<END_FILE>>> blocks "
+        "for JUST the files you change, each with its complete content."
+    )
+    return [
+        {"role": "system", "content": SYNTHESIS_SYSTEM_PROMPT},
+        {"role": "user", "content": "".join(parts)},
+    ]
