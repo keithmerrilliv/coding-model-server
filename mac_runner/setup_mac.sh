@@ -39,9 +39,17 @@ if [[ ! -f "${KEY}" ]]; then
   exit 1
 fi
 # The tunnel key is confined with command="/bin/false", so a successful auth
-# EXITS IMMEDIATELY with no output. That is the pass condition, not a failure.
+# EXITS IMMEDIATELY with no output — exit code 1, the else-branch. That is the
+# pass condition, not a failure. Exit 0 means the remote actually RAN `true`,
+# which a restricted key can never do.
 if ssh -i "${KEY}" -o BatchMode=yes -o ConnectTimeout=10 "${TARGET}" true 2>/dev/null; then
-  echo "    tunnel key authenticates (and correctly gives no shell)"
+  echo "    ! DANGER: the tunnel key just executed a remote command — it is" >&2
+  echo "      NOT restricted. A shell on the Linux box is reachable from this" >&2
+  echo "      Mac, which runs LLM-authored code. Reinstall the pubkey in the" >&2
+  echo "      Linux authorized_keys with" >&2
+  echo "        restrict,command=\"/bin/false\",permitlisten=\"5050\"" >&2
+  echo "      (tunnel plist step 6 / DEV-126), then re-run this script." >&2
+  exit 1
 else
   rc=$?
   # 255 = ssh error (auth/network). Anything else is the remote command's exit
