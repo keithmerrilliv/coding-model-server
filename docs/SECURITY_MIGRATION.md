@@ -306,7 +306,8 @@ cp mac_runner/com.codingmodel.tunnel.plist ~/Library/LaunchAgents/
 ssh keith-merrill@linux-server true    # once by hand: seeds ~/.ssh/known_hosts
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.codingmodel.tunnel.plist
 
-# 7. Verify from the Linux box — should list your repos.yml entries:
+# 7. Verify from the Linux box — expect {"status":"ok"} and nothing else
+#    (DEV-170 moved the repo list behind auth; see the verify block below):
 #    curl -s http://127.0.0.1:5050/health
 ```
 
@@ -331,7 +332,11 @@ Verify:
 
 ```sh
 curl -s http://127.0.0.1:5050/health | python3 -m json.tool
-# expect: {"status":"ok","repos":["character-sync", ...]}
+# expect: {"status": "ok"} — liveness only. The repo list is authenticated
+# (DEV-170: /health leaked project codenames to anyone who could reach :5050):
+
+curl -s -H "X-Runner-Key: $MAC_RUNNER_API_KEY" http://127.0.0.1:5050/v1/repos | python3 -m json.tool
+# expect: {"repos": ["character-sync", ...]}
 ```
 
 ### One-time setup on the Linux server
