@@ -147,7 +147,10 @@ def main():
     if args.probe_stream:
         ttft, chunks, total = probe_stream(
             args.server, headers, args.agent, args.max_tokens, args.temperature)
-        print(f"\nstream probe: TTFT {ttft:.2f}s | {chunks} content chunks | "
+        # ttft is None when no content delta ever arrived — the degenerate case
+        # the warning below exists for, so it must not crash the format.
+        ttft_s = f"{ttft:.2f}s" if ttft is not None else "n/a"
+        print(f"\nstream probe: TTFT {ttft_s} | {chunks} content chunks | "
               f"total {total:.2f}s")
         if chunks <= 1:
             print("  WARNING: the server sent the whole response as one chunk. It is not\n"
