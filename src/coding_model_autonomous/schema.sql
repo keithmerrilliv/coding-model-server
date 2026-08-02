@@ -13,7 +13,7 @@ PRAGMA journal_mode = WAL;
 CREATE TABLE IF NOT EXISTS specs (
     id              TEXT PRIMARY KEY,         -- spec_<8 hex>
     title           TEXT NOT NULL,
-    source_md_path  TEXT NOT NULL,            -- relative to workspace root
+    source_md_path  TEXT NOT NULL,            -- relative to the spec's workspace dir (workspace_root/<spec_id>/)
     normalized_yaml TEXT,                     -- NULL until planner produces YAML
     status          TEXT NOT NULL,            -- SpecStatus enum value
     jira_epic_key   TEXT,                     -- populated by Phase 1c
@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS artifacts (
     spec_id     TEXT NOT NULL REFERENCES specs(id) ON DELETE CASCADE,
     task_id     TEXT REFERENCES tasks(id) ON DELETE CASCADE,
     kind        TEXT NOT NULL,                -- ArtifactKind enum value
-    path        TEXT NOT NULL,                -- relative to workspace root
+    path        TEXT NOT NULL,                -- relative to the spec's workspace dir (workspace_root/<spec_id>/)
     sha256      TEXT,
     created_at  TEXT NOT NULL
 );
