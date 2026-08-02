@@ -1628,6 +1628,52 @@ def _collect_reviewer_code_files(db: Database, spec_id: str,
     return code_files
 
 
+_HARNESS_ERROR_RE = re.compile(
+    r"is not a function|is not defined|Cannot find module"
+    r"|ERR_MODULE_NOT_FOUND|ModuleNotFoundError|ImportError while importing"
+    r"|error(?:s)? during collection")
+
+
+def _detect_harness_defect(test_output: str, framework: str) -> "str | None":
+    """A zero-pass run whose every failure is a harness-class error.
+
+    spec_96d7e07f's reviewer tests did `import { assert } from 'node:test'`
+    (no such export), so all 19 tests died on TypeError before exercising a
+    line of implementation — and the retry loop burned implementer attempts
+    on it. Such a run proves nothing about the code under test, so it must
+    not be treated as a logic failure.
+
+    Deliberately conservative: only fires when NOTHING passed and every
+    captured error matches the harness pattern (bad import, missing module,
+    undefined function). Genuine assertion failures never match. Returns a
+    one-line reason, or None.
+    """
+    if framework in ("node_test", "jest", "vitest"):
+        summary = re.search(r"^# pass (\d+)$", test_output, re.MULTILINE)
+        fails = re.search(r"^# fail (\d+)$", test_output, re.MULTILINE)
+        if not summary or not fails:
+            return None
+        if int(summary.group(1)) != 0 or int(fails.group(1)) == 0:
+            return None
+        errors = re.findall(r"error: '([^']+)'", test_output)
+        # Suite-level wrappers report their children's count, not a defect.
+        errors = [e for e in errors if "subtests failed" not in e]
+        if not errors or not all(_HARNESS_ERROR_RE.search(e) for e in errors):
+            return None
+        distinct = sorted(set(errors))[:3]
+        return ("every test failed with a harness-class error, none of the "
+                "implementation was exercised: " + "; ".join(distinct))
+    if framework in ("pytest", "python"):
+        if re.search(r"\b[1-9]\d* passed", test_output):
+            return None
+        collect = re.search(
+            r"(ModuleNotFoundError|ImportError while importing|"
+            r"error(?:s)? during collection)", test_output)
+        if collect:
+            return f"test collection failed before any test ran: {collect.group(1)}"
+    return None
+
+
 def _run_tests_with_guard(spec_id, spec_dir, framework, test_strategy, *,
                           output_label, fail_log):
     """Run the suite and apply the Layer-1 anti-hallucination structural guard.
@@ -1952,6 +1998,14 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
         logger.info("spec %s: reviewer done, tests passed, "
                     "release_approval gate created", spec.id)
     else:
+        # A run where the test harness itself is broken proves nothing about
+        # the implementation — route it to a free, pointed harness-fix retry
+        # instead of burning a logic attempt (DEV-404).
+        harness_reason = _detect_harness_defect(test_output, framework)
+        if harness_reason and _harness_retry(
+                db, spec, task, spec_dir, harness_reason,
+                test_output, framework):
+            return
         # Tests failed or reviewer said FAIL — attempt retry. Send the
         # actionable slice of test output (failures + summary) rather than
         # the verbose head, so the implementer's retry sees the real
@@ -2173,6 +2227,77 @@ def _apply_supervisor_decision(db: Database, spec: Spec, task,
                  spec.id, decision.action)
     db.update_task_status(task.id, TaskStatus.FAILED)
     db.update_spec_status(spec.id, SpecStatus.FAILED)
+
+
+# Free (non-budget) harness-fix retries per spec. Capped so a model that
+# keeps emitting a broken harness still converges onto the normal retry
+# budget instead of looping forever.
+_HARNESS_FREE_RETRIES = 2
+
+
+def _harness_retry(db: Database, spec: Spec, task, spec_dir: Path,
+                   reason: str, test_output: str, framework: str) -> bool:
+    """Re-run the implementer with a pointed harness-fix instruction WITHOUT
+    burning a logic retry (DEV-404). Returns False when the free-retry
+    budget for this spec is spent — the caller then falls through to the
+    normal (budgeted) retry path.
+    """
+    counter_path = spec_dir / "harness_retries.json"
+    try:
+        used = json.loads(counter_path.read_text()).get("used", 0)
+    except (OSError, ValueError):
+        used = 0
+    if used >= _HARNESS_FREE_RETRIES:
+        logger.warning("spec %s: harness defect again but free harness "
+                       "retries exhausted (%d) — counting against the "
+                       "normal budget", spec.id, used)
+        return False
+
+    impl_tasks = db.list_tasks_for_spec_by_role(spec.id, "implementer")
+    impl_task = impl_tasks[0] if impl_tasks else None
+    if impl_task is None:
+        return False
+
+    failure_detail = (
+        "TEST HARNESS DEFECT — the test files themselves are broken, so the "
+        "implementation was never actually exercised:\n\n"
+        f"{reason}\n\n"
+        "Fix ONLY the test harness; do not rewrite implementation files. "
+        "For node:test suites, assertions come from "
+        "`import assert from 'node:assert/strict'` — the `node:test` module "
+        "does not export `assert`.\n\n"
+        f"Test output (failures + summary):\n"
+        f"```\n{_extract_actionable_test_output(test_output, framework)}\n```\n"
+    )
+    _write_artifact(spec_dir, "failure_report.md", failure_detail)
+    try:
+        counter_path.write_text(json.dumps({"used": used + 1}))
+    except OSError as e:
+        logger.warning("spec %s: could not persist harness retry counter: %s",
+                       spec.id, e)
+
+    # Same feedback channel _retry_role_with_feedback uses for implementer
+    # retries — a rejected CODE_REVIEW gate — minus the budget increment.
+    gate = db.create_gate(
+        spec_id=spec.id, task_id=impl_task.id,
+        gate_type=GateType.CODE_REVIEW,
+        prompt_md="## Harness-defect retry (does not count against the budget)",
+    )
+    db.respond_to_gate(gate.id, "rejected", notes=failure_detail)
+    db.update_task_status(impl_task.id, TaskStatus.PENDING)
+    impl_rank = _ROLE_ORDER.get("implementer", 0)
+    for t in db.list_tasks_for_spec(spec.id):
+        if (t.id != impl_task.id
+                and _ROLE_ORDER.get(t.role, 99) > impl_rank
+                and t.status not in (TaskStatus.PENDING, TaskStatus.SKIPPED)):
+            db.update_task_status(t.id, TaskStatus.PENDING)
+    db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
+                    payload={"role": "harness_guard",
+                             "free_retry": used + 1,
+                             "reason": reason[:300]})
+    logger.info("spec %s: harness defect — free retry %d/%d issued (%s)",
+                spec.id, used + 1, _HARNESS_FREE_RETRIES, reason[:120])
+    return True
 
 
 def _attempt_retry(db: Database, spec: Spec, task, failure_detail: str) -> None:

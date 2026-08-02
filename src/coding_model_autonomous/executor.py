@@ -380,7 +380,14 @@ REVIEWER_SYSTEM_PROMPT = textwrap.dedent("""\
     the spec workspace tidy and separates them from implementer
     deliverables. The orchestrator will rewrite a bare `test_*.py`
     path to `tests/test_*.py` defensively, but you should emit the
-    correct path yourself:
+    correct path yourself.
+
+    For JavaScript `node --test` suites: import assertions with
+    `import assert from 'node:assert/strict'`. The `node:test` module
+    does NOT export `assert` — `import { assert } from 'node:test'`
+    makes every test die on a TypeError before it exercises anything.
+
+    Example:
 
         <<<FILE: tests/test_something.py>>>
         <complete test file content>
