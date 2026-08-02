@@ -375,14 +375,26 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
         base_system_prompt = system_prompt
 
         model_config = agent_config['model_config']
+        # Known BEFORE retrieval on purpose: `_build_openai_messages` drops
+        # the agent system prompt — including any RAG block — whenever the
+        # client supplies its own system message, so retrieval for such a
+        # request burns the embedding encode + HNSW query (up to its 2s cap,
+        # exactly during prefill) for a context that can never ship, while
+        # logging that it was injected (DEV-350). Third-party OpenAI clients
+        # all send their own system message and can't know skip_memory.
+        client_has_system = (
+            bool(request.messages) and request.messages[0].role == "system"
+        )
         # RAG retrieval (embedding encode + HNSW query, up to its 2s cap)
         # used to be awaited strictly BEFORE the swap, so every request paid
         # its latency serially instead of hiding it under the
         # tens-of-seconds model load (DEV-150). Start it now, await it after
         # ensure_running: the two overlap on worker threads.
-        rag_task = asyncio.ensure_future(
-            _maybe_inject_rag_context(system_prompt, request)
-        )
+        rag_task = None
+        if not client_has_system:
+            rag_task = asyncio.ensure_future(
+                _maybe_inject_rag_context(system_prompt, request)
+            )
         # ensure_running holds _swap_lock across a SIGTERM wait, a VRAM-release
         # poll, and a /health loop that time.sleeps — up to ~140s of blocking
         # work. On the event-loop thread that freezes the whole process:
@@ -403,22 +415,19 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
                 agent_id=model_name, reserve_slot=True,
             )
         except BaseException:
-            rag_task.cancel()
+            if rag_task is not None:
+                rag_task.cancel()
             raise
         reservation_held = True
-        system_prompt, rag_suffix = await rag_task
+        rag_suffix = ""
+        if rag_task is not None:
+            system_prompt, rag_suffix = await rag_task
 
         n_ctx = model_config.get('n_ctx', 32768)
-        # Estimate what actually reaches llama-server. `_build_openai_messages`
-        # drops the agent system prompt when the client sends its own system
-        # message, so counting it in that case under-allocates the budget by
-        # the size of a prompt that never ships.
-        client_has_system = (
-            bool(request.messages) and request.messages[0].role == "system"
-        )
-        # When the client sends its own system message, _build_openai_messages
-        # drops the agent prompt (and its RAG block) off the wire, so neither is
-        # counted here.
+        # Estimate what actually reaches llama-server (client_has_system was
+        # computed above, before retrieval). When the client sends its own
+        # system message, _build_openai_messages drops the agent prompt (and
+        # its RAG block) off the wire, so neither is counted here.
         effective_system = "" if client_has_system else base_system_prompt
         effective_rag = "" if client_has_system else rag_suffix
         # The budget guidance ships either way, but it can't ride the agent
