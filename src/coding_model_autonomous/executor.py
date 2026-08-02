@@ -1467,6 +1467,37 @@ def scan_any_violations(files: list[tuple[str, str]]) -> list[str]:
     return results
 
 
+# Assertions that can never fail (DEV-407 — spec_96d7e07f's synthesized
+# tests contained `assert.ok(x || true)`, inflating the pass count). Line-
+# based on purpose: cheap, language-tolerant, and a miss only costs one
+# undetected vacuous assert — never a false hard-failure.
+_TAUTOLOGY_PATTERNS = (
+    re.compile(r"\b(?:assert|expect|ok)\w*\s*\(.*\|\|\s*(?:true|1)\b"),
+    re.compile(r"\bassert(?:\.ok)?\s*\(\s*true\b"),
+    re.compile(r"\bexpect\s*\(\s*(true|1)\s*\)\s*\.\s*toBe\s*\(\s*\1\s*\)"),
+    re.compile(r"\bassertTrue\s*\(\s*True\s*\)"),
+    re.compile(r"^\s*assert\s+True\b"),
+)
+_TEST_FILE_PATH_RE = re.compile(
+    r"(?:^|/)tests?/|\.test\.|\.spec\.|(?:^|/)test_")
+
+
+def scan_tautological_asserts(files: list[tuple[str, str]]) -> list[str]:
+    """Assertions in TEST files that can never fail, as 'path:line — text'.
+
+    Only test files are scanned — `x or True` in implementation code is
+    ordinary logic, not a vacuous test.
+    """
+    results: list[str] = []
+    for path, content in files:
+        if not _TEST_FILE_PATH_RE.search(path):
+            continue
+        for ln, line in enumerate(content.splitlines(), 1):
+            if any(pat.search(line) for pat in _TAUTOLOGY_PATTERNS):
+                results.append(f"{path}:{ln} — {line.strip()[:120]}")
+    return results
+
+
 def build_reviewer_message(
     spec_md: str,
     design_md: str,
@@ -1500,6 +1531,20 @@ def build_reviewer_message(
             "is NOT a violation.\n"
         )
 
+    # Same deterministic-scan pattern as the `any` section: hand the
+    # reviewer line-precise facts instead of hoping it notices (DEV-407).
+    tautologies = scan_tautological_asserts(code_files)
+    tautology_section = ""
+    if tautologies:
+        tautology_section = (
+            "\n## Tautological assertions detected\n\n"
+            "These assertions can NEVER fail, so any pass count that includes "
+            "them overstates real coverage. Name each in your review and write "
+            "a real assertion for the same behavior in your own tests. This "
+            "list alone is NOT grounds for a FAIL verdict:\n\n"
+            + "\n".join(f"- {t}" for t in tautologies) + "\n"
+        )
+
     retry_block = ""
     if rejection_notes:
         retry_block = (
@@ -1520,6 +1565,7 @@ def build_reviewer_message(
             "## Implementation Files\n\n"
             + "\n".join(file_sections)
             + any_section
+            + tautology_section
             + retry_block
             + f"\n\n---\n\n"
             f"Test framework: {test_framework}\n\n"
