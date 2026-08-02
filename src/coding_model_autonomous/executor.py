@@ -801,9 +801,15 @@ def _render_plan_constraints(plan_yaml: str) -> "str | None":
     language/toolchain from an ambiguous spec that contradicted the plan the
     operator already approved (DEV-107: plan said javascript + "no
     TypeScript", spec mentioned TypeScript, architect designed TypeScript
-    twice and the spec failed at design). Returns None when the YAML is
-    unparseable or carries none of the binding fields — the caller then
-    omits the section, which is exactly the pre-DEV-107 prompt.
+    twice and the spec failed at design). Rejection notes alone did not hold
+    — only rewriting spec.md did — so each decision is phrased as an order
+    that outranks the spec, not as a fact the architect is free to weigh.
+
+    Returns None when the YAML is unparseable or carries none of the binding
+    fields; the caller then omits the section, which is exactly the
+    pre-DEV-107 prompt. Planner output is LLM-generated, so a section that
+    comes back the wrong shape (`test_strategy: pytest` as a string rather
+    than a mapping) drops that one line instead of taking the run down.
     """
     try:
         plan = yaml.safe_load(plan_yaml)
@@ -812,35 +818,64 @@ def _render_plan_constraints(plan_yaml: str) -> "str | None":
     if not isinstance(plan, dict):
         return None
 
+    def _mapping(key: str) -> dict:
+        value = plan.get(key)
+        return value if isinstance(value, dict) else {}
+
+    test_strategy = _mapping("test_strategy")
+    constraints = _mapping("constraints")
+
     lines: list[str] = []
     if plan.get("language"):
-        lines.append(f"- Language: {plan['language']}")
+        lines.append(
+            f"- **Language: {plan['language']}.** Write the design for this "
+            "language and its toolchain. Do not choose another, and do not "
+            "offer the implementer a choice."
+        )
     if plan.get("target_runtime"):
-        lines.append(f"- Target runtime: {plan['target_runtime']}")
-    test_strategy = plan.get("test_strategy")
-    if isinstance(test_strategy, dict) and test_strategy.get("framework"):
-        lines.append(f"- Test framework: {test_strategy['framework']}")
-    constraints = plan.get("constraints")
-    if isinstance(constraints, dict):
-        if "dependencies_allowed" in constraints:
-            allowed = "yes" if constraints["dependencies_allowed"] else "no"
-            lines.append(f"- External dependencies allowed: {allowed}")
-        if constraints.get("notes"):
-            lines.append(f"- Other constraints: {constraints['notes']}")
-    clarifications = plan.get("clarifications")
-    if isinstance(clarifications, list) and clarifications:
-        lines.append("- Operator clarifications (verbatim, binding):")
-        lines.extend(f"  {i}. {c}" for i, c in enumerate(clarifications, 1))
+        lines.append(f"- **Target runtime: {plan['target_runtime']}.**")
+    if test_strategy.get("framework"):
+        lines.append(
+            f"- **Test framework: {test_strategy['framework']}.** The design "
+            "must be testable under this framework — keep the logic core free "
+            "of anything it cannot exercise."
+        )
+    if "dependencies_allowed" in constraints:
+        if constraints["dependencies_allowed"]:
+            lines.append("- **External dependencies: permitted.**")
+        else:
+            lines.append(
+                "- **External dependencies: NOT permitted.** Design against "
+                "the standard library only — no third-party packages."
+            )
+    if constraints.get("notes"):
+        lines.append(f"- **Other constraints:** {constraints['notes']}")
 
-    if not lines:
+    raw_clarifications = plan.get("clarifications")
+    clarifications = ([str(c) for c in raw_clarifications if c]
+                      if isinstance(raw_clarifications, list) else [])
+
+    if not lines and not clarifications:
         return None
-    return (
+
+    block = [
         "## Approved plan — binding constraints\n\n"
-        "The operator has already approved a plan for this spec. The values "
-        "below are settled decisions; where the specification is ambiguous "
-        "or contradicts them, these constraints WIN:\n\n"
-        + "\n".join(lines)
-    )
+        "The operator has already approved a plan for this spec. These are "
+        "settled decisions, not suggestions: where the specification is "
+        "ambiguous, offers a choice, or contradicts them, the plan WINS. The "
+        "choice has already been made — design to it.\n"
+    ]
+    if lines:
+        block.append("\n" + "\n".join(lines) + "\n")
+    if clarifications:
+        block.append(
+            "\n### Operator clarifications (verbatim — hard requirements)\n\n"
+            "These are the operator's own answers, at the same authority as "
+            "the spec. Apply each literally; do not override one with a "
+            "default or a more idiomatic alternative.\n\n"
+        )
+        block.extend(f"{i}. {c}\n" for i, c in enumerate(clarifications, 1))
+    return "".join(block).rstrip()
 
 
 def build_architect_message(spec_md: str,
@@ -861,16 +896,25 @@ def build_architect_message(spec_md: str,
             "invariant explicitly (rule 8). Do not simply re-emit the same design.\n\n"
             f"{rejection_notes.strip()}\n\n---\n\n"
         )
-    if plan_yaml:
-        constraints_block = _render_plan_constraints(plan_yaml)
-        if constraints_block:
-            user_parts.append(constraints_block + "\n\n---\n\n")
+    constraints_block = _render_plan_constraints(plan_yaml) if plan_yaml else None
+    if constraints_block:
+        user_parts.append(constraints_block + "\n\n---\n\n")
     user_parts.append(
         "## Specification\n\n"
         f"{spec_md}\n\n---\n\n"
         "Your task: produce a complete architecture design for this project. "
         "Output exactly one <<<DESIGN>>>…<<<END>>> block as instructed."
     )
+    if constraints_block:
+        # Restated after the spec: the failure this guards against is the
+        # architect reading an ambiguous spec *last* and re-opening a question
+        # the operator already settled, so the constraint needs recency as much
+        # as primacy.
+        user_parts.append(
+            "\nHonor the approved plan's binding constraints above — where the "
+            "specification is ambiguous or suggests an alternative, the plan "
+            "is the answer."
+        )
     return [
         {"role": "system", "content": ARCHITECT_SYSTEM_PROMPT},
         {"role": "user", "content": "\n".join(user_parts)},
