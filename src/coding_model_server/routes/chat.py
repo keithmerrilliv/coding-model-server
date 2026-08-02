@@ -137,6 +137,23 @@ async def _maybe_inject_rag_context(
     return f"{system_prompt}{rag_suffix}", rag_suffix
 
 
+def _stable_budget_figure(clamped_max: int) -> int:
+    """Round the advertised budget DOWN to a coarse bucket (DEV-409).
+
+    The exact clamp shifts with every prompt's length, and the figure is
+    interpolated into the system prompt — so consecutive agent calls were
+    never byte-identical and llama-server's prefix cache died at the first
+    differing token, re-prefilling everything after it. Coarse floor-rounded
+    buckets keep the text stable across similar-sized calls. Floor, never
+    ceiling: the text must not promise more tokens than the real clamp
+    (which still governs max_tokens exactly).
+    """
+    if clamped_max < 512:
+        return clamped_max
+    granularity = 4096 if clamped_max >= 8192 else 512
+    return (clamped_max // granularity) * granularity
+
+
 def _guidance_token_cost(guidance: str, tokenize_fn=None,
                          req_id: str = "req_unknown") -> int:
     """Token cost of the budget guidance appended to the prompt.
@@ -450,7 +467,8 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
             effective_system, effective_rag, request.messages, n_ctx,
             request.max_tokens, guidance_text, llama_server_manager.tokenize, req_id,
         )
-        budget_guidance = guidance_text.format(available_tokens=clamped_max)
+        budget_guidance = guidance_text.format(
+            available_tokens=_stable_budget_figure(clamped_max))
         if client_has_system:
             # Append, so the caller's task prompt still leads and the marker
             # formats it depends on (<<<YAML>>>, <<<DESIGN>>>, <<<FILE:>>>)

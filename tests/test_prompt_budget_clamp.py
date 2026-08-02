@@ -371,3 +371,39 @@ def test_route_converts_overflow_to_413(monkeypatch):
     # The client's _is_context_error trims history and retries on this phrase.
     assert "exceed context window" in exc_info.value.detail
     assert raw.state.error_category == "4xx_prompt_too_large"
+
+
+# ── DEV-409: the advertised figure must be prefix-cache-stable ────────────
+
+from coding_model_server.routes.chat import _stable_budget_figure
+
+
+def test_nearby_clamps_share_a_bucket():
+    """Consecutive agent calls differ by a few hundred prompt tokens; the
+    interpolated figure — and therefore the system-prompt bytes — must not
+    change with them, or llama-server's prefix cache dies at that token."""
+    assert _stable_budget_figure(50_000) == _stable_budget_figure(51_000)
+
+
+def test_figure_never_exceeds_the_real_clamp():
+    for clamp in (300, 511, 512, 8191, 8192, 50_000, 131_072):
+        assert _stable_budget_figure(clamp) <= clamp
+
+
+def test_small_budgets_pass_through_exactly():
+    # Near the MIN_COMPLETION_TOKENS floor there is no room to round away.
+    assert _stable_budget_figure(300) == 300
+
+
+def test_bucket_granularity():
+    assert _stable_budget_figure(50_000) == 49_152      # 4096-grid
+    assert _stable_budget_figure(8_191) == 7_680        # 512-grid below 8192
+    assert _stable_budget_figure(8_192) == 8_192
+
+
+def test_guidance_text_is_byte_identical_across_similar_calls():
+    for guidance in (Config.TOKEN_BUDGET_GUIDANCE,
+                     Config.TOKEN_BUDGET_GUIDANCE_CORE):
+        a = guidance.format(available_tokens=_stable_budget_figure(50_000))
+        b = guidance.format(available_tokens=_stable_budget_figure(51_000))
+        assert a == b
