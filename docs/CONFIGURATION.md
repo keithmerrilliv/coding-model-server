@@ -35,7 +35,7 @@ whatever `.env.example` happens to ship.
 |----------|---------|-------------|
 | `MODEL_N_THREADS` | `24` | CPU threads for token generation (physical cores) |
 | `MODEL_N_THREADS_BATCH` | `32` | CPU threads for prompt prefill (all threads incl. HT) |
-| `MODEL_PATH_*` | *(per-config)* | Override a model's GGUF path. One var per model config: `MODEL_PATH_35B`, `MODEL_PATH_27B`, `MODEL_PATH_30B_TURBO`, `MODEL_PATH_30B_FAST`, `MODEL_PATH_30B_HD`, `MODEL_PATH_30B_FLASH`, `MODEL_PATH_80B_Q8`, `MODEL_PATH_122B`, `MODEL_PATH_230B`, `MODEL_PATH_480B_ULTRA`, `MODEL_PATH_HYBRID_30B`. |
+| `MODEL_PATH_*` | *(per-config)* | Override a model's GGUF path. One var per model config: `MODEL_PATH_35B`, `MODEL_PATH_27B`, `MODEL_PATH_30B_TURBO`, `MODEL_PATH_30B_FAST`, `MODEL_PATH_30B_HD`, `MODEL_PATH_30B_FLASH`, `MODEL_PATH_80B_Q8`, `MODEL_PATH_122B`, `MODEL_PATH_230B`, `MODEL_PATH_HYBRID_30B`. (`MODEL_PATH_480B_ULTRA` is gone — the 480B config was retired by DEV-99 and nothing reads it.) |
 
 `n_ctx`, `n_batch`, `n_ubatch`, `ngl` and the KV types are **not** env-tunable —
 they are literals in each model config (see [Per-Model Configuration](#per-model-configuration)),
@@ -210,7 +210,7 @@ an in-memory `FakeJiraClient` and nothing external is touched.
 ### Dashboard (`scripts/serve_dashboard.py`)
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CODING_MODEL_DASHBOARD_HOST` | `0.0.0.0` | Bind address for the static SPA server. |
+| `CODING_MODEL_DASHBOARD_HOST` | `127.0.0.1` | Bind address for the static SPA server. Set `0.0.0.0` to opt in to LAN exposure (DEV-192). |
 | `CODING_MODEL_DASHBOARD_PORT` | `3001` | Port. (Vite's dev server uses 3000.) |
 | `CODING_MODEL_DASHBOARD_ROOT` | `<repo>/dashboard/dist` | Directory served. Must contain a built SPA (`npm run build`). |
 
@@ -318,7 +318,7 @@ executes silently on the strength of "the denylist didn't match".
 ## Per-Model Configuration
 
 Each model is defined via `_create_model_config()` in
-`src/coding_model_server/config.py` (all 13 configs and the agent registry live
+`src/coding_model_server/config.py` (all 10 configs and the agent registry live
 there; `server.py` is app assembly only):
 
 ```python

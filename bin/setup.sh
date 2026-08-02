@@ -14,12 +14,16 @@ echo "================================================"
 # Check Python version
 echo "Checking Python version..."
 if ! command -v python3 &> /dev/null; then
-    echo "Error: python3 not found. Please install Python 3.8 or higher."
+    echo "Error: python3 not found. Please install Python 3.10 or higher."
     exit 1
 fi
 
 PYTHON_VERSION=$(python3 --version | cut -d' ' -f2 | cut -d'.' -f1,2)
 echo "Found Python $PYTHON_VERSION"
+if [ "$(printf '%s\n' "$PYTHON_VERSION" 3.10 | sort -V | head -n1)" != "3.10" ]; then
+    echo "Error: Python $PYTHON_VERSION is too old. This project requires 3.10 or higher (pyproject.toml requires-python)."
+    exit 1
+fi
 
 # Create virtual environment
 if [ -d "venv" ]; then

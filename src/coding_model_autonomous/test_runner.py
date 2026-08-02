@@ -4,8 +4,7 @@ Extracted verbatim from executor.py (DEV-152). This is the security-relevant
 layer — bubblewrap + seccomp confinement of LLM-generated tests, and the
 local-vs-mac-runner dispatch — and it was previously unreachable for unit
 testing without importing the whole 2,300-line executor (and its import-time
-load_dotenv/basicConfig). It depends on nothing in executor but the shared
-HTTP session.
+load_dotenv/basicConfig). It no longer depends on executor at all.
 """
 from __future__ import annotations
 
@@ -21,7 +20,10 @@ from pathlib import Path
 from typing import Optional
 
 from . import seccomp_filter
-from .executor import _SESSION
+
+# Mac-runner dispatch session only. Inference calls never touch this — they
+# go through _http.post_chat_completion, which pools its own connections.
+_SESSION = requests.Session()
 
 logger = logging.getLogger("orchestrator.test_runner")
 

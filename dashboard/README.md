@@ -54,7 +54,7 @@ server, SPA fallback: unknown paths return `index.html`), managed by the
 
 | Variable | Default |
 |----------|---------|
-| `CODING_MODEL_DASHBOARD_HOST` | `0.0.0.0` |
+| `CODING_MODEL_DASHBOARD_HOST` | `127.0.0.1` (set `0.0.0.0` for LAN access) |
 | `CODING_MODEL_DASHBOARD_PORT` | `3001` |
 | `CODING_MODEL_DASHBOARD_ROOT` | `<repo>/dashboard/dist` |
 
@@ -81,7 +81,7 @@ Intervals are hardcoded, not configurable:
 | `GET /health` | 10s |
 | `GET /v1/autonomous/specs`, `/v1/autonomous/specs/:id` | 10s |
 | `GET /v1/admin/gpu_stats` | 1s |
-| `GET /v1/admin/metrics?window_seconds=` | 1s |
+| `GET /v1/admin/metrics?window_seconds=` | 5s (was 1s; the server rebuilds every bucket per call — DEV-159) |
 | `GET /v1/admin/active_model` | 2s |
 | `GET /v1/models` | on load |
 | `POST /v1/autonomous/gates/:id/respond` | on user action |
