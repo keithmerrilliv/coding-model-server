@@ -611,6 +611,29 @@ def _process_executing(db: Database, spec: Spec) -> None:
         _check_execution_gate(db, spec, current)
 
 
+def _load_plan(spec: Spec) -> dict:
+    """Parse spec.normalized_yaml into a dict; {} when absent or malformed.
+
+    Callers that merely want to *read* plan fields — implementer
+    clarifications, reviewer test_strategy, synthesis framework opts — each
+    used to re-implement this guard, and not all of them got it right. A plan
+    that does not parse into a mapping already fails loudly in
+    _bootstrap_tasks, before the spec can reach EXECUTING, so by the time
+    these readers run the YAML is known good and {} means "nothing to read"
+    rather than "silently wrong". Keep _bootstrap_tasks itself on raw
+    safe_load: that is the one caller that must fail the spec.
+    """
+    import yaml as _yaml
+    if not spec.normalized_yaml:
+        return {}
+    try:
+        plan = _yaml.safe_load(spec.normalized_yaml)
+    except _yaml.YAMLError as exc:
+        logger.warning("spec %s: failed to parse plan.yaml: %s", spec.id, exc)
+        return {}
+    return plan if isinstance(plan, dict) else {}
+
+
 def _bootstrap_tasks(db: Database, spec: Spec) -> None:
     """Parse the planner's YAML into Task rows."""
     import yaml as _yaml
@@ -1318,17 +1341,10 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
     # `clarifications:` YAML embedding: even if the planner is sloppy or the
     # implementer skips that section of the plan, the orchestrator-supplied
     # list still lands at the top of the prompt with hard-requirement framing.
-    import yaml as _yaml
-    clarifications: list[str] = []
-    if spec.normalized_yaml:
-        try:
-            plan = _yaml.safe_load(spec.normalized_yaml) or {}
-            raw_clar = plan.get("clarifications") if isinstance(plan, dict) else None
-            if isinstance(raw_clar, list):
-                clarifications = [str(c) for c in raw_clar if c]
-        except _yaml.YAMLError as exc:
-            logger.warning("spec %s: failed to parse plan.yaml for clarifications: %s",
-                           spec.id, exc)
+    raw_clar = _load_plan(spec).get("clarifications")
+    clarifications: list[str] = (
+        [str(c) for c in raw_clar if c] if isinstance(raw_clar, list) else []
+    )
 
     # On retry, include rejection notes from the most recent code_review gate.
     rejection_notes = None
@@ -1839,17 +1855,18 @@ def _run_reviewer_adversarial(db: Database, spec: Spec, task, spec_dir,
 
 
 def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
-    import yaml as _yaml
-
     spec_md = (spec_dir / spec.source_md_path).read_text()
     design_path = spec_dir / "design.md"
     design_md = design_path.read_text() if design_path.exists() else ""
 
     code_files = _collect_reviewer_code_files(db, spec.id, spec_dir)
 
-    # Detect test framework from the plan
-    plan = _yaml.safe_load(spec.normalized_yaml) if spec.normalized_yaml else {}
-    test_strategy = plan.get("test_strategy", {})
+    # Detect test framework from the plan. A plan that is not a mapping, or a
+    # test_strategy that came back as a scalar, used to raise here and fail the
+    # reviewer task outright; degrade to the pytest default instead.
+    test_strategy = _load_plan(spec).get("test_strategy")
+    if not isinstance(test_strategy, dict):
+        test_strategy = {}
     framework = test_strategy.get("framework", "pytest")
     tests_required = test_strategy.get("required", True)
 
@@ -2543,19 +2560,18 @@ def _legacy_attempt_retry(db: Database, spec: Spec, task, failure_detail: str) -
                     spec.id, MAX_RETRIES)
         # Reconstruct the framework + opts the test phase would have used.
         # Pulled from plan.yaml (test_strategy block).
-        import yaml as _yaml
         framework, framework_opts = "pytest", {}
-        try:
-            plan = _yaml.safe_load(spec.normalized_yaml) if spec.normalized_yaml else {}
-            ts = (plan or {}).get("test_strategy") or {}
+        ts = _load_plan(spec).get("test_strategy")
+        if isinstance(ts, dict):
             framework = ts.get("framework", "pytest")
             framework_opts = {
                 k: v for k, v in ts.items()
                 if k not in ("framework", "required")
             }
-        except Exception as exc:
-            logger.warning("spec %s: synthesis: couldn't parse test_strategy (%s); "
-                           "defaulting to pytest with no opts", spec.id, exc)
+        elif ts is not None:
+            logger.warning("spec %s: synthesis: test_strategy is %s, not a mapping; "
+                           "defaulting to pytest with no opts",
+                           spec.id, type(ts).__name__)
 
         synth_passed, synth_output = _run_synthesis(
             db, spec, impl_task, db.spec_dir(spec.id), framework, framework_opts)
