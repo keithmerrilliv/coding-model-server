@@ -284,9 +284,10 @@ This is where the prompt is processed — the most compute-intensive phase:
 4. **Batch processing** — Tokens are processed in micro-batches (`n_ubatch`). Larger batches = fewer GPU kernel launches = faster prefill. This is why bumping ubatch from 512 to 4096 gave 4.6x prefill speedup on Coder-Next.
 5. **Progress event** — The server emits an SSE progress event with prompt token count so the client can display "Prefill: 16.7K / 262K tokens".
 
-**Performance**: prefill speed varies by ~15x across the roster — from ~220 tok/s
-for the 480B CPU-bound architect to ~3,350 tok/s for a small partial-offload MoE
-(Coder-30B). Decode varies ~12x, from 6 tok/s (architect) to 76 (implementer).
+**Performance**: prefill speed varies by ~11x across the roster — from ~300 tok/s
+for the CPU-heavy MiniMax MoE roles to ~3,350 tok/s for a small partial-offload MoE
+(Coder-30B). Decode varies ~7x, from ~11 tok/s (the 27B dense and MiniMax roles)
+to 76 (implementer).
 
 > Measured 2026-07-14 on the reference hardware (RTX 5080 16 GB, CUDA 12.8) against
 > the **current** agent configs, `--warmup` on both benchmarks. Prefill is
@@ -316,10 +317,12 @@ for the 480B CPU-bound architect to ~3,350 tok/s for a small partial-offload MoE
 | `moe_implementer` | 2,495 | 300 | **11.2** | MiniMax M2.5, ngl 62 cpu_moe, 116K |
 | `moe_architect` | 2,540 | 304 | **11.2** | MiniMax M2.5 (same model, other role) |
 | `dense_architect` | 2,520 | 829 | **10.8** | Qwen3.6-27B dense, ngl 36 MTP |
-| `architect` | 2,449 | 222 | **6.3** | Coder-480B Q2_K_XL, ngl 63 cpu_moe, 32K |
 
 `supervisor` and `dense_architect` share one model (Qwen3.6-27B); their 11.4 vs
 10.8 is run-to-run noise, not a real difference. Same for the two MiniMax roles.
+`architect` has no row of its own because it is now an alias for
+`dense_architect`: the Coder-480B config it used to name (222 tok/s prefill,
+6.3 decode) was retired by DEV-99 and can no longer be selected.
 
 To re-measure on your hardware: `python3 scripts/benchmark_prefill.py --warmup`
 and `python3 scripts/benchmark_decode.py -a <agent> --reps 3` from the server
