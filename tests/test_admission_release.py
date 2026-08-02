@@ -114,7 +114,7 @@ def test_stream_records_generation_time_and_defers_middleware(monkeypatch):
         lambda *a, **k: samples.append(a))
 
     resp = _drive_stream(monkeypatch, admission)
-    assert getattr(resp.raw_headers, "__class__", None) is not None  # sanity
+    assert resp.status_code == 200
 
     async def _drain():
         async for _ in resp.body_iterator:

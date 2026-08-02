@@ -50,10 +50,10 @@ for f in "${FILES[@]}"; do
     # thing that makes a token or URL fail for no visible reason.
     read -r len pad < <(awk -F= -v k="${key}" '$1 == k {
         v = substr($0, index($0, "=") + 1)
-        raw = length(v)
-        sub(/[ \t]+$/, "", v)
+        pad = sub(/[ \t]+$/, "", v)
         gsub(/^["'\'']|["'\'']$/, "", v)
-        print length(v), (raw > length(v) ? "padded" : "-")
+        pad += sub(/[ \t]+$/, "", v)
+        print length(v), (pad ? "padded" : "-")
         exit
       }' "${f}")
     note=""

@@ -313,7 +313,8 @@ def _is_auto_approvable_command(command):
     if base == 'git':
         subcommand = next((a for a in argv[1:] if not a.startswith('-')), None)
         if subcommand not in GIT_READONLY_SUBCOMMANDS:
-            return False, f"'git {subcommand or ''}'.strip() is not a read-only git subcommand"
+            refused = f"git {subcommand or ''}".strip()
+            return False, f"'{refused}' is not a read-only git subcommand"
         if subcommand == 'config':
             rest = argv[argv.index('config') + 1:]
             flags = [a for a in rest if a.startswith('-')]
