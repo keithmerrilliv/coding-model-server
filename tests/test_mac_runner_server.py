@@ -269,11 +269,12 @@ def test_worktree_add_uses_a_double_dash_separator(client, monkeypatch, repo):
 # inner sandbox_apply returned EPERM and every xcodebuild against a project with
 # package dependencies died in "Resolve Package Graph" before compiling.
 #
-# The fix splits the work, so the property worth pinning is not "resolution
-# happens" but WHICH STEP IS CONFINED: resolution outside, build inside.
+# Amended by DEV-403: the xcodebuild build/test step is no longer confined
+# either (see the DEV-403 section below), but the split and the anti-nesting
+# flags stay — they are what lets the command run identically whether or not
+# a future containment mechanism wraps it again.
 
-def test_package_resolution_runs_outside_the_sandbox_and_the_build_inside(
-        client, monkeypatch):
+def test_package_resolution_runs_outside_the_sandbox(client, monkeypatch):
     monkeypatch.setattr(Config, "SANDBOX", True)
     monkeypatch.setattr(server, "_sandbox_available", lambda: True)
     calls = []
@@ -297,10 +298,9 @@ def test_package_resolution_runs_outside_the_sandbox_and_the_build_inside(
     assert resolve[0] != server.SANDBOX_EXEC, (
         "resolution must NOT be sandboxed — SwiftPM sandboxes manifest "
         "evaluation itself and macOS cannot nest sandboxes")
-    assert build[0] == server.SANDBOX_EXEC, (
-        "the build runs the LLM-authored patch and must stay confined")
     assert "-disableAutomaticPackageResolution" in build, (
-        "the sandboxed step must not re-resolve, or it nests again")
+        "the build step must not re-resolve — with a sandbox that nests, "
+        "and without one it wastes the pre-step")
     # The toolchain sandboxes itself in TWO places. Macro plugins are the
     # second: swift-frontend runs them under sandbox-exec, so any dependency
     # using a macro nests and fails with "swift-plugin-server produced
@@ -333,6 +333,69 @@ def test_swift_test_disables_swiftpms_own_sandbox(client, monkeypatch):
     assert len(calls) == 1, f"swift_test needs no resolve pre-step, got {calls}"
     assert "--disable-sandbox" in calls[0]
     assert calls[0][0] == server.SANDBOX_EXEC
+
+
+# ── DEV-403 / DEV-417: app-hosted XCTest is exempt from the sandbox ──────────
+#
+# Verified on hardware: app-hosted XCTest hangs for the full test-launch
+# timeout under sandbox-exec even with a deny-nothing (allow default) profile,
+# and passes in seconds without the wrapper. The wrapper's presence is the
+# differentiator — not the profile, not the host app's entitlements. So
+# xcodebuild_test must never be wrapped, while every other framework stays
+# confined; forcing CODING_MODEL_RUNNER_SANDBOX=0 globally was the interim
+# state this scoping exists to end.
+
+def test_xcodebuild_test_is_exempt_from_the_sandbox(client, monkeypatch):
+    monkeypatch.setattr(Config, "SANDBOX", True)
+    monkeypatch.setattr(server, "_sandbox_available", lambda: True)
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+
+    _fake_subprocess(monkeypatch, fake_run)
+    resp = client.post(
+        "/v1/run_tests",
+        headers={"X-Runner-Key": "test-key"},
+        json={"spec_id": "s1", "repo": "proj", "framework": "xcodebuild_test",
+              "scheme": "Demo"},
+    )
+    assert resp.status_code == 200, resp.text
+    build = calls[-1]
+    assert build[0] != server.SANDBOX_EXEC, (
+        "app-hosted XCTest hangs under sandbox-exec regardless of profile "
+        "(DEV-403) — wrapping it makes every run fail at the launch timeout")
+    assert build[0] == "xcodebuild"
+
+
+def test_sandbox_exemption_is_per_framework_not_global(client, monkeypatch):
+    """The scoping's point: one framework opts out, the rest stay confined."""
+    monkeypatch.setattr(Config, "SANDBOX", True)
+    monkeypatch.setattr(server, "_sandbox_available", lambda: True)
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+
+    _fake_subprocess(monkeypatch, fake_run)
+    for framework, extra in (("xcodebuild_test", {"scheme": "Demo"}),
+                             ("swift_test", {})):
+        resp = client.post(
+            "/v1/run_tests",
+            headers={"X-Runner-Key": "test-key"},
+            json={"spec_id": "s1", "repo": "proj", "framework": framework,
+                  **extra},
+        )
+        assert resp.status_code == 200, resp.text
+    assert len(calls) == 3, f"expected resolve + xcode build + swift build, got {calls}"
+    _resolve, xcode_build, swift_build = calls
+    assert xcode_build[0] == "xcodebuild"
+    assert "test" in xcode_build
+    assert swift_build[0] == server.SANDBOX_EXEC, (
+        "swift_test has no host app and sandboxes fine — exempting more than "
+        "the incompatible framework forfeits containment for no reason")
 
 
 def test_resolution_failure_is_surfaced_not_swallowed(client, monkeypatch):

@@ -48,7 +48,9 @@ class Config:
     # Wrap swift/xcodebuild in sandbox-exec so LLM-authored build/test code
     # can't read credential material or write outside its build dirs
     # (DEV-126). On by default; set CODING_MODEL_RUNNER_SANDBOX=0 to disable
-    # (e.g. while debugging a build the profile breaks).
+    # (e.g. while debugging a build the profile breaks). Scoped per framework:
+    # frameworks in frameworks.SANDBOX_INCOMPATIBLE (app-hosted XCTest —
+    # DEV-403) run unsandboxed even when this is on.
     SANDBOX = os.getenv("CODING_MODEL_RUNNER_SANDBOX", "1").lower() not in (
         "0", "false", "no")
     SANDBOX_PROFILE = Path(os.getenv(
