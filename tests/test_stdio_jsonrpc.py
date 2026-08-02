@@ -315,3 +315,61 @@ def test_start_failure_raises_a_typed_error(rpc, monkeypatch):
     with pytest.raises(StdioRpcError) as exc:
         client.request("tools/call", {"name": "x", "arguments": {}})
     assert exc.value.kind == "start"
+
+
+def test_failed_handshake_kills_child_and_allows_clean_restart(rpc, monkeypatch):
+    """DEV-333: a failed handshake used to leave the live child in
+    self.process with no write queue — start() then reported success forever,
+    and every later request() raised AttributeError('NoneType' object has no
+    attribute 'put') instead of the typed error, until a server restart."""
+    adapter, client, mp = rpc
+    bad = _FakeProc({})
+    adapter.patch_spawn(mp, bad)
+    monkeypatch.setattr(client, "_handshake", lambda proc: False)
+
+    assert client.start() is False
+    assert client.process is None, "failed start left the child registered"
+    assert bad.poll() is not None, "failed start leaked a live child"
+
+    # Repeated calls keep raising the typed start error, never AttributeError.
+    with pytest.raises(StdioRpcError) as exc:
+        client.request("tools/call", {"name": "x", "arguments": {}})
+    assert exc.value.kind == "start"
+
+    # Once the child cooperates, start() recovers without a server restart.
+    good = _FakeProc({})
+    adapter.patch_spawn(mp, good)
+    monkeypatch.setattr(client, "_handshake", lambda proc: True)
+    assert client.start() is True
+    text, err = adapter.call(client, "alpha")
+    assert err is None
+    assert text.startswith("result:alpha:")
+
+
+def test_handshake_exception_kills_child_too(rpc, monkeypatch):
+    """The exception path through _start_unlocked must clean up the same way
+    the return-False path does."""
+    adapter, client, mp = rpc
+    bad = _FakeProc({})
+    adapter.patch_spawn(mp, bad)
+
+    def boom(proc):
+        raise RuntimeError("handshake blew up")
+
+    monkeypatch.setattr(client, "_handshake", boom)
+    assert client.start() is False
+    assert client.process is None
+    assert bad.poll() is not None, "exception during start leaked a live child"
+
+
+def test_request_without_writer_raises_typed_error(rpc):
+    """A retired write queue (stop() racing request(), which snapshots it
+    without stop() holding the same lock) must surface as the typed 'start'
+    error, not an AttributeError."""
+    adapter, client, mp = rpc
+    _boot(adapter, client, mp)
+    client._write_q = None
+    with pytest.raises(StdioRpcError) as exc:
+        client.request("tools/call", {"name": "x", "arguments": {}})
+    assert exc.value.kind == "start"
+    assert client._pending == {}, "the failed call left its waiter registered"

@@ -106,12 +106,14 @@ class StdioJsonRpcClient:
 
     def _start_unlocked(self) -> bool:
         """Caller must hold self.lock."""
+        proc = None
         try:
             proc = self._spawn()
             if proc is None:
                 return False
             self.process = proc
             if not self._handshake(proc):
+                self._kill_failed_start(proc)
                 return False
             # Hand stdout to the reader only now: during a synchronous
             # handshake this thread reads the pipe, and two readers on one
@@ -130,7 +132,23 @@ class StdioJsonRpcClient:
             return True
         except Exception as e:
             logger.error("Error starting %s: %s", self.name, e)
+            if proc is not None:
+                self._kill_failed_start(proc)
             return False
+
+    def _kill_failed_start(self, proc: subprocess.Popen) -> None:
+        """A start that fails after Popen must not leave the live child in
+        self.process: start() would see it alive and report success forever,
+        while the reader/writer plumbing was never built — so request() dies
+        on the missing write queue and the half-initialized child leaks until
+        a server restart. Kill it and clear the slot so the next start()
+        respawns from scratch."""
+        try:
+            proc.kill()
+            proc.wait(timeout=2)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+        self.process = None
 
     def _readline_with_timeout(self, timeout: float = 30) -> Optional[str]:
         """Read one line from the child's stdout, bounded by *timeout*.
@@ -290,6 +308,14 @@ class StdioJsonRpcClient:
                 "params": params,
             })
             write_q = self._write_q
+
+        if write_q is None:
+            # stop() doesn't take self.lock, so it can retire the writer
+            # between the start() check above and the snapshot — surface that
+            # as the start failure it is, not an AttributeError on .put.
+            with self._pending_lock:
+                self._pending.pop(req_id, None)
+            raise StdioRpcError("start", f"{self.name} is not running")
 
         try:
             write_q.put((payload, req_id), timeout=self.WRITE_ENQUEUE_TIMEOUT)
