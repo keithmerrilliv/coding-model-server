@@ -39,6 +39,7 @@ import signal
 import threading
 import sys
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 import requests
@@ -119,6 +120,11 @@ from coding_model_autonomous import supervisor as _supervisor
 # ── Configuration ────────────────────────────────────────────────────────────
 
 POLL_INTERVAL = float(os.getenv("ORCHESTRATOR_POLL_INTERVAL", "5"))
+# Per-spec worker pool size (DEV-393). Small on purpose: agent calls all
+# queue on the same llama-server anyway, so extra workers buy nothing but
+# GPU-queue depth — the win is that cheap state transitions (gate approvals,
+# bootstraps) no longer wait behind another spec's long agent call.
+SPEC_WORKERS = int(os.getenv("ORCHESTRATOR_SPEC_WORKERS", "4"))
 LOG_LEVEL = os.getenv("ORCHESTRATOR_LOG_LEVEL", "INFO").upper()
 SUPERVISOR_ENABLED = os.getenv("AUTONOMOUS_SUPERVISOR", "0") == "1"
 
@@ -420,42 +426,123 @@ class ShutdownRequested(RuntimeError):
     task is reset to PENDING so the next daemon start re-runs it."""
 
 
-def tick(db: Database) -> None:
+class SpecScheduler:
+    """Runs each spec's per-tick pass on its own worker (DEV-393).
+
+    The tick loop used to call every processor synchronously, so one spec's
+    long agent call froze every other spec — an observed retries-exhausted
+    synthesis (~195k-token prompt, ~8 min of prefill before generation even
+    started) left an already-approved plan gate unprocessed for 12+ minutes,
+    and from the outside the starved queue was indistinguishable from a hang.
+
+    One pass per spec at a time (the in-flight registry) is the only ordering
+    the state machine needs; across specs the DB is the shared state, and its
+    WAL + thread-local connections already serve the heartbeat and Jira-sync
+    threads.
+
+    Not thread-safe by design: submit/reap/drain run on the tick thread only.
+    """
+
+    # How often reap() names a still-busy spec in the log.
+    BUSY_LOG_INTERVAL = 60.0
+
+    def __init__(self, max_workers: "int | None" = None):
+        self._pool = ThreadPoolExecutor(
+            max_workers=max_workers or SPEC_WORKERS,
+            thread_name_prefix="spec-worker",
+        )
+        # spec_id -> (future, pass label, monotonic start, last busy-log)
+        self._in_flight: dict[str, list] = {}
+
+    def submit(self, spec_id: str, label: str, fn, /, *args) -> bool:
+        """Queue one pass for a spec; refused while a pass is in flight."""
+        if spec_id in self._in_flight:
+            return False
+        fut = self._pool.submit(fn, *args)
+        now = time.monotonic()
+        self._in_flight[spec_id] = [fut, label, now, now]
+        return True
+
+    def reap(self) -> None:
+        """Drop finished passes and name the still-busy specs in the log, so
+        a starved queue reads differently from a crashed daemon."""
+        now = time.monotonic()
+        for spec_id, entry in list(self._in_flight.items()):
+            fut, label, started, last_logged = entry
+            if fut.done():
+                del self._in_flight[spec_id]
+                exc = fut.exception()
+                if exc is not None:
+                    # _run_spec_pass catches processor errors; anything that
+                    # still escaped (e.g. the FAILED write itself) surfaces
+                    # here instead of dying silently in the Future.
+                    logger.error("spec %s: %s pass crashed: %r",
+                                 spec_id, label, exc)
+            elif now - last_logged >= self.BUSY_LOG_INTERVAL:
+                logger.info("spec %s: %s pass still running (%.0fs)",
+                            spec_id, label, now - started)
+                entry[3] = now
+
+    def drain(self) -> None:
+        """Wait for in-flight passes — the shutdown contract is unchanged:
+        SIGTERM means 'after the current work', and the long manifest chain
+        still bails early via ShutdownRequested."""
+        self._pool.shutdown(wait=True)
+
+
+def tick(db: Database, scheduler: "SpecScheduler | None" = None) -> None:
     """One pass over the spec table. Idempotent — safe to call any time.
 
-    Order matters: clarification gates need to advance specs from
-    NEEDS_CLARIFICATION → PENDING_PLAN before the planner pass picks them
-    up in the same tick. Otherwise they'd wait an extra cycle for nothing.
+    With a scheduler (the daemon), each spec's pass runs on its own worker
+    so one spec's long agent call cannot starve the rest (DEV-393); a spec
+    whose previous pass is still running is skipped, never double-processed.
+    Without one (tests, one-shot callers), everything runs inline as before.
     """
-    needs_clar = db.list_specs(status=SpecStatus.NEEDS_CLARIFICATION)
-    for spec in needs_clar:
-        try:
-            _process_needs_clarification(db, spec)
-        except Exception:
-            logger.exception("spec %s: error during clarification pass",
-                             spec.id)
+    # (status to walk, log label, processor, spec status to set on error).
+    # Built per call, not at module level: _process_executing is defined
+    # further down, and late binding is what lets tests stub the processors.
+    passes = (
+        # Clarification before planner: inline, an approved clarification
+        # gate moves a spec to PENDING_PLAN in time for the planner pass of
+        # the SAME tick. Scheduled, it lands next tick — one POLL_INTERVAL,
+        # not a stall.
+        (SpecStatus.NEEDS_CLARIFICATION, "clarification",
+         _process_needs_clarification, None),
+        (SpecStatus.PENDING_PLAN, "planner", _process_pending_plan,
+         SpecStatus.FAILED),
+        (SpecStatus.PLAN_REVIEW, "plan-review", _process_plan_review, None),
+        (SpecStatus.EXECUTING, "execution", _process_executing, None),
+    )
+    if scheduler is not None:
+        scheduler.reap()
+    for status, label, processor, status_on_error in passes:
+        for spec in db.list_specs(status=status):
+            if scheduler is None:
+                _run_spec_pass(db, spec.id, status, label, processor,
+                               status_on_error)
+            else:
+                scheduler.submit(spec.id, label, _run_spec_pass,
+                                 db, spec.id, status, label, processor,
+                                 status_on_error)
 
-    pending = db.list_specs(status=SpecStatus.PENDING_PLAN)
-    for spec in pending:
-        try:
-            _process_pending_plan(db, spec)
-        except Exception:
-            logger.exception("spec %s: error during planner pass", spec.id)
-            db.update_spec_status(spec.id, SpecStatus.FAILED)
 
-    in_review = db.list_specs(status=SpecStatus.PLAN_REVIEW)
-    for spec in in_review:
-        try:
-            _process_plan_review(db, spec)
-        except Exception:
-            logger.exception("spec %s: error during plan-review pass", spec.id)
+def _run_spec_pass(db: Database, spec_id: str, status: SpecStatus,
+                   label: str, processor, status_on_error) -> None:
+    """One spec's processing for one tick, with the per-state error policy.
 
-    executing = db.list_specs(status=SpecStatus.EXECUTING)
-    for spec in executing:
-        try:
-            _process_executing(db, spec)
-        except Exception:
-            logger.exception("spec %s: error during execution pass", spec.id)
+    Re-fetches the spec first: a pass can wait behind a full worker pool
+    while a gate decision or cancellation moves the spec on, and processing
+    that stale snapshot would resurrect the old state.
+    """
+    try:
+        spec = db.get_spec(spec_id)
+        if spec is None or spec.status != status:
+            return
+        processor(db, spec)
+    except Exception:
+        logger.exception("spec %s: error during %s pass", spec_id, label)
+        if status_on_error is not None:
+            db.update_spec_status(spec_id, status_on_error)
 
 
 # ── Execution state machine (Phase 2) ───────────────────────────────────────
@@ -2607,10 +2694,13 @@ def main() -> int:
     threading.Thread(target=_heartbeat_loop, name="daemon-heartbeat",
                      daemon=True).start()
 
+    scheduler = SpecScheduler()
+    logger.info("spec worker pool: %d workers", SPEC_WORKERS)
+
     try:
         while not flag.set:
             try:
-                tick(db)
+                tick(db, scheduler)
             except Exception:
                 logger.exception("tick failed; continuing")
 
@@ -2620,6 +2710,8 @@ def main() -> int:
                 time.sleep(min(0.5, POLL_INTERVAL - slept))
                 slept += 0.5
     finally:
+        logger.info("waiting for in-flight spec passes...")
+        scheduler.drain()
         logger.info("stopping jira-sync worker...")
         jira_sync.stop()
 
