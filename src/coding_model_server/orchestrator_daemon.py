@@ -724,7 +724,21 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
     # regenerating the same document.
     rejection_notes = (_latest_architect_feedback(db, spec, spec_dir)
                        if task.retry_count > 0 else None)
-    messages = build_architect_message(spec_md, rejection_notes=rejection_notes)
+    # The approved plan carries decisions (language, framework, dependency
+    # policy, operator clarifications) that override any ambiguity left in
+    # spec.md — without it the architect re-derives them from the spec alone
+    # (DEV-107). File first, DB copy as fallback; a spec can reach EXECUTING
+    # only through plan approval, so absence is worth a warning.
+    plan_yaml: "str | None" = None
+    try:
+        plan_yaml = (spec_dir / "plan.yaml").read_text()
+    except OSError:
+        plan_yaml = spec.normalized_yaml
+    if not plan_yaml:
+        logger.warning("spec %s: no plan.yaml on disk or in DB — architect "
+                       "runs without plan constraints", spec.id)
+    messages = build_architect_message(spec_md, rejection_notes=rejection_notes,
+                                       plan_yaml=plan_yaml)
 
     # Architect output is structured (<<<DESIGN>>> / <<<COMPLEXITY>>> blocks).
     # The model occasionally drifts and returns prose without the markers; one

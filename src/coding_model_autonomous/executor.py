@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Optional
 
 import requests
+import yaml
 
 from coding_model_server.streaming import strip_thinking as _server_strip_thinking
 
@@ -793,8 +794,58 @@ def parse_reviewer_response(text: str) -> ReviewerResult | ParseError:
 
 # ── User message builders ───────────────────────────────────────────────────
 
+def _render_plan_constraints(plan_yaml: str) -> "str | None":
+    """Render the approved plan's binding decisions for the architect prompt.
+
+    The architect used to see only the raw spec, so it could re-derive a
+    language/toolchain from an ambiguous spec that contradicted the plan the
+    operator already approved (DEV-107: plan said javascript + "no
+    TypeScript", spec mentioned TypeScript, architect designed TypeScript
+    twice and the spec failed at design). Returns None when the YAML is
+    unparseable or carries none of the binding fields — the caller then
+    omits the section, which is exactly the pre-DEV-107 prompt.
+    """
+    try:
+        plan = yaml.safe_load(plan_yaml)
+    except yaml.YAMLError:
+        return None
+    if not isinstance(plan, dict):
+        return None
+
+    lines: list[str] = []
+    if plan.get("language"):
+        lines.append(f"- Language: {plan['language']}")
+    if plan.get("target_runtime"):
+        lines.append(f"- Target runtime: {plan['target_runtime']}")
+    test_strategy = plan.get("test_strategy")
+    if isinstance(test_strategy, dict) and test_strategy.get("framework"):
+        lines.append(f"- Test framework: {test_strategy['framework']}")
+    constraints = plan.get("constraints")
+    if isinstance(constraints, dict):
+        if "dependencies_allowed" in constraints:
+            allowed = "yes" if constraints["dependencies_allowed"] else "no"
+            lines.append(f"- External dependencies allowed: {allowed}")
+        if constraints.get("notes"):
+            lines.append(f"- Other constraints: {constraints['notes']}")
+    clarifications = plan.get("clarifications")
+    if isinstance(clarifications, list) and clarifications:
+        lines.append("- Operator clarifications (verbatim, binding):")
+        lines.extend(f"  {i}. {c}" for i, c in enumerate(clarifications, 1))
+
+    if not lines:
+        return None
+    return (
+        "## Approved plan — binding constraints\n\n"
+        "The operator has already approved a plan for this spec. The values "
+        "below are settled decisions; where the specification is ambiguous "
+        "or contradicts them, these constraints WIN:\n\n"
+        + "\n".join(lines)
+    )
+
+
 def build_architect_message(spec_md: str,
-                            rejection_notes: str | None = None) -> list[dict[str, str]]:
+                            rejection_notes: str | None = None,
+                            plan_yaml: str | None = None) -> list[dict[str, str]]:
     user_parts: list[str] = []
     # On a re-run (design-review rejection or supervisor design-revision), the
     # prior design led to the failure below. The implementer builds the design
@@ -810,6 +861,10 @@ def build_architect_message(spec_md: str,
             "invariant explicitly (rule 8). Do not simply re-emit the same design.\n\n"
             f"{rejection_notes.strip()}\n\n---\n\n"
         )
+    if plan_yaml:
+        constraints_block = _render_plan_constraints(plan_yaml)
+        if constraints_block:
+            user_parts.append(constraints_block + "\n\n---\n\n")
     user_parts.append(
         "## Specification\n\n"
         f"{spec_md}\n\n---\n\n"
