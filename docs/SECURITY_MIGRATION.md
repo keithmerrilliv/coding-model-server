@@ -253,15 +253,26 @@ them over HTTP to a `mac_runner` service on your Mac. Code lives at
 
 ### Risk acknowledgement
 
-The Mac runner executes LLM-generated Swift **without a sandbox**. On your
-primary workstation, that means the test process can read your Keychain
-(including signing certs and iCloud session), `~/Documents`, `~/.ssh`,
-browser profiles, etc. You chose this trade-off over the weaker protection
-macOS's `sandbox-exec` would provide. Options to harden later:
+DEV-126 added a `sandbox-exec` wrapper for LLM-generated build/test commands:
+`CODING_MODEL_RUNNER_SANDBOX` defaults to on in `mac_runner/config.py`, and the
+profile (`mac_runner/sandbox.sb`) denies reads of `~/.ssh` (including the
+tunnel key), all Keychains except an explicitly named signing keychain
+(`CODING_MODEL_RUNNER_SIGNING_KEYCHAIN`, DEV-398), and the runner's own `.env`.
+
+In practice the wrapper is currently **off**. Hardware verification (DEV-403)
+showed app-hosted XCTest does not survive under `sandbox-exec` at all — even a
+deny-nothing profile hangs the test-runner handshake — and SwiftPM manifest
+resolution cannot nest its own sandbox inside one (DEV-294). The runner
+therefore sets `CODING_MODEL_RUNNER_SANDBOX=0`, so Apple test runs execute
+LLM-generated code with the runner user's access to the Keychain,
+`~/Documents`, `~/.ssh`, browser profiles, etc. Re-enabling also requires a
+usable signing keychain (DEV-415). Real containment needs a mechanism other
+than `sandbox-exec`:
 
 - Create a dedicated `coding-model-runner` macOS user with no iCloud/Keychain
   and run the LaunchAgent as that user (strongest practical isolation on Mac).
-- Move to a dedicated Mac mini builder when available.
+- Move to a dedicated Mac mini builder, or run the runner inside a macOS VM,
+  when available.
 
 ### One-time setup on the Mac
 
@@ -421,7 +432,7 @@ list.
 - **Scraping SSRF**: `scraping/*` and `ingest_url_content` accept arbitrary URLs and follow redirects. Not addressed in this pass.
 - **Rate limiting**: still none. A misbehaving client can DoS the server even when authenticated.
 - **PDF ingest size cap**: `INGEST_MAX_FILE_SIZE` is declared in `.env.example` but not read in code.
-- **Mac runner has no sandbox**: Swift test code executes with the runner user's privileges. Revisit if/when a dedicated builder exists.
+- **Mac runner sandbox is disabled in practice**: DEV-126's `sandbox-exec` wrapper exists and defaults on, but app-hosted XCTest cannot run inside it (DEV-403 — even a permissive profile hangs the test-runner handshake), so the runner currently sets `CODING_MODEL_RUNNER_SANDBOX=0` and Swift/Xcode test code executes with the runner user's privileges. Containment needs a low-privilege runner user or a VM, and re-enabling also needs the signing keychain reissued (DEV-415).
 - **`EnvironmentFile=-` fails open**: the systemd units tolerate a missing env file by design (the leading dash). If the `.env` is ever moved or mistyped, the server starts with an empty `ADMIN_API_KEY` instead of failing loudly. The lifespan guard in `runtime.py` catches this (it refuses to boot unauthenticated), but the units themselves will not complain — check `journalctl` after any change to the env path.
 - **pbxproj editing for Xcode projects without existing XCTest targets**: not supported yet — the planner must target projects that already have a test target. SPM (`swift_test`) handles add-new-tests fine via text edits to `Package.swift`.
 - **Binary patches**: the orchestrator ships UTF-8 files only; binary assets (images, asset catalogs) can't currently be added/modified by the LLM. Worktree bases carry whatever binaries exist at `base_ref`.
