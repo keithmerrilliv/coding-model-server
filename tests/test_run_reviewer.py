@@ -197,3 +197,34 @@ def test_parse_error_soft_fails_to_retry_when_exhausted(db, spec_and_task):
     attempt.assert_called_once()
     # _run_reviewer itself must not have hard-failed the spec.
     assert db.get_spec(spec.id).status is SpecStatus.EXECUTING
+
+
+# ── DEV-405: a PASS verdict over a red test run must be unrepresentable ──
+
+def test_pass_verdict_over_failing_tests_is_overridden_to_fail(db, spec_and_task):
+    """spec_96d7e07f attempt 5: failure_report.md opened "Reviewer verdict:
+    PASS" directly above failing test output. Tests are canonical — the
+    recorded verdict must be FAIL, with the override named."""
+    spec, task, spec_dir = spec_and_task
+    with mock.patch.object(d, "_attempt_retry") as retry:
+        _run(db, spec, task, spec_dir,
+             verdict="PASS", tests_pass=False,
+             test_output="1 failed in 0.01s")
+
+    retry.assert_called_once()
+    assert db.list_open_gates(spec.id) == [], "no release gate over red tests"
+    report = (spec_dir / "failure_report.md").read_text()
+    assert report.startswith("Reviewer verdict: FAIL"), (
+        "the recorded verdict must be the reconciled one")
+    assert "overridden to FAIL" in report, "the override must be named"
+
+
+def test_fail_verdict_is_not_double_annotated(db, spec_and_task):
+    spec, task, spec_dir = spec_and_task
+    with mock.patch.object(d, "_attempt_retry"):
+        _run(db, spec, task, spec_dir,
+             verdict="FAIL", tests_pass=False,
+             test_output="1 failed in 0.01s")
+    report = (spec_dir / "failure_report.md").read_text()
+    assert "overridden" not in report, (
+        "an honest FAIL needs no reconciliation banner")

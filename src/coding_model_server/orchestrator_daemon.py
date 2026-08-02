@@ -1978,6 +1978,21 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
             spec_md, design_md, code_files, result, test_output,
         )
 
+    # Tests are canonical: a reviewer PASS over a red test run must be
+    # unrepresentable (DEV-405 — spec_96d7e07f's attempt-5 failure_report
+    # opened "Reviewer verdict: PASS" above failing output). Overridden, not
+    # re-asked: the reviewer never sees execution output by design, so
+    # re-asking can't change what it knows.
+    if not tests_passed and result.verdict == "PASS":
+        logger.warning(
+            "spec %s: reviewer said PASS but the test run failed — "
+            "overriding verdict to FAIL", spec.id)
+        result.verdict = "FAIL"
+        result.review_md = (
+            "**Verdict overridden to FAIL: the reviewer's static review said "
+            "PASS, but the test run failed — test results are canonical "
+            "(DEV-405).**\n\n" + result.review_md)
+
     if tests_passed and result.verdict == "PASS":
         # Everything looks good — create release_approval gate
         db.update_task_status(task.id, TaskStatus.BLOCKED_ON_REVIEW)
