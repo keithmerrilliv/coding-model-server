@@ -78,6 +78,61 @@ def test_disconnect_after_real_finish_reason_keeps_it():
     assert finish_reason == "stop"
 
 
+# ── DEV-344: mid-stream retry must not corrupt the tool-call accumulator ──
+
+class _InterruptedResponse(_FakeResponse):
+    """Streams its lines, then dies with ChunkedEncodingError — the retryable
+    interruption (unlike ConnectionError, which breaks/continues elsewhere)."""
+
+    def iter_lines(self):
+        for line in self._lines:
+            yield line.encode("utf-8")
+        raise requests.exceptions.ChunkedEncodingError("peer closed mid-chunk")
+
+
+def _tool_chunk(index, name=None, arguments=None, call_id=None):
+    fn = {}
+    if name is not None:
+        fn["name"] = name
+    if arguments is not None:
+        fn["arguments"] = arguments
+    tc = {"index": index, "type": "function", "function": fn}
+    if call_id is not None:
+        tc["id"] = call_id
+    import json
+    return "data: " + json.dumps(
+        {"choices": [{"delta": {"tool_calls": [tc]}, "finish_reason": None}]})
+
+
+def test_midstream_retry_does_not_double_accumulate_tool_calls():
+    """A stream that emits partial tool_call deltas and dies is retried; the
+    fresh stream replays the deltas from index 0. The stale accumulator used
+    to survive the retry, yielding name 'remote_execremote_exec' and
+    arguments '{"comm{"command": "ls"}' — which the dispatcher then rejected
+    as an unknown tool / malformed JSON for a call the model emitted
+    correctly (DEV-344)."""
+    first = _InterruptedResponse([
+        _tool_chunk(0, name="remote_exec", arguments='{"comm',
+                    call_id="call_1"),
+    ])
+    second = _FakeResponse([
+        _tool_chunk(0, name="remote_exec", arguments='{"command": "ls"}',
+                    call_id="call_1"),
+        _finish_chunk("tool_calls"),
+        "data: [DONE]",
+    ], die_after=False)
+
+    with mock.patch.object(completion._SESSION, "post",
+                           side_effect=[first, second]):
+        _text, finish_reason, tool_calls = completion.get_completion(
+            [{"role": "user", "content": "hi"}], "implementer", "theme")
+
+    assert finish_reason == "tool_calls"
+    assert tool_calls is not None and len(tool_calls) == 1
+    assert tool_calls[0]["function"]["name"] == "remote_exec"
+    assert tool_calls[0]["function"]["arguments"] == '{"command": "ls"}'
+
+
 def test_clean_stream_still_reports_server_finish_reason():
     text, finish_reason, _ = _run(
         [_content_chunk("done"), _finish_chunk("length"), "data: [DONE]"],

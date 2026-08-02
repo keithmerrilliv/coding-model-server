@@ -397,6 +397,10 @@ def get_completion(history, model, agent_theme, agentic_context=None,
                 full_response = ""
                 chunk_count = 0
                 finish_reason_received = False
+                # The fresh stream re-emits every tool_call delta from index
+                # 0; stale slots would concatenate two copies of the name and
+                # arguments (DEV-344).
+                tool_calls_acc = {}
                 start_time = time.time()
                 first_token_time = None
                 stop_progress = threading.Event()
@@ -437,6 +441,9 @@ def get_completion(history, model, agent_theme, agentic_context=None,
                 full_response = ""
                 chunk_count = 0
                 finish_reason_received = False
+                # As above: the retry replays the stream, so stale tool_call
+                # slots would double-accumulate (DEV-344).
+                tool_calls_acc = {}
             start_time = time.time()
             stop_progress = threading.Event()
             progress_thread = threading.Thread(target=show_progress, daemon=True)
