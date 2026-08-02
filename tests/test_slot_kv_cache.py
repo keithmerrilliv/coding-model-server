@@ -76,8 +76,10 @@ def test_cache_filename_changes_with_runtime_signature(mgr):
 # ── save side ────────────────────────────────────────────────────────────
 
 def test_save_posts_when_context_is_large(mgr):
+    # n_prompt_tokens is what the 2026-06 build actually reports (verified
+    # live against /slots); n_past is the older name, covered below.
     _live_child(mgr)
-    mgr._session = _fake_session([{"n_past": 150_000}])
+    mgr._session = _fake_session([{"n_prompt_tokens": 150_000}])
     mgr._save_slot_state()
     mgr._session.post.assert_called_once()
     url = mgr._session.post.call_args.args[0]
@@ -89,9 +91,16 @@ def test_save_posts_when_context_is_large(mgr):
 def test_save_skipped_below_token_threshold(mgr):
     """Tiny contexts re-prefill faster than a multi-GB file writes."""
     _live_child(mgr)
-    mgr._session = _fake_session([{"n_past": 100}])
+    mgr._session = _fake_session([{"n_prompt_tokens": 100}])
     mgr._save_slot_state()
     mgr._session.post.assert_not_called()
+
+
+def test_save_accepts_legacy_n_past_field(mgr):
+    _live_child(mgr)
+    mgr._session = _fake_session([{"n_past": 150_000}])
+    mgr._save_slot_state()
+    mgr._session.post.assert_called_once()
 
 
 def test_save_skipped_with_no_live_child(mgr):

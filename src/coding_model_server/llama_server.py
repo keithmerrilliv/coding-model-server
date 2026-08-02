@@ -584,11 +584,14 @@ class LlamaServerManager:
             slots = self._session.get(f"{base}/slots", timeout=5).json()
             n_past = 0
             if isinstance(slots, list) and slots:
-                # Field name has drifted across server versions — take what
-                # this build offers, and fall through to 0 (skip) if neither
-                # exists rather than guessing.
+                # Field name has drifted across server versions — our
+                # 2026-06 build reports n_prompt_tokens; older ones used
+                # n_past. Fall through to 0 (skip) if none exist rather
+                # than guessing.
                 slot0 = slots[0]
-                n_past = int(slot0.get('n_past') or slot0.get('n_ctx_used') or 0)
+                n_past = int(slot0.get('n_prompt_tokens')
+                             or slot0.get('n_past')
+                             or slot0.get('n_ctx_used') or 0)
             if n_past < self.SLOT_SAVE_MIN_TOKENS:
                 return
             fname = self._slot_cache_filename(signature)
