@@ -26,7 +26,7 @@ Environment="PYTHONUNBUFFERED=1"
 
 # Bind/port + dashboard root come from .env so operators can change the
 # port without editing this unit. Defaults in serve_dashboard.py:
-#   CODING_MODEL_DASHBOARD_HOST=0.0.0.0
+#   CODING_MODEL_DASHBOARD_HOST=127.0.0.1  (0.0.0.0 is the LAN opt-in, DEV-192)
 #   CODING_MODEL_DASHBOARD_PORT=3001
 #   CODING_MODEL_DASHBOARD_ROOT=<repo>/dashboard/dist
 EnvironmentFile=-/home/keith-merrill/Dev/coding-model-server/.env

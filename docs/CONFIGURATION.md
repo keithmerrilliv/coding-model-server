@@ -210,7 +210,7 @@ an in-memory `FakeJiraClient` and nothing external is touched.
 ### Dashboard (`scripts/serve_dashboard.py`)
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CODING_MODEL_DASHBOARD_HOST` | `0.0.0.0` | Bind address for the static SPA server. |
+| `CODING_MODEL_DASHBOARD_HOST` | `127.0.0.1` | Bind address for the static SPA server. Set `0.0.0.0` to opt in to LAN exposure (DEV-192). |
 | `CODING_MODEL_DASHBOARD_PORT` | `3001` | Port. (Vite's dev server uses 3000.) |
 | `CODING_MODEL_DASHBOARD_ROOT` | `<repo>/dashboard/dist` | Directory served. Must contain a built SPA (`npm run build`). |
 

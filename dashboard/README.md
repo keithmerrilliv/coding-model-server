@@ -54,7 +54,7 @@ server, SPA fallback: unknown paths return `index.html`), managed by the
 
 | Variable | Default |
 |----------|---------|
-| `CODING_MODEL_DASHBOARD_HOST` | `0.0.0.0` |
+| `CODING_MODEL_DASHBOARD_HOST` | `127.0.0.1` (set `0.0.0.0` for LAN access) |
 | `CODING_MODEL_DASHBOARD_PORT` | `3001` |
 | `CODING_MODEL_DASHBOARD_ROOT` | `<repo>/dashboard/dist` |
 
