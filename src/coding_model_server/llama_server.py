@@ -108,6 +108,25 @@ class LlamaServerManager:
     """Manages the llama-server subprocess that serves all agents."""
 
     LLAMA_SERVER_PORT = 8081
+    # Host-RAM pool for parking evicted-slot KV (--cache-ram). llama-server's
+    # default is 8192 MiB — useless for one 195k-token context, let alone
+    # several, on a 188GB box. Bounded (not -1) because the big MoE models'
+    # CPU-resident expert weights already claim >100GB and KV is malloc'd,
+    # not reclaimable page cache (DEV-408).
+    CACHE_RAM_MIB = int(os.getenv('LLAMA_CACHE_RAM_MIB', '32768'))
+    # Slot KV persistence across model swaps (--slot-save-path + the
+    # /slots/{id}?action=save|restore API). A saved 195k-token prefill
+    # restores in seconds instead of ~8 minutes of recompute (DEV-393's
+    # measured worst case).
+    SLOT_SAVE_ENABLED = os.getenv('LLAMA_SLOT_SAVE', '1') == '1'
+    # Below this many cached tokens the file write costs more than the
+    # prefill it would save.
+    SLOT_SAVE_MIN_TOKENS = int(os.getenv('LLAMA_SLOT_SAVE_MIN_TOKENS', '8192'))
+    # LRU cap on the save directory — KV files for big contexts are
+    # tens of GB each.
+    SLOT_SAVE_MAX_TOTAL_GIB = float(os.getenv('LLAMA_SLOT_SAVE_MAX_TOTAL_GIB', '100'))
+    # Save/restore stream tens of GB to/from NVMe; generous but bounded.
+    SLOT_IO_TIMEOUT = 180
     # Idle timeout — only counts when no requests are active. The watchdog
     # also checks _active_requests below and never kills mid-stream.
     IDLE_TIMEOUT = 1800  # 30 minutes
@@ -242,7 +261,13 @@ class LlamaServerManager:
             # and reuses the longest matching prefix. 256 is the minimum
             # match length; larger values miss shorter common prefixes.
             '--cache-reuse', '256',
+            '--cache-ram', str(self.CACHE_RAM_MIB),
         ]
+
+        if self.SLOT_SAVE_ENABLED:
+            save_dir = self._slot_save_dir
+            save_dir.mkdir(parents=True, exist_ok=True)
+            cmd.extend(['--slot-save-path', str(save_dir)])
 
         # MoE models: keep expert weights off the GPU. `n_cpu_moe` (preferred)
         # keeps only the first N layers' experts on CPU and runs the rest on the
@@ -417,8 +442,10 @@ class LlamaServerManager:
             time.sleep(self.HEALTH_POLL_INTERVAL)
 
         # Timeout — kill the process. _shutdown_unlocked also runs under
-        # self._swap_lock (which we hold) and clears state to idle.
-        self._shutdown_unlocked()
+        # self._swap_lock (which we hold) and clears state to idle. No slot
+        # save: the child never became healthy, so there is no KV worth
+        # parking and the HTTP call would hang against a wedged server.
+        self._shutdown_unlocked(save_slot=False)
         raise TimeoutError(f"llama-server did not become healthy within {self.HEALTH_TIMEOUT}s")
 
     def _reap_orphan_llama_server(self) -> None:
@@ -522,7 +549,107 @@ class LlamaServerManager:
         )
         return expects
 
-    def _shutdown_unlocked(self):
+    @property
+    def _slot_save_dir(self) -> Path:
+        # var/ lives at the repo root; this file is at src/coding_model_server/.
+        return Path(__file__).resolve().parents[2] / 'var' / 'kv_cache'
+
+    @staticmethod
+    def _slot_cache_filename(signature: tuple) -> str:
+        """Save-file name keyed by the FULL runtime signature (DEV-408).
+
+        llama-server hard-fails a restore whose model/quant/KV-type/flags
+        don't match the saved state, so the key must change whenever any of
+        those change — which is exactly what _runtime_signature captures.
+        """
+        return hashlib.sha1(repr(signature).encode()).hexdigest()[:16] + '.bin'
+
+    def _save_slot_state(self) -> None:
+        """Park the live slot's KV on disk before the child goes away.
+
+        Best-effort by design: a failed save costs one re-prefill, while an
+        error escaping here would break the swap/shutdown path — so nothing
+        propagates. Skipped when the cached context is too small to be worth
+        the file write.
+        """
+        if not self.SLOT_SAVE_ENABLED:
+            return
+        with self.lock:
+            signature = self.current_runtime_signature
+            proc = self.process
+        if signature is None or proc is None or proc.poll() is not None:
+            return
+        base = f"http://127.0.0.1:{self.LLAMA_SERVER_PORT}"
+        try:
+            slots = self._session.get(f"{base}/slots", timeout=5).json()
+            n_past = 0
+            if isinstance(slots, list) and slots:
+                # Field name has drifted across server versions — take what
+                # this build offers, and fall through to 0 (skip) if neither
+                # exists rather than guessing.
+                slot0 = slots[0]
+                n_past = int(slot0.get('n_past') or slot0.get('n_ctx_used') or 0)
+            if n_past < self.SLOT_SAVE_MIN_TOKENS:
+                return
+            fname = self._slot_cache_filename(signature)
+            resp = self._session.post(
+                f"{base}/slots/0?action=save",
+                json={"filename": fname}, timeout=self.SLOT_IO_TIMEOUT,
+            )
+            if resp.status_code == 200:
+                logger.info("slot save: parked %d tokens of KV as %s",
+                            n_past, fname)
+                self._trim_slot_cache_dir()
+            else:
+                logger.warning("slot save failed: HTTP %d %s",
+                               resp.status_code, resp.text[:200])
+        except Exception as e:
+            logger.warning("slot save skipped: %s", e)
+
+    def _restore_slot_state(self, signature: tuple) -> None:
+        """Reload parked KV for this exact runtime signature, if any.
+
+        A rejected or corrupt file is deleted so one bad save can't fail
+        every future start of that model. Best-effort like the save side.
+        """
+        if not self.SLOT_SAVE_ENABLED:
+            return
+        fname = self._slot_cache_filename(signature)
+        path = self._slot_save_dir / fname
+        if not path.is_file():
+            return
+        base = f"http://127.0.0.1:{self.LLAMA_SERVER_PORT}"
+        try:
+            resp = self._session.post(
+                f"{base}/slots/0?action=restore",
+                json={"filename": fname}, timeout=self.SLOT_IO_TIMEOUT,
+            )
+            if resp.status_code == 200:
+                logger.info("slot restore: reloaded KV from %s", fname)
+            else:
+                logger.warning(
+                    "slot restore rejected (HTTP %d) — discarding %s",
+                    resp.status_code, fname)
+                path.unlink(missing_ok=True)
+        except Exception as e:
+            logger.warning("slot restore skipped: %s", e)
+
+    def _trim_slot_cache_dir(self) -> None:
+        """Drop oldest save files until the directory fits the size cap."""
+        try:
+            files = sorted(self._slot_save_dir.glob('*.bin'),
+                           key=lambda p: p.stat().st_mtime)
+            budget = self.SLOT_SAVE_MAX_TOTAL_GIB * (1024 ** 3)
+            total = sum(p.stat().st_size for p in files)
+            while files and total > budget:
+                victim = files.pop(0)
+                total -= victim.stat().st_size
+                victim.unlink(missing_ok=True)
+                logger.info("slot cache trim: removed %s", victim.name)
+        except OSError as e:
+            logger.warning("slot cache trim failed: %s", e)
+
+    def _shutdown_unlocked(self, save_slot: bool = True):
         """Internal: stop the subprocess. Caller must hold self._swap_lock.
 
         Releases self.lock during the SIGTERM/wait so dashboard snapshots
@@ -530,7 +657,13 @@ class LlamaServerManager:
         operations only touch the local ``proc`` reference; concurrent
         readers see _state == STOPPING and self.process == None as soon as
         we transition.
+
+        ``save_slot`` parks the live slot's KV to disk first (DEV-408) —
+        passed False only on the unhealthy-child path, where the HTTP save
+        would just hang against a wedged server.
         """
+        if save_slot:
+            self._save_slot_state()
         # Capture the process handle and clear "current" state under a
         # short lock acquisition. After this block, readers see "stopping"
         # state with no process attached; the actual SIGTERM/wait runs
@@ -932,6 +1065,10 @@ class LlamaServerManager:
 
             try:
                 self.start(model_config)
+                # If a prior run of this exact runtime parked its KV, reload
+                # it now (DEV-408) — the next request with a matching prefix
+                # then skips its prefill entirely.
+                self._restore_slot_state(signature)
                 if agent_id is not None:
                     with self.lock:
                         self.current_agent_id = agent_id
