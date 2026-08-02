@@ -1,5 +1,6 @@
 """DEV-156/157/158 — VRAM-record self-correction, orphan handling, and
 prompt upstream cancellation."""
+import logging
 import subprocess
 from unittest import mock
 
@@ -46,13 +47,25 @@ class TestVramRecord:
             "a record that passes again is trusted again"
         )
 
-    def test_impossible_delta_is_not_recorded(self, mgr):
-        # The recording arm lives in ensure_running; drive the same logic
-        # via its guard: a delta exceeding the card's total VRAM is
-        # cross-process interference, not a footprint.
-        with mock.patch.object(mgr, "_gpu_total_mib", return_value=16_000):
-            total = mgr._gpu_total_mib()
-        assert total == 16_000
+    def test_impossible_delta_is_not_recorded(self, mgr, caplog):
+        # A measured delta exceeding the card's total VRAM cannot be the
+        # model's footprint — another process moved memory between the two
+        # readings. Recording it would guarantee eternal refusals (the
+        # DEV-156 brick), so the recording arm in ensure_running must drop
+        # it. The incoherent free readings are the point: that is what
+        # cross-process interference looks like.
+        mgr._wait_for_vram_release = mock.Mock()
+        mgr._gpu_free_mib = mock.Mock(side_effect=[40_000, 10_000])
+        mgr.start = mock.Mock()
+        with mock.patch.object(mgr, "_gpu_total_mib", return_value=16_000), \
+                caplog.at_level(logging.WARNING):
+            mgr.ensure_running({"path": "/models/x.gguf", "n_ctx": 8192},
+                               agent_id="impl")
+        assert "impl" not in mgr._measured_vram_delta_mib, (
+            "an impossible delta must be discarded, not recorded as a "
+            "footprint that no future load can satisfy"
+        )
+        assert "cross-process interference" in caplog.text
 
     def test_gpu_total_is_cached(self, mgr):
         fake = mock.Mock(returncode=0, stdout="16384\n")
