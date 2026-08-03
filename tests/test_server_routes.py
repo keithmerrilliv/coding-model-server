@@ -42,8 +42,26 @@ EXPECTED_PATHS = {
 }
 
 
+def _registered_paths(routes):
+    """Route paths, flattened across FastAPI versions.
+
+    Since fastapi 0.13x include_router() no longer copies the included routes
+    into app.routes — they stay inside an _IncludedRouter wrapper (no .path)
+    whose original_router holds them. None of our routers use a prefix, so the
+    nested paths are already absolute.
+    """
+    out = set()
+    for r in routes:
+        if hasattr(r, "path"):
+            out.add(r.path)
+        inner = getattr(r, "original_router", None)
+        if inner is not None:
+            out |= _registered_paths(inner.routes)
+    return out
+
+
 def test_all_expected_routes_registered():
-    registered = {r.path for r in app.routes}
+    registered = _registered_paths(app.routes)
     missing = EXPECTED_PATHS - registered
     assert not missing, f"routes missing after split: {missing}"
 
