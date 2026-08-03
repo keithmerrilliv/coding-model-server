@@ -1,0 +1,49 @@
+#!/bin/sh
+# DEV-419 (phase 0 of DEV-400): confine the coding-auto pipeline principal
+# to a create-only attempt namespace on this repo.
+#
+# Runs as the authenticated UNIX user, so the principal check is `id -un`.
+# Humans (anyone but coding-auto) are deliberately unconstrained — this hook
+# exists to bound the autonomous pipeline, not to police the operator.
+#
+# For coding-auto, every pushed ref must:
+#   - match  refs/auto/spec/<spec-id>/attempt-<n>   (spec-id: [A-Za-z0-9_-]+)
+#   - be a create (old sha all zeros): no updates, no deletes, hence no
+#     non-fast-forward by construction
+# Anything else — refs/heads/*, tags, HEAD, notes — is rejected outright.
+#
+# Source of truth lives in the coding-model-server repo (zooshly/ dir);
+# installed here by zooshly/setup_coding_auto.sh. Keep the two in sync.
+
+principal="$(id -un)"
+[ "$principal" = "coding-auto" ] || exit 0
+
+zero="0000000000000000000000000000000000000000"
+status=0
+
+while read -r old new ref; do
+    case "$ref" in
+        refs/auto/spec/*/attempt-*)
+            # Shape check beyond the glob: one path segment for spec id,
+            # numeric attempt, nothing trailing.
+            if ! printf '%s\n' "$ref" | grep -qE '^refs/auto/spec/[A-Za-z0-9_-]+/attempt-[0-9]+$'; then
+                echo "coding-auto: REJECTED $ref — attempt refs must match refs/auto/spec/<id>/attempt-<n> (DEV-419)" >&2
+                status=1
+                continue
+            fi
+            if [ "$new" = "$zero" ]; then
+                echo "coding-auto: REJECTED delete of $ref — attempt refs are create-only, deletes are admin-side (DEV-419)" >&2
+                status=1
+            elif [ "$old" != "$zero" ]; then
+                echo "coding-auto: REJECTED update of $ref — attempt refs are create-only; push a new attempt-<n+1> instead (DEV-419)" >&2
+                status=1
+            fi
+            ;;
+        *)
+            echo "coding-auto: REJECTED $ref — this principal may only create refs/auto/spec/<id>/attempt-<n> (DEV-419)" >&2
+            status=1
+            ;;
+    esac
+done
+
+exit $status

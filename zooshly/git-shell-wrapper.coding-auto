@@ -1,0 +1,22 @@
+#!/bin/sh
+# DEV-419: forced command for the coding-auto SSH principal.
+# Installed to /home/coding-auto/git-shell-wrapper by zooshly/setup_coding_auto.sh
+# and referenced from authorized_keys (command="..."), so every login runs this
+# regardless of what the client asked for.
+#
+# Confines the principal to git-shell AND to the phase-0 pilot repo: git-shell
+# alone would stop interactive logins and non-git commands, but not a
+# `git-upload-pack /srv/private/git/SomethingElse.git` — repo scoping is this
+# wrapper's job. Add repos here (and their pre-receive hooks) as later DEV-400
+# phases widen the pilot.
+
+case "$SSH_ORIGINAL_COMMAND" in
+    "git-receive-pack '/srv/private/git/JSONParser.git'" | \
+    "git-upload-pack '/srv/private/git/JSONParser.git'")
+        exec git-shell -c "$SSH_ORIGINAL_COMMAND"
+        ;;
+    *)
+        echo "coding-auto: only git push/fetch of JSONParser.git is permitted (DEV-419)" >&2
+        exit 1
+        ;;
+esac
