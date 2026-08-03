@@ -267,6 +267,37 @@ def run_tests_endpoint(req: RunTestsRequest) -> RunTestsResponse:
     )
 
 
+def unlock_signing_keychain() -> bool:
+    """Unlock the signing keychain so headless codesign can reach the key.
+
+    Keychains lock on every reboot. Without this, the first signed build
+    after a restart fails at CodeSign with errSecInternalComponent — an error
+    that names a missing certificate rather than the locked keychain
+    (DEV-415/DEV-416). Failure is logged but not fatal: unsigned runs
+    (CODE_SIGN_IDENTITY=-) don't need the keychain at all.
+    """
+    if not Config.SIGNING_KEYCHAIN:
+        return True
+    if not Config.SIGNING_KEYCHAIN_PASSWORD:
+        logger.warning(
+            "CODING_MODEL_RUNNER_SIGNING_KEYCHAIN is set but "
+            "…_SIGNING_KEYCHAIN_PASSWORD is not — the keychain stays locked "
+            "after a reboot and signed builds will fail with "
+            "errSecInternalComponent until it is unlocked manually")
+        return False
+    proc = subprocess.run(
+        ["security", "unlock-keychain",
+         "-p", Config.SIGNING_KEYCHAIN_PASSWORD, Config.SIGNING_KEYCHAIN],
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        logger.error("unlock of signing keychain %s failed: %s",
+                     Config.SIGNING_KEYCHAIN, proc.stderr.strip())
+        return False
+    logger.info("signing keychain unlocked: %s", Config.SIGNING_KEYCHAIN)
+    return True
+
+
 def main() -> None:
     import uvicorn
 
@@ -280,6 +311,7 @@ def main() -> None:
 
     Config.WORKTREE_ROOT.mkdir(parents=True, exist_ok=True)
     Config.DERIVED_DATA.mkdir(parents=True, exist_ok=True)
+    unlock_signing_keychain()
 
     logger.info(
         "mac_runner listening on %s:%d — %d registered repos",

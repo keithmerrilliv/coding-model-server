@@ -398,6 +398,63 @@ def test_sandbox_exemption_is_per_framework_not_global(client, monkeypatch):
         "the incompatible framework forfeits containment for no reason")
 
 
+# ── DEV-415 / DEV-416: unlock the signing keychain at startup ────────────────
+#
+# Keychains lock on every reboot. The runner is headless, so codesign's GUI
+# unlock prompt can never be answered — the first signed build after a restart
+# fails with errSecInternalComponent, and the xcodebuild error names a missing
+# certificate rather than the locked keychain. main() therefore unlocks the
+# keychain itself, using the password from the .env.
+
+def test_startup_unlocks_the_signing_keychain(monkeypatch):
+    monkeypatch.setattr(Config, "SIGNING_KEYCHAIN", "/kc/runner.keychain-db")
+    monkeypatch.setattr(Config, "SIGNING_KEYCHAIN_PASSWORD", "kc-pass")
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    _fake_subprocess(monkeypatch, fake_run)
+    assert server.unlock_signing_keychain() is True
+    assert calls == [["security", "unlock-keychain",
+                      "-p", "kc-pass", "/kc/runner.keychain-db"]]
+
+
+def test_unlock_is_a_noop_without_a_configured_keychain(monkeypatch):
+    monkeypatch.setattr(Config, "SIGNING_KEYCHAIN", "")
+    monkeypatch.setattr(Config, "SIGNING_KEYCHAIN_PASSWORD", "")
+    _fake_subprocess(monkeypatch, lambda cmd, **kw: pytest.fail(
+        "no keychain configured — nothing should be executed"))
+    assert server.unlock_signing_keychain() is True
+
+
+def test_missing_keychain_password_warns_and_reports_failure(
+        monkeypatch, caplog):
+    """Keychain without password is the pre-DEV-416 trap: it works until the
+    next reboot, then fails with an unrelated-looking signing error. Surface
+    it at startup instead."""
+    monkeypatch.setattr(Config, "SIGNING_KEYCHAIN", "/kc/runner.keychain-db")
+    monkeypatch.setattr(Config, "SIGNING_KEYCHAIN_PASSWORD", "")
+    _fake_subprocess(monkeypatch, lambda cmd, **kw: pytest.fail(
+        "no password — security must not be invoked"))
+    with caplog.at_level("WARNING", logger="mac_runner.server"):
+        assert server.unlock_signing_keychain() is False
+    assert "errSecInternalComponent" in caplog.text
+
+
+def test_failed_unlock_is_loud_but_not_fatal(monkeypatch, caplog):
+    monkeypatch.setattr(Config, "SIGNING_KEYCHAIN", "/kc/runner.keychain-db")
+    monkeypatch.setattr(Config, "SIGNING_KEYCHAIN_PASSWORD", "wrong")
+    _fake_subprocess(monkeypatch, lambda cmd, **kw: subprocess.CompletedProcess(
+        cmd, 51, stdout="", stderr="The user name or passphrase is incorrect."))
+    with caplog.at_level("ERROR", logger="mac_runner.server"):
+        assert server.unlock_signing_keychain() is False
+    assert "passphrase is incorrect" in caplog.text, (
+        "security's stderr is the only clue the recorded password is wrong — "
+        "swallowing it recreates the DEV-415 debugging séance")
+
+
 def test_resolution_failure_is_surfaced_not_swallowed(client, monkeypatch):
     """A failed resolve is non-fatal — the build may run from a warm cache —
     but it must appear in the output, or a build failure caused by it looks
