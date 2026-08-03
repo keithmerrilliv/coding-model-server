@@ -36,6 +36,16 @@
 
   <key>RunAtLoad</key>
   <true/>
+
+  <!-- Without this, launchd gives the agent background QoS and macOS throttles
+       it AND everything it spawns. The VM that carries xcodebuild_test
+       (DEV-422) inherits that throttling: boot-to-ssh measured 189s under
+       launchd versus 19s from an interactive shell, which overran the
+       runner's 300s boot timeout and failed the first deploy outright.
+       Interactive keeps the runner and its guests at foreground priority. -->
+  <key>ProcessType</key>
+  <string>Interactive</string>
+
   <!-- SuccessfulExit=false + ThrottleInterval: a bare KeepAlive=true made a
        fast-exiting runner (e.g. sys.exit(1) on an empty
        CODING_MODEL_RUNNER_API_KEY) a quiet crash-loop at launchd's ~10s

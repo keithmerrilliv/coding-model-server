@@ -26,6 +26,7 @@ import logging
 import shlex
 import shutil
 import subprocess
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -47,6 +48,18 @@ _SSH_OPTS = [
     "-o", "UserKnownHostsFile=/dev/null",
     "-o", "LogLevel=ERROR",
     "-o", "ConnectTimeout=5",
+    # Password auth ONLY, and none of the host's ssh identity: with an agent
+    # loaded, ssh offers every key first and the guest cuts the connection at
+    # MaxAuthTries — "Too many authentication failures" — before the password
+    # is ever tried. Killed a real deploy run the moment the runner had an
+    # agent in reach. -F /dev/null also keeps ~/.ssh/config's per-host rules
+    # out of a connection to a throwaway NAT-local guest.
+    "-F", "/dev/null",
+    "-o", "IdentitiesOnly=yes",
+    "-o", "IdentityAgent=none",
+    "-o", "PubkeyAuthentication=no",
+    "-o", "PreferredAuthentications=password",
+    "-o", "NumberOfPasswordPrompts=1",
 ]
 
 # Bounds for the non-test stages. The test step itself runs under the
@@ -92,13 +105,26 @@ def _guest_sh(cmd: list[str], cwd: str) -> str:
     return f"cd {shlex.quote(cwd)} && {shlex.join(cmd)}"
 
 
-def _wait_for_ssh(name: str, boot_proc: "subprocess.Popen") -> str:
+def _boot_log(path: Path) -> str:
+    """Tail of `tart run`'s own output, for failure messages."""
+    try:
+        text = path.read_text().strip()
+    except OSError:
+        return ""
+    if not text:
+        return ""
+    return "\n[tart run output]\n" + "\n".join(text.splitlines()[-20:])
+
+
+def _wait_for_ssh(name: str, boot_proc: "subprocess.Popen",
+                  boot_log: Path) -> str:
     deadline = time.monotonic() + Config.VM_BOOT_TIMEOUT
     ip = ""
     while time.monotonic() < deadline:
         if boot_proc.poll() is not None:
             raise VMError(
-                f"tart run exited {boot_proc.returncode} before the guest came up")
+                f"tart run exited {boot_proc.returncode} before the guest "
+                f"came up{_boot_log(boot_log)}")
         if not ip:
             probe = subprocess.run(["tart", "ip", name],
                                    capture_output=True, text=True)
@@ -118,7 +144,8 @@ def _wait_for_ssh(name: str, boot_proc: "subprocess.Popen") -> str:
         time.sleep(2)
     raise VMError(
         f"guest not reachable over ssh within {Config.VM_BOOT_TIMEOUT}s "
-        "(CODING_MODEL_RUNNER_VM_BOOT_TIMEOUT)")
+        f"(CODING_MODEL_RUNNER_VM_BOOT_TIMEOUT); last ip={ip or '<none>'}"
+        f"{_boot_log(boot_log)}")
 
 
 def _destroy(name: str, boot_proc: "subprocess.Popen | None") -> None:
@@ -148,6 +175,7 @@ def run_tests_in_vm(worktree: Path, resolve_cmd: "list[str] | None",
     """
     name = f"cmr-{uuid.uuid4().hex[:12]}"
     boot_proc: "subprocess.Popen | None" = None
+    boot_log: "Path | None" = None
     deadline = time.monotonic() + timeout
     resolve_output = ""
     try:
@@ -157,11 +185,17 @@ def run_tests_in_vm(worktree: Path, resolve_cmd: "list[str] | None",
         if clone.returncode != 0:
             return None, (f"[vm] tart clone '{Config.VM_IMAGE}' failed: "
                           f"{clone.stderr.strip()}")
-        boot_proc = subprocess.Popen(
-            ["tart", "run", name, "--no-graphics"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # tart run's own output is the ONLY explanation when a guest fails to
+        # come up; discarding it leaves a 300 s timeout with no cause (seen
+        # on the first launchd deploy). Kept on disk so the failure message
+        # can quote it.
+        boot_log = Path(tempfile.gettempdir()) / f"{name}-tart-run.log"
+        with open(boot_log, "w") as boot_out:
+            boot_proc = subprocess.Popen(
+                ["tart", "run", name, "--no-graphics"],
+                stdout=boot_out, stderr=subprocess.STDOUT)
         try:
-            ip = _wait_for_ssh(name, boot_proc)
+            ip = _wait_for_ssh(name, boot_proc, boot_log)
         except VMError as e:
             return None, f"[vm] {e}"
         logger.info("vm %s up at %s", name, ip)
@@ -216,3 +250,5 @@ def run_tests_in_vm(worktree: Path, resolve_cmd: "list[str] | None",
                                (tr.stderr or ""))
     finally:
         _destroy(name, boot_proc)
+        if boot_log is not None:
+            boot_log.unlink(missing_ok=True)
