@@ -153,6 +153,14 @@ def test_auto_approvable(gated, command):
     "ls $(rm -rf /tmp/x)",
     # Not a plain binary name.
     "VAR=1 pytest",
+    # DEV-347: a path to an executable is not the allow-listed binary, however
+    # its basename reads. Any file on disk named like `ls`/`cat`/`pytest`
+    # auto-approved by basename before this.
+    "./pytest tests/ -q",
+    "/tmp/evil/cat README.md",
+    "~/Downloads/payload/ls",
+    "sub/dir/rg pattern",
+    "/bin/ls",
     # DEV-111: `env` execs its argument — the base-binary check saw only `env`
     # and auto-approved arbitrary code in yolo mode.
     "env python3 evil.py",
