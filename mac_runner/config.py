@@ -70,6 +70,14 @@ class Config:
     #   security list-keychains -d user -s build.keychain login.keychain-db
     SIGNING_KEYCHAIN = os.getenv("CODING_MODEL_RUNNER_SIGNING_KEYCHAIN", "")
 
+    # Password for SIGNING_KEYCHAIN so the runner can unlock it at startup.
+    # Keychains lock on every reboot, and a headless runner has no GUI to
+    # answer codesign's prompt — signing then fails with
+    # errSecInternalComponent and an error naming a missing certificate
+    # instead of the locked keychain (DEV-415/DEV-416).
+    SIGNING_KEYCHAIN_PASSWORD = os.getenv(
+        "CODING_MODEL_RUNNER_SIGNING_KEYCHAIN_PASSWORD", "")
+
     @classmethod
     def repos(cls) -> dict[str, Path]:
         """Load symbolic-name → absolute-path map from repos.yml."""
