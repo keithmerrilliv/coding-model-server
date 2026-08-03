@@ -8,9 +8,18 @@ suite runs regardless of install state.
 import os
 import sys
 
-_SRC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_SRC = os.path.join(_ROOT, "src")
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
+
+# mac_runner lives at the repo root, outside src/, and is deliberately not in
+# the installed package set (it deploys by git checkout on the Mac, not by
+# pip). CI installs the package and runs pytest from the repo root, where
+# nothing puts the root on sys.path — so without this, every mac_runner test
+# module dies at collection with ModuleNotFoundError.
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
 
 # The suite drives the app through starlette's TestClient — a loopback client —
 # with no ADMIN_API_KEY configured. Since DEV-127 that combination is an
