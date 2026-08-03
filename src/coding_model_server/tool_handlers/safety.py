@@ -297,10 +297,15 @@ def _is_auto_approvable_command(command):
     if not argv:
         return False, "empty command"
 
-    base = os.path.basename(argv[0])
-    if base != argv[0] and not argv[0].startswith(('./', '/', '~')):
-        # e.g. "VAR=1 pytest" — argv[0] isn't a plain binary name. Prompt.
-        return False, f"'{argv[0]}' is not a plain command name"
+    # Only a bare name resolved via PATH may auto-approve. A path form —
+    # './pytest', '/tmp/evil/cat', '~/Downloads/x/ls' — names an arbitrary
+    # executable that merely shares a basename with an allow-listed binary, so
+    # matching it by basename hands silent execution to any file on disk named
+    # like `ls` (DEV-347). "VAR=1 pytest" also lands here via the allowlist
+    # miss below: argv[0] is "VAR=1", which is not a listed command.
+    base = argv[0]
+    if base != os.path.basename(base) or base.startswith('~'):
+        return False, f"'{argv[0]}' is not a bare command name resolved via PATH"
 
     allowlist = _auto_approve_allowlist()
     if base not in allowlist:
