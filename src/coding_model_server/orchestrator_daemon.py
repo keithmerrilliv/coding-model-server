@@ -39,7 +39,7 @@ import signal
 import threading
 import sys
 import time
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import requests
