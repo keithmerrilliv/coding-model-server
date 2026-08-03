@@ -810,10 +810,13 @@ Update these after each retrieval step. They help you stay organized and efficie
             _MOE_30B_FAST,
             executor=True
         ),
-        # DEV-414 eval candidate for the fast tier — dense 24B, VRAM-resident.
-        # The trade under eval: quality-per-second vs fast_implementer, at the
-        # cost of 64K -> 16K context. Not wired into any pipeline role until
-        # the eval decides.
+        # DEV-414 outcome (2026-08-03, blind counterbalanced, judge=claude-sdk,
+        # artifacts var/eval_dev414_*): beat fast_implementer 4-3-1 on quality
+        # and finished the 8-task set 16% faster on wall clock via concision
+        # (4893 vs 5831 tok) despite 7% slower decode (53.3 vs 57.3 tok/s).
+        # Kept registered as the quality-edge option for short-context work;
+        # NOT repointing the pipeline's "low" tier — that costs 64K -> 14K ctx,
+        # unsafe without prompt-size telemetry for low-tier executor runs.
         'devstral_implementer': _create_agent_config(
             'Implementer — Devstral Small 2 24B Q4_K_M (dense, 14K ctx Q8_0, ngl=41 VRAM-resident, DEV-414 eval)',
             _IMPLEMENTER_SYSTEM_PROMPT,
