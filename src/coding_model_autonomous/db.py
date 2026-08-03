@@ -118,6 +118,8 @@ class Database:
         self.db_path = Path(db_path)
         self.workspace_root = Path(workspace_root)
         self._tls = threading.local()
+        self._all_conns: set[sqlite3.Connection] = set()
+        self._conns_lock = threading.Lock()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.workspace_root.mkdir(parents=True, exist_ok=True)
         self._bootstrap_schema()
@@ -142,6 +144,8 @@ class Database:
             # returns SQLITE_BUSY_SNAPSHOT, which the busy handler does NOT retry.
             conn.execute("PRAGMA busy_timeout = 5000")
             self._tls.conn = conn
+            with self._conns_lock:
+                self._all_conns.add(conn)
         return conn
 
     @contextmanager
@@ -166,10 +170,18 @@ class Database:
             conn.execute("COMMIT")
 
     def close_all(self) -> None:
-        conn = getattr(self._tls, "conn", None)
-        if conn is not None:
+        """Close every connection this Database created, on any thread.
+
+        Shutdown-only: threads still holding a closed connection get
+        sqlite3.ProgrammingError on next use rather than silently keeping
+        the WAL busy. Cross-thread close is safe because every connection
+        is opened with check_same_thread=False.
+        """
+        with self._conns_lock:
+            conns, self._all_conns = self._all_conns, set()
+        for conn in conns:
             conn.close()
-            self._tls.conn = None
+        self._tls.conn = None
 
     def _bootstrap_schema(self) -> None:
         sql = _SCHEMA_PATH.read_text()

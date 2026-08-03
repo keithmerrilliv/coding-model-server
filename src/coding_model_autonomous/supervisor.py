@@ -383,8 +383,7 @@ def _parse_decision(data: dict) -> SupervisorDecision:
         target_role = None
     else:
         target_role = None
-        if action != "retry":
-            feedback = feedback if feedback and feedback.strip() else None
+        feedback = feedback if feedback and feedback.strip() else None
 
     return SupervisorDecision(
         action=action,

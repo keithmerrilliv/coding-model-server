@@ -27,6 +27,18 @@ from coding_model_client.orchestrator import (
 from coding_model_client.agentic.context import AgenticContext
 
 
+@pytest.fixture(autouse=True)
+def _restore_tool_functions():
+    # set_tool_functions swaps module globals in orchestrator with no teardown;
+    # without this, the last-installed stubs leak into every later-collected
+    # module and pass/fail depends on execution order (DEV-384).
+    prev = (orchestrator._process_remote_commands,
+            orchestrator._extract_fallback_commands,
+            orchestrator._execute_remote_command)
+    yield
+    orchestrator.set_tool_functions(*prev)
+
+
 @pytest.fixture
 def turn(monkeypatch):
     """A TurnState wired to a scripted get_completion.

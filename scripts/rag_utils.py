@@ -24,7 +24,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import chromadb
 
-PERSIST_DIR = "var/memory_db"
+# Env-driven with the server's default, like monitor_resources.py (DEV-173/
+# DEV-379): a cwd-relative literal made `count` report 0 against a silently
+# created empty DB whenever CODING_MODEL_MEMORY_DB relocated the real one or
+# the script ran outside the repo root.
+PERSIST_DIR = os.getenv(
+    "CODING_MODEL_MEMORY_DB",
+    str(Path(__file__).resolve().parent.parent / "var" / "memory_db"))
 COLLECTION_NAME = "qwen_agent_memory"
 
 

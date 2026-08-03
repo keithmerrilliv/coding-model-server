@@ -15,12 +15,19 @@ Usage:
   python3 purge_bulk_code.py --vacuum    # Execute + reclaim disk
 """
 import argparse
+import os
 import sqlite3
 
 import chromadb
 
-DB_PATH = "var/memory_db"
-SQLITE_PATH = f"{DB_PATH}/chroma.sqlite3"
+# Env-driven with the server's default, like monitor_resources.py (DEV-173/
+# DEV-379): a cwd-relative literal ran the purge against the wrong — or a
+# silently created empty — DB whenever CODING_MODEL_MEMORY_DB relocated the
+# real one or the script ran outside the repo root.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DB_PATH = os.getenv(
+    "CODING_MODEL_MEMORY_DB", os.path.join(_REPO_ROOT, "var", "memory_db"))
+SQLITE_PATH = os.path.join(DB_PATH, "chroma.sqlite3")
 COLLECTION = "qwen_agent_memory"
 BATCH_SIZE = 500
 

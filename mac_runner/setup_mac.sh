@@ -80,6 +80,10 @@ scp -q -i "${KEY}" "${TARGET}:~/mac-runner-key.env" "${CFG}/.env.new" 2>/dev/nul
   # The restricted tunnel key cannot run scp (no shell). Fall back to the admin key.
   scp -q "${TARGET}:~/mac-runner-key.env" "${CFG}/.env.new"
 }
+# If the fetched file lacks a trailing newline, appending would glue HOST onto
+# the API key line, corrupting the key — the silent auth mismatch DEV-83 warns
+# about, introduced by the very script that guards against it.
+[ -n "$(tail -c1 "${CFG}/.env.new")" ] && echo >> "${CFG}/.env.new"
 printf 'CODING_MODEL_RUNNER_HOST=127.0.0.1\nCODING_MODEL_RUNNER_PORT=5050\n' >> "${CFG}/.env.new"
 mv "${CFG}/.env.new" "${CFG}/.env"
 chmod 600 "${CFG}/.env"
