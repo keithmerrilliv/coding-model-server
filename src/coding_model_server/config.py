@@ -353,6 +353,21 @@ Update these after each retrieval step. They help you stay organized and efficie
         cpu_moe=True, n_cpu_moe=26, n_ubatch=3584,
     )
 
+    # DEVSTRAL: Devstral Small 2 24B Q4_K_M — DEV-414 fast-tier candidate.
+    # Dense 24B (mistral3, 40 blocks), so unlike every MoE above it fits
+    # almost entirely in the RTX 5080's VRAM: 13.7 GB weights + Q8_0 KV.
+    # n_ctx is the tight dimension — 8 KV-heads x 128 x 40 blocks ~= 85 KB/token
+    # at Q8_0. 16K ctx measured 358 MiB free (under the vram guard's 500 MiB
+    # cushion); 14K keeps the margin above it.
+    # --jinja: mistral3 needs its embedded Mistral template, not chatml.
+    # No logit_bias: the Qwen tool-call token ids don't exist in this vocab.
+    _DENSE_24B_DEVSTRAL = _create_model_config(
+        'MODEL_PATH_24B_DEVSTRAL',
+        f'{_MODELS_ROOT}/unsloth/Devstral-Small-2-24B-Instruct-2512-GGUF/Devstral-Small-2-24B-Instruct-2512-Q4_K_M.gguf',
+        41, 14336, 2048,
+        server_extra_args=['--jinja'],
+    )
+
     # NEXT: Qwen3-Coder-Next-Q8_0 (80B MoE with 3B active params)
     # Very smart but runs mostly on system RAM (slow). Native 256k context enabled.
     # ngl=48 (--cpu-moe): 8,304 MiB free. All 48 attention layers on GPU.
@@ -793,6 +808,16 @@ Update these after each retrieval step. They help you stay organized and efficie
             'Implementer — Coder-30B Q4_K_M (3B/30B MoE, 64K ctx Q8_0, ngl=49 n_cpu_moe=26, fast)',
             _IMPLEMENTER_SYSTEM_PROMPT,
             _MOE_30B_FAST,
+            executor=True
+        ),
+        # DEV-414 eval candidate for the fast tier — dense 24B, VRAM-resident.
+        # The trade under eval: quality-per-second vs fast_implementer, at the
+        # cost of 64K -> 16K context. Not wired into any pipeline role until
+        # the eval decides.
+        'devstral_implementer': _create_agent_config(
+            'Implementer — Devstral Small 2 24B Q4_K_M (dense, 14K ctx Q8_0, ngl=41 VRAM-resident, DEV-414 eval)',
+            _IMPLEMENTER_SYSTEM_PROMPT,
+            _DENSE_24B_DEVSTRAL,
             executor=True
         ),
         # NB: `architect` (the interactive role) is no longer a standalone entry —
