@@ -7,7 +7,6 @@ the live slot's KV around swaps: save on graceful teardown, restore after a
 start of the same runtime signature. These tests pin the choreography with
 the HTTP session and child process faked — no real llama-server involved.
 """
-import types
 from unittest import mock
 
 import pytest

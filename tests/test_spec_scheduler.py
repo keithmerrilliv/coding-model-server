@@ -63,7 +63,7 @@ def _wait_for(predicate, timeout=5.0):
 def test_slow_spec_does_not_block_other_specs(db, scheduler, monkeypatch):
     """The DEV-393 scenario: while one spec sits in a long execution pass,
     a tick must still process the other specs' passes."""
-    slow = _spec(db, SpecStatus.EXECUTING)
+    _spec(db, SpecStatus.EXECUTING)  # the slow one, parked in the gate below
     fast = _spec(db, SpecStatus.PLAN_REVIEW)
 
     gate = _Gate()
