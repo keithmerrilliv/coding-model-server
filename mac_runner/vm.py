@@ -48,6 +48,18 @@ _SSH_OPTS = [
     "-o", "UserKnownHostsFile=/dev/null",
     "-o", "LogLevel=ERROR",
     "-o", "ConnectTimeout=5",
+    # Password auth ONLY, and none of the host's ssh identity: with an agent
+    # loaded, ssh offers every key first and the guest cuts the connection at
+    # MaxAuthTries — "Too many authentication failures" — before the password
+    # is ever tried. Killed a real deploy run the moment the runner had an
+    # agent in reach. -F /dev/null also keeps ~/.ssh/config's per-host rules
+    # out of a connection to a throwaway NAT-local guest.
+    "-F", "/dev/null",
+    "-o", "IdentitiesOnly=yes",
+    "-o", "IdentityAgent=none",
+    "-o", "PubkeyAuthentication=no",
+    "-o", "PreferredAuthentications=password",
+    "-o", "NumberOfPasswordPrompts=1",
 ]
 
 # Bounds for the non-test stages. The test step itself runs under the

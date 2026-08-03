@@ -212,6 +212,19 @@ def test_guest_command_keeps_inherited_literal():
     assert sh.startswith(f"cd {vm.GUEST_WORKTREE} && ")
 
 
+def test_guest_ssh_ignores_the_hosts_identities_and_config():
+    """With an ssh-agent in reach, ssh offers every loaded key before the
+    password and the guest cuts the connection at MaxAuthTries ("Too many
+    authentication failures") — it never reaches the password. Killed a real
+    deploy run, so the guest connection must be password-only and blind to
+    the host's ~/.ssh/config."""
+    opts = vm._SSH_OPTS
+    assert "-F" in opts and opts[opts.index("-F") + 1] == "/dev/null"
+    for flag in ("IdentitiesOnly=yes", "IdentityAgent=none",
+                 "PubkeyAuthentication=no", "PreferredAuthentications=password"):
+        assert flag in opts, f"{flag} missing — an agent key can crowd out the password"
+
+
 def test_vm_available_names_the_missing_prerequisite(monkeypatch):
     monkeypatch.setattr(vm.shutil, "which", lambda name: None)
     reason = vm.vm_available()
