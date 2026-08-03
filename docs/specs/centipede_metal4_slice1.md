@@ -51,7 +51,13 @@ simulation, not as a test-only hook.
 - A hit on a cell holding a **body** segment removes that segment, leaves a mushroom in the
   cell it occupied, and splits its chain into two independent chains: the portion ahead of
   the hit keeps its head and direction, and the portion behind the hit becomes a new chain
-  whose frontmost segment is promoted to head.
+  whose frontmost segment — the one that was nearest the struck cell — is promoted to head.
+- **The trailing chain keeps the parent's direction and segment order.** Do not reverse it
+  at split time, and do not reverse its array. It is left pointing at the mushroom that the
+  hit just created, so on its next step the ordinary turn-on-collision rule blocks it, and
+  it descends one row and reverses. That descent-and-reversal is the correct behaviour and
+  it must *emerge* from the existing rule — a special-case reversal inside the split would
+  both skip the descent and double up with the collision rule a tick later.
 - A split that would leave an empty portion produces no empty chain.
 - A hit on a **head** segment removes it, leaves a mushroom in that cell, and promotes the
   next segment in the chain to head; the chain keeps its direction. A chain whose last
@@ -121,6 +127,10 @@ These belong to later slices. Implementing them here is a scope violation, not a
 - A chain descending past the last row is removed.
 - A hit on a middle body segment yields exactly two chains, with the correct segment counts
   either side, a new head on the trailing chain, and a mushroom left in the struck cell.
+- Immediately after that split the trailing chain still holds the parent's direction and
+  segment order — it is not reversed at split time.
+- Stepping once more, the trailing chain is blocked by the mushroom the hit created, and so
+  descends one row and reverses via the ordinary turn-on-collision rule.
 - A hit on the segment directly behind the head yields two chains, one of which is the head
   alone.
 - A hit on the head promotes the next segment and leaves the chain count unchanged.
@@ -148,6 +158,10 @@ These belong to later slices. Implementing them here is a scope violation, not a
   head promotion on the trailing chain, and direction preserved. Off-by-one errors in
   segment ownership are the most likely defect and are why the acceptance list pins the
   middle-segment, behind-the-head, head, and last-segment cases separately.
+- The trailing chain's reversal is settled and is **emergent, not special-cased** — see the
+  behaviour section. A reviewer has already argued once for reversing it at split time;
+  that is wrong here, because it skips the descent and then collides with the ordinary
+  turn-on-collision rule on the following tick. Do not reopen it.
 - Turn-on-collision has an ordering trap: whether the descent happens before or after the
   reversal changes which cell the head lands in. Pick one order, state it, and test it.
 - Determinism breaks silently. A single use of a system RNG or of `Set`/`Dictionary`
