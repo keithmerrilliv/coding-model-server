@@ -15,9 +15,17 @@ Usage:
 """
 import re
 import argparse
+import os
 import sqlite3
 
-DB_PATH = "var/memory_db/chroma.sqlite3"
+# Env-driven with the server's default, like monitor_resources.py (DEV-173/
+# DEV-379): a cwd-relative literal ran maintenance against the wrong — or a
+# silently created empty — DB whenever CODING_MODEL_MEMORY_DB relocated the
+# real one or the script ran outside the repo root.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MEMORY_DB_DIR = os.getenv(
+    "CODING_MODEL_MEMORY_DB", os.path.join(_REPO_ROOT, "var", "memory_db"))
+DB_PATH = os.path.join(MEMORY_DB_DIR, "chroma.sqlite3")
 BATCH_SIZE = 500
 
 
@@ -115,7 +123,7 @@ def cleanup(dry_run=True, vacuum=False):
 
     print(f"Deleting {len(embedding_ids):,} documents via ChromaDB API...")
     import chromadb
-    client = chromadb.PersistentClient(path="var/memory_db")
+    client = chromadb.PersistentClient(path=MEMORY_DB_DIR)
     col = client.get_collection("qwen_agent_memory")
 
     for i in range(0, len(embedding_ids), BATCH_SIZE):

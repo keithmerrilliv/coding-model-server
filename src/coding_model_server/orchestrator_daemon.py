@@ -2855,7 +2855,10 @@ def main() -> int:
     # with the process, so a crashed daemon never wedges the lock.
     import fcntl
     lock_path = Path(db.db_path).with_suffix(".lock")
-    lock_file = open(lock_path, "w")
+    # "a", never "w": mode "w" truncates at open, before the flock decides who
+    # owns the file — a refused second start still wiped the live daemon's
+    # recorded pid, destroying the one diagnostic the file exists to carry.
+    lock_file = open(lock_path, "a")
     try:
         fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
@@ -2865,6 +2868,7 @@ def main() -> int:
             "systemctl stop coding-model-orchestrator)", lock_path,
         )
         return 1
+    lock_file.truncate(0)
     lock_file.write(f"{os.getpid()}\n")
     lock_file.flush()
 

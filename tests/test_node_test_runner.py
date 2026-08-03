@@ -8,6 +8,7 @@ orchestrator:
   3. The orchestrator's structural guard recognizes the node:test TAP summary,
      so a genuine run isn't force-failed as "no summary detected".
 """
+import functools
 import shutil
 import subprocess
 from pathlib import Path
@@ -138,23 +139,30 @@ _NVM_NODE = sorted(Path.home().glob(".nvm/versions/node/*/bin/node"))
 
 
 def _node_version(node_bin) -> str:
-    return subprocess.run([str(node_bin), "--version"],
-                          capture_output=True, text=True).stdout.strip()
+    try:
+        return subprocess.run([str(node_bin), "--version"],
+                              capture_output=True, text=True).stdout.strip()
+    except OSError:
+        return ""
 
 
 # The bound toolchain is only PROVABLY in use if it differs from whatever Node
 # the sandbox already has on PATH via /usr. When they match, this test cannot
 # tell the two apart and would pass without the bind doing anything.
-_SYS_NODE = shutil.which("node", path="/usr/local/bin:/usr/bin:/bin")
-_BIND_IS_DISTINGUISHABLE = bool(_NVM_NODE) and (
-    _SYS_NODE is None or _node_version(_NVM_NODE[-1]) != _node_version(_SYS_NODE))
+# A function, not a module constant (DEV-387): the version probes spawn
+# subprocesses, which must not run during mere collection — and a broken nvm
+# binary used to error the whole file at import instead of skipping one test.
+@functools.lru_cache(maxsize=1)
+def _bind_is_distinguishable() -> bool:
+    if not _NVM_NODE:
+        return False
+    sys_node = shutil.which("node", path="/usr/local/bin:/usr/bin:/bin")
+    return sys_node is None or (
+        _node_version(_NVM_NODE[-1]) != _node_version(sys_node))
 
 
 @pytest.mark.skipif(shutil.which("bwrap") is None, reason="bwrap not installed")
 @pytest.mark.skipif(not _NVM_NODE, reason="no nvm Node to bind into the sandbox")
-@pytest.mark.skipif(not _BIND_IS_DISTINGUISHABLE,
-                    reason="nvm and system Node are the same version — the bind "
-                           "would be unobservable, so this test would be vacuous")
 def test_sandbox_runs_the_BOUND_node_not_the_system_one(tmp_path, monkeypatch):
     """DEV-103's acceptance criterion, executed rather than asserted about.
 
@@ -171,6 +179,9 @@ def test_sandbox_runs_the_BOUND_node_not_the_system_one(tmp_path, monkeypatch):
     makes it discriminating: drop the bind and the system Node answers with a
     different version, and this fails.
     """
+    if not _bind_is_distinguishable():
+        pytest.skip("nvm and system Node are the same version — the bind "
+                    "would be unobservable, so this test would be vacuous")
     node_root = _NVM_NODE[-1].parent.parent
     expected = _node_version(_NVM_NODE[-1])
     monkeypatch.setattr(test_runner, "SANDBOX_NODE_ROOT", node_root)

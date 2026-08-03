@@ -16,6 +16,18 @@ from coding_model_client import orchestrator
 from coding_model_client.orchestrator import process_agent_tasks, set_tool_functions
 
 
+@pytest.fixture(autouse=True)
+def _restore_tool_functions():
+    # set_tool_functions swaps module globals in orchestrator with no teardown;
+    # without this, the last-installed stubs leak into every later-collected
+    # module and pass/fail depends on execution order (DEV-384).
+    prev = (orchestrator._process_remote_commands,
+            orchestrator._extract_fallback_commands,
+            orchestrator._execute_remote_command)
+    yield
+    set_tool_functions(*prev)
+
+
 @pytest.fixture
 def scripted(monkeypatch):
     """Drive the loop with a canned list of (text, finish_reason) replies.
