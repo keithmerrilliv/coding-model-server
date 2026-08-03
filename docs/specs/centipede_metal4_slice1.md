@@ -124,6 +124,11 @@ These belong to later slices. Implementing them here is a scope violation, not a
 - A chain advances one cell per tick with each segment following the one ahead.
 - A chain reaching the field edge descends one row and reverses direction.
 - A chain blocked by a mushroom descends one row and reverses direction.
+- In both blocked cases the head **keeps its own column** — the blocked horizontal step is
+  replaced by the descent, not combined with it. The head never enters the cell that
+  blocked it, and never leaves the field's horizontal bounds.
+- A hit on the head leaves a mushroom in the cell the head vacated, exactly as a body hit
+  does.
 - A chain descending past the last row is removed.
 - A hit on a middle body segment yields exactly two chains, with the correct segment counts
   either side, a new head on the trailing chain, and a mushroom left in the struck cell.
