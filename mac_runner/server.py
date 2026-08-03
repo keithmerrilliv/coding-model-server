@@ -24,6 +24,7 @@ from .frameworks import (
     DEFAULT_TIMEOUTS,
     FrameworkError,
     SANDBOX_EXEC,
+    SANDBOX_INCOMPATIBLE,
     build_cmd,
     build_resolve_cmd,
     wrap_sandbox,
@@ -199,20 +200,18 @@ def run_tests_endpoint(req: RunTestsRequest) -> RunTestsResponse:
 
             # The patch being built is LLM-authored code; confine it
             # (DEV-126). The Linux orchestrator already sandboxes its runs —
-            # unsandboxed Mac execution was the asymmetry.
-            if Config.SANDBOX and _sandbox_available():
-                if (req.framework == "xcodebuild_test"
-                        and opts.get("signing_identity", "-") != "-"
-                        and not Config.SIGNING_KEYCHAIN):
-                    # Signing inside the sandbox cannot work without a readable
-                    # keychain, and the resulting xcodebuild error names a
-                    # missing certificate rather than the real cause (DEV-398).
-                    logger.warning(
-                        "signing with a real identity but "
-                        "CODING_MODEL_RUNNER_SIGNING_KEYCHAIN is unset — "
-                        "codesign cannot read the private key inside the "
-                        "sandbox and the build will fail claiming the "
-                        "certificate does not exist")
+            # unsandboxed Mac execution was the asymmetry. The exemption list
+            # is per-framework: app-hosted XCTest cannot survive sandbox-exec
+            # at all (DEV-403), and exempting only it keeps every other run
+            # confined instead of forcing the sandbox off globally.
+            if Config.SANDBOX and req.framework in SANDBOX_INCOMPATIBLE:
+                logger.warning(
+                    "%s runs UNSANDBOXED: app-hosted XCTest hangs under "
+                    "sandbox-exec regardless of profile (DEV-403); "
+                    "replacement containment is tracked in DEV-417",
+                    req.framework,
+                )
+            elif Config.SANDBOX and _sandbox_available():
                 cmd = wrap_sandbox(
                     cmd, profile=Config.SANDBOX_PROFILE, worktree=wt,
                     derived_data=Config.DERIVED_DATA,

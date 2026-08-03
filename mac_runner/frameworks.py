@@ -19,6 +19,18 @@ class FrameworkError(ValueError):
     pass
 
 
+# Frameworks that must NOT run under the sandbox-exec wrapper. App-hosted
+# XCTest hangs for the full test-launch timeout ("The test runner hung before
+# establishing connection", ~350s) under sandbox-exec even with a deny-nothing
+# (allow default) profile — the wrapper's presence is the differentiator, not
+# its policy and not the host app's entitlements (DEV-403, verified on
+# hardware; stripping com.apple.security.app-sandbox changed nothing).
+# Containment for these runs needs a different mechanism (DEV-417); until that
+# lands they run unsandboxed and the server logs it loudly. Do not "fix" this
+# by tuning sandbox.sb — no profile works.
+SANDBOX_INCOMPATIBLE = frozenset({"xcodebuild_test"})
+
+
 def build_swift_test_cmd(worktree: Path, **opts: Any) -> list[str]:
     # --disable-sandbox stops SwiftPM applying ITS OWN sandbox to manifest
     # evaluation. macOS cannot nest sandboxes: with our sandbox-exec wrapper
