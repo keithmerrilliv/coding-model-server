@@ -52,6 +52,7 @@ def _wire(monkeypatch, behave):
         Popen=fake_popen,
         TimeoutExpired=subprocess.TimeoutExpired,
         DEVNULL=subprocess.DEVNULL,
+        STDOUT=subprocess.STDOUT,
     ))
     return calls
 
