@@ -49,10 +49,30 @@ class Config:
     # can't read credential material or write outside its build dirs
     # (DEV-126). On by default; set CODING_MODEL_RUNNER_SANDBOX=0 to disable
     # (e.g. while debugging a build the profile breaks). Scoped per framework:
-    # frameworks in frameworks.SANDBOX_INCOMPATIBLE (app-hosted XCTest —
-    # DEV-403) run unsandboxed even when this is on.
+    # frameworks in frameworks.VM_REQUIRED (app-hosted XCTest — DEV-403)
+    # cannot run under sandbox-exec and are contained in an ephemeral tart VM
+    # instead (DEV-422, see VM below).
     SANDBOX = os.getenv("CODING_MODEL_RUNNER_SANDBOX", "1").lower() not in (
         "0", "false", "no")
+
+    # VM containment for frameworks sandbox-exec cannot hold (DEV-417/DEV-422).
+    # On by default when SANDBOX is on; requires tart + sshpass installed and
+    # VM_IMAGE already pulled (`tart pull <image>`, tens of GB, once). Set
+    # CODING_MODEL_RUNNER_VM=0 to restore the previous behavior — those
+    # frameworks then run UNSANDBOXED on the host and the server warns loudly
+    # on every such run (DEV-403).
+    VM = os.getenv("CODING_MODEL_RUNNER_VM", "1").lower() not in (
+        "0", "false", "no")
+    VM_IMAGE = os.getenv("CODING_MODEL_RUNNER_VM_IMAGE",
+                         "ghcr.io/cirruslabs/macos-tahoe-xcode:26.5")
+    # The cirruslabs images ship an auto-logged-in "admin" account. The guest
+    # is NAT-local and destroyed after every run, so these credentials guard
+    # nothing durable; override only for a custom base image.
+    VM_SSH_USER = os.getenv("CODING_MODEL_RUNNER_VM_SSH_USER", "admin")
+    VM_SSH_PASSWORD = os.getenv("CODING_MODEL_RUNNER_VM_SSH_PASSWORD", "admin")
+    # Spike-measured boot-to-ssh is ~19 s; the generous default absorbs a
+    # cold host and first-boot Spotlight churn.
+    VM_BOOT_TIMEOUT = int(os.getenv("CODING_MODEL_RUNNER_VM_BOOT_TIMEOUT", "300"))
     SANDBOX_PROFILE = Path(os.getenv(
         "CODING_MODEL_RUNNER_SANDBOX_PROFILE",
         str(Path(__file__).parent / "sandbox.sb"),
