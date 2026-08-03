@@ -51,6 +51,9 @@ def client(tmp_path, repo, monkeypatch):
     # Off by default so command assertions stay platform-independent; the
     # DEV-126 sandbox tests opt in explicitly.
     monkeypatch.setattr(Config, "SANDBOX", False)
+    # Same for VM containment (DEV-422): host-path tests must not depend on
+    # tart existing; the VM tests opt in and stub the vm module.
+    monkeypatch.setattr(Config, "VM", False)
     return TestClient(server.app)
 
 
@@ -342,8 +345,9 @@ def test_swift_test_disables_swiftpms_own_sandbox(client, monkeypatch):
 # and passes in seconds without the wrapper. The wrapper's presence is the
 # differentiator — not the profile, not the host app's entitlements. So
 # xcodebuild_test must never be wrapped, while every other framework stays
-# confined; forcing CODING_MODEL_RUNNER_SANDBOX=0 globally was the interim
-# state this scoping exists to end.
+# confined. Its real containment is the VM (DEV-422, section below); these
+# tests pin the explicit CODING_MODEL_RUNNER_VM=0 fallback, where the run
+# stays on the host, unwrapped, with a loud warning.
 
 def test_xcodebuild_test_is_exempt_from_the_sandbox(client, monkeypatch):
     monkeypatch.setattr(Config, "SANDBOX", True)
@@ -396,6 +400,112 @@ def test_sandbox_exemption_is_per_framework_not_global(client, monkeypatch):
     assert swift_build[0] == server.SANDBOX_EXEC, (
         "swift_test has no host app and sandboxes fine — exempting more than "
         "the incompatible framework forfeits containment for no reason")
+
+
+# ── DEV-422: VM containment for frameworks sandbox-exec cannot hold ──────────
+#
+# The DEV-417 decision, spike-proven in DEV-421: xcodebuild_test dispatches
+# into an ephemeral tart VM instead of running unsandboxed on the host. The
+# guest signs ad-hoc and builds into its own throwaway DerivedData; nothing
+# of the host's enters it. CODING_MODEL_RUNNER_VM=0 is the only way back to
+# the old warned host behavior, and a missing VM prerequisite fails the run
+# actionably rather than silently degrading to an unconfined host exec.
+
+def test_xcodebuild_dispatches_into_a_vm_not_onto_the_host(client, monkeypatch):
+    monkeypatch.setattr(Config, "SANDBOX", True)
+    monkeypatch.setattr(Config, "VM", True)
+    monkeypatch.setattr(server, "_sandbox_available", lambda: True)
+    monkeypatch.setattr(server.vm, "vm_available", lambda: None)
+    seen = {}
+
+    def fake_vm_run(wt, resolve_cmd, cmd, *, timeout, resolve_timeout):
+        seen["resolve_cmd"] = resolve_cmd
+        seen["cmd"] = cmd
+        return 0, "guest tests ok"
+
+    monkeypatch.setattr(server.vm, "run_tests_in_vm", fake_vm_run)
+    _fake_subprocess(monkeypatch, lambda cmd, **kw: pytest.fail(
+        f"VM mode must not execute anything on the host, got {cmd}"))
+
+    resp = client.post(
+        "/v1/run_tests",
+        headers={"X-Runner-Key": "test-key"},
+        json={"spec_id": "s1", "repo": "proj", "framework": "xcodebuild_test",
+              "scheme": "Demo"},
+    )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["passed"] is True
+    assert "guest tests ok" in body["output"]
+    # Both commands target the GUEST's DerivedData — building into the host's
+    # would be wrong twice over (path doesn't exist in the guest; and the
+    # guest must not share host build state).
+    from mac_runner import vm as vm_module
+    assert vm_module.GUEST_DERIVED_DATA in seen["cmd"]
+    assert "-resolvePackageDependencies" in seen["resolve_cmd"]
+    assert vm_module.GUEST_DERIVED_DATA in seen["resolve_cmd"]
+    # Ad-hoc signing: no identity, keychain, or password enters the guest.
+    assert "CODE_SIGN_IDENTITY=-" in seen["cmd"]
+
+
+def test_vm_unavailable_fails_actionably_instead_of_falling_back(
+        client, monkeypatch):
+    monkeypatch.setattr(Config, "SANDBOX", True)
+    monkeypatch.setattr(Config, "VM", True)
+    monkeypatch.setattr(
+        server.vm, "vm_available",
+        lambda: "tart is not installed — brew install cirruslabs/cli/tart")
+    _fake_subprocess(monkeypatch, lambda cmd, **kw: pytest.fail(
+        "an unavailable VM must NOT degrade to an unconfined host run"))
+
+    resp = client.post(
+        "/v1/run_tests",
+        headers={"X-Runner-Key": "test-key"},
+        json={"spec_id": "s1", "repo": "proj", "framework": "xcodebuild_test",
+              "scheme": "Demo"},
+    )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["passed"] is False
+    assert body["exit_code"] is None
+    assert "tart is not installed" in body["output"]
+
+
+def test_vm_disabled_flag_warns_and_runs_on_the_host(client, monkeypatch, caplog):
+    monkeypatch.setattr(Config, "SANDBOX", True)
+    monkeypatch.setattr(Config, "VM", False)
+    monkeypatch.setattr(server, "_sandbox_available", lambda: True)
+    seen = _capture_cmd(monkeypatch)
+
+    with caplog.at_level("WARNING", logger="mac_runner.server"):
+        resp = client.post(
+            "/v1/run_tests",
+            headers={"X-Runner-Key": "test-key"},
+            json={"spec_id": "s1", "repo": "proj",
+                  "framework": "xcodebuild_test", "scheme": "Demo"},
+        )
+
+    assert resp.status_code == 200, resp.text
+    assert "CODING_MODEL_RUNNER_VM=0" in caplog.text, (
+        "the fallback must be loud — silence here reads as containment")
+    assert seen["cmd"][0] == "xcodebuild", "fallback runs on the host, unwrapped"
+
+
+def test_vm_mode_leaves_swift_test_on_the_sandboxed_host_path(client, monkeypatch):
+    """VM containment is for the sandbox-incompatible frameworks only —
+    swift_test keeps its cheaper sandbox-exec confinement."""
+    monkeypatch.setattr(Config, "SANDBOX", True)
+    monkeypatch.setattr(Config, "VM", True)
+    monkeypatch.setattr(server, "_sandbox_available", lambda: True)
+    monkeypatch.setattr(server.vm, "run_tests_in_vm", lambda *a, **k: pytest.fail(
+        "swift_test sandboxes fine and must not pay the VM overhead"))
+    seen = _capture_cmd(monkeypatch)
+
+    _post_swift_test(client)
+
+    assert seen["cmd"][0] == server.SANDBOX_EXEC
 
 
 # ── DEV-415 / DEV-416: unlock the signing keychain at startup ────────────────

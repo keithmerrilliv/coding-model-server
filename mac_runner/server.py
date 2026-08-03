@@ -14,17 +14,19 @@ import os
 import subprocess
 import sys
 import time
+from pathlib import Path
 from typing import Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
+from . import vm
 from .config import Config
 from .frameworks import (
     DEFAULT_TIMEOUTS,
     FrameworkError,
     SANDBOX_EXEC,
-    SANDBOX_INCOMPATIBLE,
+    VM_REQUIRED,
     build_cmd,
     build_resolve_cmd,
     wrap_sandbox,
@@ -127,16 +129,36 @@ def run_tests_endpoint(req: RunTestsRequest) -> RunTestsResponse:
     # framework is passed positionally to build_cmd; leaving it in opts too
     # makes it a duplicate argument.
     opts = req.model_dump(exclude_none=True, exclude={"framework"})
+    # VM containment (DEV-422): frameworks sandbox-exec cannot hold
+    # (app-hosted XCTest, DEV-403) dispatch into a throwaway tart VM instead
+    # of running unsandboxed on the host. CODING_MODEL_RUNNER_VM=0 is the
+    # explicit fallback to the old warned host behavior.
+    use_vm = Config.SANDBOX and Config.VM and req.framework in VM_REQUIRED
+
     # Discover what this Mac can offer: a real signing identity in preference
     # to ad-hoc, and an attached physical device in preference to a simulator
     # (DEV-395/DEV-396). Anything the plan set explicitly is left alone.
-    if req.framework == "xcodebuild_test":
+    # Host-only: an attached device is unreachable from inside a VM, and the
+    # guest signs ad-hoc so there is no identity to discover (DEV-421).
+    if req.framework == "xcodebuild_test" and not use_vm:
         opts = resolve_environment(opts)
         if device := opts.pop("destination_device", None):
             logger.info("testing on attached device %s (%s)",
                         device, opts.get("destination"))
 
     start = time.monotonic()
+    if use_vm and (unavailable := vm.vm_available()):
+        # An operator problem, not something the implementer can patch its
+        # way out of (cf. the missing-toolchain path below) — and falling
+        # back silently to an unconfined host run would defeat the point.
+        logger.error("VM containment unavailable: %s", unavailable)
+        return RunTestsResponse(
+            passed=False,
+            output=(f"[vm] VM containment is enabled for {req.framework} "
+                    f"but unavailable: {unavailable}"),
+            duration_sec=0.0,
+            exit_code=None,
+        )
     try:
         with worktree(
             repo_path, req.base_ref, req.spec_id,
@@ -156,100 +178,32 @@ def run_tests_endpoint(req: RunTestsRequest) -> RunTestsResponse:
                     duration_sec=round(time.monotonic() - start, 2),
                 )
 
+            # In VM mode the command runs in the guest, so it must name guest
+            # paths — the guest resolves and builds into its own throwaway
+            # DerivedData, never the host's.
+            derived_data = (Path(vm.GUEST_DERIVED_DATA) if use_vm
+                            else Config.DERIVED_DATA)
             try:
-                cmd = build_cmd(req.framework, wt, Config.DERIVED_DATA, **opts)
-            except FrameworkError as e:
-                raise HTTPException(400, str(e))
-
-            # Resolve SwiftPM dependencies BEFORE sandboxing (DEV-294).
-            # SwiftPM sandboxes manifest evaluation itself and macOS cannot
-            # nest sandboxes, so doing this inside our profile fails with
-            # "sandbox_apply: Operation not permitted" every time. Only the
-            # build/test step — the part that runs the LLM-authored patch —
-            # needs our confinement, and it still gets it below.
-            resolve_output = ""
-            try:
+                cmd = build_cmd(req.framework, wt, derived_data, **opts)
                 resolve_cmd = build_resolve_cmd(
-                    req.framework, wt, Config.DERIVED_DATA, **opts)
+                    req.framework, wt, derived_data, **opts)
             except FrameworkError as e:
                 raise HTTPException(400, str(e))
-            if resolve_cmd is not None:
-                logger.info("resolving packages (unsandboxed): %s",
-                            " ".join(resolve_cmd))
-                try:
-                    rr = subprocess.run(
-                        resolve_cmd, cwd=wt, capture_output=True, text=True,
-                        timeout=min(timeout, RESOLVE_TIMEOUT),
-                    )
-                    if rr.returncode != 0:
-                        # Not fatal on its own: the build may still succeed from
-                        # a warm cache, and if it cannot, xcodebuild's own error
-                        # is more useful than anything we would synthesise here.
-                        # Kept so a resolution failure is visible in the output
-                        # rather than showing up as a mystifying build error.
-                        logger.warning("package resolution exited %d", rr.returncode)
-                        resolve_output = (
-                            "[package resolution failed — the build may fail "
-                            f"for this reason]\n{rr.stdout}\n{rr.stderr}\n\n")
-                except subprocess.TimeoutExpired:
-                    logger.warning("package resolution timed out")
-                    resolve_output = "[package resolution timed out]\n\n"
-                except FileNotFoundError:
-                    logger.error("%s not found on PATH", resolve_cmd[0])
-                    resolve_output = f"[{resolve_cmd[0]!r} not found on PATH]\n\n"
 
-            # The patch being built is LLM-authored code; confine it
-            # (DEV-126). The Linux orchestrator already sandboxes its runs —
-            # unsandboxed Mac execution was the asymmetry. The exemption list
-            # is per-framework: app-hosted XCTest cannot survive sandbox-exec
-            # at all (DEV-403), and exempting only it keeps every other run
-            # confined instead of forcing the sandbox off globally.
-            if Config.SANDBOX and req.framework in SANDBOX_INCOMPATIBLE:
-                logger.warning(
-                    "%s runs UNSANDBOXED: app-hosted XCTest hangs under "
-                    "sandbox-exec regardless of profile (DEV-403); "
-                    "replacement containment is tracked in DEV-417",
-                    req.framework,
+            if use_vm:
+                logger.info(
+                    "running %s for spec %s in an ephemeral VM "
+                    "(image %s, timeout=%ds)",
+                    req.framework, req.spec_id, Config.VM_IMAGE, timeout)
+                exit_code, output = vm.run_tests_in_vm(
+                    wt, resolve_cmd, cmd,
+                    timeout=timeout,
+                    resolve_timeout=min(timeout, RESOLVE_TIMEOUT),
                 )
-            elif Config.SANDBOX and _sandbox_available():
-                cmd = wrap_sandbox(
-                    cmd, profile=Config.SANDBOX_PROFILE, worktree=wt,
-                    derived_data=Config.DERIVED_DATA,
-                    signing_keychain=Config.SIGNING_KEYCHAIN,
-                )
-            elif Config.SANDBOX:
-                logger.warning(
-                    "sandbox requested but %s not found — running "
-                    "LLM-authored tests UNSANDBOXED", SANDBOX_EXEC,
-                )
-
-            logger.info("running %s in %s (timeout=%ds)", " ".join(cmd), wt, timeout)
-            try:
-                result = subprocess.run(
-                    cmd, cwd=wt, capture_output=True, text=True, timeout=timeout,
-                )
-                passed = result.returncode == 0
-                output = resolve_output + (result.stdout or "") + "\n" + (result.stderr or "")
-                exit_code: Optional[int] = result.returncode
-            except subprocess.TimeoutExpired as e:
-                passed = False
-                output = (
-                    f"Tests timed out after {timeout}s\n"
-                    f"{e.stdout.decode() if isinstance(e.stdout, bytes) else (e.stdout or '')}\n"
-                    f"{e.stderr.decode() if isinstance(e.stderr, bytes) else (e.stderr or '')}"
-                )
-                exit_code = None
-            except FileNotFoundError:
-                # Toolchain missing from PATH — an operator problem, not something
-                # the implementer can patch its way out of. Log the PATH here; the
-                # response only needs to name the binary.
-                logger.error("%s not found on PATH=%s", cmd[0], os.environ.get("PATH", ""))
-                passed = False
-                output = (
-                    f"{cmd[0]!r} was not found on the runner's PATH. Install the "
-                    f"toolchain on the runner host, or fix PATH in the LaunchAgent plist."
-                )
-                exit_code = None
+                passed = exit_code == 0
+            else:
+                passed, output, exit_code = _run_on_host(
+                    req, wt, cmd, resolve_cmd, timeout)
     except WorkspaceError as e:
         return RunTestsResponse(
             passed=False,
@@ -265,6 +219,98 @@ def run_tests_endpoint(req: RunTestsRequest) -> RunTestsResponse:
         passed=passed, output=output.strip(),
         duration_sec=duration, exit_code=exit_code,
     )
+
+
+def _run_on_host(req: RunTestsRequest, wt: Path, cmd: list[str],
+                 resolve_cmd: "list[str] | None",
+                 timeout: int) -> "tuple[bool, str, Optional[int]]":
+    """The pre-DEV-422 host execution path: resolve, maybe sandbox, run."""
+    # Resolve SwiftPM dependencies BEFORE sandboxing (DEV-294).
+    # SwiftPM sandboxes manifest evaluation itself and macOS cannot
+    # nest sandboxes, so doing this inside our profile fails with
+    # "sandbox_apply: Operation not permitted" every time. Only the
+    # build/test step — the part that runs the LLM-authored patch —
+    # needs our confinement, and it still gets it below.
+    resolve_output = ""
+    if resolve_cmd is not None:
+        logger.info("resolving packages (unsandboxed): %s",
+                    " ".join(resolve_cmd))
+        try:
+            rr = subprocess.run(
+                resolve_cmd, cwd=wt, capture_output=True, text=True,
+                timeout=min(timeout, RESOLVE_TIMEOUT),
+            )
+            if rr.returncode != 0:
+                # Not fatal on its own: the build may still succeed from
+                # a warm cache, and if it cannot, xcodebuild's own error
+                # is more useful than anything we would synthesise here.
+                # Kept so a resolution failure is visible in the output
+                # rather than showing up as a mystifying build error.
+                logger.warning("package resolution exited %d", rr.returncode)
+                resolve_output = (
+                    "[package resolution failed — the build may fail "
+                    f"for this reason]\n{rr.stdout}\n{rr.stderr}\n\n")
+        except subprocess.TimeoutExpired:
+            logger.warning("package resolution timed out")
+            resolve_output = "[package resolution timed out]\n\n"
+        except FileNotFoundError:
+            logger.error("%s not found on PATH", resolve_cmd[0])
+            resolve_output = f"[{resolve_cmd[0]!r} not found on PATH]\n\n"
+
+    # The patch being built is LLM-authored code; confine it
+    # (DEV-126). The Linux orchestrator already sandboxes its runs —
+    # unsandboxed Mac execution was the asymmetry. The exemption list
+    # is per-framework: app-hosted XCTest cannot survive sandbox-exec
+    # at all (DEV-403) — its containment is the VM (DEV-422), so reaching
+    # this path with such a framework means the operator disabled it.
+    if Config.SANDBOX and req.framework in VM_REQUIRED:
+        logger.warning(
+            "%s runs UNSANDBOXED on the host: sandbox-exec cannot contain "
+            "app-hosted XCTest (DEV-403) and VM containment (DEV-422) is "
+            "disabled via CODING_MODEL_RUNNER_VM=0 — re-enable it to "
+            "confine LLM-authored code",
+            req.framework,
+        )
+    elif Config.SANDBOX and _sandbox_available():
+        cmd = wrap_sandbox(
+            cmd, profile=Config.SANDBOX_PROFILE, worktree=wt,
+            derived_data=Config.DERIVED_DATA,
+            signing_keychain=Config.SIGNING_KEYCHAIN,
+        )
+    elif Config.SANDBOX:
+        logger.warning(
+            "sandbox requested but %s not found — running "
+            "LLM-authored tests UNSANDBOXED", SANDBOX_EXEC,
+        )
+
+    logger.info("running %s in %s (timeout=%ds)", " ".join(cmd), wt, timeout)
+    try:
+        result = subprocess.run(
+            cmd, cwd=wt, capture_output=True, text=True, timeout=timeout,
+        )
+        passed = result.returncode == 0
+        output = resolve_output + (result.stdout or "") + "\n" + (result.stderr or "")
+        exit_code: Optional[int] = result.returncode
+    except subprocess.TimeoutExpired as e:
+        passed = False
+        output = (
+            f"Tests timed out after {timeout}s\n"
+            f"{e.stdout.decode() if isinstance(e.stdout, bytes) else (e.stdout or '')}\n"
+            f"{e.stderr.decode() if isinstance(e.stderr, bytes) else (e.stderr or '')}"
+        )
+        exit_code = None
+    except FileNotFoundError:
+        # Toolchain missing from PATH — an operator problem, not something
+        # the implementer can patch its way out of. Log the PATH here; the
+        # response only needs to name the binary.
+        logger.error("%s not found on PATH=%s", cmd[0], os.environ.get("PATH", ""))
+        passed = False
+        output = (
+            f"{cmd[0]!r} was not found on the runner's PATH. Install the "
+            f"toolchain on the runner host, or fix PATH in the LaunchAgent plist."
+        )
+        exit_code = None
+    return passed, output, exit_code
 
 
 def unlock_signing_keychain() -> bool:
