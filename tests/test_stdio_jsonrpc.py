@@ -22,7 +22,6 @@ import time
 import pytest
 
 from coding_model_client import services as client_services
-from coding_model_client.services import CupertinoMCPClient
 from coding_model_server import mcp_service
 from coding_model_server.mcp_service import AppleDeepDocsService
 from coding_model_server.stdio_jsonrpc import StdioRpcError
@@ -147,27 +146,10 @@ class _ServerAdapter:
         return out, None
 
 
-class _ClientAdapter:
-    name = "cupertino"
-
-    def make(self, monkeypatch):
-        return CupertinoMCPClient()
-
-    def patch_spawn(self, monkeypatch, proc):
-        monkeypatch.setattr(client_services.subprocess, "Popen",
-                            lambda *a, **k: proc)
-        monkeypatch.setattr(client_services.subprocess, "check_output",
-                            lambda *a, **k: "/usr/local/bin/cupertino\n")
-
-    def call(self, cli, tool):
-        res = cli._send_request("tools/call", {"name": tool, "arguments": {}})
-        if "error" in res:
-            return None, res["error"]
-        parts = [c.get("text", "") for c in res.get("content", [])]
-        return "\n\n".join(parts), None
-
-
-ADAPTERS = [_ServerAdapter(), _ClientAdapter()]
+# _ClientAdapter (CupertinoMCPClient) removed in DEV-479: that client spawned
+# a `cupertino` binary installable on neither machine. The shared
+# StdioJsonRpcClient base is still covered through the server adapter.
+ADAPTERS = [_ServerAdapter()]
 
 
 @pytest.fixture(params=ADAPTERS, ids=[a.name for a in ADAPTERS])

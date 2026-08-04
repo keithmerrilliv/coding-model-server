@@ -65,7 +65,7 @@ def configure(config, colors, print_colored_fn, logger_inst, temp_tracker, exter
         logger_inst: logging.Logger instance.
         temp_tracker: dict with key 'add' mapping to a function that registers a temp file path.
         external_handlers: dict with keys 'save_memory', 'web_search',
-            'handle_cupertino_search', 'handle_apple_deep_docs', 'ingest_pdf',
+            'handle_apple_deep_docs', 'ingest_pdf',
             'ingest_url_content' mapping to their respective functions.
         **kwargs: Extended options — rich_console, permission_mode, verbose_mode.
     """

@@ -103,6 +103,20 @@ def web_search_endpoint(request: SearchRequest):
     return {"result": result}
 
 
+@router.get("/v1/tools/apple_deep_docs", dependencies=[Depends(verify_admin_key)])
+def apple_deep_docs_list_endpoint():
+    """List the MCP server's tools.
+
+    GET lists, POST calls. Without this the service was unusable despite being
+    healthy — POST needs a `tool` name and nothing published the valid names,
+    so every guess returned "Unknown tool" (DEV-480).
+    """
+    if not runtime.services.apple_deep_docs:
+        raise HTTPException(status_code=503,
+                            detail="Apple Deep Docs service not initialized")
+    return {"result": runtime.services.apple_deep_docs.list_tools()}
+
+
 @router.post("/v1/tools/apple_deep_docs", dependencies=[Depends(verify_admin_key)])
 def apple_deep_docs_endpoint(request: DeepDocRequest):
     """Perform an Apple Documentation search using the server-side MCP"""

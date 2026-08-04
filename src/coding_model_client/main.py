@@ -12,7 +12,7 @@ from coding_model_client.readline_mgr import READLINE_AVAILABLE, setup_readline,
 from coding_model_client.temp_manager import _add_temp_file
 from coding_model_client.services import (
     save_memory, web_search, ingest_pdf, ingest_url_content,
-    handle_cupertino_search, handle_apple_deep_docs,
+    handle_apple_deep_docs,
 )
 from coding_model_client.commands import handle_user_command, set_tool_handlers
 from coding_model_client.orchestrator import (
@@ -53,7 +53,6 @@ def _configure_tool_handlers():
         external_handlers={
             'save_memory': save_memory,
             'web_search': web_search,
-            'handle_cupertino_search': handle_cupertino_search,
             'handle_apple_deep_docs': handle_apple_deep_docs,
             'ingest_pdf': ingest_pdf,
             'ingest_url_content': ingest_url_content,

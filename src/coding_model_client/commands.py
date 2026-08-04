@@ -8,7 +8,6 @@ from coding_model_client.models import AGENT_THEMES
 from coding_model_client.history import save_chat_history
 from coding_model_client.readline_mgr import READLINE_AVAILABLE
 from coding_model_client.services import (
-    handle_cupertino_search,
     apple_deep_docs_search,
 )
 
@@ -55,16 +54,14 @@ def handle_user_command(user_input, history, model, agent_theme):
         print("  Ctrl+C               - Interrupt generation (keeps partial response)")
 
         print_colored(f"\n{COLORS['BOLD']}DOCUMENTATION TOOLS:{COLORS['ENDC']}", COLORS['BLUE'])
-        print("  /cupertino <query>   - Search local Apple documentation on macOS")
-        print("                         Example: /cupertino MTLMeshRenderPipelineDescriptor")
         print("  /apple <tool> <args> - Search Apple Deep Docs on the Linux server")
         print("                         Example: /apple search_swift_evolution {\"feature\": \"actors\"}")
         print("  /ingest <path>       - Ingest a PDF into memory (supports server files or local: prefix for client files)")
         print("  /ingest-code <dir>   - Ingest a codebase directory with AST-aware chunking")
         print("                         Examples: /ingest /home/user/Metal4_Specs.pdf")
         print("                                   /ingest local:/Users/me/Reports/annual.pdf")
-        print("  /scrape [framework]  - Run the documentation scraper (default: Metal)")
-        print("                         Example: /scrape MetalFX")
+        print("  /scrape [framework]  - Refresh Apple docs in the RAG (no arg = ALL, takes hours)")
+        print("                         Example: /scrape Metal   |   /scrape XCTest")
 
         print_colored(f"\n{COLORS['BOLD']}AGENT SHORTCUTS:{COLORS['ENDC']}", COLORS['BLUE'])
         print("  @<agent_name> [msg]  - Switch agent and optionally send message in one go")
@@ -161,23 +158,15 @@ def handle_user_command(user_input, history, model, agent_theme):
             print_colored("Treating as normal text...", COLORS['BLUE'])
             return False, model
 
-    # ── Cupertino Apple docs ──────────────────────────────────────────────
-    if user_input.lower().startswith('/cupertino '):
-        parts = user_input.split(' ', 1)
-        if len(parts) < 2 or not parts[1].strip():
-            print_colored("Usage: /cupertino <query>", COLORS['FAIL'])
-            return True, model
-        query = parts[1].strip()
-        result = handle_cupertino_search(query)
-        print_colored(f"\n{result}\n", COLORS['GREEN'])
-        return True, model
-
     # ── Apple Deep Docs ───────────────────────────────────────────────────
     if user_input.lower().startswith('/apple '):
         parts = user_input.split(' ', 2)
         if len(parts) < 2:
-            print_colored("Usage: /apple <tool_name> [args_json]", COLORS['FAIL'])
-            print_colored("Example: /apple search_swift_evolution {\"feature\": \"actors\"}", COLORS['BLUE'])
+            # No tool named: list what is available rather than printing a
+            # usage line the user cannot act on (DEV-480).
+            from coding_model_client.services import apple_deep_docs_list
+            print_colored(apple_deep_docs_list(), COLORS['GREEN'])
+            print_colored("Usage: /apple <tool_name> [args_json]", COLORS['BLUE'])
             return True, model
         tool = parts[1]
         args_str = parts[2].strip() if len(parts) > 2 else "{}"
