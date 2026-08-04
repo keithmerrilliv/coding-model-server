@@ -1650,6 +1650,7 @@ def build_synthesis_message(
     spec_md: str,
     design_md: str,
     attempts: list[dict],
+    review_notes: list[str] | None = None,
 ) -> list[dict[str, str]]:
     """Build a single synthesis prompt that gives the model the full
     rotation history (code + per-attempt test outcome) and asks for a
@@ -1657,12 +1658,27 @@ def build_synthesis_message(
 
     Each attempt dict has keys: retry (int), agent (str), test_summary
     (str — last ~1500 chars of pytest output), files (dict of relpath→content).
+
+    review_notes carries the human reviewer's notes from any rejected code
+    review gates, oldest first (DEV-433). When the attempts were rejected at
+    the gate rather than by a failing test run, these are the only record of
+    *which* attempt got *which* part right — a judgement the merge cannot
+    recover from the code alone.
     """
     parts = [
         "## Specification\n\n", spec_md,
         "\n\n## Architecture Design\n\n", design_md,
-        "\n\n## Prior Attempts\n\n",
     ]
+    if review_notes:
+        parts.append("\n\n## Reviewer feedback on the attempts below\n\n")
+        parts.append(
+            "These are the human reviews that rejected the attempts, oldest "
+            "first. Where a review says a part is correct and should be kept, "
+            "keep it verbatim; where it names a defect, fix it.\n\n"
+        )
+        for i, note in enumerate(review_notes, 1):
+            parts.append(f"### Review {i}\n\n{note}\n\n")
+    parts.append("\n\n## Prior Attempts\n\n")
     for att in attempts:
         parts.append(
             f"### Attempt retry={att['retry']} (agent={att['agent']})\n\n"
