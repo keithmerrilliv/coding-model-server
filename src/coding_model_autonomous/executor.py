@@ -57,6 +57,34 @@ DESIGN_REVIEW_MAX_REVISIONS = int(os.getenv("AUTONOMOUS_DESIGN_REVIEW_MAX_REVISI
 # is intermittent, so one re-run often recovers it.
 REVIEWER_PARSE_RETRIES = int(os.getenv("AUTONOMOUS_REVIEWER_PARSE_RETRIES", "1"))
 
+# Roles allowed to receive server-side RAG context, comma-separated
+# (e.g. "implementer" or "implementer,architect"). EMPTY BY DEFAULT, which
+# preserves the long-standing behaviour: _http.post_chat_completion defaults
+# skip_memory=True for the whole autonomous package, so no autonomous agent has
+# ever seen a retrieved chunk.
+#
+# Opt in per role rather than globally because the value depends entirely on
+# prompt shape. Retrieval uses the LAST USER MESSAGE as its embedding query, so
+# it only works when that message reads like a question about an API. A planner
+# prompt ("decompose this spec") or a manifest-mode implementer prompt (a list
+# of 12 file paths) embeds diffusely and retrieves noise — or, worse, retrieves
+# confidently-irrelevant docs that then get appended to the system prompt.
+#
+# Injection is bounded: get_context_string takes the top 5 hits and truncates to
+# ~1000 tokens, and MEMORY_RELEVANCE_THRESHOLD discards anything past the cosine
+# cutoff, so an off-topic task should retrieve nothing rather than filler.
+def _parse_memory_roles(raw: str) -> set[str]:
+    """Split the env value into a normalised role set.
+
+    Separate function so tests can exercise the parsing without reloading this
+    module — reloading rebinds module-scope objects that sibling modules and
+    other tests already hold references to.
+    """
+    return {r.strip().lower() for r in (raw or "").split(",") if r.strip()}
+
+
+AUTONOMOUS_MEMORY_ROLES = _parse_memory_roles(os.getenv("AUTONOMOUS_MEMORY_ROLES", ""))
+
 ARCHITECT_TIMEOUT = float(os.getenv("AUTONOMOUS_ARCHITECT_TIMEOUT", "2700"))
 IMPLEMENTER_TIMEOUT = float(os.getenv("AUTONOMOUS_IMPLEMENTER_TIMEOUT", "1800"))
 REVIEWER_TIMEOUT = float(os.getenv("AUTONOMOUS_REVIEWER_TIMEOUT", "2700"))
@@ -479,8 +507,12 @@ def call_agent(
     max_tokens = max_tokens or ROLE_TO_MAX_TOKENS.get(role, 8000)
     timeout = timeout or ROLE_TO_TIMEOUT.get(role, 1800)
 
-    logger.info("calling agent=%s, role=%s, msg_count=%d, max_tokens=%d",
-                agent, role, len(messages), max_tokens)
+    # Per-role RAG opt-in (default: nothing opts in — see AUTONOMOUS_MEMORY_ROLES).
+    use_memory = role.lower() in AUTONOMOUS_MEMORY_ROLES
+
+    logger.info("calling agent=%s, role=%s, msg_count=%d, max_tokens=%d, rag=%s",
+                agent, role, len(messages), max_tokens,
+                "on" if use_memory else "off")
 
     # retry_5xx=True: model-swap CUDA OOM is the dominant cause of 500s here
     # (VRAM not fully released between models — see project_model_swap_oom.md):
@@ -491,7 +523,7 @@ def call_agent(
     # in _http._BACKOFFS (Blackwell VRAM release takes 10-30s after exit).
     resp = post_chat_completion(
         agent, messages, timeout=timeout, max_tokens=max_tokens,
-        temperature=0.2, retry_5xx=True,
+        temperature=0.2, retry_5xx=True, skip_memory=not use_memory,
     )
     resp.raise_for_status()
     data = resp.json()
