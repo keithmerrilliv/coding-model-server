@@ -126,6 +126,10 @@ class HealthResponse(BaseModel):
     model_loaded: bool
     agents: List[str]
     timestamp: str
+    # Gates waiting on a human (DEV-430). A quiet daemon and a green health
+    # check used to look identical whether the pipeline was idle or blocked
+    # on a review nobody knew had opened. None means the count is unavailable.
+    open_review_gates: Optional[int] = None
 
 
 class ErrorDetail(BaseModel):

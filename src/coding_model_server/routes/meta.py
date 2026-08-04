@@ -5,7 +5,7 @@ from datetime import datetime
 from fastapi import APIRouter
 
 from coding_model_server.config import Config
-from coding_model_server.runtime import llama_server_manager
+from coding_model_server.runtime import get_autonomous_db, llama_server_manager
 from coding_model_server.schemas import HealthResponse, ModelListResponse
 
 router = APIRouter()
@@ -31,11 +31,19 @@ async def root():
 @router.get("/health", response_model=HealthResponse)
 async def health():
     """Health check endpoint"""
+    # DEV-430: surface work blocked on a human. Best-effort — a health check
+    # must never fail because the autonomous store is unavailable, and None
+    # reads as "unknown" rather than "none waiting".
+    try:
+        open_gates = len(get_autonomous_db().list_open_gates())
+    except Exception:
+        open_gates = None
     return {
         "status": "healthy",
         "model_loaded": llama_server_manager.is_running(),
         "agents": list(Config.AGENTS.keys()),
-        "timestamp": datetime.now().isoformat()
+        "timestamp": datetime.now().isoformat(),
+        "open_review_gates": open_gates,
     }
 
 
