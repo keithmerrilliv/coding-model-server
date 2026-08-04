@@ -153,6 +153,7 @@ These belong to later slices. Implementing them here is a scope violation, not a
     protected_paths:
       - Sources/CentipedeCore/GameState.swift
       - Tests/CentipedeCoreTests/GameStateTests.swift
+      - Package.swift
     notes: |
       Runs on the Mac runner via `swift test` against the registered `centipede` repo.
       The suite must pass headlessly: no GPU, no window server, no network. The runner
@@ -160,9 +161,11 @@ These belong to later slices. Implementing them here is a scope violation, not a
       its build directories will fail. Keep every test in CentipedeCore's test target;
       there is no app target and no xcodebuild path in this slice.
 
-      `protected_paths` names the two scaffold files this spec puts off-limits. They are
-      never sent to the runner, so the worktree keeps the `main` version of each — write
-      to them and your version is discarded, not merged.
+      `protected_paths` names the files this spec puts off-limits. They are never sent to
+      the runner, so the worktree keeps the `main` version of each — write to them and
+      your version is discarded, not merged. `Package.swift` is on that list because the
+      Constraints section forbids changing its tools version, platforms or target list,
+      and prose alone does not enforce anything: only this key does.
 
 ## Risks
 
