@@ -91,6 +91,34 @@ class TestQueryBuilders:
     def test_spec_query_handles_a_spec_with_no_heading(self):
         assert executor.spec_memory_query("just prose\n") == "just prose"
 
+    def test_spec_query_excludes_process_boilerplate(self):
+        """DEV-494. Verbatim from spec_9872c963, which is how this was caught.
+
+        The opening paragraph is process scaffolding, not subject matter, and
+        against a corpus of Apple API docs that generic engineering prose is
+        what retrieval matches: this spec pulled MTLPipelineOption and
+        addComputePipelineFunctions into a design about mushroom fields, at
+        distance 0.508.
+
+        DEV-489's builders were verified with clean synthetic queries that had
+        no boilerplate in them, which is exactly why it shipped. This case uses
+        the real thing.
+        """
+        real = (
+            "# Centipede — logic core, slice 1 (mushroom field, centipede "
+            "movement, split-on-hit)\n"
+            "\n"
+            "This targets an **existing** repository, not a greenfield project. "
+            "The Mac runner has it registered as `centipede` "
+            "(`~/Dev/Metal/Centipede`, default branch `main`), and it already "
+            "contains a working SwiftPM scaffold with a green test baseline:\n"
+        )
+        q = executor.spec_memory_query(real)
+        assert q.startswith("Centipede")
+        for leaked in ("SwiftPM", "greenfield", "Mac runner", "default branch",
+                       "repository", "baseline"):
+            assert leaked not in q, f"process boilerplate {leaked!r} reached the query"
+
     def test_spec_query_handles_empty_input(self):
         assert executor.spec_memory_query("") == ""
 

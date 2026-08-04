@@ -976,9 +976,26 @@ def _render_plan_constraints(plan_yaml: str) -> "str | None":
 # under the truncation limit — that is the whole point.
 _MEMORY_QUERY_MAX_CHARS = 600
 
-
 def spec_memory_query(spec_md: str) -> str:
-    """The spec's title and opening prose — what the design is *about*."""
+    """The spec's TITLE — the one line that says what this work is about.
+
+    Deliberately NOT the opening paragraph (DEV-494). That paragraph is mostly
+    process boilerplate — "targets an existing repository, not a greenfield
+    project", "the Mac runner has it registered as", "contains a working SwiftPM
+    scaffold with a green test baseline" — and that generic engineering prose is
+    what retrieval latches onto. The Centipede spec pulled MTLPipelineOption,
+    MTLPipelineOptionNone and addComputePipelineFunctions into a design about
+    mushroom fields at distance 0.508, i.e. more confidently than most genuine
+    matches score.
+
+    Measured against the live collection: the title alone returns nothing for
+    that spec (correct — a corpus of Apple API docs holds nothing about
+    centipede movement), while "Make the Stop button actually cancel MLX
+    generation" returns cancelAction and cancel(_:action:). Adding the paragraph
+    back is what produces the noise; it was never the path or the title.
+
+    Falls back to the opening prose only when a spec has no heading at all.
+    """
     title = ""
     body: list[str] = []
     for line in spec_md.splitlines():
@@ -990,9 +1007,10 @@ def spec_memory_query(spec_md: str) -> str:
         if stripped.startswith("#"):
             if not title:
                 title = stripped.lstrip("#").strip()
+                break
             continue
         body.append(stripped)
-    return " ".join(filter(None, [title, " ".join(body)]))[:_MEMORY_QUERY_MAX_CHARS]
+    return (title or " ".join(body))[:_MEMORY_QUERY_MAX_CHARS]
 
 
 def file_memory_query(entry: "ManifestEntry") -> str:
