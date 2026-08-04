@@ -392,13 +392,19 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
         base_system_prompt = system_prompt
 
         model_config = agent_config['model_config']
-        # Known BEFORE retrieval on purpose: `_build_openai_messages` drops
-        # the agent system prompt — including any RAG block — whenever the
-        # client supplies its own system message, so retrieval for such a
-        # request burns the embedding encode + HNSW query (up to its 2s cap,
-        # exactly during prefill) for a context that can never ship, while
-        # logging that it was injected (DEV-350). Third-party OpenAI clients
-        # all send their own system message and can't know skip_memory.
+        # `_build_openai_messages` drops the agent system prompt whenever the
+        # client supplies its own, so a RAG block appended to that prompt goes
+        # off the wire with it. DEV-350 responded by skipping retrieval for such
+        # requests — correct at the time, but it silently nullified RAG for the
+        # ENTIRE autonomous pipeline: all 8 executor call sites send their own
+        # system message, so retrieval was skipped before skip_memory was ever
+        # read, and AUTONOMOUS_MEMORY_ROLES became dead config (9 architect
+        # calls logged rag=on, 0 injected anything — DEV-488).
+        #
+        # So retrieve either way and fold the block into the caller's own
+        # system message below, exactly as the budget guidance already does.
+        # skip_memory is now the single control over whether RAG runs, which is
+        # what callers were already setting it for.
         client_has_system = (
             bool(request.messages) and request.messages[0].role == "system"
         )
@@ -407,11 +413,9 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
         # its latency serially instead of hiding it under the
         # tens-of-seconds model load (DEV-150). Start it now, await it after
         # ensure_running: the two overlap on worker threads.
-        rag_task = None
-        if not client_has_system:
-            rag_task = asyncio.ensure_future(
-                _maybe_inject_rag_context(system_prompt, request)
-            )
+        rag_task = asyncio.ensure_future(
+            _maybe_inject_rag_context(system_prompt, request)
+        )
         # ensure_running holds _swap_lock across a SIGTERM wait, a VRAM-release
         # poll, and a /health loop that time.sleeps — up to ~140s of blocking
         # work. On the event-loop thread that freezes the whole process:
@@ -432,13 +436,10 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
                 agent_id=model_name, reserve_slot=True,
             )
         except BaseException:
-            if rag_task is not None:
-                rag_task.cancel()
+            rag_task.cancel()
             raise
         reservation_held = True
-        rag_suffix = ""
-        if rag_task is not None:
-            system_prompt, rag_suffix = await rag_task
+        system_prompt, rag_suffix = await rag_task
 
         n_ctx = model_config.get('n_ctx', 32768)
         # Estimate what actually reaches llama-server (client_has_system was
@@ -446,7 +447,10 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
         # system message, _build_openai_messages drops the agent prompt (and
         # its RAG block) off the wire, so neither is counted here.
         effective_system = "" if client_has_system else base_system_prompt
-        effective_rag = "" if client_has_system else rag_suffix
+        # The RAG block ships either way now (folded into the caller's system
+        # message when they sent one), so it is always counted — still counted
+        # separately from the base prompt to keep the tokenize cache warm.
+        effective_rag = rag_suffix
         # The budget guidance ships either way, but it can't ride the agent
         # system prompt when that prompt is about to be dropped — which is the
         # case for every programmatic caller (the whole autonomous pipeline).
@@ -473,8 +477,14 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
             # Append, so the caller's task prompt still leads and the marker
             # formats it depends on (<<<YAML>>>, <<<DESIGN>>>, <<<FILE:>>>)
             # keep their position. Still exactly one system message on the wire.
+            #
+            # rag_suffix rides here for the same reason the guidance does: the
+            # agent prompt it would otherwise ride is about to be dropped, and a
+            # second system message is not an option. Retrieved memories go
+            # before the guidance so the budget line stays last, nearest
+            # generation. rag_suffix is "" whenever nothing was retrieved.
             request.messages[0].content = (
-                f"{request.messages[0].content}\n{budget_guidance}"
+                f"{request.messages[0].content}{rag_suffix}\n{budget_guidance}"
             )
             augmented_system = system_prompt  # dropped downstream; kept for clarity
         else:
