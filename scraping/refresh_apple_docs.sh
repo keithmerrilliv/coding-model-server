@@ -44,14 +44,45 @@ echo "=== refresh started $(date '+%F %T') -> $WORK ==="
 
 PY="$REPO/venv/bin/python"
 [ -x "$PY" ] || PY=python3
-KEY="$(grep -m1 '^ADMIN_API_KEY=' "$REPO/.env" 2>/dev/null | cut -d= -f2-)"
-if [ -z "$KEY" ]; then echo "!! no ADMIN_API_KEY; aborting"; exit 2; fi
+# Prefer an inherited key so this is callable from a machine whose local .env
+# has no ADMIN_API_KEY (the Mac's holds runner settings, not the server's).
+KEY="${ADMIN_API_KEY:-$(grep -m1 '^ADMIN_API_KEY=' "$REPO/.env" 2>/dev/null | cut -d= -f2-)}"
+if [ -z "$KEY" ]; then
+  echo "!! no ADMIN_API_KEY in the environment or $REPO/.env; aborting"
+  exit 2
+fi
 
 CAPS=(
   "Metal:4200" "MetalKit:300" "MetalFX:400" "MetalPerformanceShaders:1200"
   "CompositorServices:500" "RealityKit:6300" "ARKit:2400" "ModelIO:800"
   "SwiftUI:8700" "Swift:3000" "Foundation:3000"
+  # Developer tooling. Small, and disproportionately useful: these are prose
+  # guides rather than symbol stubs, so --skip-stubs keeps nearly all of them.
+  # The Xcode tree alone carries 42 Metal/GPU tooling pages — the Metal
+  # debugger, workload analysis, shader inspection, the Performance HUD, and
+  # "Validating your app's Metal API/shader usage", which is the class of
+  # knowledge an agent needs to diagnose a failing Metal build rather than
+  # guess. Sized from the index at x0.7 fetchable x1.15 margin.
+  "Xcode:500" "XCTest:600" "Testing:400" "PackageDescription:600"
+  "Xcode-Release-Notes:100"
 )
+
+# Optional framework filter: `refresh_apple_docs.sh Metal XCTest` refreshes
+# only those, reusing the same gate and delete-then-ingest path. This is what
+# the client's /scrape command calls.
+if [ $# -gt 0 ]; then
+  SEL=()
+  for want in "$@"; do
+    for c in "${CAPS[@]}"; do
+      [ "${c%%:*}" = "$want" ] && SEL+=("$c")
+    done
+    # Unknown name: pass it through with the default cap rather than silently
+    # dropping it, so a typo surfaces as a tiny/empty harvest, not as silence.
+    case " ${SEL[*]} " in *" $want:"*) ;; *) SEL+=("$want:1500");; esac
+  done
+  CAPS=("${SEL[@]}")
+  echo "  framework filter: ${CAPS[*]}"
+fi
 
 INGEST_BATCH="apple-docs-$(date +%Y-%m-%d)" \
   "$PY" "$SCRIPT_DIR/scrape_apple_docs_json.py" \

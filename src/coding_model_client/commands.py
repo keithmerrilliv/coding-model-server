@@ -123,13 +123,22 @@ def handle_user_command(user_input, history, model, agent_theme):
         framework_arg = ""
         if len(parts) > 1 and parts[1].strip():
             framework_arg = f" {parts[1].strip()}"
-            print_colored(f"Starting documentation scraper for '{parts[1].strip()}' on the server...", COLORS['CYAN'])
+            print_colored(f"Refreshing documentation for '{parts[1].strip()}' (crawl, then replace in the RAG)...", COLORS['CYAN'])
         else:
-            print_colored("Starting Metal documentation scraper on the server...", COLORS['CYAN'])
-        # scraping/main.py has never existed — /scrape failed 100% of the
-        # time (DEV-165). scrape_all_apple_frameworks.py is the real entry
-        # point and takes optional framework names as argv.
-        scrape_cmd = f"cd scraping && python3 scrape_all_apple_frameworks.py{framework_arg}"
+            print_colored("Refreshing ALL Apple documentation — this crawls ~30k pages and takes hours.", COLORS['WARNING'])
+        # /scrape has been broken twice. scraping/main.py never existed, so it
+        # failed 100% of the time (DEV-165); the replacement pointed here at
+        # scrape_all_apple_frameworks.py, which imported four scrapers needing
+        # a `cupertino` binary that cannot be installed as documented and an
+        # `mcp_client` module that was never in the repo — so it also could not
+        # work, just less visibly (DEV-471).
+        #
+        # refresh_apple_docs.sh is the real entry point: it crawls Apple's own
+        # documentation JSON, then REPLACES each framework in the collection
+        # (delete where framework=X, then ingest X) rather than appending, and
+        # refuses to publish a harvest that collapsed against the last run.
+        # Naming a framework refreshes just that one.
+        scrape_cmd = f"./scraping/refresh_apple_docs.sh{framework_arg}"
         result = _tool_handlers.execute_remote_command(scrape_cmd)
         print_colored(f"\n{result}\n", COLORS['GREEN'])
         return True, model

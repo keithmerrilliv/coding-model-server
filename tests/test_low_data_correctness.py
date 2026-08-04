@@ -213,9 +213,17 @@ def test_scrape_command_targets_a_real_script():
     cmd_lines = [ln for ln in src.splitlines() if "scrape_cmd = " in ln]
     assert cmd_lines, "the /scrape command builder disappeared"
     assert "main.py" not in cmd_lines[0], "the phantom entry point must be gone"
-    assert "scrape_all_apple_frameworks.py" in cmd_lines[0]
+    # DEV-471: the DEV-165 replacement, scrape_all_apple_frameworks.py, was
+    # itself non-functional — it imported four scrapers needing a `cupertino`
+    # binary installable on neither machine and an `mcp_client` module never
+    # present in the repo, and swallowed both failures. /scrape now calls the
+    # refresh script, which crawls Apple's own documentation JSON and replaces
+    # each framework in the RAG rather than appending.
+    assert "refresh_apple_docs.sh" in cmd_lines[0]
     repo_root = pathlib.Path(commands.__file__).resolve().parents[2]
-    assert (repo_root / "scraping" / "scrape_all_apple_frameworks.py").is_file()
+    entry = repo_root / "scraping" / "refresh_apple_docs.sh"
+    assert entry.is_file(), "the /scrape entry point must exist"
+    assert entry.stat().st_mode & 0o111, "it is invoked directly, so it must be executable"
 
 
 def test_importing_client_config_does_not_configure_root_logging():

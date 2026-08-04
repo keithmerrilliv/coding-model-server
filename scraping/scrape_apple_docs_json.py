@@ -52,6 +52,16 @@ DEFAULT_FRAMEWORKS = [
     "Metal", "MetalKit", "MetalFX", "MetalPerformanceShaders",
     "CompositorServices", "RealityKit", "ARKit", "ModelIO",
     "Swift", "SwiftUI", "Foundation",
+    # Developer tooling. Small trees but high value, and mostly prose guides
+    # rather than symbol stubs. The Xcode tree carries 42 Metal/GPU tooling
+    # pages: the Metal debugger, capturing and replaying GPU traces, shader
+    # inspection and debugging, workload analysis, the Performance HUD, and
+    # "Validating your app's Metal API/shader usage" — what an agent needs to
+    # diagnose a failing Metal build instead of guessing. XCTest and Testing
+    # matter because the pipeline writes tests; Swift Testing especially,
+    # being new enough that model training data is thin. PackageDescription
+    # because the specs are SwiftPM packages.
+    "Xcode", "XCTest", "Testing", "PackageDescription", "Xcode-Release-Notes",
 ]
 
 

@@ -5,7 +5,16 @@
 # Usage:  ./run_all_ingestion.sh [server_ip]
 #   server_ip defaults to CODING_MODEL_SERVER_IP env var, then 192.168.50.101
 #
-# The database should be cleared before running this.
+# DO NOT clear the database before running this. That instruction used to live
+# here, and combined with scrapers that exited zero while producing nothing
+# (DEV-471) it was one command away from wiping the collection and repopulating
+# it with almost nothing.
+#
+# Apple documentation is NOT handled here any more. It has its own path that
+# replaces per framework instead of appending, and refuses to publish a
+# collapsed harvest:  scraping/refresh_apple_docs.sh  (run weekly by
+# coding-model-apple-docs-refresh.timer). The stages below cover local code,
+# sample code and Xcode docs only.
 # All stages run in parallel since they use independent data sources.
 # Each stage logs to its own file.
 # =============================================================================
@@ -83,11 +92,15 @@ python3 "$SCRIPT_DIR/ingest_intelligent.py" > "$LOG_DIR/local-dev-intelligent.lo
 STAGE_NAMES+=("local-dev-intelligent"); STAGE_PIDS+=($!); STAGE_LOGS+=("$LOG_DIR/local-dev-intelligent.log")
 
 # =============================================================================
-# STAGE 2: Apple Documentation Scraping (web)
+# STAGE 2: Apple Documentation — REMOVED (DEV-471)
 # =============================================================================
-echo -e "  Starting: ${YELLOW}apple-docs-scrape${NC}"
-python3 "$SCRIPT_DIR/scrape_apple_deep.py" > "$LOG_DIR/apple-docs-scrape.log" 2>&1 &
-STAGE_NAMES+=("apple-docs-scrape"); STAGE_PIDS+=($!); STAGE_LOGS+=("$LOG_DIR/apple-docs-scrape.log")
+# This ran scrape_apple_deep.py, which fetched nine hardcoded developer.apple.com
+# HTML URLs, swallowed every error in a bare `except Exception`, and printed
+# "Mission Complete" regardless. Its Metal/RealityKit coverage is superseded by
+# scrape_apple_docs_json.py, which walks Apple's documentation JSON with real
+# provenance; its Vision URLs are the only thing lost, and Vision can be added
+# to the framework list if wanted.
+echo -e "  Skipping: apple-docs-scrape — use scraping/refresh_apple_docs.sh"
 
 # =============================================================================
 # STAGE 3: Apple Sample Code Index (web)
