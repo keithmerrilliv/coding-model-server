@@ -22,9 +22,14 @@ function initMermaidOnce(): void {
     flowchart: {
       curve: "basis",
       htmlLabels: true,
-      // Vertical density — the DAGs we render are tall not wide.
+      // LR layout (DEV-439), so the axes are the opposite of what these
+      // names suggest at a glance: nodeSpacing is the vertical gap
+      // between siblings sharing a rank, rankSpacing the horizontal gap
+      // between successive pipeline steps. Rank gets the larger value —
+      // node labels are multi-line (role, agent, duration), so adjacent
+      // steps need room for the edge label between them.
       nodeSpacing: 30,
-      rankSpacing: 40,
+      rankSpacing: 60,
     },
   });
   mermaidInitialised = true;
@@ -51,6 +56,19 @@ const ExecutionDag: React.FC<ExecutionDagProps> = ({ detail }) => {
       .then(({ svg }) => {
         if (cancelled || !containerRef.current) return;
         containerRef.current.innerHTML = svg;
+
+        // Mermaid emits width="100%" plus an inline max-width of the
+        // graph's natural size. Under LR that makes a long chain scale
+        // itself down to the card width — legible at 4 nodes, unreadable
+        // at 14 — and .execution-dag-svg's overflow-x never engages.
+        // Dropping the width attribute lets the viewBox supply the
+        // natural width so the container scrolls instead (DEV-439).
+        const svgEl = containerRef.current.querySelector("svg");
+        if (svgEl) {
+          svgEl.removeAttribute("width");
+          svgEl.style.maxWidth = "none";
+        }
+
         setErrorText(null);
       })
       .catch((err: unknown) => {
