@@ -1,8 +1,12 @@
 import importlib.util
 
-# Validate that ddgs is available
+# Validate that ddgs is available. Name the package we actually check for:
+# `duckduckgo_search` is the pre-rename project and provides a module of
+# that name, so the old hint left this exact error in place (DEV-436).
 if importlib.util.find_spec("ddgs") is None:
-    raise ImportError("ddgs package is not installed. Please install it with: pip install duckduckgo_search")
+    raise ImportError(
+        "ddgs package is not installed. Please install it with: pip install ddgs"
+    )
 
 import logging
 from ddgs import DDGS
