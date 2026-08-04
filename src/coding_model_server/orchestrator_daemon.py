@@ -1229,6 +1229,15 @@ def _diagnostic_messages(notes: str) -> set:
         return set()
     msgs = set()
     for line in notes.splitlines():
+        # Only diagnostics that name a file:line say anything about the code.
+        # Bare driver lines — `error: fatalError`, `error: emit-module command
+        # failed…` — appear in essentially every failed build regardless of
+        # cause: "fatalError" was present in 5 of 5 of spec_cc7dd609's build
+        # failures. Counting them made every pair of consecutive failures look
+        # like the same unfixable defect, which sent a perfectly good design
+        # back for revision on no evidence at all.
+        if not _ATTRIBUTED_ERROR_RE.search(line):
+            continue
         match = _SIG_ERROR_RE.search(line)
         if not match:
             continue
