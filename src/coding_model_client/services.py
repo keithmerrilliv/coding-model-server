@@ -310,107 +310,6 @@ def web_search(query):
     except Exception as e:
         return f"Error searching: {str(e)}"
 
-
-# ---------------------------------------------------------------------------
-# Apple documentation (Cupertino MCP)
-# ---------------------------------------------------------------------------
-
-class CupertinoMCPClient(StdioJsonRpcClient):
-    """Client for interacting with the Cupertino MCP server on macOS.
-
-    Transport (reader/writer threads, response demux, fail-all-on-death) comes
-    from the shared StdioJsonRpcClient (DEV-146). This copy previously had a
-    hand-rolled reader but NO writer thread and no bounded handshake read, so
-    a wedged child could block callers on the stdin write — the drift the
-    extraction exists to end.
-    """
-
-    # 2 min. A wait, not a lock hold, so a slow request doesn't block others.
-    MAX_TOTAL_WALL_TIME = 120
-
-    def __init__(self):
-        super().__init__("cupertino-mcp")
-
-    def _spawn(self):
-        cupertino_path = subprocess.check_output(
-            ["which", "cupertino"], text=True).strip()
-        if not cupertino_path:
-            return None
-        # No synchronous handshake here (unlike Apple Deep Docs), so the base
-        # hands stdout straight to the reader.
-        return subprocess.Popen(
-            [cupertino_path, "serve"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            bufsize=1,
-        )
-
-    def start(self):
-        ok = super().start()
-        if not ok and self.process is None:
-            print_colored("Error starting Cupertino MCP: not found or failed to start",
-                          COLORS['FAIL'])
-        return ok
-
-    def stop(self):
-        # Shorter terminate grace than the default: this is a CLI exiting.
-        super().stop(term_timeout=2)
-
-    def _send_request(self, method, params):
-        """Send a JSON-RPC request and return its `result`, or {"error": ...}."""
-        try:
-            response = self.request(method, params)
-        except StdioRpcError as e:
-            if e.kind == "start":
-                return {"error": "Cupertino MCP not found or failed to start"}
-            if e.kind == "timeout":
-                return {"error": "Cupertino MCP response not received within "
-                                 f"{self.MAX_TOTAL_WALL_TIME}s"}
-            if e.kind == "died":
-                return {"error": "Cupertino MCP server process exited unexpectedly."}
-            return {"error": f"Communication error: {e}"}
-        return response.get("result", {})
-
-    def search(self, query):
-        """Search Apple documentation using the MCP tool."""
-        params = {"name": "search_docs", "arguments": {"query": query}}
-        return self._send_request("tools/call", params)
-
-    def read_resource(self, uri):
-        """Read a specific documentation resource."""
-        return self._send_request("resources/read", {"uri": uri})
-
-
-cupertino_client = CupertinoMCPClient()
-atexit.register(cupertino_client.stop)
-
-
-def handle_cupertino_search(query):
-    """Execute search via Cupertino MCP and save to server memory."""
-    print_colored(f"Searching Apple Documentation for: {query}...", COLORS['BLUE'])
-    result = cupertino_client.search(query)
-    if "error" in result:
-        error_msg = f"Cupertino Error: {result['error']}"
-        print_colored(error_msg, COLORS['FAIL'])
-        return error_msg
-
-    content_list = result.get("content", [])
-    text_results = []
-    for item in content_list:
-        if item.get("type") == "text":
-            text_results.append(item.get("text", ""))
-
-    combined_results = "\n\n".join(text_results)
-    if not combined_results:
-        return "No documentation found for that query."
-
-    print_colored("Saving retrieved documentation to server memory...", COLORS['CYAN'])
-    save_memory(f"Apple Documentation ({query}):\n{combined_results[:5000]}")
-    return f"Retrieved Apple Documentation for '{query}':\n\n{combined_results}"
-
-
 # ---------------------------------------------------------------------------
 # Apple Deep Docs (server-side MCP)
 # ---------------------------------------------------------------------------
@@ -430,6 +329,24 @@ def handle_apple_deep_docs(payload_str):
     except Exception as e:
         logger.error("Error handling Apple Deep Docs: %s", str(e))
         return f"Error handling Apple Deep Docs: {str(e)}"
+
+
+def apple_deep_docs_list():
+    """List the MCP server's available tools (GET on the same endpoint).
+
+    Exists because the tool names were undiscoverable: POST requires a `tool`
+    and nothing published the valid values, so the whole service looked dead
+    (DEV-480).
+    """
+    try:
+        response = _SESSION.get(config.DEEP_DOCS_API_URL,
+                                headers=config.auth_headers,
+                                timeout=config.LONG_REQUEST_TIMEOUT)
+        if response.status_code == 200:
+            return response.json().get("result", "No tools reported")
+        return f"Error listing tools: HTTP {response.status_code}"
+    except Exception as e:
+        return f"Error listing tools: {e}"
 
 
 def apple_deep_docs_search(tool, args):

@@ -25,7 +25,7 @@ from coding_model_server.tool_handlers.shell import execute_remote_command
 
 # Tools that reach the network. Whatever the agent read this turn can leave the
 # machine through one of these, so they get an approval gate at dispatch time.
-# CUPERTINO / APPLE_DEEP_DOCS also egress, but only to fixed Apple documentation
+# APPLE_DEEP_DOCS also egresses, but only to fixed Apple documentation
 # endpoints — they carry no attacker-chosen destination, so they are not gated.
 _OUTBOUND_FETCH_TAGS = frozenset({'WEB_SEARCH', 'DEEP_INGEST'})
 
@@ -175,7 +175,6 @@ def process_remote_commands(response_text: str) -> Optional[str]:
         'GREP':           lambda arg: grep_search(arg),
         'SAVE_MEMORY':    lambda arg: state.external_handlers['save_memory'](arg.strip()),
         'WEB_SEARCH':     lambda arg: state.external_handlers['web_search'](arg.strip()),
-        'CUPERTINO':      lambda arg: state.external_handlers['handle_cupertino_search'](arg.strip()),
         'APPLE_DEEP_DOCS': lambda arg: state.external_handlers['handle_apple_deep_docs'](arg.strip()),
         'INGEST_PDF':     lambda arg: ingest_pdf_content(arg),
         'DEEP_INGEST':    lambda arg: state.external_handlers['ingest_url_content'](arg.strip()),

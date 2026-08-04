@@ -160,6 +160,43 @@ class AppleDeepDocsService(StdioJsonRpcClient):
             return "\n\n".join(text_parts)
         return json.dumps(result, indent=2)
 
+    def list_tools(self) -> str:
+        """Return the MCP server's tool catalogue as readable text.
+
+        Without this the service was effectively unusable despite working: the
+        endpoint requires a `tool` name, and nothing anywhere listed the valid
+        names. Every guess came back "Unknown tool", which is exactly why this
+        service was mistaken for dead during the DEV-471 audit (DEV-480).
+
+        `tools/list` is standard MCP, and the transport already speaks the
+        sibling `tools/call`.
+        """
+        try:
+            response = self.request("tools/list", {})
+        except StdioRpcError as e:
+            if e.kind == "start":
+                return "Error: Apple Deep Docs MCP server failed to start."
+            if e.kind == "timeout":
+                return (f"Error: MCP server response not received within "
+                        f"{self.MAX_TOTAL_WALL_TIME}s.")
+            if e.kind == "died":
+                return "Error: MCP server process exited unexpectedly."
+            return f"Error: Could not list tools: {e}"
+
+        tools = (response.get("result") or {}).get("tools") or []
+        if not tools:
+            return "No tools reported by the Apple Deep Docs MCP server."
+        lines = ["Apple Deep Docs MCP — %d tools:" % len(tools)]
+        for t in tools:
+            name = t.get("name", "?")
+            desc = (t.get("description") or "").strip().splitlines()
+            first = desc[0] if desc else ""
+            lines.append("  %-34s %s" % (name, first[:110]))
+            props = ((t.get("inputSchema") or {}).get("properties") or {})
+            if props:
+                lines.append("      args: %s" % ", ".join(sorted(props)))
+        return "\n".join(lines)
+
 
 # Global instance for CLI / shared use
 _instance = None
