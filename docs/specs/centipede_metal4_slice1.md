@@ -150,12 +150,19 @@ These belong to later slices. Implementing them here is a scope violation, not a
     required: true
     repo: centipede
     base_ref: main
+    protected_paths:
+      - Sources/CentipedeCore/GameState.swift
+      - Tests/CentipedeCoreTests/GameStateTests.swift
     notes: |
       Runs on the Mac runner via `swift test` against the registered `centipede` repo.
       The suite must pass headlessly: no GPU, no window server, no network. The runner
       executes it confined by sandbox-exec, so anything reaching outside the worktree and
       its build directories will fail. Keep every test in CentipedeCore's test target;
       there is no app target and no xcodebuild path in this slice.
+
+      `protected_paths` names the two scaffold files this spec puts off-limits. They are
+      never sent to the runner, so the worktree keeps the `main` version of each — write
+      to them and your version is discarded, not merged.
 
 ## Risks
 
