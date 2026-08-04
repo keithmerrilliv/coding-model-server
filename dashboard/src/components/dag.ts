@@ -2,8 +2,9 @@
 //
 // The autonomous pipeline isn't strictly DAG (retries loop back), so we
 // linearise it by chronological order and draw retry-loop edges as
-// dashed back-edges. The output is "flowchart TD" so the result reads
-// top-to-bottom in the rendered graph.
+// dashed back-edges. The output is "flowchart LR" so the result reads
+// left-to-right in the rendered graph (DEV-439) — the pipeline is a long
+// mostly-linear chain, which is a wide strip rather than a tall column.
 //
 // Note on data shape: Tasks correspond to architect / implementer /
 // reviewer / supervisor steps. The planner is implicit (no Task row);
@@ -116,7 +117,7 @@ export function buildDagDefinition(data: SpecDetailResponse): string {
   const events = data.recent_events || [];
 
   if (tasks.length === 0 && gates.length === 0) {
-    return "flowchart TD\n  empty[\"no tasks or gates yet\"]";
+    return "flowchart LR\n  empty[\"no tasks or gates yet\"]";
   }
 
   // Sort everything chronologically and render as a linear flow with
@@ -127,7 +128,7 @@ export function buildDagDefinition(data: SpecDetailResponse): string {
   ];
   entities.sort((a, b) => a.ts.localeCompare(b.ts));
 
-  const lines: string[] = ["flowchart TD"];
+  const lines: string[] = ["flowchart LR"];
   // Style classes for status colouring.
   lines.push(
     "  classDef done fill:#1e3a2e,stroke:#4ade80,color:#bbf7d0",
