@@ -37,7 +37,10 @@ def save_memory_endpoint(request: MemoryRequest):
         if request.source:
             result = runtime.services.memory.add_memory_chunked(request.text, source=request.source)
         else:
-            result = runtime.services.memory.add_memory(request.text)
+            # `source` routes to the tree-sitter CODE chunker, which is wrong
+            # for prose. Doc scrapers therefore send prose via this branch and
+            # carry provenance in `metadata` instead.
+            result = runtime.services.memory.add_memory(request.text, metadata=request.metadata)
 
         if "error" in result:
             raise HTTPException(status_code=500, detail=result["error"])

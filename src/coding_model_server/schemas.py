@@ -3,7 +3,7 @@
 Extracted from server.py so the route modules and the app wiring can share one
 schema source. Pure data definitions — no app, no services, no side effects.
 """
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -148,6 +148,14 @@ class MemoryRequest(BaseModel):
     """Request to save a memory"""
     text: str = Field(..., max_length=200_000)  # ~100KB, matches client file-size cap
     source: Optional[str] = None  # file path hint for language detection
+    # Free-form provenance stored alongside the chunk. Without this every
+    # HTTP ingest was stamped source="manual" by add_memory's defaults, which
+    # is why ~89% of the collection cannot be attributed to a framework, URL
+    # or SDK version and so cannot be selectively refreshed. Keys collide with
+    # and override the defaults (source/date/timestamp), which is intended:
+    # a doc scraper knows its real source, the default does not.
+    # Chroma only stores scalars, so values are restricted accordingly.
+    metadata: Optional[Dict[str, Union[str, int, float, bool]]] = None
 
 
 class SearchRequest(BaseModel):
