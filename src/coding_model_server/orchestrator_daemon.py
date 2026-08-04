@@ -1067,6 +1067,67 @@ def _load_prior_manifest_run(spec_dir, retry_count: int):
     return entries, prior_files
 
 
+# DEV-434: how many consecutive attempts may repeat the same diagnostics before
+# the targeted retry gives up and regenerates everything. 1 means "the second
+# identical failure widens".
+TARGETED_RETRY_MAX_REPEATS = int(
+    os.getenv("AUTONOMOUS_TARGETED_RETRY_MAX_REPEATS", "1"))
+
+# Absolute worktree paths differ per dispatch (…/worktrees/spec_x-7f8a8795/…),
+# and line numbers move as the file is rewritten. Neither changes what the
+# defect IS, so both are stripped before comparing two failures.
+_SIG_PATH_RE = re.compile(r"(/\S+?/)?([\w.+-]+\.\w+):\d+:\d+:")
+_SIG_ERROR_RE = re.compile(r"error: (.+)")
+
+
+def _failure_signature(notes: str) -> str:
+    """Order- and location-independent fingerprint of a failure's diagnostics.
+
+    Two attempts that produce the same set of error messages have the same
+    signature even if the paths, line numbers and ordering differ.
+    """
+    if not notes:
+        return ""
+    msgs = set()
+    for line in notes.splitlines():
+        match = _SIG_ERROR_RE.search(line)
+        if not match:
+            continue
+        msg = _SIG_PATH_RE.sub(r"\2:", match.group(1).strip())
+        if msg:
+            msgs.add(msg)
+    return "|".join(sorted(msgs))
+
+
+def _consecutive_identical_failures(db, spec_id: str, current_notes: str) -> int:
+    """How many prior consecutive attempts failed with the same diagnostics.
+
+    Targeted retry regenerates only the files the compiler *cited*. When the
+    fix lies outside those files — access control, a missing `@testable`, a
+    signature mismatch — the cited files get rewritten forever and the defect
+    never moves. Repetition is the signal that the selection is wrong, not the
+    generation.
+    """
+    sig = _failure_signature(current_notes)
+    if not sig:
+        return 0
+    gates = [g for g in db.list_gates_for_spec(spec_id, GateType.CODE_REVIEW)
+             if g.status is GateStatus.REJECTED and g.reviewer_notes]
+    newest_first = list(reversed(gates))
+    # Skip at most ONE gate — the one carrying the notes we were handed.
+    # Skipping every gate whose text matches would discard the repeats
+    # themselves, since a repeated failure is byte-identical by definition.
+    if newest_first and newest_first[0].reviewer_notes == current_notes:
+        newest_first = newest_first[1:]
+    count = 0
+    for gate in newest_first:
+        if _failure_signature(gate.reviewer_notes) == sig:
+            count += 1
+        else:
+            break
+    return count
+
+
 def _parse_cited_paths(rejection_notes: str, known_paths) -> set:
     """Manifest file paths the reviewer cited in its rejection notes.
 
@@ -1168,6 +1229,42 @@ def _generate_via_manifest(
         if prior is not None:
             entries, prior_files = prior
             cited = _parse_cited_paths(rejection_notes, {e.path for e in entries})
+            widened = False
+
+            # DEV-434: the cited files are the ones the compiler NAMED, which
+            # is not always where the fix belongs. An access-control error, a
+            # missing @testable, a signature mismatch — all of them name the
+            # victim rather than the cause, so regenerating the cited set
+            # rewrites the same files forever while the defect sits elsewhere.
+            # Repetition is the tell, so widen on it rather than looping.
+            repeats = _consecutive_identical_failures(db, spec.id, rejection_notes)
+            if cited and repeats >= TARGETED_RETRY_MAX_REPEATS:
+                logger.warning(
+                    "spec %s: same diagnostics as the previous %d attempt(s) — "
+                    "the fix is not in the cited files; regenerating all %d "
+                    "instead of %d", spec.id, repeats, len(entries), len(cited))
+                db.record_event(
+                    EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
+                    payload={"role": "manifest", "mode": "widened_after_repeat",
+                             "repeats": repeats, "would_have_regenerated": sorted(cited),
+                             "regenerating": len(entries)})
+                cited, widened = set(), True  # full regeneration below
+
+            # DEV-435: a diagnostic with no file:line cannot be attributed, so
+            # the cited set is whatever cascade errors happened to carry a
+            # location — usually the victims. Do not trust it.
+            elif cited and _unattributed_errors(rejection_notes):
+                logger.warning(
+                    "spec %s: build reported an error with no file:line; the "
+                    "cited files may be consequences — regenerating all %d "
+                    "instead of %d", spec.id, len(entries), len(cited))
+                db.record_event(
+                    EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
+                    payload={"role": "manifest", "mode": "widened_unattributed",
+                             "would_have_regenerated": sorted(cited),
+                             "regenerating": len(entries)})
+                cited, widened = set(), True
+
             if cited:
                 logger.info("spec %s: targeted retry — regenerating %d/%d cited "
                             "files: %s", spec.id, len(cited), len(entries),
@@ -1185,8 +1282,9 @@ def _generate_via_manifest(
                 if not isinstance(result, ParseError):
                     _persist_manifest(spec_dir, entries)
                 return result
-            logger.info("spec %s: targeted retry wanted but no cited files matched "
-                        "the manifest — full regeneration", spec.id)
+            elif not widened:
+                logger.info("spec %s: targeted retry wanted but no cited files "
+                            "matched the manifest — full regeneration", spec.id)
 
     # ── Full generation: manifest call + per-file ─────────────────────────────
     meta: dict = {}
