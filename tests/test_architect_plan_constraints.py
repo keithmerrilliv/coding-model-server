@@ -66,11 +66,19 @@ def test_plan_is_stated_as_outranking_the_spec():
     body = _user_message(build_architect_message(
         SPEC, plan_yaml="language: javascript\n"))
     assert "the plan WINS" in body
-    assert body.rstrip().endswith(
+    # The restatement grew a second sentence for DEV-490 (the plan's approved
+    # acceptance_criteria supersede the spec's). Recency is what this test
+    # protects, so assert the original sentence still follows the spec AND is
+    # still in the closing block — not that it is the literal final character.
+    tail = body.rstrip()[body.rstrip().index(SPEC.strip()) + len(SPEC.strip()):]
+    assert (
         "Honor the approved plan's binding constraints above — where the "
         "specification is ambiguous or suggests an alternative, the plan "
         "is the answer."
-    ), "the constraint is restated after the spec for recency"
+    ) in tail, "the constraint is restated after the spec for recency"
+    assert tail.rstrip().endswith("(DEV-490)."), (
+        "the plan-precedence block must remain the last thing the architect "
+        "reads before it starts writing")
 
 
 def test_dependencies_permitted_renders_the_positive_form():
