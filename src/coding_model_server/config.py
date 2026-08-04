@@ -139,8 +139,8 @@ class Config:
         # agent to burn a turn on a guaranteed empty (the DEV-479 failure).
         '<<<APPLE_DEEP_DOCS>>>{"tool":"NAME","arguments":{}}  — Apple docs (server MCP). Tools:',
         '    search_swift_evolution{feature} | get_swift_evolution_proposal{se_number}  — why a Swift feature exists',
-        '    fetch_apple_documentation{url} | search_apple_online{query,platform} | get_framework_info{framework}',
-        '    search_swift_repos{query} | fetch_github_file{url}  — Apple/swiftlang source',
+        '    fetch_apple_documentation{url}  — parsed page from developer.apple.com',
+        '    fetch_github_file{url}          — file contents from Apple/swiftlang GitHub',
         "<<<INGEST_PDF>>>path                              — ingest a PDF file into memory (supports local: prefix for client files)",
         "<<<SCRATCHPAD>>>                                  — update your working memory (FACTS, OPEN_QUESTIONS, DEAD_ENDS)",
         "<<<PLAN>>>                                        — create/update your retrieval plan (GOAL, STEPS with [x]/[ ], CURRENT)",

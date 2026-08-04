@@ -26,18 +26,24 @@ def _reference_text():
     pytest.skip("TOOL_REFERENCE not found on Config")
 
 
-# Tools verified to return CONTENT through /v1/tools/apple_deep_docs.
+# Tools verified to return CONTENT, by calling every one of the MCP's 15
+# through /v1/tools/apple_deep_docs. Only these four do.
 WORKING = {
-    "search_swift_evolution", "get_swift_evolution_proposal",
-    "fetch_apple_documentation", "search_apple_online", "get_framework_info",
-    "search_swift_repos", "fetch_github_file",
+    "search_swift_evolution",       # structured proposals
+    "get_swift_evolution_proposal", # full proposal detail
+    "fetch_apple_documentation",    # parsed developer.apple.com page
+    "fetch_github_file",            # actual file contents
 }
 
-# Present on the MCP but useless to an agent: the first four return
-# {"search_urls": ...} rather than text, and the rest read Xcode's on-disk docs
-# and return [] on the Linux host. Naming any of these would point an agent at a
-# guaranteed empty.
+# Present on the MCP but useless to an agent. Three groups, all verified:
+#   - return {"search_urls": ...} or a bare URL, never text: search_swift_repos,
+#     search_apple_online, get_framework_info, the WWDC pair, the HIG pair
+#   - read Xcode's on-disk docs, so [] on the Linux host: the four *_docs /
+#     *_document / get_xcode_versions tools
+# Naming any of them points an agent at a guaranteed empty, which is the turn
+# <<<CUPERTINO>>> used to waste.
 NOT_AGENT_USABLE = {
+    "search_swift_repos", "search_apple_online", "get_framework_info",
     "search_wwdc_notes", "get_wwdc_session",
     "search_human_interface_guidelines", "list_human_interface_guidelines_platforms",
     "search_docs", "get_document", "list_documents", "get_xcode_versions",
