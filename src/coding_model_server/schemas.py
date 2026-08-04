@@ -66,6 +66,15 @@ class ChatCompletionRequest(BaseModel):
     # semantic search of "## Specification\n\n# Roman numeral converter…"
     # mostly retrieves noise). Default False preserves chat behavior.
     skip_memory: bool = False
+    # What to retrieve ON, when the last user message is the wrong query.
+    # Retrieval embeds the last user message by default, but all-MiniLM-L6-v2
+    # truncates at 256 tokens and autonomous prompts are far longer: an
+    # implementer's per-file message leads with the whole spec and design and
+    # ends with the actual ask, so the ask is always discarded and every file
+    # in a project retrieves on the same spec preamble (DEV-489). Callers that
+    # know their real subject pass it here — e.g. the target file's path,
+    # purpose and exports. Falls back to the last user message when unset.
+    memory_query: Optional[str] = None
 
     @field_validator('messages')
     @classmethod

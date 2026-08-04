@@ -97,7 +97,7 @@ def test_per_file_truncation_bails_and_records_agent(db, spec_task):
     calls = {"n": 0}
 
     def fake_call(role, messages, *, agent=None, max_tokens=None,
-                  meta=None, timeout=None):
+                  meta=None, timeout=None, **kwargs):
         calls["n"] += 1
         if calls["n"] == 1:
             return manifest                        # manifest call: clean

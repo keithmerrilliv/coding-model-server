@@ -89,10 +89,16 @@ async def _maybe_inject_rag_context(
     last_user_msg = next(
         (m.content for m in reversed(request.messages) if m.role == 'user'), None
     )
-    if not last_user_msg:
+    # An explicit memory_query wins: the last user message is the right query
+    # for chat, but not for structured callers whose message leads with a whole
+    # spec. all-MiniLM-L6-v2 truncates at 256 tokens, so a long message
+    # retrieves on its opening paragraph and silently discards the actual
+    # request at the end (DEV-489).
+    query = request.memory_query or last_user_msg
+    if not query:
         return system_prompt, ""
     retrieval = asyncio.ensure_future(
-        asyncio.to_thread(memory_service.get_context_string, last_user_msg)
+        asyncio.to_thread(memory_service.get_context_string, query)
     )
     try:
         # shield: the timeout must not mark the task cancelled — the worker
@@ -120,7 +126,7 @@ async def _maybe_inject_rag_context(
         return system_prompt, ""
     if not context:
         return system_prompt, ""
-    logger.info("Injecting memory context for query: %s...", last_user_msg[:50])
+    logger.info("Injecting memory context for query: %s...", query[:50])
     rag_suffix = (
         "\n\n"
         "## Retrieved memories (untrusted reference data)\n\n"

@@ -916,7 +916,8 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
     result = None
     for attempt in range(1, max_attempts + 1):
         meta: dict = {}
-        raw = call_agent("architect", messages, meta=meta)
+        raw = call_agent("architect", messages, meta=meta,
+                         memory_query=executor.spec_memory_query(spec_md))
         _note_truncation(db, spec, task, "architect", meta, executor.ARCHITECT_MAX_TOKENS)
         result = parse_architect_response(raw)
         db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
@@ -1600,6 +1601,7 @@ def _generate_one_file(
             build_per_file_message(spec_md, design_md, manifest_entries, entry,
                                    written_summary, clarifications, rejection_notes),
             agent=chosen_agent, max_tokens=executor.PER_FILE_MAX_TOKENS, meta=meta,
+            memory_query=executor.file_memory_query(entry),
         )
         _note_truncation(db, spec, task, f"per-file:{entry.path}", meta,
                          executor.PER_FILE_MAX_TOKENS)

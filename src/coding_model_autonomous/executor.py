@@ -505,6 +505,7 @@ def call_agent(
     max_tokens: int | None = None,
     timeout: float | None = None,
     meta: Optional[dict] = None,
+    memory_query: str | None = None,
 ) -> str:
     """Call an agent via the coding-model-server inference API.
 
@@ -519,6 +520,12 @@ def call_agent(
         output hit ``max_tokens`` and was cut off mid-stream. The implementer
         path uses this to emit an OUTPUT_TRUNCATED event instead of letting a
         half-written file surface as a bogus reviewer "missing file" FAIL.
+
+    *memory_query* is what RAG retrieves on, for roles that opted in. Without
+    it the server embeds the last user message, which for these prompts leads
+    with the entire spec and design — and the embedding model truncates at 256
+    tokens, so the actual ask at the end never reaches retrieval (DEV-489).
+    Ignored when the role has not opted into memory.
     """
     agent = agent or role_to_agent(role)
     max_tokens = max_tokens or ROLE_TO_MAX_TOKENS.get(role, 8000)
@@ -538,9 +545,15 @@ def call_agent(
     # swap-OOM cancels the whole spec (_start_task catches Exception → task
     # failed → spec FAILED, no rotation). The generous backoff schedule lives
     # in _http._BACKOFFS (Blackwell VRAM release takes 10-30s after exit).
+    # Only sent when the role actually retrieves, so the payload doesn't carry
+    # a query the server would ignore.
+    extra = {}
+    if use_memory and memory_query:
+        extra["memory_query"] = memory_query
     resp = post_chat_completion(
         agent, messages, timeout=timeout, max_tokens=max_tokens,
         temperature=0.2, retry_5xx=True, skip_memory=not use_memory,
+        **extra,
     )
     resp.raise_for_status()
     data = resp.json()
@@ -925,6 +938,44 @@ def _render_plan_constraints(plan_yaml: str) -> "str | None":
         )
         block.extend(f"{i}. {c}\n" for i, c in enumerate(clarifications, 1))
     return "".join(block).rstrip()
+
+
+# ── RAG retrieval queries ────────────────────────────────────────────────────
+#
+# The server embeds the last user message by default, which is right for chat
+# and wrong here: our user messages lead with the whole spec and design, and
+# all-MiniLM-L6-v2 truncates at 256 tokens (~1000 chars). A per-file message is
+# many times that, so the actual ask at the end never reaches retrieval and
+# every file in a project retrieves on the same spec preamble (DEV-489).
+#
+# These build short queries that describe the real subject. Keep them well
+# under the truncation limit — that is the whole point.
+_MEMORY_QUERY_MAX_CHARS = 600
+
+
+def spec_memory_query(spec_md: str) -> str:
+    """The spec's title and opening prose — what the design is *about*."""
+    title = ""
+    body: list[str] = []
+    for line in spec_md.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            if body:
+                break          # first paragraph is enough
+            continue
+        if stripped.startswith("#"):
+            if not title:
+                title = stripped.lstrip("#").strip()
+            continue
+        body.append(stripped)
+    return " ".join(filter(None, [title, " ".join(body)]))[:_MEMORY_QUERY_MAX_CHARS]
+
+
+def file_memory_query(entry: "ManifestEntry") -> str:
+    """The one file being written — path, purpose, and what it exports."""
+    return " ".join(filter(None, [
+        entry.path, entry.purpose, entry.exports,
+    ]))[:_MEMORY_QUERY_MAX_CHARS]
 
 
 def build_architect_message(spec_md: str,
