@@ -1219,14 +1219,14 @@ _SIG_PATH_RE = re.compile(r"(/\S+?/)?([\w.+-]+\.\w+):\d+:\d+:")
 _SIG_ERROR_RE = re.compile(r"error: (.+)")
 
 
-def _failure_signature(notes: str) -> str:
-    """Order- and location-independent fingerprint of a failure's diagnostics.
+def _diagnostic_messages(notes: str) -> set:
+    """The distinct error messages in a failure report, location-stripped.
 
-    Two attempts that produce the same set of error messages have the same
-    signature even if the paths, line numbers and ordering differ.
+    Worktree paths and line numbers move between dispatches without changing
+    what the defect is, so both are removed before comparison.
     """
     if not notes:
-        return ""
+        return set()
     msgs = set()
     for line in notes.splitlines():
         match = _SIG_ERROR_RE.search(line)
@@ -1235,7 +1235,46 @@ def _failure_signature(notes: str) -> str:
         msg = _SIG_PATH_RE.sub(r"\2:", match.group(1).strip())
         if msg:
             msgs.add(msg)
-    return "|".join(sorted(msgs))
+    return msgs
+
+
+def _failure_signature(notes: str) -> str:
+    """Order- and location-independent fingerprint of a failure's diagnostics.
+
+    Two attempts that produce the same set of error messages have the same
+    signature even if the paths, line numbers and ordering differ.
+    """
+    return "|".join(sorted(_diagnostic_messages(notes)))
+
+
+def _persistent_diagnostics(db, spec_id: str, current_notes: str,
+                            *, lookback: int) -> set:
+    """Diagnostics present in this failure AND each of the previous *lookback*.
+
+    Whole-signature equality is too strict to detect an unfixable defect.
+    Verified against spec_cc7dd609's five real build failures: no two
+    consecutive attempts had identical error *sets*, because incidental errors
+    came and went — yet `'mutating' is not valid on instance methods in
+    classes` was present in four of the five, and `cannot assign to property:
+    'type' is a 'let' constant` in four. Those are the design-caused ones, and
+    they are exactly what survives a full regeneration.
+
+    So the signal is an individual message that outlives repeated attempts,
+    not a set that repeats verbatim.
+    """
+    current = _diagnostic_messages(current_notes)
+    if not current or lookback < 1:
+        return set()
+    prior = [g for g in db.list_gates_for_spec(spec_id, GateType.CODE_REVIEW)
+             if g.status is GateStatus.REJECTED and g.reviewer_notes]
+    prior = list(reversed(prior))[:lookback]
+    if len(prior) < lookback:
+        return set()  # not enough history to call anything persistent
+    for gate in prior:
+        current &= _diagnostic_messages(gate.reviewer_notes)
+        if not current:
+            return set()
+    return current
 
 
 def _consecutive_identical_failures(db, spec_id: str, current_notes: str,
@@ -2006,9 +2045,9 @@ def _route_build_failure_to_architect(db: Database, spec: Spec, task, spec_dir,
     MAX_RETRIES, and the implementer's own budget is left untouched, since
     this attempt was not its fault.
     """
-    repeats = _consecutive_identical_failures(db, spec.id, feedback,
-                                              already_recorded=False)
-    if repeats < BUILD_FAILURE_ARCHITECT_THRESHOLD:
+    persistent = _persistent_diagnostics(
+        db, spec.id, feedback, lookback=BUILD_FAILURE_ARCHITECT_THRESHOLD)
+    if not persistent:
         return False
 
     architects = db.list_tasks_for_spec_by_role(spec.id, "architect")
@@ -2016,20 +2055,22 @@ def _route_build_failure_to_architect(db: Database, spec: Spec, task, spec_dir,
     if architect is None:
         return False
     if architect.retry_count >= MAX_RETRIES:
-        logger.warning("spec %s: build failure recurred %d time(s) but the "
-                       "architect is out of revisions (%d/%d) — continuing "
-                       "with the implementer", spec.id, repeats,
+        logger.warning("spec %s: %d diagnostic(s) persist but the architect is "
+                       "out of revisions (%d/%d) — continuing with the "
+                       "implementer", spec.id, len(persistent),
                        architect.retry_count, MAX_RETRIES)
         return False
 
+    survived = "\n".join(f"  - {m}" for m in sorted(persistent))
     note = (
         "## The design cannot be built as written\n\n"
-        f"The implementer has produced the same compiler diagnostics on "
-        f"{repeats + 1} consecutive attempts, across more than one agent. That "
-        f"is not an implementation slip — the implementer is writing what this "
-        f"design specifies, and the design is re-read unchanged each time, so "
-        f"retrying it cannot help.\n\n"
-        f"First diagnostic:\n\n    {build_reason}\n\n"
+        f"These diagnostics have survived {BUILD_FAILURE_ARCHITECT_THRESHOLD + 1} "
+        f"consecutive implementer attempts, across more than one agent, through "
+        f"full regeneration of every file:\n\n{survived}\n\n"
+        "That is not an implementation slip. The implementer is writing what "
+        "this design specifies, and the design is re-read unchanged on every "
+        "attempt, so retrying it cannot help.\n\n"
+        f"First diagnostic this round:\n\n    {build_reason}\n\n"
         "Revise the design so the code it describes can actually compile in "
         "the target language. Check every type signature, access level and "
         "member reference in the document against the language's rules. Change "
@@ -2047,17 +2088,19 @@ def _route_build_failure_to_architect(db: Database, spec: Spec, task, spec_dir,
     db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
                     payload={"role": "implementer",
                              "routed_to": "architect",
-                             "reason": "recurring_build_failure",
-                             "repeats": repeats,
+                             "reason": "persistent_build_diagnostics",
+                             "persistent": sorted(persistent)[:8],
                              "diagnostic": build_reason[:200]})
     db.increment_task_retry(architect.id)
     db.update_task_status(architect.id, TaskStatus.PENDING)
     # The implementer re-runs after the new design; its budget is untouched.
     db.update_task_status(task.id, TaskStatus.PENDING)
-    logger.warning("spec %s: same build failure %d time(s) running — returning "
-                   "to the architect (revision %d/%d) instead of retrying the "
-                   "implementer: %s", spec.id, repeats + 1,
-                   architect.retry_count + 1, MAX_RETRIES, build_reason)
+    logger.warning("spec %s: %d diagnostic(s) survived %d consecutive attempts "
+                   "— returning to the architect (revision %d/%d) instead of "
+                   "retrying the implementer: %s", spec.id, len(persistent),
+                   BUILD_FAILURE_ARCHITECT_THRESHOLD + 1,
+                   architect.retry_count + 1, MAX_RETRIES,
+                   sorted(persistent)[0][:90])
     return True
 
 
