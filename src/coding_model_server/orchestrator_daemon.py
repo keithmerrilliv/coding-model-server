@@ -40,6 +40,7 @@ import threading
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from pathlib import Path
 
 import requests
@@ -120,6 +121,10 @@ from coding_model_autonomous import supervisor as _supervisor
 # ── Configuration ────────────────────────────────────────────────────────────
 
 POLL_INTERVAL = float(os.getenv("ORCHESTRATOR_POLL_INTERVAL", "5"))
+# How often to re-announce gates still waiting on a human (DEV-430). Well
+# above POLL_INTERVAL on purpose: the point is a periodic reminder, not a
+# per-tick log line.
+GATE_REPORT_INTERVAL = float(os.getenv("ORCHESTRATOR_GATE_REPORT_INTERVAL", "300"))
 # Per-spec worker pool size (DEV-393). Small on purpose: agent calls all
 # queue on the same llama-server anyway, so extra workers buy nothing but
 # GPU-queue depth — the win is that cheap state transitions (gate approvals,
@@ -3027,6 +3032,51 @@ def _build_jira_client() -> JiraClient:
     return FakeJiraClient(project_key=project_key)
 
 
+def _gate_age_minutes(gate) -> float:
+    """Minutes since *gate* was created, or 0.0 if the timestamp is unusable."""
+    created = getattr(gate, "created_at", None)
+    if created is None:
+        return 0.0
+    try:
+        if isinstance(created, str):
+            created = datetime.fromisoformat(created)
+        now = datetime.now(created.tzinfo) if created.tzinfo else datetime.now()
+        return max(0.0, (now - created).total_seconds() / 60.0)
+    except (ValueError, TypeError, AttributeError):
+        # An age is a nicety; never let it break the report it decorates.
+        return 0.0
+
+
+def report_open_gates(db: Database, *, startup: bool = False) -> int:
+    """Log every gate waiting on a human; return how many there are (DEV-430).
+
+    A spec blocked on review is otherwise indistinguishable from an idle
+    daemon: the blocked-on-review branch returns silently every tick, and the
+    health endpoint stays green. On DEV-102 that read as "nothing to do" twice
+    in one afternoon — once for 18 minutes after a restart, once for 12
+    minutes with no restart involved, because the reviewer had no signal that
+    a gate had opened.
+    """
+    try:
+        gates = db.list_open_gates()
+    except Exception:
+        logger.exception("could not list open gates")
+        return 0
+
+    if not gates:
+        if startup:
+            logger.info("no review gates are waiting on a human")
+        return 0
+
+    prefix = "waiting on a human at startup" if startup else "still waiting on a human"
+    for gate in gates:
+        logger.warning("%s: gate %s (%s) on spec %s — %.0f min",
+                       prefix, gate.id,
+                       getattr(gate.gate_type, "value", gate.gate_type),
+                       gate.spec_id, _gate_age_minutes(gate))
+    return len(gates)
+
+
 def main() -> int:
     logger.info("orchestrator daemon starting (poll=%.1fs)", POLL_INTERVAL)
     db = Database()
@@ -3137,12 +3187,22 @@ def main() -> int:
     scheduler = SpecScheduler()
     logger.info("spec worker pool: %d workers", SPEC_WORKERS)
 
+    # Say immediately what we are waiting for. A restart that logs only its
+    # banner and then goes quiet looks identical to a restart with no work.
+    report_open_gates(db, startup=True)
+    next_gate_report = time.monotonic() + GATE_REPORT_INTERVAL
+
     try:
         while not flag.set:
             try:
                 tick(db, scheduler)
             except Exception:
                 logger.exception("tick failed; continuing")
+
+            # Aged reminder, not per-tick: a 5s poll would drown the log.
+            if time.monotonic() >= next_gate_report:
+                report_open_gates(db)
+                next_gate_report = time.monotonic() + GATE_REPORT_INTERVAL
 
             # Sleep in small chunks so SIGTERM is responsive.
             slept = 0.0
