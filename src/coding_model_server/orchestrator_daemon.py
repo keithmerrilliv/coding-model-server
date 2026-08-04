@@ -1525,6 +1525,27 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
                     spec.id, build_reason, task.retry_count + 1, MAX_RETRIES)
         return
 
+    # DEV-427: the dispatch drops off-limits files so the worktree keeps the
+    # base_ref version, but the reviewer still needs telling — the implementer
+    # believed it was writing them, and a silent discard is its own surprise.
+    protected_touched = []
+    if isinstance(ts_for_build, dict):
+        protected = {str(p).strip().lstrip("./")
+                     for p in (ts_for_build.get("protected_paths") or []) if p}
+        protected_touched = sorted(p for p, _ in result.files if p in protected)
+    protected_block = ""
+    if protected_touched:
+        protected_block = (
+            "\n\n⚠ **OFF-LIMITS FILES MODIFIED** — the spec puts these out of "
+            "bounds. Each was restored to the base revision and the "
+            "implementer's version was discarded, so the suite ran against the "
+            "original:\n\n"
+            + "\n".join(f"- `{p}`" for p in protected_touched) + "\n"
+        )
+        logger.warning("spec %s: implementer modified %d protected path(s): %s",
+                       spec.id, len(protected_touched),
+                       ", ".join(protected_touched))
+
     # Create code_review gate
     file_list = "\n".join(f"- `{p}`" for p, _ in result.files)
     if restored:
@@ -1550,7 +1571,7 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
             f"Retry: {task.retry_count}\n"
             f"{_build_check_line(build_passed)}\n"
             f"The implementer produced the following files:\n\n{file_list}\n"
-            f"{missing_block}\n"
+            f"{missing_block}{protected_block}\n"
             f"Approve to proceed to testing, or reject with notes.\n"
         ),
     )
