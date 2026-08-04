@@ -2968,11 +2968,36 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
     # pass-rate threshold, and a converted pass still flows through the
     # caller's release_approval gate exactly like a first-try synthesis
     # pass — never straight to DONE.
+    #
+    # DEV-469: a build failure produces no runner summary, so the pass rate is
+    # unmeasurable and this used to skip the repair entirely — inverting the
+    # intent, because a synthesis that fails to compile is usually *nearer* to
+    # right than one that compiles and fails a third of its assertions. It is a
+    # type or syntax slip, not a behavioural misunderstanding. That mattered
+    # more once DEV-433 made synthesis reachable from build-driven exhaustion,
+    # since every failure arriving that way is a build failure by construction.
+    # Observed on spec_cc7dd609: synthesis died on two one-line type errors
+    # with no repair attempted.
     rate = _test_pass_rate(test_output)
-    if rate is None or rate < _SYNTHESIS_REPAIR_MIN_RATE:
+    build_failed = _detect_build_failure(test_output, framework, tests_passed)
+    if rate is None and build_failed:
+        logger.info("spec %s: synthesis failed to build (%s) — one targeted "
+                    "repair round", spec.id, build_failed)
+    elif rate is None:
+        # No summary and no compiler diagnostic: the runner itself is suspect,
+        # which is the hallucinated-PASS case the structural guard handles.
+        # Repairing generated code cannot fix that, so do not spend the call.
+        logger.info("spec %s: synthesis failure not measurable and shows no "
+                    "compiler diagnostic — no repair round", spec.id)
         return tests_passed, test_output
-    logger.info("spec %s: synthesis near-miss (%.0f%% pass) — one targeted "
-                "repair round", spec.id, rate * 100)
+    elif rate < _SYNTHESIS_REPAIR_MIN_RATE:
+        logger.info("spec %s: synthesis %.0f%% pass, below the %.0f%% repair "
+                    "threshold — no repair round", spec.id, rate * 100,
+                    _SYNTHESIS_REPAIR_MIN_RATE * 100)
+        return tests_passed, test_output
+    else:
+        logger.info("spec %s: synthesis near-miss (%.0f%% pass) — one targeted "
+                    "repair round", spec.id, rate * 100)
     repair_messages = executor.build_synthesis_repair_message(
         spec_md, design_md, result.files,
         _extract_actionable_test_output(test_output, framework),
@@ -3002,7 +3027,13 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
                     task_id=impl_task.id,
                     payload={"role": "synthesis_repair",
                              "agent": _SYNTHESIS_AGENT,
-                             "pre_repair_pass_rate": round(rate, 3),
+                             # None when the repair was triggered by a build
+                             # failure, which has no pass rate to report
+                             # (DEV-469) — the reason is recorded instead.
+                             "pre_repair_pass_rate": (
+                                 round(rate, 3) if rate is not None else None),
+                             "trigger": ("build_failure" if rate is None
+                                         else "near_miss"),
                              "files": len(repair.files)})
     tests_passed, test_output = _run_tests_with_guard(
         spec.id, spec_dir, framework, framework_opts,
