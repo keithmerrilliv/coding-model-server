@@ -917,7 +917,19 @@ def _render_plan_constraints(plan_yaml: str) -> "str | None":
     clarifications = ([str(c) for c in raw_clarifications if c]
                       if isinstance(raw_clarifications, list) else [])
 
-    if not lines and not clarifications:
+    # DEV-490: the plan's acceptance_criteria never reached the architect, so a
+    # criterion struck at the plan gate came straight back in the design. On
+    # spec_837b167f I rejected three criteria the harness cannot evaluate, the
+    # planner removed all three, the plan was approved — and the architect
+    # reinstated them verbatim, because spec.md still carried the original text
+    # (4 occurrences of "pre-fix") and nothing said which document wins. A plan
+    # rejection survived exactly one stage. Same shape as the DEV-107 failure
+    # this function was written for, one field over.
+    raw_criteria = plan.get("acceptance_criteria")
+    criteria = ([str(c) for c in raw_criteria if c]
+                if isinstance(raw_criteria, list) else [])
+
+    if not lines and not clarifications and not criteria:
         return None
 
     block = [
@@ -937,6 +949,18 @@ def _render_plan_constraints(plan_yaml: str) -> "str | None":
             "default or a more idiomatic alternative.\n\n"
         )
         block.extend(f"{i}. {c}\n" for i, c in enumerate(clarifications, 1))
+    if criteria:
+        block.append(
+            "\n### Approved acceptance criteria — THE definitive list\n\n"
+            "Your Acceptance Criteria Checklist must restate exactly these, and "
+            "nothing else. The specification below may contain an older set: "
+            "criteria were added, reworded or REMOVED when this plan was "
+            "approved, and the spec was not rewritten. Any criterion that "
+            "appears in the spec but not here was deliberately struck — do not "
+            "reinstate it, however reasonable it looks. Where the two lists "
+            "disagree, this one is correct.\n\n"
+        )
+        block.extend(f"{i}. {c}\n" for i, c in enumerate(criteria, 1))
     return "".join(block).rstrip()
 
 
@@ -1013,7 +1037,10 @@ def build_architect_message(spec_md: str,
         user_parts.append(
             "\nHonor the approved plan's binding constraints above — where the "
             "specification is ambiguous or suggests an alternative, the plan "
-            "is the answer."
+            "is the answer. If the plan listed approved acceptance criteria, "
+            "your checklist restates those and only those; a criterion present "
+            "in the specification but absent there was struck on purpose "
+            "(DEV-490)."
         )
     return [
         {"role": "system", "content": ARCHITECT_SYSTEM_PROMPT},
