@@ -1516,6 +1516,27 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
             f"Fix every diagnostic below and re-emit ALL files.\n\n"
             f"```\n{actionable}\n```\n"
         )
+        # The budget applies here exactly as it does on the parse-failure and
+        # test-failure paths. Without this check the short-circuit loops past
+        # MAX_RETRIES forever — each pass costs a full generation plus a runner
+        # dispatch, and the spec can never reach the synthesis escape hatch
+        # that exists precisely for "every attempt failed differently".
+        if task.retry_count >= MAX_RETRIES:
+            logger.error("spec %s: build-failure retry budget exhausted "
+                         "(%d/%d) — handing to synthesis",
+                         spec.id, task.retry_count, MAX_RETRIES)
+            reviewer_tasks = db.list_tasks_for_spec_by_role(spec.id, "reviewer")
+            reviewer_task = reviewer_tasks[0] if reviewer_tasks else None
+            if reviewer_task is None:
+                db.update_task_status(task.id, TaskStatus.FAILED)
+                db.update_spec_status(spec.id, SpecStatus.FAILED)
+            else:
+                # Same escape hatch the other two exhaustion paths use
+                # (DEV-433): the attempts on disk may still merge into
+                # something that builds.
+                _legacy_attempt_retry(db, spec, reviewer_task, feedback)
+            return
+
         synth_gate = db.create_gate(
             spec_id=spec.id,
             task_id=task.id,

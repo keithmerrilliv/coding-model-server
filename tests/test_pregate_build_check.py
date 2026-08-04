@@ -181,6 +181,40 @@ def test_dispatch_error_does_not_burn_a_retry(db, impl_spec):
     assert db.get_spec(spec.id).status is SpecStatus.EXECUTING
 
 
+def test_build_failure_respects_the_retry_budget(db, impl_spec):
+    """Without this the short-circuit loops past MAX_RETRIES forever, each pass
+    costing a generation plus a runner dispatch, and the spec can never reach
+    the synthesis escape hatch. Observed live on spec_ead8f7fc at "attempt 6/5"."""
+    spec, task, spec_dir = impl_spec
+    db.create_task(spec_id=spec.id, agent="reviewer", role="reviewer",
+                   title="review")
+    for _ in range(d.MAX_RETRIES):
+        db.increment_task_retry(task.id)
+    task = db.get_task(task.id)
+    assert task.retry_count == d.MAX_RETRIES
+
+    with mock.patch.object(d, "_legacy_attempt_retry") as exhausted:
+        _run(db, spec, task, spec_dir, build_passed=False,
+             build_output=SWIFT_BUILD_FAILURE)
+
+    # Handed to synthesis, not looped round again.
+    exhausted.assert_called_once()
+    assert db.get_task(task.id).retry_count == d.MAX_RETRIES  # not incremented
+    assert not [g for g in db.list_gates_for_spec(spec.id)
+                if g.status is GateStatus.PENDING]
+
+
+def test_build_failure_at_budget_with_no_reviewer_fails_the_spec(db, impl_spec):
+    spec, task, spec_dir = impl_spec
+    for _ in range(d.MAX_RETRIES):
+        db.increment_task_retry(task.id)
+    _run(db, spec, db.get_task(task.id), spec_dir, build_passed=False,
+         build_output=SWIFT_BUILD_FAILURE)
+
+    assert db.get_task(task.id).status is TaskStatus.FAILED
+    assert db.get_spec(spec.id).status is SpecStatus.FAILED
+
+
 def test_no_test_strategy_skips_the_check_entirely(db, impl_spec):
     spec, task, spec_dir = impl_spec
     result = ImplementerResult(files=[("a.py", "x = 1")], raw="")
