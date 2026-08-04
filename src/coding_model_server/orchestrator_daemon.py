@@ -1774,9 +1774,10 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
     build_reason = None
     build_output = ""
     build_passed = None
+    build_framework = ""
     ts_for_build = _load_plan(spec).get("test_strategy")
     if isinstance(ts_for_build, dict) and ts_for_build.get("framework"):
-        fw = ts_for_build["framework"]
+        fw = build_framework = ts_for_build["framework"]
         try:
             build_passed, build_output = _run_tests_with_guard(
                 spec.id, spec_dir, fw, ts_for_build,
@@ -1795,6 +1796,28 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
                                  "passed": build_passed if not build_reason else False,
                                  "build_failed": build_reason is not None,
                                  "retry": task.retry_count})
+
+        # DEV-478: keep the runner's own words whatever the outcome. Previously
+        # this was written only on the diagnostic path below, so the one case
+        # where the reviewer most needs it — the check ran, something failed,
+        # and it was not a recognised compiler diagnostic — kept nothing. The
+        # reviewer's own test_output.txt is written by _run_reviewer_tests,
+        # which sits *behind* this gate and has not run.
+        if build_output:
+            _write_artifact(spec_dir, "build_check_output.txt", build_output)
+            db.create_artifact(spec_id=spec.id, task_id=task.id,
+                               kind=ArtifactKind.TEST_REPORT,
+                               path="build_check_output.txt")
+
+        # DEV-477: neither a summary nor a diagnostic means the check told us
+        # nothing — an infrastructure fault, not a verdict on the code.
+        if (build_passed is False and build_reason is None
+                and not _observed_a_test_run(build_output, fw)):
+            logger.warning(
+                "spec %s: pre-gate build check is inconclusive — no test "
+                "summary and no compiler diagnostic in %d chars of output; "
+                "the build is unverified, not confirmed",
+                spec.id, len(build_output))
 
     if build_reason is not None:
         # Straight back to the implementer with the compiler's own words. No
@@ -1895,6 +1918,16 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
             "has them; tests that import them can only fail:\n\n"
             + "\n".join(f"- `{p}`" for p in still_missing) + "\n"
         )
+    # DEV-478: give the reviewer the runner's own words, not just a verdict.
+    # Without this the gate says "the suite has failing tests" and names none
+    # of them, and the only other copy is the artifact written above.
+    build_excerpt = ""
+    if build_passed is False and build_output:
+        build_excerpt = (
+            "\n<details><summary>Build check output</summary>\n\n"
+            f"```\n{_extract_actionable_test_output(build_output, build_framework)}\n```\n"
+            "\n</details>\n"
+        )
     db.update_task_status(task.id, TaskStatus.BLOCKED_ON_REVIEW)
     db.create_gate(
         spec_id=spec.id,
@@ -1904,9 +1937,9 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
             f"## Code review: {spec.title}\n\n"
             f"Spec ID: `{spec.id}`\n"
             f"Retry: {task.retry_count}\n"
-            f"{_build_check_line(build_passed)}\n"
+            f"{_build_check_line(build_passed, build_output, build_framework)}\n"
             f"The implementer produced the following files:\n\n{file_list}\n"
-            f"{missing_block}{protected_block}\n"
+            f"{missing_block}{protected_block}{build_excerpt}\n"
             f"Approve to proceed to testing, or reject with notes.\n"
         ),
     )
@@ -2113,18 +2146,66 @@ def _route_build_failure_to_architect(db: Database, spec: Spec, task, spec_dir,
     return True
 
 
-def _build_check_line(build_passed: bool | None) -> str:
+# Swift emits no summary that _validate_test_output_structure knows — it
+# deliberately passes unrecognised frameworks through, which is right for the
+# anti-hallucination guard (a false negative there would force a genuinely
+# passing suite to FAIL) but useless for deciding what to tell a reviewer.
+# swift-testing prints "✔/✘ Test run with N tests passed/failed after ..."
+# and XCTest prints "Executed N tests, with M failures" plus "Test Suite '...'
+# passed/failed". Matching any of them is evidence tests actually executed.
+_SWIFT_SUMMARY_RE = re.compile(
+    r"Test run with \d+ test"
+    r"|Executed \d+ test"
+    r"|Test Suite '[^']*' (?:passed|failed)",
+    re.MULTILINE)
+
+
+def _observed_a_test_run(output: str, framework: str) -> bool:
+    """Is there positive evidence the runner executed tests? (DEV-477)
+
+    Wording only — this never changes control flow, so a miss costs a vaguer
+    gate prompt rather than a wrongly-failed suite. That asymmetry is
+    deliberate: no Swift suite has ever passed on this pipeline, so the Swift
+    patterns above are unvalidated against a real green run, and the only safe
+    place for an unvalidated pattern is somewhere it cannot fail the build.
+    """
+    if not output or not output.strip():
+        return False
+    ok, _ = _validate_test_output_structure(output, framework)
+    if not ok:
+        return False
+    if framework.lower() in ("swift_test", "xcodebuild_test"):
+        return bool(_SWIFT_SUMMARY_RE.search(output))
+    return True
+
+
+def _build_check_line(build_passed: bool | None, build_output: str = "",
+                      framework: str = "") -> str:
     """One-line build status for the code_review gate prompt (DEV-429).
 
     Tells the reviewer what the compiler already established, so a gate is
     never mistaken for "nobody has run this yet".
+
+    DEV-477: a failed check is *not* evidence of a successful compile. It means
+    only that the run did not pass and _detect_build_failure recognised no
+    diagnostic — which is equally true of a runner dispatch error, a worktree
+    that failed to materialise, a timeout, or a sandbox refusal. None of those
+    built anything. Claiming "compiled" there is worse than saying nothing: it
+    tells the reviewer not to look for build errors. On spec_8dac1142 that put
+    five Swift errors in front of a human under an assurance they could not be
+    there. So the "tests failed on behaviour" wording is only used when the
+    output actually parses as a test run; otherwise say it is unverified.
     """
     if build_passed is None:
         return "Build check: not run (no test framework in the plan).\n"
     if build_passed:
         return "Build check: **compiled and the suite passed.**\n"
-    return ("Build check: **compiled**, but the suite has failing tests — "
-            "the failures are behaviour, not a build error.\n")
+    if _observed_a_test_run(build_output, framework):
+        return ("Build check: **compiled**, but the suite has failing tests — "
+                "the failures are behaviour, not a build error.\n")
+    return ("Build check: **inconclusive** — the runner returned neither a test "
+            "summary nor a recognised compiler diagnostic, so nothing here "
+            "confirms the code builds. Treat the build as unverified.\n")
 
 
 def _extract_actionable_test_output(output: str, framework: str, max_chars: int = 8000) -> str:
