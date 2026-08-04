@@ -152,3 +152,52 @@ def test_run3_synthesis_output_is_recognised_as_a_build_failure():
     assert d._test_pass_rate(text) is None, "no runner summary — the old gate"
     # the two type errors that ended run 3
     assert "Int64" in text
+
+
+# ── driver noise must never look like a persistent defect ────────────────────
+
+def test_driver_noise_is_not_counted_as_a_diagnostic():
+    """`error: fatalError` and `error: emit-module command failed` appear in
+    nearly every failed Swift build regardless of cause — 5 of 5 in run 3. When
+    they counted, every pair of consecutive failures looked like the same
+    unfixable defect and a good design was sent back for revision on no
+    evidence (observed live on run 4, 01:29)."""
+    noise = ("Building for debugging...\n"
+             "error: fatalError\n"
+             "error: emit-module command failed with exit code 1 "
+             "(use -v to see invocation)\n")
+    assert d._diagnostic_messages(noise) == set()
+    assert d._failure_signature(noise) == ""
+
+
+def test_two_failures_sharing_only_driver_noise_do_not_route(db):
+    spec = db.create_spec(title="noise", source_md_path="spec.md")
+    db.update_spec_status(spec.id, SpecStatus.EXECUTING)
+    arch = db.create_task(spec_id=spec.id, agent="architect", role="architect",
+                          title="d")
+    impl = db.create_task(spec_id=spec.id, agent="implementer",
+                          role="implementer", title="b")
+    spec_dir = db.spec_dir(spec.id)
+    spec_dir.mkdir(parents=True, exist_ok=True)
+
+    first = ("A.swift:1:1: error: alpha only here\nerror: fatalError\n")
+    second = ("B.swift:9:9: error: beta only here\nerror: fatalError\n")
+    g = db.create_gate(spec_id=spec.id, task_id=None,
+                       gate_type=GateType.CODE_REVIEW,
+                       prompt_md="## Automated build-failure retry (DEV-429)")
+    db.respond_to_gate(g.id, "rejected", notes=first)
+
+    assert d._route_build_failure_to_architect(
+        db, db.get_spec(spec.id), db.get_task(impl.id), spec_dir,
+        second, "beta") is False
+    # a fresh task is already PENDING, so retry_count is the meaningful signal
+    assert db.get_task(arch.id).retry_count == 0
+    assert not (spec_dir / "design_review_feedback.md").exists()
+
+
+def test_run3_pairs_share_a_located_diagnostic_after_filtering():
+    """The real signal survives the filter — all four transitions."""
+    sets = [d._diagnostic_messages(t) for _, t in _build_failures()]
+    shared = [a & b for a, b in zip(sets, sets[1:])]
+    assert all(s for s in shared), "every adjacent pair must still share one"
+    assert all("fatalError" not in s for s in sets)
