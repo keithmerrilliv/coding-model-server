@@ -146,3 +146,16 @@ tr:hover { background: #f8f9fa; cursor: pointer; }
 .current-execution-title { font-size: 15px; font-weight: 600; color: var(--color-primary); text-decoration: none; }
 .current-execution-title:hover { text-decoration: underline; }
 .current-execution-sub { font-size: 11px; color: #6c757d; }
+
+/* RAG panel's recent-queries table (DEV-501). Denser than the global table
+   style: it is a diagnostic list read at a glance, not a primary surface. */
+.rag-recent { font-size: 0.85em; }
+.rag-recent th, .rag-recent td { padding: 4px 8px; }
+/* Queries are long (a spec title, sometimes a whole clause). Truncate rather
+   than let one row set the table width; the full text is in the title attr. */
+.rag-query {
+  max-width: 340px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

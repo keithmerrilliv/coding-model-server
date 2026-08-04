@@ -439,12 +439,29 @@ class MemoryService:
             logger.error(f"Error searching memory: {e}")
             return []
 
-    def get_context_string(self, query: str, max_tokens: int = 1000) -> str:
+    def get_context_string(self, query: str, max_tokens: int = 1000,
+                           stats: Optional[Dict[str, Any]] = None) -> str:
         """Get a formatted string of relevant memories for prompt injection.
 
         Truncates output to approximately max_tokens (estimated at 4 chars/token).
+
+        If *stats* is provided it is populated with what retrieval actually
+        found — ``hits`` and ``best_distance`` — for the dashboard's RAG panel
+        (DEV-501). An out-parameter rather than a changed return type, matching
+        ``call_agent(..., meta=meta)`` elsewhere, so the many callers and mocks
+        that just want the string are unaffected.
+
+        best_distance is the diagnostic that matters: DEV-494 shipped confident
+        nonsense at 0.508 while genuine matches score 0.28-0.45, and a bare
+        count could not tell those apart.
         """
         memories = self.search_memory(query, n_results=5)
+        if stats is not None:
+            stats["hits"] = len(memories)
+            stats["best_distance"] = (
+                min((m["distance"] for m in memories if m.get("distance") is not None),
+                    default=None)
+            )
 
         if not memories:
             return ""

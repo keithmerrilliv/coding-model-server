@@ -8,6 +8,7 @@ import type {
   MetricsResponse,
   GpuStatsResponse,
   ActiveModelResponse,
+  RagStatsResponse,
 } from '../types/api';
 
 // API host defaults to the same host that served the dashboard, on port 5000.
@@ -85,4 +86,7 @@ export async function fetchGpuStats(since?: string): Promise<ApiResponse<GpuStat
 
 export async function fetchActiveModel(): Promise<ApiResponse<ActiveModelResponse>> {
   return request<ActiveModelResponse>('/v1/admin/active_model');
+}
+export async function fetchRagStats(limit = 20): Promise<ApiResponse<RagStatsResponse>> {
+  return request<RagStatsResponse>(`/v1/admin/rag_stats?limit=${limit}`);
 }

@@ -19,7 +19,7 @@ from starlette.background import BackgroundTask
 
 from coding_model_server import runtime
 from coding_model_server.config import Config
-from coding_model_server.metrics import request_metrics
+from coding_model_server.metrics import rag_metrics, request_metrics
 from coding_model_server.llama_server import (
     InsufficientVramError,
     ModelBusyError,
@@ -85,6 +85,11 @@ async def _maybe_inject_rag_context(
     """
     memory_service = runtime.services.memory
     if not memory_service or not request.messages or request.skip_memory:
+        # Distinguished from "ran and found nothing" on the dashboard: a system
+        # where retrieval never runs looks identical to a healthy one if both
+        # report zero injections. That is exactly how DEV-488 hid (DEV-501).
+        if memory_service and request.skip_memory:
+            rag_metrics.record("skipped", agent=request.model)
         return system_prompt, ""
     last_user_msg = next(
         (m.content for m in reversed(request.messages) if m.role == 'user'), None
@@ -97,8 +102,13 @@ async def _maybe_inject_rag_context(
     query = request.memory_query or last_user_msg
     if not query:
         return system_prompt, ""
+    # Populated by get_context_string with what it actually found, so the
+    # dashboard can show hit counts and best distance rather than a bare
+    # count that cannot tell good retrieval from confident nonsense (DEV-501).
+    rag_stats: dict = {}
     retrieval = asyncio.ensure_future(
-        asyncio.to_thread(memory_service.get_context_string, query)
+        asyncio.to_thread(memory_service.get_context_string, query,
+                          stats=rag_stats)
     )
     try:
         # shield: the timeout must not mark the task cancelled — the worker
@@ -120,12 +130,23 @@ async def _maybe_inject_rag_context(
                             "(wasted CPU during prefill)")
 
         retrieval.add_done_callback(_log_late_completion)
+        rag_metrics.record("timeout", query=query, agent=request.model)
         return system_prompt, ""
     except Exception as e:
         logger.error("Memory retrieval failed: %s", e)
+        rag_metrics.record("error", query=query, agent=request.model)
         return system_prompt, ""
     if not context:
+        # Ran, matched nothing above the ceiling. A healthy state — it is what
+        # a centipede spec should get from a corpus of Apple API docs — but
+        # only if it is visibly different from "never ran" (DEV-494).
+        rag_metrics.record("empty", query=query, agent=request.model,
+                           hits=rag_stats.get("hits"),
+                           best_distance=rag_stats.get("best_distance"))
         return system_prompt, ""
+    rag_metrics.record("injected", query=query, agent=request.model,
+                       hits=rag_stats.get("hits"),
+                       best_distance=rag_stats.get("best_distance"))
     logger.info("Injecting memory context for query: %s...", query[:50])
     rag_suffix = (
         "\n\n"

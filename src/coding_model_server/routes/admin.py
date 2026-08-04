@@ -2,7 +2,7 @@
 from fastapi import APIRouter, Depends
 
 from coding_model_server.config import Config
-from coding_model_server.metrics import gpu_sampler, request_metrics
+from coding_model_server.metrics import gpu_sampler, rag_metrics, request_metrics
 from coding_model_server.runtime import chat_admission, llama_server_manager, verify_admin_key
 
 router = APIRouter()
@@ -27,6 +27,18 @@ def admin_gpu_stats(since: "str | None" = None, limit: int = 60) -> dict:
     defaults to the 60 the panel actually renders (DEV-159).
     """
     return gpu_sampler.snapshot(since=since, limit=limit)
+
+
+@router.get("/v1/admin/rag_stats", dependencies=[Depends(verify_admin_key)])
+def admin_rag_stats(limit: int = 20) -> dict:
+    """Memory-retrieval outcomes for the dashboard's RAG panel.
+
+    Reports skipped / empty / injected / timeout / error separately: a system
+    where retrieval never runs and one where it runs and correctly finds
+    nothing both show zero injections, and telling them apart is the whole
+    point (DEV-488 vs DEV-494 — see DEV-501).
+    """
+    return rag_metrics.snapshot(limit=max(1, min(limit, 50)))
 
 
 @router.get("/v1/admin/active_model", dependencies=[Depends(verify_admin_key)])

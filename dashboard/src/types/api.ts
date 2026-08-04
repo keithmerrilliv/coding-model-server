@@ -190,3 +190,25 @@ export interface ActiveModelResponse {
   chat_in_flight: number;
   chat_max_inflight: number;
 }
+// RAG retrieval telemetry (DEV-501). Outcomes are reported separately because
+// "never ran" and "ran and correctly found nothing" both yield zero
+// injections, and conflating them is how DEV-488 stayed hidden.
+export type RagOutcome = 'skipped' | 'empty' | 'injected' | 'timeout' | 'error';
+
+export interface RagEvent {
+  t: string;
+  outcome: RagOutcome;
+  agent: string | null;
+  query: string | null;
+  hits: number | null;
+  best_distance: number | null;
+}
+
+export interface RagStatsResponse {
+  counts: Partial<Record<RagOutcome, number>>;
+  attempted: number;
+  injected: number;
+  // null (not 0) when nothing was attempted — see the note above.
+  hit_rate: number | null;
+  recent: RagEvent[];
+}

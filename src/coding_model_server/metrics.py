@@ -38,6 +38,14 @@ _GPU_RING_SIZE = 120
 # shouldn't fork a doomed subprocess every second forever.
 _GPU_RETRY_INTERVAL_S = 30.0
 
+# Recent retrieval outcomes kept for the dashboard's RAG panel. Small: this is
+# a "what just happened" list, not history, and the counters carry the totals.
+_RAG_RING_SIZE = 50
+
+# Retrieval queries can be a whole spec paragraph; the panel only needs enough
+# to recognise which query ran.
+_RAG_QUERY_MAX_CHARS = 160
+
 _EndpointKey = Tuple[str, str, Optional[str]]
 
 
@@ -362,6 +370,75 @@ class GpuSampler:
         }
 
 
+class RagRetrievalCollector:
+    """Outcomes of memory retrieval, for the dashboard's RAG panel.
+
+    Exists because two RAG defects hid in production with nothing on the
+    dashboard to show them (DEV-501):
+
+      - DEV-488: retrieval never ran for any autonomous agent. Nine architect
+        calls logged rag=on and injected nothing. Found only by grepping the
+        server journal.
+      - DEV-494: retrieval ran and returned actively misleading content —
+        Metal GPU-pipeline pages for a centipede game-logic design. Found only
+        by replaying the query by hand against /v1/memory/search.
+
+    So a single "injections" counter is the wrong instrument. The states are
+    distinct failures and must stay distinguishable:
+
+      skipped   the caller set skip_memory; retrieval never attempted
+      empty     it ran, everything was above the distance ceiling
+      injected  context actually shipped in the prompt
+      timeout   the 2s cap fired during prefill
+      error     the memory service raised
+
+    ``best_distance`` is the number that made DEV-494 legible: genuine matches
+    sat at 0.28-0.45 while the noise sat at 0.51-0.54, both under a 0.6
+    ceiling. Without it a bad *query* is invisible — the count alone looks
+    healthy.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._counts: Dict[str, int] = defaultdict(int)
+        self._recent: Deque[dict] = deque(maxlen=_RAG_RING_SIZE)
+
+    def record(self, outcome: str, *, query: Optional[str] = None,
+               agent: Optional[str] = None, hits: Optional[int] = None,
+               best_distance: Optional[float] = None) -> None:
+        # Queries are truncated: they can be a whole spec paragraph, and this
+        # rides a dashboard poll.
+        entry = {
+            "t": datetime.now(timezone.utc).isoformat(),
+            "outcome": outcome,
+            "agent": agent,
+            "query": (query or "")[:_RAG_QUERY_MAX_CHARS] or None,
+            "hits": hits,
+            "best_distance": best_distance,
+        }
+        with self._lock:
+            self._counts[outcome] += 1
+            self._recent.appendleft(entry)
+
+    def snapshot(self, limit: int = 20) -> dict:
+        with self._lock:
+            counts = dict(self._counts)
+            recent = list(self._recent)[:max(0, limit)]
+        attempted = sum(v for k, v in counts.items() if k != "skipped")
+        injected = counts.get("injected", 0)
+        return {
+            "counts": counts,
+            "attempted": attempted,
+            "injected": injected,
+            # Share of retrievals that actually shipped context. None rather
+            # than 0 when nothing was attempted, so "never ran" (DEV-488) reads
+            # differently from "ran and found nothing" (a healthy 0.0).
+            "hit_rate": (injected / attempted) if attempted else None,
+            "recent": recent,
+        }
+
+
 # Module-level singletons. server.py imports + drives these.
 request_metrics = RequestMetricsCollector()
 gpu_sampler = GpuSampler(interval_s=1.0)
+rag_metrics = RagRetrievalCollector()

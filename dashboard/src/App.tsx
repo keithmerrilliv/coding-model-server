@@ -6,6 +6,7 @@ import AgentsGrid from './components/AgentsGrid';
 import SpecsTable from './components/SpecsTable';
 import SpecDetail from './components/SpecDetail';
 import GpuPanel from './components/GpuPanel';
+import RagPanel from './components/RagPanel';
 import EndpointMetrics from './components/EndpointMetrics';
 import ActiveModelCard from './components/ActiveModelCard';
 import CurrentExecutionCard from './components/CurrentExecutionCard';
@@ -61,6 +62,7 @@ const Overview: React.FC = () => (
 const MetricsPage: React.FC = () => (
   <>
     <GpuPanel />
+    <RagPanel />
     <EndpointMetrics />
   </>
 );
