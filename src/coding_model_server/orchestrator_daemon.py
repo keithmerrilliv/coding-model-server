@@ -1513,6 +1513,7 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
             f"No review was performed — the build failed, so there is nothing "
             f"to review yet. First compiler diagnostic:\n\n"
             f"    {build_reason}\n\n"
+            f"{_diagnostic_completeness_note(build_output)}"
             f"Fix every diagnostic below and re-emit ALL files.\n\n"
             f"```\n{actionable}\n```\n"
         )
@@ -1647,6 +1648,62 @@ _BUILD_FAILURE_RES = {
         re.MULTILINE),
 }
 _BUILD_FAILURE_RES["python"] = _BUILD_FAILURE_RES["pytest"]
+
+
+# DEV-435: an `error:` the compiler emitted with no file:line in front of it.
+# `swift build` reports a failed emit-module job as a bare
+# "error: emit-module command failed with exit code 1 (use -v to see
+# invocation)" and swallows the underlying diagnostic. Nothing downstream can
+# act on that: the retry's file selection keys off cited paths and finds none,
+# so it attributes the failure entirely to whatever cascade errors DID carry a
+# location — usually the test files that can no longer see the module.
+_ATTRIBUTED_ERROR_RE = re.compile(r"^\s*\S.*?:\d+:\d+: error: ", re.MULTILINE)
+_BARE_ERROR_RE = re.compile(r"^error: (.+)$", re.MULTILINE)
+
+
+def _unattributed_errors(output: str) -> list[str]:
+    """`error:` lines carrying no file:line, oldest first, deduped."""
+    if not output:
+        return []
+    seen, out = set(), []
+    for match in _BARE_ERROR_RE.finditer(output):
+        msg = match.group(1).strip()
+        if msg and msg not in seen:
+            seen.add(msg)
+            out.append(msg)
+    return out
+
+
+def _diagnostic_completeness_note(output: str) -> str:
+    """Warn, in the failure report, that the diagnostics are incomplete.
+
+    Without this the cascade errors read as the whole story, and both the model
+    and the human draw confident conclusions from a build log whose actual
+    cause was never printed.
+    """
+    bare = _unattributed_errors(output)
+    if not bare:
+        return ""
+    has_located = bool(_ATTRIBUTED_ERROR_RE.search(output))
+    lines = "".join(f"  - {m}\n" for m in bare)
+    note = (
+        "⚠ **INCOMPLETE DIAGNOSTICS** — the build reported "
+        f"{len(bare)} error(s) with no file or line:\n\n{lines}\n"
+    )
+    if has_located:
+        note += (
+            "The located errors below may be *consequences* of these rather "
+            "than the cause. In particular, a failed `emit-module` means the "
+            "module was never produced, so every 'cannot find X in scope' in "
+            "the test target follows from it and fixing the tests will not "
+            "help. Look for the defect in the module's own sources.\n"
+        )
+    else:
+        note += (
+            "No located error was reported at all, so the failing file is "
+            "unknown. Re-examine the sources named in the design.\n"
+        )
+    return note + "\n"
 
 
 def _detect_build_failure(output: str, framework: str, passed: bool) -> str | None:
