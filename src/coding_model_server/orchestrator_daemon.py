@@ -2506,6 +2506,24 @@ def _test_pass_rate(test_output: str) -> "float | None":
 
 
 
+def _collect_rejection_notes(db: Database, spec_id: str) -> list[str]:
+    """Human reviewer notes from rejected CODE_REVIEW gates, oldest first.
+
+    Skips the synthetic gates the daemon answers itself (parse-failure and
+    build-failure retries): their content is compiler or parser output that
+    already travels with each attempt's test summary, and repeating it here
+    would crowd out the human judgement this is for.
+    """
+    notes = []
+    for gate in db.list_gates_for_spec(spec_id, GateType.CODE_REVIEW):
+        if gate.status is not GateStatus.REJECTED or not gate.reviewer_notes:
+            continue
+        if (gate.prompt_md or "").startswith("## Automated"):
+            continue
+        notes.append(gate.reviewer_notes)
+    return notes
+
+
 def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
                    framework: str, framework_opts: dict) -> tuple[bool, str]:
     """MAX_RETRIES escape hatch: synthesize the union of correct behaviors
@@ -2526,10 +2544,19 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
     spec_md = spec_md_path.read_text() if spec_md_path.exists() else ""
     design_md = design_md_path.read_text() if design_md_path.exists() else ""
 
-    logger.info("spec %s: synthesis from %d attempts via agent=%s",
-                spec.id, len(attempts), _SYNTHESIS_AGENT)
+    # DEV-433: when the attempts were rejected at the gate rather than by a
+    # failing test run, the reviewer's notes are the single most useful input
+    # synthesis can have — they say which attempt got which part right, which
+    # is exactly the judgement the merge needs and cannot recover from the
+    # code alone.
+    review_notes = _collect_rejection_notes(db, spec.id)
 
-    messages = build_synthesis_message(spec_md, design_md, attempts)
+    logger.info("spec %s: synthesis from %d attempts (%d reviewer notes) "
+                "via agent=%s", spec.id, len(attempts), len(review_notes),
+                _SYNTHESIS_AGENT)
+
+    messages = build_synthesis_message(spec_md, design_md, attempts,
+                                       review_notes=review_notes)
 
     # Synthesis merges every attempt's files into one final response — the same
     # single-call emit-everything constraint as the implementer, so it gets the
@@ -2889,10 +2916,30 @@ def _legacy_handle_gate_rejection(db: Database, spec: Spec, task, gate) -> None:
             logger.info("spec %s: code rejected by human, retry %d/%d",
                         spec.id, impl_task.retry_count + 1, MAX_RETRIES)
         else:
-            db.update_task_status(impl_task.id, TaskStatus.FAILED)
-            db.update_spec_status(spec.id, SpecStatus.FAILED)
-            logger.error("spec %s: code rejected, max retries exhausted",
-                         spec.id)
+            # DEV-433: exhaustion here used to fail the spec outright, while
+            # the identical exhaustion reached via a failing test run went
+            # through the synthesis escape hatch. Whether the accumulated
+            # attempts survived depended on who noticed the defect, not on
+            # what the defect was — and the gate path carries strictly more
+            # information, since it comes with the reviewer's written notes.
+            # Route both through _legacy_attempt_retry, which synthesises at
+            # MAX_RETRIES and only fails the spec if synthesis fails too.
+            reviewer_tasks = db.list_tasks_for_spec_by_role(spec.id, "reviewer")
+            reviewer_task = reviewer_tasks[0] if reviewer_tasks else None
+            if reviewer_task is None:
+                logger.error("spec %s: code rejected, max retries exhausted "
+                             "and no reviewer task to synthesise into",
+                             spec.id)
+                db.update_task_status(impl_task.id, TaskStatus.FAILED)
+                db.update_spec_status(spec.id, SpecStatus.FAILED)
+            else:
+                logger.info("spec %s: code rejected, max retries exhausted — "
+                            "attempting synthesis from the rejected attempts",
+                            spec.id)
+                _legacy_attempt_retry(
+                    db, spec, reviewer_task,
+                    gate.reviewer_notes or "Rejected at the code review gate.",
+                )
 
     elif task.role == "reviewer":
         # Release rejected — send back to implementer.
