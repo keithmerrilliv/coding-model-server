@@ -1,0 +1,18 @@
+[Unit]
+Description=Monthly Apple Deep Docs MCP update
+Documentation=file:///home/keith-merrill/Dev/coding-model-server/scripts/update_deep_docs_mcp.sh
+
+[Timer]
+# First Sunday of the month, 04:00. Two hours after the weekly docs refresh
+# (Sun 02:00), which runs for several hours — the gap is deliberate, and the
+# two are separate timers because they track different things on different
+# cadences: this one third-party CODE, that one Apple's published docs.
+#
+# Monthly rather than weekly because upstream moves slowly (the pin was nine
+# months old) and every run restarts the inference server.
+OnCalendar=Sun *-*-01..07 04:00:00
+Persistent=true
+RandomizedDelaySec=15m
+
+[Install]
+WantedBy=timers.target

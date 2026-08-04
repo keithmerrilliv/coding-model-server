@@ -130,7 +130,17 @@ class Config:
         "<<<GREP>>>pattern|path|options                    — search file contents (options: i=ignore case)",
         "<<<SAVE_MEMORY>>>fact                             — persist a fact",
         "<<<WEB_SEARCH>>>query                             — web search",
-        '<<<APPLE_DEEP_DOCS>>>{"tool":"NAME","arguments":{}}  — Apple docs (server MCP)',
+        # The tool names are listed because the MCP rejects anything else with
+        # "Unknown tool", and nothing else published them — so an agent had to
+        # guess, and the service was advertised but unusable (DEV-484).
+        # ONLY the six that return content are named. The MCP also exposes
+        # WWDC/HIG tools that return search URLs rather than text, and
+        # Xcode-local tools that return [] on Linux; naming those would send an
+        # agent to burn a turn on a guaranteed empty (the DEV-479 failure).
+        '<<<APPLE_DEEP_DOCS>>>{"tool":"NAME","arguments":{}}  — Apple docs (server MCP). Tools:',
+        '    search_swift_evolution{feature} | get_swift_evolution_proposal{se_number}  — why a Swift feature exists',
+        '    fetch_apple_documentation{url} | search_apple_online{query,platform} | get_framework_info{framework}',
+        '    search_swift_repos{query} | fetch_github_file{url}  — Apple/swiftlang source',
         "<<<INGEST_PDF>>>path                              — ingest a PDF file into memory (supports local: prefix for client files)",
         "<<<SCRATCHPAD>>>                                  — update your working memory (FACTS, OPEN_QUESTIONS, DEAD_ENDS)",
         "<<<PLAN>>>                                        — create/update your retrieval plan (GOAL, STEPS with [x]/[ ], CURRENT)",

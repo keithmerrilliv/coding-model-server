@@ -1,0 +1,27 @@
+[Unit]
+Description=Update the vendored Apple Deep Docs MCP checkout
+# It restarts coding-model-server as part of the update (the MCP is a child
+# process), and smoke-tests through the server's HTTP API afterwards.
+Wants=coding-model-server.service
+After=coding-model-server.service network-online.target
+
+[Service]
+Type=oneshot
+User=keith-merrill
+WorkingDirectory=/home/keith-merrill/Dev/coding-model-server
+EnvironmentFile=-/home/keith-merrill/Dev/coding-model-server/.env
+Environment="PYTHONUNBUFFERED=1"
+Environment="CODING_MODEL_SERVER_IP=127.0.0.1"
+ExecStart=/home/keith-merrill/Dev/coding-model-server/scripts/update_deep_docs_mcp.sh
+
+# A git pull plus pip install plus restart plus smoke test. Nowhere near the
+# docs refresh's hours, but well over the default.
+TimeoutStartSec=15m
+
+# Deliberately NOT Restart=on-failure. A failure here means the smoke test
+# rejected an upstream change and the script already rolled back — retrying
+# would pull the same broken commit and roll it back again.
+# `systemctl list-units --failed` is the intended signal.
+
+[Install]
+WantedBy=multi-user.target
