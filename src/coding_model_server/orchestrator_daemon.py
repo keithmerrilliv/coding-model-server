@@ -1238,8 +1238,16 @@ def _failure_signature(notes: str) -> str:
     return "|".join(sorted(msgs))
 
 
-def _consecutive_identical_failures(db, spec_id: str, current_notes: str) -> int:
+def _consecutive_identical_failures(db, spec_id: str, current_notes: str,
+                                    *, already_recorded: bool = True) -> int:
     """How many prior consecutive attempts failed with the same diagnostics.
+
+    `already_recorded` says whether *current_notes* has itself been written to
+    a gate yet. On the retry path it has — the notes were read back off the
+    latest rejected gate — so the newest match is this same failure and must
+    not be counted. On the pre-gate build check it has not: the failure is in
+    hand and nothing has recorded it, so every match is a genuine prior
+    occurrence.
 
     Targeted retry regenerates only the files the compiler *cited*. When the
     fix lies outside those files — access control, a missing `@testable`, a
@@ -1256,7 +1264,8 @@ def _consecutive_identical_failures(db, spec_id: str, current_notes: str) -> int
     # Skip at most ONE gate — the one carrying the notes we were handed.
     # Skipping every gate whose text matches would discard the repeats
     # themselves, since a repeated failure is byte-identical by definition.
-    if newest_first and newest_first[0].reviewer_notes == current_notes:
+    if (already_recorded and newest_first
+            and newest_first[0].reviewer_notes == current_notes):
         newest_first = newest_first[1:]
     count = 0
     for gate in newest_first:
@@ -1754,6 +1763,20 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
             f"Fix every diagnostic below and re-emit ALL files.\n\n"
             f"```\n{actionable}\n```\n"
         )
+        # DEV-468: when the same diagnostics survive repeated implementer
+        # attempts, the implementer is not the author of the defect — the
+        # design is, and it is re-read unchanged on every retry, so no number
+        # of implementer attempts can converge. Send it upstream instead.
+        #
+        # On spec_cc7dd609 three of five attempts were spent reproducing three
+        # Swift errors that were in the approved design: `mutating` on a
+        # `final class`, a `static` split with no receiver, and a reference to
+        # an undeclared nested type. Each retry read the design, wrote them
+        # again, and failed identically.
+        if _route_build_failure_to_architect(db, spec, task, spec_dir,
+                                             feedback, build_reason):
+            return
+
         # The budget applies here exactly as it does on the parse-failure and
         # test-failure paths. Without this check the short-circuit loops past
         # MAX_RETRIES forever — each pass costs a full generation plus a runner
@@ -1961,6 +1984,81 @@ def _detect_build_failure(output: str, framework: str, passed: bool) -> str | No
         return None
     line = output[match.start():].splitlines()[0].strip()
     return line[:200] if line else "compiler diagnostic present"
+
+
+# DEV-468: how many consecutive implementer attempts may produce the same
+# diagnostics before the failure is treated as upstream. 1 means the second
+# identical build failure goes to the architect.
+BUILD_FAILURE_ARCHITECT_THRESHOLD = int(
+    os.getenv("AUTONOMOUS_BUILD_FAILURE_ARCHITECT_THRESHOLD", "1"))
+
+
+def _route_build_failure_to_architect(db: Database, spec: Spec, task, spec_dir,
+                                      feedback: str, build_reason: str) -> bool:
+    """Send a recurring build failure to the architect. True if it was routed.
+
+    "Retry the implementer" is the wrong response when the implementer is
+    faithfully writing what the design told it to. The design is re-read
+    unchanged on every attempt, so those errors cannot self-correct — they
+    just consume the budget.
+
+    Bounded on both sides: the architect must exist and still be within
+    MAX_RETRIES, and the implementer's own budget is left untouched, since
+    this attempt was not its fault.
+    """
+    repeats = _consecutive_identical_failures(db, spec.id, feedback,
+                                              already_recorded=False)
+    if repeats < BUILD_FAILURE_ARCHITECT_THRESHOLD:
+        return False
+
+    architects = db.list_tasks_for_spec_by_role(spec.id, "architect")
+    architect = architects[0] if architects else None
+    if architect is None:
+        return False
+    if architect.retry_count >= MAX_RETRIES:
+        logger.warning("spec %s: build failure recurred %d time(s) but the "
+                       "architect is out of revisions (%d/%d) — continuing "
+                       "with the implementer", spec.id, repeats,
+                       architect.retry_count, MAX_RETRIES)
+        return False
+
+    note = (
+        "## The design cannot be built as written\n\n"
+        f"The implementer has produced the same compiler diagnostics on "
+        f"{repeats + 1} consecutive attempts, across more than one agent. That "
+        f"is not an implementation slip — the implementer is writing what this "
+        f"design specifies, and the design is re-read unchanged each time, so "
+        f"retrying it cannot help.\n\n"
+        f"First diagnostic:\n\n    {build_reason}\n\n"
+        "Revise the design so the code it describes can actually compile in "
+        "the target language. Check every type signature, access level and "
+        "member reference in the document against the language's rules. Change "
+        "only what the diagnostics require — the behavioural invariants in this "
+        "design have already been reviewed and approved.\n\n"
+        f"{feedback}"
+    )
+    try:
+        (spec_dir / "design_review_feedback.md").write_text(note)
+    except OSError as e:
+        logger.warning("spec %s: could not persist build-failure feedback for "
+                       "the architect: %s", spec.id, e)
+        return False
+
+    db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
+                    payload={"role": "implementer",
+                             "routed_to": "architect",
+                             "reason": "recurring_build_failure",
+                             "repeats": repeats,
+                             "diagnostic": build_reason[:200]})
+    db.increment_task_retry(architect.id)
+    db.update_task_status(architect.id, TaskStatus.PENDING)
+    # The implementer re-runs after the new design; its budget is untouched.
+    db.update_task_status(task.id, TaskStatus.PENDING)
+    logger.warning("spec %s: same build failure %d time(s) running — returning "
+                   "to the architect (revision %d/%d) instead of retrying the "
+                   "implementer: %s", spec.id, repeats + 1,
+                   architect.retry_count + 1, MAX_RETRIES, build_reason)
+    return True
 
 
 def _build_check_line(build_passed: bool | None) -> str:
