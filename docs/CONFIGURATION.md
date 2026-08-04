@@ -57,7 +57,7 @@ because every one of them is a VRAM-budget decision that has been measured.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CODING_MODEL_MEMORY_DB` | `<repo>/var/memory_db` | ChromaDB persistence directory. |
-| `MEMORY_RELEVANCE_THRESHOLD` | `0.35` | Minimum similarity for a memory to be injected into a chat request. |
+| `MEMORY_RELEVANCE_THRESHOLD` | `0.6` | **Maximum cosine distance** for a memory to be injected into a chat request — a hit is kept when `distance <= threshold`, so RAISING this makes retrieval *looser*, not stricter. (This row previously said "minimum similarity", which inverts the meaning.) |
 | `PDF_CHUNK_SIZE` | `1000` | Characters per chunk when ingesting a PDF. |
 | `PDF_CHUNK_OVERLAP` | `200` | Overlap between PDF chunks. |
 | `INGEST_MAX_FILE_SIZE` | `104857600` (100MB) | Per-file byte cap enforced by `/v1/memory/ingest`. `0` disables. |

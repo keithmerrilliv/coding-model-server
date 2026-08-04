@@ -30,7 +30,12 @@ logging.getLogger("pypdf").setLevel(logging.ERROR)
 if _chunker is None:
     logger.warning("tree_sitter_languages not available; language-aware chunking disabled")
 
-MEMORY_RELEVANCE_THRESHOLD = float(os.getenv('MEMORY_RELEVANCE_THRESHOLD', '0.35'))
+# Max cosine DISTANCE for a hit to be returned (kept when distance <= this),
+# so a HIGHER value is looser. The old 0.35 default was measured too strict to
+# be useful: against the rebuilt Apple-docs collection a near-verbatim sentence
+# scored 0.2757, but "MTLDevice" and "How do I create an MTLDevice and command
+# queue?" both returned nothing, i.e. anything phrased as a question missed.
+MEMORY_RELEVANCE_THRESHOLD = float(os.getenv('MEMORY_RELEVANCE_THRESHOLD', '0.6'))
 PDF_CHUNK_SIZE = int(os.getenv('PDF_CHUNK_SIZE', '1000'))
 PDF_CHUNK_OVERLAP = int(os.getenv('PDF_CHUNK_OVERLAP', '200'))
 
