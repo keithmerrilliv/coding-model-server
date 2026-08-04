@@ -595,6 +595,22 @@ def call_agent(
 _DESIGN_RE = re.compile(
     r"<{1,3}DESIGN>{1,3}\s*(.*?)\s*<{1,3}END>{1,3}", re.DOTALL | re.IGNORECASE,
 )
+# DEV-498: the architect corrupts its own opening delimiter, reproducibly. On
+# spec_9872c963 it emitted <<<DESINVARIANT>>> on three consecutive calls —
+# DESIGN blended with INVARIANT, which the architect prompt shouts throughout
+# (rules 1 and 8). Everything else in those responses was correct: a complete
+# design body, a well-formed <<<END>>>, and a valid COMPLEXITY block after it.
+#
+# Discarding 15 KB of correct design over one token is expensive — each retry
+# is a full generation, and exhausting the attempts fails the SPEC outright,
+# with no synthesis path. So accept an opening delimiter that starts with DES
+# and is followed by the usual structure. The closing delimiter is unchanged,
+# so there is no ambiguity about where the block ends.
+_DESIGN_FUZZY_RE = re.compile(
+    r"<{1,3}DES[A-Z_]*>{1,3}\s*(.*?)\s*<{1,3}END>{1,3}", re.DOTALL | re.IGNORECASE,
+)
+# For the failure message: what delimiters were actually present?
+_ANY_DELIMITER_RE = re.compile(r"<{1,3}[A-Z_]{2,}>{1,3}")
 _COMPLEXITY_RE = re.compile(
     r"<{1,3}COMPLEXITY>{1,3}\s*(.*?)\s*<{1,3}END_COMPLEXITY>{1,3}",
     re.DOTALL | re.IGNORECASE,
@@ -661,7 +677,22 @@ def parse_architect_response(text: str) -> ArchitectResult | ParseError:
     cleaned = _strip_thinking(text)
     m = _DESIGN_RE.search(cleaned)
     if not m:
-        return ParseError("No <<<DESIGN>>>…<<<END>>> block found", text)
+        # DEV-498: fall back to a near-miss opening delimiter before giving up.
+        m = _DESIGN_FUZZY_RE.search(cleaned)
+        if m:
+            logger.warning(
+                "architect opening delimiter was %r, not <<<DESIGN>>> — "
+                "recovered the block anyway (DEV-498)",
+                m.group(0)[:m.group(0).find(">")+3],
+            )
+    if not m:
+        # Name what was actually there. "no block found" reads as "the model
+        # produced nothing usable", which sent me to the artifact to discover
+        # a complete design behind one wrong token.
+        seen = ", ".join(sorted(set(_ANY_DELIMITER_RE.findall(cleaned)))) or "none"
+        return ParseError(
+            f"No <<<DESIGN>>>…<<<END>>> block found (delimiters seen: {seen})",
+            text)
     design = m.group(1).strip()
     if not design:
         return ParseError("<<<DESIGN>>> block was empty", text)
