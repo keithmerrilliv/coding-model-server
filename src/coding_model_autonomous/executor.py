@@ -1122,9 +1122,41 @@ _MANIFEST_RE = re.compile(
 # Leading list markers ("1.", "- ", "* ") the model sometimes prefixes.
 _LIST_MARKER_RE = re.compile(r"^\s*(?:\d+[.)]|[-*])\s*")
 # Interface-bearing lines (imports + declarations) for the written-file summary.
+#
+# DEV-467: the original pattern matched a declaration keyword at the start of the
+# line, which works for Python/TS/Rust but drops almost everything in Swift,
+# because Swift puts modifiers first — `mutating func`, `final class`,
+# `private(set) var`, `@discardableResult func`. On spec_cc7dd609 the summary
+# handed to World.swift was four lines of `struct X {` with not one initialiser,
+# method or property, so every cross-file call was a guess and six of them were
+# wrong. Modifiers and attributes may now precede the keyword, and the keyword
+# set covers Swift's declaration forms. Additive only: every line the old pattern
+# matched still matches.
+_DECL_MODIFIER = (
+    r"(?:@[\w.]+(?:\([^()]*\))?"
+    r"|(?:public|private|internal|fileprivate|open|package|static|final|mutating"
+    r"|nonmutating|override|required|convenience|lazy|weak|unowned|indirect"
+    r"|dynamic|optional|class|export|default|declare|abstract|readonly|async)"
+    r"(?:\([^()]*\))?)"
+)
+_DECL_KEYWORD = (
+    r"(?:export|import|from|def|class|func|function|interface|type|enum|public|pub"
+    r"|impl|trait|struct|module|protocol|actor|extension|init|deinit|subscript"
+    r"|typealias|associatedtype)"
+)
+# Deliberately NOT here: `const`. In TS a module's exported constants already
+# match via `export`, while a bare `const hidden = 1` is a body line — adding it
+# swept those in and broke test_summarize_extracts_interface_lines.
+# Stored properties define a Swift type's memberwise initialiser, so callers need
+# them — but a bare `var`/`let` also matches locals inside a function body. The
+# type annotation is what distinguishes a declared property from `let x = 5`.
+_DECL_PROPERTY = r"(?:var|let)\s+[\w`]+\s*:"
+# Enum cases are the payload shape callers pattern-match on. Anchored to exclude
+# switch cases, which lead with a dot (`case .left:`), a literal, or a binding.
+_DECL_ENUM_CASE = r"case\s+[a-z_]\w*\s*(?:[,(=]|$)"
 _SIGNATURE_RE = re.compile(
-    r"^\s*(?:export|import|from|def|class|func|function|interface|type|enum|"
-    r"public|pub|impl|trait|struct|module)\b"
+    rf"^\s*(?:{_DECL_MODIFIER}\s+)*"
+    rf"(?:{_DECL_KEYWORD}\b|{_DECL_PROPERTY}|{_DECL_ENUM_CASE})"
 )
 
 
@@ -1254,7 +1286,7 @@ def use_manifest_mode(design_md: str) -> bool:
 def summarize_written_files(
     files: list[tuple[str, str]],
     *,
-    max_sig_lines: int = 24,
+    max_sig_lines: int = 40,
     max_total_chars: int = 12000,
 ) -> str:
     """Compact interface summary of already-written files for the per-file prompt.
@@ -1262,6 +1294,12 @@ def summarize_written_files(
     Emits each file's import/declaration lines (its public surface) rather than
     full bodies, so later files can import real symbols without the prompt
     ballooning. Bounded in both per-file line count and total size.
+
+    The per-file line cap was 24 when a Swift file yielded a single matching
+    line; now that properties, initialisers and cases are captured (DEV-467) a
+    modest type easily reaches double figures, so a type with many members would
+    truncate before its interface was fully described. `max_total_chars` remains
+    the real bound on prompt growth.
     """
     if not files:
         return "(none yet — this is the first file)"
