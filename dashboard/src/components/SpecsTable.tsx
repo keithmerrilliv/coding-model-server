@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { fetchSpecs } from '../api/client';
 import type { Spec } from '../types/api';
+import { specStatusBadgeClass } from './specStatus';
 
 const SpecsTable: React.FC = () => {
   const [specs, setSpecs] = useState<Spec[]>([]);
@@ -23,19 +24,6 @@ const SpecsTable: React.FC = () => {
     const interval = setInterval(poll, 10000);
     return () => { cancelled = true; clearInterval(interval); };
   }, []);
-
-  const getStatusClass = (status: string) => {
-    const map: Record<string, string> = {
-      pending_plan: 'badge-pending',
-      needs_clarification: 'badge-needs-clarification',
-      plan_review: 'badge-plan-review',
-      executing: 'badge-executing',
-      completed: 'badge-completed',
-      failed: 'badge-failed',
-      archived: 'badge-pending',
-    };
-    return map[status] || 'badge-pending';
-  };
 
   return (
     <div className="card">
@@ -59,7 +47,7 @@ const SpecsTable: React.FC = () => {
               aria-label={`Open ${spec.title}`}
             >
               <td>{spec.title}</td>
-              <td><span className={`badge ${getStatusClass(spec.status)}`}>{spec.status}</span></td>
+              <td><span className={`badge ${specStatusBadgeClass(spec.status)}`}>{spec.status}</span></td>
               <td>{new Date(spec.created_at).toLocaleString()}</td>
             </tr>
           ))}

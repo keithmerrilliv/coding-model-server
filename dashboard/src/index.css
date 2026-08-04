@@ -137,3 +137,10 @@ tr:hover { background: #f8f9fa; cursor: pointer; }
 .execution-dag-svg svg { max-width: 100%; height: auto; }
 .execution-dag-error { padding: 12px; background: #fff5f5; border: 1px solid #fc8181; border-radius: 4px; color: #c53030; font-family: 'SF Mono', Menlo, monospace; font-size: 12px; }
 .execution-dag-source { background: #1e1e1e; color: #d4d4d4; padding: 12px; border-radius: 4px; overflow-x: auto; font-family: 'SF Mono', Menlo, monospace; font-size: 11px; line-height: 1.4; margin-top: 8px; }
+/* Overview "Current Execution" card wrapping the DAG (DEV-428). */
+.current-execution-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.current-execution-header h2 { margin: 0; }
+.current-execution-meta { display: flex; flex-direction: column; gap: 2px; margin: 8px 0 14px; }
+.current-execution-title { font-size: 15px; font-weight: 600; color: var(--color-primary); text-decoration: none; }
+.current-execution-title:hover { text-decoration: underline; }
+.current-execution-sub { font-size: 11px; color: #6c757d; }

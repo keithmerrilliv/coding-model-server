@@ -8,6 +8,7 @@ import SpecDetail from './components/SpecDetail';
 import GpuPanel from './components/GpuPanel';
 import EndpointMetrics from './components/EndpointMetrics';
 import ActiveModelCard from './components/ActiveModelCard';
+import CurrentExecutionCard from './components/CurrentExecutionCard';
 
 const AuthGuard: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { adminKey } = useAuth();
@@ -50,6 +51,7 @@ const LoginForm: React.FC = () => {
 
 const Overview: React.FC = () => (
   <>
+    <CurrentExecutionCard />
     <ActiveModelCard />
     <HealthCard />
     <AgentsGrid />

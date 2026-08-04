@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { fetchSpecDetail } from '../api/client';
 import type { SpecDetailResponse } from '../types/api';
+import { specStatusBadgeClass } from './specStatus';
 import EventTimeline from './EventTimeline';
 import ExecutionDag from './ExecutionDag';
 import GateActions from './GateActions';
@@ -34,19 +35,6 @@ const SpecDetail: React.FC = () => {
     return <div className="card">{error ? <div className="api-error">{error}</div> : 'Loading spec details...'}</div>;
   }
 
-  const getStatusClass = (status: string) => {
-    const map: Record<string, string> = {
-      pending_plan: 'badge-pending',
-      needs_clarification: 'badge-needs-clarification',
-      plan_review: 'badge-plan-review',
-      executing: 'badge-executing',
-      completed: 'badge-completed',
-      failed: 'badge-failed',
-      archived: 'badge-pending',
-    };
-    return map[status] || 'badge-pending';
-  };
-
   return (
     <div>
       <button onClick={() => navigate('/specs')} style={{ marginBottom: '16px', cursor: 'pointer' }}>← Back to Specs</button>
@@ -54,7 +42,7 @@ const SpecDetail: React.FC = () => {
       <div className="card">
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <h2>{detail.spec.title}</h2>
-          <span className={`badge ${getStatusClass(detail.spec.status)}`}>{detail.spec.status}</span>
+          <span className={`badge ${specStatusBadgeClass(detail.spec.status)}`}>{detail.spec.status}</span>
         </div>
         <p style={{ marginTop: '8px', color: '#6c757d' }}>Task Count: {detail.task_count}</p>
         <p style={{ fontSize: '12px', color: '#868e96' }}>ID: {detail.spec.id} | Created: {new Date(detail.spec.created_at).toLocaleString()}</p>
