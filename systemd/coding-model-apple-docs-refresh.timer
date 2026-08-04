@@ -1,0 +1,19 @@
+[Unit]
+Description=Weekly Apple documentation RAG refresh
+Documentation=file:///home/keith-merrill/Dev/coding-model-server/scraping/refresh_apple_docs.sh
+
+[Timer]
+# Sunday 02:00 — after the autonomous pipeline's typical working hours, and the
+# run takes several hours. Weekly rather than daily because Apple's docs move
+# on release cadence, not continuously; weekly rather than monthly because the
+# point is to EXERCISE the path. An integration that runs monthly has eleven
+# chances a year to have rotted unnoticed since the last look.
+OnCalendar=Sun *-*-* 02:00:00
+# Run on next boot if the machine was off at the scheduled time. Without this a
+# weekend outage silently skips a week — the failure mode being designed out.
+Persistent=true
+# Spread load if anything else ever shares this slot.
+RandomizedDelaySec=15m
+
+[Install]
+WantedBy=timers.target

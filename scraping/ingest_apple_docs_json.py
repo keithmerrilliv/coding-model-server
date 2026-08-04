@@ -57,7 +57,11 @@ def main():
     args = ap.parse_args()
 
     url = "http://%s:%s/v1/memory" % (args.server, args.port)
-    files = sorted(Path(args.indir).glob("*.jsonl"))
+    target = Path(args.indir)
+    # Accept a single .jsonl as well as a directory, so a scheduled refresh can
+    # replace ONE framework at a time (delete where framework=X, then ingest
+    # only X) instead of re-ingesting all eleven to update one.
+    files = [target] if target.is_file() else sorted(target.glob("*.jsonl"))
     if not files:
         print("no .jsonl files in %s" % args.indir)
         return 1
