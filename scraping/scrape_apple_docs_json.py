@@ -177,39 +177,85 @@ def render_symbol(doc, url):
         body.append(prose)
     text = "\n\n".join(body).strip()
 
+    # A "stub" is a symbol Apple lists but never wrote prose for: title, kind,
+    # declaration, availability, and nothing else — the case NoOverviewAvailable
+    # exists to measure. Measured across the first sweep these were 51% of
+    # everything captured, and 81% of MetalPerformanceShaders.
+    #
+    # They are worse than merely useless. Retrieval returns a fixed top-5, so a
+    # short generic stub competes for those slots against real prose, and the
+    # stubs are numerous. Filtering them raises the value of every retrieval.
+    placeholder = abstract.strip().lower().startswith("no overview available")
+    has_prose = bool(prose) or (bool(abstract) and not placeholder)
+
     meta = {
         "source": "https://developer.apple.com" + url,
         "doc_title": title,
         "symbol_kind": kind,
         "availability": avail[:480],
         "is_beta": is_beta,
+        "has_prose": has_prose,
         "scraped_at": time.strftime("%Y-%m-%d"),
         "ingest_batch": os.environ.get("INGEST_BATCH", "apple-docs"),
     }
     return text, meta
 
 
-def crawl(framework, fetcher, max_pages, verbose=True):
-    """Breadth-first over a framework's reference graph, staying inside it."""
+def crawl(framework, fetcher, max_pages, skip_stubs=False, verbose=True):
+    """Breadth-first over a framework's reference graph, staying inside it.
+
+    Returns (pages, stats). The stats matter as much as the pages: a run that
+    stops because it hit `max_pages` has been TRUNCATED at a number we chose,
+    and `queue_remaining` says how much was left undiscovered. Without that,
+    "900 records" is indistinguishable from "this framework has 900 pages" —
+    which is exactly the ambiguity that made the first pass unreadable.
+    """
     root = "/documentation/%s" % framework.lower()
     seen, queue, pages = {root}, [root], []
+    fetched = empty = stubs = 0
     while queue and len(pages) < max_pages:
         path = queue.pop(0)
         doc = fetcher.get_json("%s%s.json" % (BASE, path[len("/documentation"):]))
+        fetched += 1
         if not doc:
             continue
         text, meta = render_symbol(doc, path)
-        if len(text) > 40:
+        if len(text) <= 40:
+            empty += 1
+        elif skip_stubs and not meta["has_prose"]:
+            # Dropped from OUTPUT only — the page is still fetched and its
+            # references still followed below, because a prose-less symbol
+            # can still be the parent of documented children.
+            stubs += 1
+        else:
             meta["framework"] = framework
             pages.append((text, meta))
-            if verbose and len(pages) % 25 == 0:
-                print("    %s: %d pages" % (framework, len(pages)), flush=True)
+            if verbose and len(pages) % 100 == 0:
+                print("    %s: %d kept, %d stubs dropped, %d queued"
+                      % (framework, len(pages), stubs, len(queue)), flush=True)
         for ref in (doc.get("references") or {}).values():
             u = ref.get("url") or ""
             if (u.startswith(root + "/") or u == root) and u not in seen:
                 seen.add(u)
                 queue.append(u)
-    return pages
+
+    exhausted = not queue
+    stats = {
+        "framework": framework,
+        "pages_kept": len(pages),
+        "fetched": fetched,
+        "discovered": len(seen),
+        "queue_remaining": len(queue),
+        "too_short_skipped": empty,
+        "stubs_dropped": stubs,
+        "cap": max_pages,
+        "exhausted": exhausted,
+        # The number that answers "what cap does this framework need?".
+        # Exact when the graph was exhausted; a floor when it was truncated,
+        # since unvisited pages keep discovering more.
+        "size_estimate": len(seen) if exhausted else None,
+    }
+    return pages, stats
 
 
 def main():
@@ -217,6 +263,10 @@ def main():
     ap.add_argument("frameworks", nargs="*", default=None)
     ap.add_argument("--out", default="output-json")
     ap.add_argument("--max-pages", type=int, default=1200)
+    ap.add_argument("--skip-stubs", action="store_true",
+                    help="drop symbols Apple never wrote prose for (no abstract "
+                         "and no discussion). They were 51%% of the first sweep "
+                         "and compete for the fixed top-5 retrieval slots.")
     ap.add_argument("--dry-run", action="store_true",
                     help="crawl and report, write nothing, ingest nothing")
     ap.add_argument("--ingest", action="store_true")
@@ -226,27 +276,52 @@ def main():
     ap.add_argument("--delay", type=float, default=0.25)
     args = ap.parse_args()
 
-    frameworks = args.frameworks or DEFAULT_FRAMEWORKS
+    # "Name" uses the global cap; "Name:N" overrides it for that framework —
+    # frameworks differ by more than an order of magnitude, so one cap either
+    # truncates the big ones or wastes requests on the small ones.
+    specs = []
+    for item in (args.frameworks or DEFAULT_FRAMEWORKS):
+        name, _, cap = item.partition(":")
+        specs.append((name, int(cap) if cap else args.max_pages))
+
     fetcher = Fetcher(delay=args.delay)
     outdir = Path(args.out)
     if not args.dry_run:
         outdir.mkdir(parents=True, exist_ok=True)
 
-    total = 0
-    for fw in frameworks:
-        print("== %s" % fw, flush=True)
-        pages = crawl(fw, fetcher, args.max_pages)
+    total, all_stats = 0, []
+    for fw, cap in specs:
+        print("== %s (cap %d)" % (fw, cap), flush=True)
+        pages, stats = crawl(fw, fetcher, cap, skip_stubs=args.skip_stubs)
         beta = sum(1 for _, m in pages if m.get("is_beta"))
-        chars = sum(len(t) for t, _ in pages)
-        print("   %d pages, %d beta-flagged, %d chars" % (len(pages), beta, chars))
+        stats["beta"] = beta
+        stats["chars"] = sum(len(t) for t, _ in pages)
+        all_stats.append(stats)
+        print("   %d kept (%d stubs dropped), %d beta, %d chars | discovered=%d queue_left=%d %s"
+              % (len(pages), stats["stubs_dropped"], beta, stats["chars"],
+                 stats["discovered"], stats["queue_remaining"],
+                 "COMPLETE" if stats["exhausted"] else "TRUNCATED BY CAP"), flush=True)
         total += len(pages)
         if not args.dry_run:
             with (outdir / ("%s.jsonl" % fw)).open("w") as f:
                 for text, meta in pages:
                     f.write(json.dumps({"text": text, "metadata": meta}) + "\n")
 
+    if not args.dry_run:
+        (outdir / "crawl_stats.json").write_text(json.dumps(all_stats, indent=2))
+
+    print("\n%-26s %7s %7s %9s %9s  %s" % (
+        "FRAMEWORK", "KEPT", "CAP", "DISCOVER", "QUEUELEFT", "STATUS"))
+    for s in all_stats:
+        print("%-26s %7d %7d %9d %9d  %s" % (
+            s["framework"], s["pages_kept"], s["cap"], s["discovered"],
+            s["queue_remaining"], "complete" if s["exhausted"] else "TRUNCATED"))
+    trunc = [s["framework"] for s in all_stats if not s["exhausted"]]
+    if trunc:
+        print("\nTruncated (raise the cap for these): %s" % ", ".join(trunc))
+
     print("\nTOTAL %d pages across %d frameworks; %d HTTP fetches, %d errors"
-          % (total, len(frameworks), fetcher.count, len(fetcher.errors)))
+          % (total, len(specs), fetcher.count, len(fetcher.errors)))
     for u, e in fetcher.errors[:10]:
         print("  ERROR %s -> %s" % (u, e))
     if fetcher.errors:
