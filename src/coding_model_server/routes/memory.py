@@ -13,8 +13,8 @@ from coding_model_server import runtime
 from coding_model_server.config import Config
 from coding_model_server.runtime import verify_admin_key
 from coding_model_server.schemas import (
-    DeepDocRequest, FileUploadRequest, IngestRequest, MemoryRequest,
-    SearchRequest,
+    DeepDocRequest, FileUploadRequest, IngestRequest, MemoryDeleteRequest,
+    MemoryRequest, SearchRequest,
 )
 
 logger = logging.getLogger(__name__)
@@ -51,6 +51,32 @@ def save_memory_endpoint(request: MemoryRequest):
     except Exception as e:
         logger.error("Error saving memory: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/v1/memory/delete", dependencies=[Depends(verify_admin_key)])
+def delete_memory_endpoint(request: MemoryDeleteRequest):
+    """Delete memories by id and/or metadata filter.
+
+    POST rather than DELETE: the filter is a nested object, and bodies on DELETE
+    are poorly supported across clients and proxies.
+
+    Admin-key gated like every other memory route. Note the asymmetry this
+    closes — anyone who could POST /v1/memory could grow the collection without
+    limit, but nobody could shrink it.
+    """
+    if not runtime.services.memory:
+        raise HTTPException(status_code=503, detail="Memory service not initialized")
+
+    result = runtime.services.memory.delete_memories(
+        ids=request.ids, where=request.where,
+        allow_delete_all=request.allow_delete_all,
+    )
+    if "error" in result:
+        # A refusal to wipe unfiltered is the caller's mistake, not a server
+        # fault, so it comes back as 400 rather than 500.
+        code = 400 if "refusing to delete" in result["error"] else 500
+        raise HTTPException(status_code=code, detail=result["error"])
+    return result
 
 
 @router.post("/v1/memory/search", dependencies=[Depends(verify_admin_key)])

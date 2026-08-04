@@ -158,6 +158,20 @@ class MemoryRequest(BaseModel):
     metadata: Optional[Dict[str, Union[str, int, float, bool]]] = None
 
 
+class MemoryDeleteRequest(BaseModel):
+    """Request to delete memories by id and/or metadata filter.
+
+    `where` is a chromadb metadata filter, so provenance keys written by the
+    doc scraper are directly usable — {"framework": "Metal"} drops exactly one
+    framework's chunks, which is what makes a per-framework refresh possible
+    instead of an archive-and-rebuild.
+    """
+    ids: Optional[List[str]] = None
+    where: Optional[Dict[str, Any]] = None
+    # Explicit opt-in for an unfiltered wipe; see MemoryService.delete_memories.
+    allow_delete_all: bool = False
+
+
 class SearchRequest(BaseModel):
     """Request to search the web"""
     query: str

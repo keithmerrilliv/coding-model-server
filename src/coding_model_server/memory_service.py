@@ -257,6 +257,45 @@ class MemoryService:
                 count, self.MEMORY_COUNT_WARN_THRESHOLD,
             )
 
+    def delete_memories(self, ids: Optional[List[str]] = None,
+                        where: Optional[Dict[str, Any]] = None,
+                        allow_delete_all: bool = False) -> Dict[str, Any]:
+        """Delete documents by id and/or metadata filter. Returns the count.
+
+        The collection was append-only until now, which meant a bad ingest could
+        only be undone by archiving the whole store and rebuilding — that is
+        exactly what removing one test row cost on 2026-08-03. It also made the
+        provenance work only half useful: chunks record their framework and
+        source URL, but there was no way to act on that and refresh one
+        framework at a time.
+
+        Deleting EVERYTHING requires allow_delete_all, because chromadb treats
+        an empty filter as "match all". Without that guard a caller that meant
+        to pass a filter, and passed an empty dict by mistake, silently wipes
+        the collection — the failure mode this method exists to make
+        recoverable, so it must not be the easy one to hit.
+        """
+        if not ids and not where and not allow_delete_all:
+            return {"error": "refusing to delete with no ids and no filter; "
+                             "pass allow_delete_all to wipe the collection"}
+        try:
+            before = self._collection.count()
+            # chromadb rejects an empty `where` dict, so only pass real filters.
+            kwargs: Dict[str, Any] = {}
+            if ids:
+                kwargs["ids"] = ids
+            if where:
+                kwargs["where"] = where
+            self._collection.delete(**kwargs)
+            after = self._collection.count()
+            deleted = before - after
+            logger.info("Deleted %d memories (ids=%s where=%s) — %d remain",
+                        deleted, len(ids) if ids else 0, where, after)
+            return {"status": "success", "deleted": deleted, "remaining": after}
+        except Exception as e:
+            logger.error("Error deleting memories: %s", e)
+            return {"error": str(e)}
+
     def add_memory_chunked(self, text: str, source: str, metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Add text to the database using language-aware chunking when possible.
 
