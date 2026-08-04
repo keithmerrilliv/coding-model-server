@@ -38,6 +38,7 @@ import shutil
 import signal
 import threading
 import sys
+import textwrap
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -304,9 +305,147 @@ def _process_pending_plan(db: Database, spec: Spec) -> None:
         db.update_spec_status(spec.id, SpecStatus.FAILED)
 
 
+# DEV-426: keys each Apple framework needs before a dispatch can even be built.
+# A plan missing these is invalid by construction — it cannot run, and the
+# failure surfaces at the test phase, long after design and implementation.
+_FRAMEWORK_REQUIRED_KEYS = {
+    "swift_test": ("repo",),
+    "xcodebuild_test": ("repo", "scheme", "filter"),
+}
+# How many times validation may bounce a plan back before the spec fails, so a
+# planner that cannot produce a valid block does not loop forever.
+PLAN_VALIDATION_MAX_ROUNDS = int(
+    os.getenv("AUTONOMOUS_PLAN_VALIDATION_MAX_ROUNDS", "2"))
+_AUTO_PLAN_REJECT_MARKER = "## Plan validation failure (DEV-426)"
+_SPEC_TEST_STRATEGY_RE = re.compile(
+    r"^##+\s*test_strategy\s*$(.*?)(?=^##\s|\Z)",
+    re.MULTILINE | re.DOTALL | re.IGNORECASE)
+
+
+def _spec_declared_test_strategy(spec_md: str) -> dict:
+    """The `## test_strategy` block from the spec itself, as a mapping.
+
+    Specs write it as an indented YAML block under the heading. Returns {} when
+    absent or unparseable — this is an advisory source, never a hard failure.
+    """
+    import yaml as _yaml
+    if not spec_md:
+        return {}
+    match = _SPEC_TEST_STRATEGY_RE.search(spec_md)
+    if not match:
+        return {}
+    block = textwrap.dedent(match.group(1)).strip()
+    if not block:
+        return {}
+    try:
+        parsed = _yaml.safe_load(block)
+    except _yaml.YAMLError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _validate_test_strategy(yaml_text: str, spec_md: str) -> list[str]:
+    """Problems that make a plan's test_strategy unrunnable. Empty means fine.
+
+    Two rules. The framework's own required keys must be present, because
+    without them no dispatch can be constructed. And every key the spec's own
+    test_strategy block declares must survive into the plan — the planner may
+    add keys, never silently drop them. The second rule is the stronger one:
+    `base_ref` and `protected_paths` are not framework-required, and losing
+    them fails silently rather than loudly (DEV-427 is disabled outright).
+    """
+    import yaml as _yaml
+    try:
+        plan = _yaml.safe_load(yaml_text)
+    except _yaml.YAMLError:
+        return []  # malformed YAML is _bootstrap_tasks' job to reject, not ours
+    if not isinstance(plan, dict):
+        return []
+    strategy = plan.get("test_strategy")
+    if not isinstance(strategy, dict):
+        return []  # no strategy at all is a different (non-Apple) shape
+
+    problems: list[str] = []
+    reported: set[str] = set()
+    framework = str(strategy.get("framework") or "").strip()
+    for key in _FRAMEWORK_REQUIRED_KEYS.get(framework, ()):
+        if not strategy.get(key):
+            reported.add(key)
+            problems.append(
+                f"`{key}` is required for `framework: {framework}` and is missing. "
+                f"Without it the runner dispatch cannot be built at all.")
+
+    # A key can fail both rules; say so once.
+    declared = _spec_declared_test_strategy(spec_md)
+    dropped = [k for k in declared
+               if k not in ("framework", "required", "notes")
+               and k not in strategy and k not in reported]
+    for key in dropped:
+        problems.append(
+            f"`{key}` is declared in the spec's own test_strategy block and is "
+            f"absent from the plan. Copy it through as a real YAML key — "
+            f"prose inside `notes` is never parsed.")
+    return problems
+
+
+def _reject_plan_for_validation(db: Database, spec: Spec, problems: list[str],
+                                yaml_text: str) -> bool:
+    """Bounce an invalid plan back to the planner. True if the round was issued.
+
+    Uses the same channel a human rejection uses — an approved CLARIFICATION
+    gate carrying the feedback, then PENDING_PLAN — so the planner sees it as
+    a normal revision round and no operator attention is consumed.
+    """
+    prior = sum(1 for g in db.list_gates_for_spec(spec.id, GateType.CLARIFICATION)
+                if (g.prompt_md or "").startswith(_AUTO_PLAN_REJECT_MARKER))
+    if prior >= PLAN_VALIDATION_MAX_ROUNDS:
+        logger.error("spec %s: plan still invalid after %d validation round(s) "
+                     "— failing: %s", spec.id, prior, "; ".join(problems))
+        db.update_spec_status(spec.id, SpecStatus.FAILED)
+        return False
+
+    bullets = "\n".join(f"- {p}" for p in problems)
+    notes = (
+        "## Plan rejection feedback\n\n"
+        "The plan's `test_strategy` cannot be dispatched as written. This was "
+        "caught automatically before review, so no reviewer has seen it yet.\n\n"
+        f"{bullets}\n\n"
+        "Re-emit the plan with these as structured keys under `test_strategy`. "
+        "Keep whatever prose you have in `notes` — it is useful to the "
+        "implementer — but the values must also exist as keys, because the "
+        "runner dispatch is built from the keys and `notes` is never parsed.\n"
+    )
+    gate = db.create_gate(
+        spec_id=spec.id,
+        gate_type=GateType.CLARIFICATION,
+        prompt_md=_AUTO_PLAN_REJECT_MARKER,
+    )
+    db.respond_to_gate(gate.id, "approved", notes=notes)
+    db.update_spec_status(spec.id, SpecStatus.PENDING_PLAN)
+    logger.info("spec %s: plan failed validation (round %d/%d), replanning: %s",
+                spec.id, prior + 1, PLAN_VALIDATION_MAX_ROUNDS,
+                "; ".join(problems))
+    return True
+
+
 def _accept_plan(db: Database, spec: Spec, spec_dir, result: PlannerYaml) -> None:
     """Persist a YAML plan to disk and create the plan_approval gate."""
     yaml_text = result.yaml_text
+
+    # DEV-426: a plan that cannot dispatch must never reach a human gate. Three
+    # consecutive runs of the same spec lost test_strategy keys into `notes`
+    # prose; each cost a review round, and a dropped `protected_paths` silently
+    # disables the scaffold protection with no error at all.
+    try:
+        spec_md_path = spec_dir / spec.source_md_path
+        spec_md = spec_md_path.read_text() if spec_md_path.exists() else ""
+    except OSError:
+        spec_md = ""
+    problems = _validate_test_strategy(yaml_text, spec_md)
+    if problems:
+        _reject_plan_for_validation(db, spec, problems, yaml_text)
+        return
+
     db.update_spec_status(
         spec.id,
         SpecStatus.PLAN_REVIEW,
