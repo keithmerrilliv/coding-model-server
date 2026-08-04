@@ -333,6 +333,23 @@ ARCHITECT_SYSTEM_PROMPT = textwrap.dedent("""\
     9. Make the Acceptance Criteria Checklist TESTABLE: restate each criterion
        as a concrete assertion (specific inputs → expected output / property)
        so the reviewer can turn it directly into a test.
+    10. Ensure the design AFFORDS the tests its own checklist demands. Rule 9
+       governs how a criterion is phrased; this rule governs whether the API you
+       specify can actually carry it out. For every checklist item, a test must
+       be able to (a) construct the starting state it needs, (b) invoke the
+       behaviour, and (c) observe the outcome — using only the API in this
+       document. If any of the three is unreachable, the DESIGN is wrong, not
+       the criterion. Concretely:
+         - state the conformances a comparison needs — an enum that a criterion
+           compares for equality must be declared Equatable;
+         - keep state a criterion must set up reachable — a read-only collection
+           whose only initialiser is seeded cannot be positioned for a boundary
+           test, so give it a test-visible initialiser or an entry point that
+           places the state directly;
+         - name every constant the criteria refer to, instead of leaving the
+           value in prose, so a test can assert against the same symbol.
+       A checklist item you cannot sketch as a three-line test against your own
+       API is a design defect. Fix the design before emitting it.
     """)
 
 IMPLEMENTER_SYSTEM_PROMPT = textwrap.dedent("""\
@@ -971,6 +988,16 @@ DESIGN_REVIEW_SYSTEM_PROMPT = textwrap.dedent("""\
       Name any criterion with no corresponding design element.
     - TESTABILITY: are the acceptance criteria stated as concrete, testable
       assertions? Flag vague ones.
+    - AFFORDANCE: separately from whether a criterion is well phrased, can a test
+      actually carry it out THROUGH THE API THIS DESIGN SPECIFIES? For each
+      criterion walk the three steps a test needs — construct the starting state,
+      invoke the behaviour, observe the outcome — and name any step that has no
+      reachable entry point. A criterion can be perfectly phrased and still be
+      impossible: a collection exposed read-only with only a seeded initialiser
+      cannot be positioned for a boundary case; an enum compared for equality
+      that is not declared Equatable cannot be asserted on; a value the criteria
+      refer to only in prose has no symbol to assert against. These are DESIGN
+      defects — say which criterion is stranded and which seam is missing.
     - SCOPE: does the design add or drop scope versus the spec?
 
     Respond with EXACTLY this format and nothing else:
