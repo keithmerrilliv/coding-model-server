@@ -610,6 +610,32 @@ def _collect_patch_files(spec_dir: Path) -> tuple[list[dict], Optional[str]]:
     return patch_files, None
 
 
+def _drop_protected(patch_files: list[dict],
+                    protected_paths) -> tuple[list[dict], list[str]]:
+    """Remove paths the spec puts off-limits, restoring them to the base.
+
+    The runner materialises a git worktree at ``base_ref`` and then writes the
+    patch files over it, so a path simply *not sent* keeps whatever the base
+    commit has. That makes restoration free — no diff, no checkout, no
+    round-trip — and it is why this is the cheap slice of DEV-400 that lands
+    without waiting on attempt-branch transport.
+
+    Returns (kept, dropped_paths).
+    """
+    if not protected_paths:
+        return patch_files, []
+    protected = {p.strip().lstrip("./") for p in protected_paths if p and p.strip()}
+    if not protected:
+        return patch_files, []
+    kept, dropped = [], []
+    for item in patch_files:
+        if item["path"] in protected:
+            dropped.append(item["path"])
+        else:
+            kept.append(item)
+    return kept, dropped
+
+
 def _run_mac_runner_tests(
     spec_dir: Path,
     framework: str,
@@ -623,6 +649,7 @@ def _run_mac_runner_tests(
     workspace: Optional[str] = None,
     project: Optional[str] = None,
     filter: Optional[str] = None,
+    protected_paths: Optional[list] = None,
 ) -> tuple[bool, str]:
     """Dispatch swift_test / xcodebuild_test to the Mac runner over HTTP."""
     if not MAC_RUNNER_API_KEY:
@@ -640,6 +667,14 @@ def _run_mac_runner_tests(
     patch_files, err = _collect_patch_files(spec_dir)
     if err:
         return False, err
+
+    # DEV-427: files the spec declares off-limits are never sent, so the
+    # worktree keeps the base_ref version of each.
+    patch_files, dropped_protected = _drop_protected(patch_files, protected_paths)
+    if dropped_protected:
+        logger.warning("restoring %d protected path(s) to %s: %s",
+                       len(dropped_protected), base_ref,
+                       ", ".join(dropped_protected))
 
     payload: dict = {
         "spec_id": spec_dir.name,
@@ -676,7 +711,19 @@ def _run_mac_runner_tests(
     except ValueError:
         return False, f"mac-runner returned non-JSON response: {resp.text[:2000]}"
 
-    return bool(data.get("passed")), str(data.get("output", ""))
+    output = str(data.get("output", ""))
+    if dropped_protected:
+        # Say so in the output the reviewer and the retry both read: silently
+        # discarding the implementer's version of a file would be its own
+        # surprise.
+        output = (
+            "[protected paths] the implementer modified "
+            f"{len(dropped_protected)} off-limits file(s); each was restored "
+            f"to {base_ref} and its version was NOT used:\n"
+            + "".join(f"  - {p}\n" for p in dropped_protected)
+            + "\n" + output
+        )
+    return bool(data.get("passed")), output
 
 
 def run_tests(
@@ -696,7 +743,12 @@ def run_tests(
 
     framework_opts carries the framework-specific configuration from the
     planner's test_strategy block (repo, base_ref, scheme, destination,
-    configuration, workspace, project, filter) — unknown keys are ignored.
+    configuration, workspace, project, filter, protected_paths) — unknown
+    keys are ignored.
+
+    protected_paths (Apple frameworks only) names repo-relative files the
+    spec puts off-limits. They are dropped from the dispatch payload, so the
+    worktree keeps the base_ref version of each (DEV-427).
 
     Returns (passed, combined_output).
     """
@@ -728,6 +780,7 @@ def run_tests(
             workspace=framework_opts.get("workspace"),
             project=framework_opts.get("project"),
             filter=framework_opts.get("filter"),
+            protected_paths=framework_opts.get("protected_paths"),
         )
     else:
         passed, output = _run_local_tests(spec_dir, framework, effective_timeout)
