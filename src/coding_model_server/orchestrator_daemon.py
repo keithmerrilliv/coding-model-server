@@ -1463,6 +1463,68 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
     # (DEV-106). Restore what the snapshots have; flag the rest loudly.
     restored, still_missing = _verify_manifest_workspace(db, spec, task, spec_dir)
 
+    # DEV-429: build the code before asking a human to review it. A gate that
+    # opens on code which cannot compile spends the expensive resource (the
+    # reviewer) on something the free one (the compiler) already decided. The
+    # reviewer/test task that would have caught it sits PENDING *behind* this
+    # gate, so without this the ordering is inverted.
+    #
+    # A dispatch that errors out (Mac asleep, key missing, network) must not
+    # burn a retry: _detect_build_failure only fires on a recognised compiler
+    # diagnostic, and everything else falls through to the normal gate.
+    build_reason = None
+    build_output = ""
+    build_passed = None
+    ts_for_build = _load_plan(spec).get("test_strategy")
+    if isinstance(ts_for_build, dict) and ts_for_build.get("framework"):
+        fw = ts_for_build["framework"]
+        try:
+            build_passed, build_output = _run_tests_with_guard(
+                spec.id, spec_dir, fw, ts_for_build,
+                output_label="Pre-gate build check output:",
+                fail_log=("spec %s: pre-gate build check failed structural "
+                          "validation (%s)"),
+            )
+            build_reason = _detect_build_failure(build_output, fw, build_passed)
+        except Exception as e:  # never let the check itself stall the spec
+            logger.warning("spec %s: pre-gate build check errored (%s) — "
+                           "falling through to the review gate", spec.id, e)
+            build_reason = None
+
+        db.record_event(EventKind.TEST_RAN, spec_id=spec.id, task_id=task.id,
+                        payload={"phase": "pre_gate_build_check",
+                                 "passed": build_passed if not build_reason else False,
+                                 "build_failed": build_reason is not None,
+                                 "retry": task.retry_count})
+
+    if build_reason is not None:
+        # Straight back to the implementer with the compiler's own words. No
+        # human gate: there is nothing here for a reviewer to decide.
+        _write_artifact(spec_dir, "build_failure.txt", build_output)
+        actionable = _extract_actionable_test_output(
+            build_output, ts_for_build["framework"])
+        feedback = (
+            f"## The code does not compile\n\n"
+            f"No review was performed — the build failed, so there is nothing "
+            f"to review yet. First compiler diagnostic:\n\n"
+            f"    {build_reason}\n\n"
+            f"Fix every diagnostic below and re-emit ALL files.\n\n"
+            f"```\n{actionable}\n```\n"
+        )
+        synth_gate = db.create_gate(
+            spec_id=spec.id,
+            task_id=task.id,
+            gate_type=GateType.CODE_REVIEW,
+            prompt_md="## Automated build-failure retry (DEV-429)",
+        )
+        db.respond_to_gate(synth_gate.id, "rejected", notes=feedback)
+        db.increment_task_retry(task.id)
+        db.update_task_status(task.id, TaskStatus.PENDING)
+        logger.info("spec %s: build failed (%s), rotating implementer "
+                    "without a human gate (attempt %d/%d)",
+                    spec.id, build_reason, task.retry_count + 1, MAX_RETRIES)
+        return
+
     # Create code_review gate
     file_list = "\n".join(f"- `{p}`" for p, _ in result.files)
     if restored:
@@ -1485,7 +1547,8 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
         prompt_md=(
             f"## Code review: {spec.title}\n\n"
             f"Spec ID: `{spec.id}`\n"
-            f"Retry: {task.retry_count}\n\n"
+            f"Retry: {task.retry_count}\n"
+            f"{_build_check_line(build_passed)}\n"
             f"The implementer produced the following files:\n\n{file_list}\n"
             f"{missing_block}\n"
             f"Approve to proceed to testing, or reject with notes.\n"
@@ -1518,6 +1581,59 @@ _VITEST_SUMMARY_RE = re.compile(
     r"^\s*(?:Test Files|Tests)\s+\d+\s+(?:passed|failed|skipped|todo)",
     re.MULTILINE,
 )
+
+# DEV-429: signatures of a *build* failure, as opposed to a test failure. The
+# distinction matters because a build failure needs no human judgement — the
+# compiler already said what is wrong — so it must never open a code_review
+# gate. Swift emits `path:line:col: error: message` for every diagnostic and
+# prints nothing of the sort when the build succeeds and only assertions fail.
+# Python's equivalent is a collection/import error, which likewise means the
+# suite never ran.
+_BUILD_FAILURE_RES = {
+    "swift_test": re.compile(r"^.*:\d+:\d+: error: |^error: ", re.MULTILINE),
+    "xcodebuild_test": re.compile(
+        r"^.*:\d+:\d+: error: |^error: |The following build commands failed",
+        re.MULTILINE),
+    "pytest": re.compile(
+        r"^E\s+(?:ImportError|ModuleNotFoundError|SyntaxError|IndentationError|NameError)|"
+        r"^ERROR collecting |^!+ Interrupted: \d+ errors? during collection",
+        re.MULTILINE),
+}
+_BUILD_FAILURE_RES["python"] = _BUILD_FAILURE_RES["pytest"]
+
+
+def _detect_build_failure(output: str, framework: str, passed: bool) -> str | None:
+    """Return a short reason when *output* shows the code never built.
+
+    Only ever consulted on a failing run: a green suite proves the build was
+    fine, and some tests legitimately print the word "error" in their own
+    output. Returning None means "this is a real test failure, or we cannot
+    tell" — both of which keep the normal gate path.
+    """
+    if passed or not output:
+        return None
+    pattern = _BUILD_FAILURE_RES.get(framework.lower())
+    if pattern is None:
+        return None
+    match = pattern.search(output)
+    if match is None:
+        return None
+    line = output[match.start():].splitlines()[0].strip()
+    return line[:200] if line else "compiler diagnostic present"
+
+
+def _build_check_line(build_passed: bool | None) -> str:
+    """One-line build status for the code_review gate prompt (DEV-429).
+
+    Tells the reviewer what the compiler already established, so a gate is
+    never mistaken for "nobody has run this yet".
+    """
+    if build_passed is None:
+        return "Build check: not run (no test framework in the plan).\n"
+    if build_passed:
+        return "Build check: **compiled and the suite passed.**\n"
+    return ("Build check: **compiled**, but the suite has failing tests — "
+            "the failures are behaviour, not a build error.\n")
 
 
 def _extract_actionable_test_output(output: str, framework: str, max_chars: int = 8000) -> str:
