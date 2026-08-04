@@ -6,6 +6,8 @@ Two collectors:
     sparklines on the dashboard.
   - GpuSampler: 1 Hz background thread, shells out to nvidia-smi, keeps
     a rolling buffer of GPU utilisation/VRAM/power/clocks/temp.
+    Availability is derived from whether sampling currently works, not
+    probed once at startup — see the note on _loop (DEV-432).
 
 Neither collector is admin-key gated at this layer; the snapshot endpoints
 in server.py are. Everything is in-memory — no persistence. Cardinality is
@@ -30,6 +32,11 @@ _PER_ENDPOINT_RING_SIZE = 600
 
 # 1-Hz GPU samples. 120 = 2 min of history (we render the last 60).
 _GPU_RING_SIZE = 120
+
+# Cadence while nvidia-smi is not answering. The sampler keeps retrying
+# rather than latching off (DEV-432), but a host with no GPU at all
+# shouldn't fork a doomed subprocess every second forever.
+_GPU_RETRY_INTERVAL_S = 30.0
 
 _EndpointKey = Tuple[str, str, Optional[str]]
 
@@ -222,27 +229,14 @@ class GpuSampler:
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
-        self._available = self._probe()
+        # Set by the sampler thread on its first successful read. Starting
+        # False means the panel says "unavailable" for at most one tick.
+        self._available = False
         # Cached per-process; the GPU power cap doesn't change.
         self._static_power_limit: Optional[float] = None
         self._static_vram_total: Optional[float] = None
 
-    @staticmethod
-    def _probe() -> bool:
-        try:
-            subprocess.run(
-                ["nvidia-smi", "--version"],
-                capture_output=True, timeout=2.0, check=True,
-            )
-            return True
-        except (FileNotFoundError, subprocess.CalledProcessError,
-                subprocess.TimeoutExpired, OSError):
-            return False
-
     def start(self) -> None:
-        if not self._available:
-            logger.warning("GpuSampler: nvidia-smi unavailable, GPU stats disabled")
-            return
         if self._thread and self._thread.is_alive():
             return
         self._stop.clear()
@@ -258,12 +252,39 @@ class GpuSampler:
             self._thread.join(timeout=2.0)
 
     def _loop(self) -> None:
+        """Sample until stopped, treating availability as a live property.
+
+        This used to be gated on a single nvidia-smi probe taken in
+        __init__, so a server that started before the nvidia driver
+        finished initialising latched "unavailable" for its whole
+        lifetime and only a restart brought GPU stats back (DEV-432).
+        Deriving it from the sample itself self-heals a boot race within
+        one tick, and equally covers the driver being reloaded under a
+        long-running server. Transitions are logged; steady state is not,
+        so a GPU-less host doesn't spam the log every retry.
+        """
+        first_tick = True
         while not self._stop.is_set():
             sample = self._sample_once()
             if sample is not None:
                 with self._lock:
                     self._ring.append(sample)
-            self._stop.wait(self._interval)
+                if not self._available:
+                    logger.info("GpuSampler: nvidia-smi responding, GPU stats enabled")
+                    self._available = True
+                wait = self._interval
+            else:
+                # `or first_tick` so a host with no GPU still says why the
+                # panel is empty; without it the opening state change is
+                # False -> False and would log nothing at all.
+                if self._available or first_tick:
+                    logger.warning(
+                        "GpuSampler: nvidia-smi not responding, GPU stats "
+                        "unavailable (retrying every %.0fs)", _GPU_RETRY_INTERVAL_S)
+                    self._available = False
+                wait = max(self._interval, _GPU_RETRY_INTERVAL_S)
+            first_tick = False
+            self._stop.wait(wait)
 
     def _sample_once(self) -> Optional[dict]:
         try:
