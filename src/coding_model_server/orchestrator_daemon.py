@@ -3457,9 +3457,15 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
     else:
         logger.info("spec %s: synthesis near-miss (%.0f%% pass) — one targeted "
                     "repair round", spec.id, rate * 100)
+    # DEV-522: tell the repair which kind of failure it is looking at. At this
+    # point `rate is None` means exactly "arrived via the build-failure branch"
+    # — the two early returns above have already discarded the unmeasurable and
+    # far-from-passing cases — so it is the same discriminator the event's
+    # `trigger` field uses. The near-miss prompt is left byte-identical.
     repair_messages = executor.build_synthesis_repair_message(
         spec_md, design_md, result.files,
         _extract_actionable_test_output(test_output, framework),
+        build_diagnostic=build_failed if rate is None else None,
     )
     repair_meta: dict = {}
     try:
@@ -3493,7 +3499,15 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
                                  round(rate, 3) if rate is not None else None),
                              "trigger": ("build_failure" if rate is None
                                          else "near_miss"),
-                             "files": len(repair.files)})
+                             # DEV-522: this used to be a bare `files` count of
+                             # what the repair EMITTED, which reads as what the
+                             # repair was GIVEN — the repair is handed every
+                             # synthesized file. That ambiguity sent a diagnosis
+                             # of run 6 straight into a visibility bug that does
+                             # not exist, so record both sides explicitly.
+                             "files_offered": len(result.files),
+                             "files_changed": len(repair.files),
+                             "changed_paths": [p for p, _ in repair.files]})
     tests_passed, test_output = _run_tests_with_guard(
         spec.id, spec_dir, framework, framework_opts,
         output_label="Post-repair test runner output:",

@@ -1931,27 +1931,59 @@ def build_synthesis_repair_message(
     design_md: str,
     files: "list[tuple[str, str]]",
     failing_output: str,
+    build_diagnostic: str | None = None,
 ) -> list[dict[str, str]]:
-    """One targeted repair round on a near-passing synthesized artifact.
+    """One targeted repair round on a synthesized artifact.
 
     Unlike synthesis (which merges all attempts), the repair sees only the
-    synthesized files plus the failing-test excerpt, and is told to change
-    the minimum — a 15/17 artifact should not be re-imagined (DEV-406).
+    synthesized files plus the failure excerpt, and is told to change the
+    minimum — a 15/17 artifact should not be re-imagined (DEV-406).
+
+    ``build_diagnostic`` carries the first compiler error when the synthesis
+    failed to BUILD rather than to pass (DEV-522). DEV-469 opened that path
+    but left DEV-406's near-miss wording behind it, so the repair was told
+    its code "already passes most of its tests" about code that compiled not
+    at all, under a "## Failing tests" heading holding compiler diagnostics.
+    The damage is not the false flattery but the instruction that follows it:
+    "do not restructure or rewrite passing behavior" reads as "edit where the
+    error is reported", and a missing conformance is reported at the USE site
+    while the fix belongs at the DECLARATION. Run 6 of spec_1ba2db3d died one
+    word from compiling because the repair rewrote the test that cited the
+    error instead of adding ``: Equatable`` to the type.
     """
+    building = build_diagnostic is not None
     parts = [
         "## Specification\n\n", spec_md,
         "\n\n## Architecture Design\n\n", design_md,
-        "\n\n## Current implementation (passes most tests)\n\n",
+        "\n\n## Current implementation (does NOT compile)\n\n" if building
+        else "\n\n## Current implementation (passes most tests)\n\n",
     ]
     for relpath, content in files:
         parts.append(f"### {relpath}\n\n```\n{content}\n```\n\n")
-    parts.append(
-        "## Failing tests\n\n```\n" + failing_output + "\n```\n\n---\n\n"
-        "This implementation already passes most of its tests. Fix ONLY "
-        "what the failures above require — do not restructure or rewrite "
-        "passing behavior. Output <<<FILE: path>>>…<<<END_FILE>>> blocks "
-        "for JUST the files you change, each with its complete content."
-    )
+    if building:
+        parts.append(
+            "## Compiler diagnostics\n\n```\n" + failing_output + "\n```\n\n"
+            "---\n\n"
+            "This implementation FAILED TO COMPILE. No test ran, so no "
+            "behavior here is known to pass and none of it is protected — "
+            "getting the build correct comes first.\n\n"
+            "Fix the CAUSE of each diagnostic. The cause is often NOT in the "
+            "file the diagnostic names: a missing protocol or interface "
+            "conformance is reported at the line that USES the type and is "
+            "fixed at the line that DECLARES it. Add the conformance to the "
+            "declaration rather than rewriting the caller to avoid needing "
+            "it. Change a test only when the test is itself what is wrong.\n\n"
+            "Output <<<FILE: path>>>…<<<END_FILE>>> blocks for every file you "
+            "change, each with its complete content."
+        )
+    else:
+        parts.append(
+            "## Failing tests\n\n```\n" + failing_output + "\n```\n\n---\n\n"
+            "This implementation already passes most of its tests. Fix ONLY "
+            "what the failures above require — do not restructure or rewrite "
+            "passing behavior. Output <<<FILE: path>>>…<<<END_FILE>>> blocks "
+            "for JUST the files you change, each with its complete content."
+        )
     return [
         {"role": "system", "content": SYNTHESIS_SYSTEM_PROMPT},
         {"role": "user", "content": "".join(parts)},
