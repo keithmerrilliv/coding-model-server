@@ -1425,6 +1425,13 @@ def _generate_via_manifest(
         prior = _load_prior_manifest_run(spec_dir, retry_count)
         if prior is not None:
             entries, prior_files = prior
+            # DEV-500: repair here too, not just on full generation. A targeted
+            # retry reuses the PRIOR manifest, so a corrupted directory is
+            # baked in and every regeneration rewrites the file to the same
+            # unbuildable path — the retry cannot fix what the manifest keeps
+            # asserting. Repair before computing the cited set so the citation
+            # matches the corrected path.
+            _repair_manifest_dirs(db, spec, task, entries, design_md)
             cited = _parse_cited_paths(rejection_notes, {e.path for e in entries})
             widened = False
 
@@ -1503,6 +1510,8 @@ def _generate_via_manifest(
     logger.info("spec %s: manifest = %d files: %s", spec.id,
                 len(manifest.entries), ", ".join(e.path for e in manifest.entries))
 
+    _repair_manifest_dirs(db, spec, task, manifest.entries, design_md)
+
     result = _build_from_manifest(
         db, spec, task, spec_md, design_md, manifest.entries, chosen_agent,
         clarifications, rejection_notes,
@@ -1511,6 +1520,100 @@ def _generate_via_manifest(
     if not isinstance(result, ParseError):
         _persist_manifest(spec_dir, manifest.entries)
     return result
+
+
+# Directory names as the design writes them. It uses a tree layout — `Tests/`
+# on one line, `└── CentipedeCoreTests/` on the next — so a full path prefix
+# never appears contiguously and matching on prefixes finds nothing. Match on
+# individual components instead, which is layout-agnostic.
+_DESIGN_DIR_COMPONENT_RE = re.compile(r"([A-Za-z][\w.-]*)/")
+
+
+def _design_dir_components(design_md: str) -> set:
+    """Directory names the design mentions, e.g. {'Sources', 'CentipedeCore',
+    'Tests', 'CentipedeCoreTests'} — however the document lays them out."""
+    return set(_DESIGN_DIR_COMPONENT_RE.findall(design_md))
+
+
+def _closest_component(candidate: str, known: set) -> "str | None":
+    """The known directory name one substitution from `candidate`, if exactly
+    one is.
+
+    Deliberately strict: same length, and either one substitution or one
+    adjacent transposition. Both shapes were observed on the same run —
+    `CentipedeCoreTests` → `CentipegeCoreTests` (substitution) and
+    `CentipedeCore` → `CentidepeCore` (transposition, which is two
+    substitutions and so needs its own case). Neither can collide with a
+    genuinely new directory, which differs by whole words rather than by one
+    letter. Requiring a unique match leaves an ambiguous case alone rather
+    than guessing.
+    """
+    def _near(k: str) -> bool:
+        if k == candidate or len(k) != len(candidate):
+            return False
+        diff = [i for i, (a, b) in enumerate(zip(k, candidate)) if a != b]
+        if len(diff) == 1:
+            return True
+        if len(diff) == 2:
+            # A swap of two characters. Not necessarily adjacent: the observed
+            # `Centipede` → `Centidepe` swaps the p and d two apart.
+            i, j = diff
+            return k[i] == candidate[j] and k[j] == candidate[i]
+        return False
+
+    matches = [k for k in known if _near(k)]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _repair_manifest_dirs(db, spec, task, entries, design_md: str) -> int:
+    """Correct manifest paths whose directory is a near-miss typo (DEV-500).
+
+    A one-character corruption in a directory name is silent and expensive: the
+    file lands where no build target claims it, so it is never compiled. The
+    sources still build, the pre-existing suite still passes, and the pre-gate
+    check reports "compiled and the suite passed" for a spec that delivered
+    nothing. Observed live on spec_9872c963, where the implementer emitted
+    `Tests/CentipegeCoreTests/CoreLogicTests.swift` after writing the correct
+    `Tests/CentipedeCoreTests/` on both previous attempts.
+
+    Repairs in place and returns the number of paths corrected. A path whose
+    directory the design never mentions is left alone — the design is the
+    authority on layout, and inventing a correction would be worse than the
+    typo.
+    """
+    known = _design_dir_components(design_md)
+    if not known:
+        return 0
+    repaired = 0
+    for e in entries:
+        parts = e.path.split("/")
+        if len(parts) < 2:
+            continue
+        fixed_parts, changed = [], False
+        for part in parts[:-1]:            # directories only; never the filename
+            if part in known:
+                fixed_parts.append(part)
+                continue
+            near = _closest_component(part, known)
+            if near is None:
+                fixed_parts.append(part)
+                continue
+            fixed_parts.append(near)
+            changed = True
+        if not changed:
+            continue
+        corrected = "/".join(fixed_parts + [parts[-1]])
+        logger.warning(
+            "spec %s: manifest path %r has a directory one character from the "
+            "design's — correcting to %r. Left alone, the file lands in no "
+            "build target and the suite passes having tested nothing "
+            "(DEV-500).", spec.id, e.path, corrected)
+        e.path = corrected
+        repaired += 1
+    if repaired:
+        db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
+                        payload={"role": "manifest", "repaired_paths": repaired})
+    return repaired
 
 
 def _verify_manifest_workspace(db, spec, task, spec_dir) -> "tuple[list, list]":
