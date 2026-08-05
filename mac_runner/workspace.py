@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
 import re
 import subprocess
 import uuid
@@ -27,7 +28,24 @@ def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProc
     )
 
 
-def _write_patch_files(worktree_path: Path, patch_files: list[dict]) -> None:
+# A rewrite this much smaller than the file it replaces is a reconstruction,
+# not an edit (DEV-492). The implementer is never given existing file contents,
+# so a file it was told to "modify" comes back invented from the spec alone —
+# on spec_f47132ab a 163+ line ContentView.swift came back as 45 lines.
+_SHRINK_RATIO = float(os.getenv("RUNNER_OVERWRITE_SHRINK_RATIO", "0.5"))
+
+
+def _write_patch_files(worktree_path: Path, patch_files: list[dict],
+                       overwrites: "list[dict] | None" = None) -> None:
+    """Write the LLM's files over the worktree.
+
+    When *overwrites* is given it collects one record per patch file that
+    replaced existing content, with the before/after sizes. This is the only
+    point in the system where both versions exist: the worktree still holds
+    base_ref, and we are about to write over it. The orchestrator cannot make
+    this comparison — it has never seen the original, which is the whole of
+    DEV-492.
+    """
     worktree_abs = worktree_path.resolve()
     for item in patch_files:
         rel = item["path"]
@@ -37,6 +55,24 @@ def _write_patch_files(worktree_path: Path, patch_files: list[dict]) -> None:
         dest = (worktree_path / rel).resolve()
         if dest != worktree_abs and not str(dest).startswith(str(worktree_abs) + "/"):
             raise WorkspaceError(f"patch path escapes worktree: {rel}")
+        if overwrites is not None and dest.is_file():
+            try:
+                old = dest.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                old = None
+            if old is not None and old.strip():
+                old_n, new_n = len(old), len(content)
+                overwrites.append({
+                    "path": rel,
+                    "old_chars": old_n,
+                    "new_chars": new_n,
+                    "old_lines": old.count("\n") + 1,
+                    "new_lines": content.count("\n") + 1,
+                    # Reported rather than enforced: the runner does not know
+                    # whether the spec intended a rewrite. The orchestrator and
+                    # the human reviewer decide.
+                    "suspected_reconstruction": new_n < old_n * _SHRINK_RATIO,
+                })
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(content, encoding="utf-8")
 
@@ -48,6 +84,7 @@ def worktree(
     spec_id: str,
     root: Path,
     patch_files: list[dict],
+    overwrites: "list[dict] | None" = None,
 ) -> Iterator[Path]:
     """Create a git worktree, apply patch files, yield its path, clean up on exit.
 
@@ -80,7 +117,7 @@ def worktree(
         raise WorkspaceError(f"git worktree add failed: {e.stderr.strip()}") from e
 
     try:
-        _write_patch_files(path, patch_files)
+        _write_patch_files(path, patch_files, overwrites=overwrites)
         yield path
     finally:
         logger.info("removing worktree %s", path)

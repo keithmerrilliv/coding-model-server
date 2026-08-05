@@ -80,6 +80,12 @@ class RunTestsResponse(BaseModel):
     output: str
     duration_sec: float
     exit_code: Optional[int] = None
+    # Files whose existing content the patch replaced, with before/after sizes
+    # (DEV-492). The runner is the only component that ever sees both versions,
+    # so it is the only one that can report this. Advisory: the orchestrator
+    # decides what a shrink means, since only the spec knows whether a rewrite
+    # was intended.
+    overwrites: list[dict] = []
 
 
 async def verify_runner_key(x_runner_key: Optional[str] = Header(None)) -> None:
@@ -159,10 +165,13 @@ def run_tests_endpoint(req: RunTestsRequest) -> RunTestsResponse:
             duration_sec=0.0,
             exit_code=None,
         )
+    # DEV-492: the worktree still holds base_ref when the patch is written, so
+    # this is the only place a "modify" can be compared against what it replaced.
+    overwrites: list[dict] = []
     try:
         with worktree(
             repo_path, req.base_ref, req.spec_id,
-            Config.WORKTREE_ROOT, patch_dicts,
+            Config.WORKTREE_ROOT, patch_dicts, overwrites=overwrites,
         ) as wt:
             # A patch written where the project does not look is compiled by
             # nobody, and the repo's own green tests then report the run as a
@@ -176,6 +185,7 @@ def run_tests_endpoint(req: RunTestsRequest) -> RunTestsResponse:
                     output=f"[integration check] {e}",
                     exit_code=None,
                     duration_sec=round(time.monotonic() - start, 2),
+                    overwrites=overwrites,
                 )
 
             # In VM mode the command runs in the guest, so it must name guest
@@ -215,9 +225,17 @@ def run_tests_endpoint(req: RunTestsRequest) -> RunTestsResponse:
     duration = time.monotonic() - start
     logger.info("test result: %s in %.1fs (%d chars output)",
                 "PASS" if passed else "FAIL", duration, len(output))
+    for ow in overwrites:
+        if ow.get("suspected_reconstruction"):
+            logger.warning(
+                "spec %s: %s was REPLACED, %d lines -> %d lines. A file the "
+                "implementer never read is re-emitted from imagination "
+                "(DEV-492); this shrink suggests reconstruction, not an edit.",
+                req.spec_id, ow["path"], ow["old_lines"], ow["new_lines"])
     return RunTestsResponse(
         passed=passed, output=output.strip(),
         duration_sec=duration, exit_code=exit_code,
+        overwrites=overwrites,
     )
 
 

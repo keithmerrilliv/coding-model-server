@@ -428,6 +428,81 @@ def _reject_plan_for_validation(db: Database, spec: Spec, problems: list[str],
     return True
 
 
+# DEV-492: the pipeline can create files; it cannot modify one. The implementer
+# never receives existing sources — build_implementer_message takes spec, design,
+# rejection notes and clarifications, and the Mac runner exposes no read path — so
+# a file marked "modify" is re-emitted from imagination and written over the real
+# thing. On spec_f47132ab that replaced ~120 lines of working UI with a 45-line
+# reconstruction; it was caught only because the invention happened not to compile.
+#
+# Until the read path exists, refuse rather than corrupt. Set this to "1" to
+# override once the implementer is actually given the files.
+ALLOW_UNREAD_FILE_MODIFICATION = (
+    os.getenv("AUTONOMOUS_ALLOW_UNREAD_FILE_MODIFICATION", "0") == "1"
+)
+
+# Matches a spec's change-surface table row: | `path` | modify (...) |
+#
+# Deliberately keyed on the TABLE rather than on the word "modify" anywhere in
+# the prose. Greenfield specs routinely say "extend an existing package" or
+# "do not modify Package.swift" while every file they write is new — the
+# Centipede spec does both and must not be blocked. A change-surface row is an
+# explicit declaration that an existing file is an output.
+_CHANGE_SURFACE_ROW = re.compile(
+    r"^\|\s*`?([^`|]+?)`?\s*\|\s*(?:\*\*)?(modif\w*)\b",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _declared_file_modifications(spec_md: str) -> list[str]:
+    """Paths a spec's change-surface table marks as modified, not created."""
+    if not spec_md:
+        return []
+    return [
+        m.group(1).strip()
+        for m in _CHANGE_SURFACE_ROW.finditer(spec_md)
+        if m.group(1).strip() and m.group(1).strip().lower() != "path"
+    ]
+
+
+def _block_plan_for_unreadable_modification(
+    db: Database, spec: Spec, paths: list[str]
+) -> None:
+    """Fail the spec instead of letting it overwrite files it has never read.
+
+    NOT routed through _reject_plan_for_validation: that hands the plan back to
+    the planner for another round, and replanning cannot give the pipeline an
+    ability it structurally lacks — it would just loop until the round budget
+    ran out. This is a hard stop that needs a human.
+    """
+    bullets = "\n".join(f"- `{p}`" for p in paths)
+    logger.error(
+        "spec %s: plan declares %d existing file(s) as modified but the "
+        "implementer cannot be given their contents (DEV-492) — failing rather "
+        "than overwriting: %s", spec.id, len(paths), ", ".join(paths))
+    gate = db.create_gate(
+        spec_id=spec.id,
+        gate_type=GateType.CLARIFICATION,
+        prompt_md=(
+            "## Blocked — this spec modifies files the implementer cannot read\n\n"
+            "The change surface marks these as **modify**:\n\n"
+            f"{bullets}\n\n"
+            "The implementer is never given existing file contents, so it would "
+            "re-emit each of these from the spec and design alone and the runner "
+            "would write that reconstruction over the real file. Where the "
+            "invention happens to compile, the loss is silent.\n\n"
+            "This is structural (DEV-492), not a prompt problem — no amount of "
+            "instruction can make an agent preserve what it has never seen.\n\n"
+            "**Options:** rewrite the spec so every output is a new file, wait "
+            "for the runner read path, or set "
+            "`AUTONOMOUS_ALLOW_UNREAD_FILE_MODIFICATION=1` to accept the risk "
+            "deliberately."
+        ),
+    )
+    db.respond_to_gate(gate.id, "rejected", notes="blocked by DEV-492 guard")
+    db.update_spec_status(spec.id, SpecStatus.FAILED)
+
+
 def _accept_plan(db: Database, spec: Spec, spec_dir, result: PlannerYaml) -> None:
     """Persist a YAML plan to disk and create the plan_approval gate."""
     yaml_text = result.yaml_text
@@ -445,6 +520,15 @@ def _accept_plan(db: Database, spec: Spec, spec_dir, result: PlannerYaml) -> Non
     if problems:
         _reject_plan_for_validation(db, spec, problems, yaml_text)
         return
+
+    # Checked before the human gate for the same reason DEV-426 moved test_strategy
+    # validation here: an operator should not spend a review round approving a plan
+    # the pipeline cannot execute without destroying work.
+    if not ALLOW_UNREAD_FILE_MODIFICATION:
+        modified = _declared_file_modifications(spec_md)
+        if modified:
+            _block_plan_for_unreadable_modification(db, spec, modified)
+            return
 
     db.update_spec_status(
         spec.id,
