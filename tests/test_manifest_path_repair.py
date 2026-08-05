@@ -125,7 +125,7 @@ def test_a_bare_filename_is_ignored():
 def test_every_corrupted_component_in_one_path_is_repaired():
     e = _entries("Sourses/CentipegeCoreTests/X.swift")
     design = DESIGN + "\n```\nSourses_placeholder\n```"
-    _repair(e, DESIGN)
+    _repair(e, design)
     assert e[0].path == "Sources/CentipedeCoreTests/X.swift"
 
 

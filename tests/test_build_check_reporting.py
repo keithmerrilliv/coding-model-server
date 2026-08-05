@@ -20,7 +20,7 @@ import pytest
 
 import coding_model_server.orchestrator_daemon as d
 from coding_model_autonomous.db import Database
-from coding_model_autonomous.models import GateStatus, SpecStatus, TaskStatus
+from coding_model_autonomous.models import GateStatus, SpecStatus
 
 # A real swift-testing summary and a real XCTest summary.
 SWIFT_TESTING_FAIL = (

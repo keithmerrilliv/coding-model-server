@@ -21,7 +21,6 @@ import time
 
 import pytest
 
-from coding_model_client import services as client_services
 from coding_model_server import mcp_service
 from coding_model_server.mcp_service import AppleDeepDocsService
 from coding_model_server.stdio_jsonrpc import StdioRpcError

@@ -1,8 +1,6 @@
 """External service clients — memory, web search, PDF ingestion, Apple docs."""
 import os
 import json
-import subprocess
-import atexit
 import logging
 
 import requests
@@ -12,7 +10,6 @@ import requests
 _SESSION = requests.Session()
 
 from coding_model_client.config import config, COLORS, print_colored
-from coding_model_server.stdio_jsonrpc import StdioJsonRpcClient, StdioRpcError
 
 logger = logging.getLogger(__name__)
 
