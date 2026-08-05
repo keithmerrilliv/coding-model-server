@@ -157,15 +157,19 @@ class TestNoFalseRejections:
 
 
 class TestAgainstTheRealRun7Design:
-    """The design I rejected by hand at gate_8e14f676."""
+    """The design I rejected by hand at gate_8e14f676.
+
+    Frozen into tests/fixtures rather than read from the live workspace. The
+    first version of these tests read `var/tasks_db/specs/.../design.md`, which
+    the architect overwrote with its next revision minutes later — a test that
+    silently changes meaning as a run progresses is worse than no test.
+    """
 
     @pytest.fixture
     def design(self):
         from pathlib import Path
-        p = Path("var/tasks_db/specs/spec_9e190582/design.md")
-        if not p.is_file():
-            pytest.skip("run 7 workspace not present")
-        return p.read_text()
+        return (Path(__file__).parent / "fixtures"
+                / "run7_design_v3.md").read_text()
 
     def test_it_catches_the_defect_i_caught_by_hand(self, design):
         f = [x for x in dt.check_design_completeness(design)
@@ -209,3 +213,49 @@ struct World { var origin: Position }
 ```
 """
     assert dt.check_design_completeness(design) == []
+
+
+class TestNestedTypesNeedNoFile:
+    """Run 7's design v4 nested `MushroomEntry` inside `WorldSnapshot` — at my
+    own suggestion, and correctly. A rule blind to nesting flagged it on the
+    first live design it ever saw, which is the DEV-440 false rejection."""
+
+    NESTED = """\
+# Architecture: Demo
+
+## File Structure
+```
+Sources/Core/
+├── Position.swift
+└── WorldSnapshot.swift
+```
+
+## Data Models
+```swift
+struct Position: Equatable { let col: Int }
+
+struct WorldSnapshot: Equatable {
+    struct MushroomEntry: Equatable {
+        let position: Position
+        let damage: Int
+    }
+    let mushrooms: [MushroomEntry]
+}
+```
+"""
+
+    def test_a_nested_type_is_not_reported_as_unallocated(self):
+        flagged = " ".join(f.detail for f in
+                           dt.check_design_completeness(self.NESTED))
+        assert "MushroomEntry" not in flagged
+
+    def test_the_enclosing_type_still_needs_its_file(self):
+        design = self.NESTED.replace("└── WorldSnapshot.swift", "")
+        flagged = " ".join(f.detail for f in
+                           dt.check_design_completeness(design))
+        assert "WorldSnapshot" in flagged
+
+    def test_nested_types_still_resolve_as_declared(self):
+        """Only the file rule ignores them; they are real declarations."""
+        assert "MushroomEntry" in dt.declared_types(self.NESTED)
+        assert "MushroomEntry" not in dt.top_level_types(self.NESTED)

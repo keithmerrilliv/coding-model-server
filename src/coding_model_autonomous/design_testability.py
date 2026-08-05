@@ -187,6 +187,34 @@ def declared_types(design_md: str) -> set[str]:
     return types
 
 
+def top_level_types(design_md: str) -> set[str]:
+    """Declared types that need a file of their own.
+
+    A NESTED declaration lives in its enclosing type's file and must never be
+    reported as unallocated. Run 7's design v4 nested `MushroomEntry` inside
+    `WorldSnapshot` — correctly, and at my own suggestion — and a rule that
+    ignored nesting flagged it immediately. That is the DEV-440 false rejection
+    arriving on the first live design it ever saw.
+
+    Indentation is the signal: a declaration indented inside a fenced block is
+    inside something else.
+    """
+    body = _section(design_md, DATA_MODELS_HEADING)
+    decl = re.compile(
+        r"^(\s*)(?:struct|class|enum|protocol|actor|typealias|interface)\s+"
+        r"([A-Z]\w*)")
+    top = set()
+    for line in body.splitlines():
+        m = decl.match(line)
+        if m and not m.group(1):
+            top.add(m.group(2))
+    for b in _bullets(body):
+        m = re.match(r"^[-*]\s*`?([A-Z]\w*)`?\s*[:—-]", b)
+        if m:
+            top.add(m.group(1))
+    return top
+
+
 def declared_members(design_md: str) -> dict[str, str]:
     """member name → the declared type text on its right-hand side.
 
@@ -532,7 +560,7 @@ def check_design_completeness(design_md: str) -> list[Finding]:
     # tell "allocated nowhere" from "we failed to read it". Judging every
     # declared type unallocated on that basis would reject a whole design over
     # a parsing gap, so this direction stays silent instead.
-    for name in sorted(declared - files) if files else ():
+    for name in sorted(top_level_types(design_md) - files) if files else ():
         findings.append(Finding(
             kind=KIND_TYPE_WITHOUT_FILE,
             criterion="",
