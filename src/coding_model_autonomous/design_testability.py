@@ -38,6 +38,11 @@ KIND_UNRESOLVED_SYMBOL = "unresolved_symbol"
 KIND_MISSING_EQUATABLE = "missing_equatable"
 KIND_UNTYPED_COMPARISON = "untyped_comparison"
 KIND_READONLY_SETUP = "readonly_setup"
+# DEV-509: the design's named types and its allocated files must agree.
+KIND_TYPE_WITHOUT_FILE = "type_without_file"
+KIND_FILE_WITHOUT_TYPE = "file_without_type"
+
+FILE_STRUCTURE_HEADING = "File Structure"
 
 SEAMS_HEADING = "Criterion Seams"
 CHECKLIST_HEADING = "Acceptance Criteria Checklist"
@@ -160,13 +165,25 @@ def _code_spans(text: str) -> list[str]:
 # ── the design's own vocabulary ──────────────────────────────────────────────
 
 def declared_types(design_md: str) -> set[str]:
-    """Type names the design declares in Data Models (leading backticked
-    identifier of each bullet)."""
+    """Type names the design declares in Data Models.
+
+    Two spellings, because architects use both and reading only one produces
+    false findings: a bullet list (``- `Position`: {col, row}``) and a fenced
+    code block (``struct Position { ... }``). Run 7's design used the code
+    block exclusively, and reading bullets alone reported four types as
+    undeclared that were declared perfectly well — precisely the false
+    rejection DEV-440 warns about.
+    """
+    body = _section(design_md, DATA_MODELS_HEADING)
     types = set()
-    for b in _bullets(_section(design_md, DATA_MODELS_HEADING)):
+    for b in _bullets(body):
         m = re.match(r"^[-*]\s*`?([A-Z]\w*)`?\s*[:—-]", b)
         if m:
             types.add(m.group(1))
+    for m in re.finditer(
+            r"\b(?:struct|class|enum|protocol|actor|typealias|interface)\s+"
+            r"([A-Z]\w*)", body):
+        types.add(m.group(1))
     return types
 
 
@@ -441,6 +458,110 @@ def check_design_testability(design_md: str) -> list[Finding]:
         findings.extend(_check_equatable(labelled, types, members, design_md))
         findings.extend(_check_untyped_comparison(labelled, members))
         findings.extend(_check_readonly(labelled, readonly))
+    return findings
+
+
+# ── DEV-509: the type set and the file set must agree ───────────────────────
+
+def allocated_files(design_md: str) -> set[str]:
+    """Basenames the File Structure allocates, without extension.
+
+    The manifest is generated from this section at implementer time, and
+    manifest mode creates exactly the files enumerated there — so a type with
+    no file here can never come into existence, whatever the design says.
+    """
+    body = _section(design_md, FILE_STRUCTURE_HEADING)
+    return {m.group(1)
+            for m in re.finditer(r"\b(\w+)\.(?:swift|py|ts|tsx|js|kt|java|go|rs)\b",
+                                 body)}
+
+
+def _type_references(design_md: str) -> set[str]:
+    """Capitalised names used AS TYPES in the design's declarations.
+
+    Only positions where something must already be a type: after `:` in a
+    property or parameter, and after `->`. Bare prose mentions do not count —
+    a design may discuss a concept it does not declare.
+    """
+    body = _section(design_md, DATA_MODELS_HEADING)
+    refs: set[str] = set()
+    for m in re.finditer(r"(?::|->)\s*\[?\[?([A-Z]\w*)", body):
+        refs.add(m.group(1))
+    return refs
+
+
+# Types the standard library supplies. Only needs to cover what shows up in a
+# design's signatures — anything missed here is silent, never a false finding,
+# because a name must ALSO have a file allocated before it is ever reported.
+_STDLIB = frozenset({
+    "Int", "Int8", "Int16", "Int32", "Int64", "UInt", "UInt8", "UInt16",
+    "UInt32", "UInt64", "Double", "Float", "Bool", "String", "Character",
+    "Array", "Dictionary", "Set", "Optional", "Result", "Data", "Date",
+    "UUID", "Void", "Any", "AnyObject", "Self", "Error", "Range",
+    "ClosedRange", "Sequence", "Collection", "Equatable", "Hashable",
+    "Comparable", "Codable", "Encodable", "Decodable", "List", "Tuple",
+    "None", "True", "False",
+})
+
+
+def check_design_completeness(design_md: str) -> list[Finding]:
+    """Findings where the design's types and its files disagree — DEV-509.
+
+    Two directions of one invariant, each from a run that died on it:
+
+      * run 6 (spec_1ba2db3d) declared `SeededRNG` in Data Models and allocated
+        no file for it. Manifest mode generates exactly the enumerated files, so
+        the implementer improvised one, the next regeneration dropped it, and the
+        diagnostic alternated between "the RNG is wrong" and "there is no RNG" —
+        so `_persistent_diagnostics` found an empty intersection and DEV-468's
+        architect routing never fired. Both budgets went.
+
+      * run 7 (spec_9e190582) did the reverse: `MushroomField` had a file, was
+        the type of `GameWorld.field` and a parameter of `init(field:chains:)`,
+        and was never declared. The design then stated outright that every seam
+        symbol "is declared above". Nothing checked the claim.
+
+    Fail-open: a name is only reported when the design commits to it in BOTH a
+    file and a signature, or declares it outright. Ambiguity stays silent.
+    """
+    declared = declared_types(design_md)
+    files = allocated_files(design_md)
+    findings: list[Finding] = []
+
+    # No File Structure section, or one that parsed to nothing, means we cannot
+    # tell "allocated nowhere" from "we failed to read it". Judging every
+    # declared type unallocated on that basis would reject a whole design over
+    # a parsing gap, so this direction stays silent instead.
+    for name in sorted(declared - files) if files else ():
+        findings.append(Finding(
+            kind=KIND_TYPE_WITHOUT_FILE,
+            criterion="",
+            detail=(
+                f"`{name}` is declared in Data Models but no file in the File "
+                f"Structure holds it. The manifest is built from that section "
+                f"and generates exactly the files it names, so `{name}` can "
+                f"never be created — the implementer improvises one, the next "
+                f"regeneration deletes it, and the retry loop cannot converge. "
+                f"Allocate a file for `{name}`."),
+        ))
+
+    # The reverse: a file was allocated and something is typed by that name,
+    # but nothing declares it. Capitalised only — `main.py` implies no type.
+    referenced = _type_references(design_md)
+    for name in sorted(files & referenced):
+        if name in declared or name in _STDLIB:
+            continue
+        findings.append(Finding(
+            kind=KIND_FILE_WITHOUT_TYPE,
+            criterion="",
+            detail=(
+                f"`{name}` has a file in the File Structure and is used as a "
+                f"type in a declaration, but Data Models never declares it. The "
+                f"implementer is told to fill `{name}`'s file with no statement "
+                f"of what goes in it, so every attempt invents a different "
+                f"shape. Declare `{name}` with its storage and its entry "
+                f"points."),
+        ))
     return findings
 
 

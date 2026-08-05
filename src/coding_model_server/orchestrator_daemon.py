@@ -1064,8 +1064,14 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
     if (executor.TESTABILITY_CHECK_ENABLED
             and task.retry_count < executor.TESTABILITY_CHECK_MAX_ROUNDS):
         try:
-            findings = design_testability.check_design_testability(
-                result.design_md)
+            # DEV-509 runs alongside DEV-481's check: same gate, same budget,
+            # same feedback file. Completeness first — a design missing a type
+            # declaration strands its seams too, and naming the root cause
+            # beats reporting the symptom.
+            findings = (
+                design_testability.check_design_completeness(result.design_md)
+                + design_testability.check_design_testability(result.design_md)
+            )
         except Exception as exc:
             # Regex-heavy parsing of LLM prose. A crash here must not cost a
             # spec that has an otherwise usable design — the design review and
