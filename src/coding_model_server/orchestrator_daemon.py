@@ -87,7 +87,9 @@ from coding_model_autonomous.jira_client import (
     JiraClient,
 )
 from coding_model_autonomous.jira_sync import JiraSync
-from coding_model_autonomous import adversarial, executor, test_runner
+from coding_model_autonomous import (
+    adversarial, design_testability, executor, test_runner,
+)
 from coding_model_autonomous.test_runner import run_tests
 from coding_model_autonomous.retry_policy import (
     _PRESERVE_ON_RETRY,
@@ -1051,6 +1053,43 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
         logger.info("spec %s: architect complexity assessment: tier=%r agent=%r",
                     spec.id, result.complexity.get("tier"),
                     result.complexity.get("recommended_agent"))
+
+    # Testability check (DEV-481 fix 1): before spending a design-review call or
+    # a human's attention, verify mechanically that the design's own Criterion
+    # Seams resolve against the API it specifies. This runs FIRST because it is
+    # free, deterministic, and catches the class that has now killed two runs —
+    # a criterion whose type is never declared Equatable. Bounded separately from
+    # the design review so a testability bounce cannot consume the review's
+    # single revision, and capped so it can never loop.
+    if (executor.TESTABILITY_CHECK_ENABLED
+            and task.retry_count < executor.TESTABILITY_CHECK_MAX_ROUNDS):
+        try:
+            findings = design_testability.check_design_testability(
+                result.design_md)
+        except Exception as exc:
+            # Regex-heavy parsing of LLM prose. A crash here must not cost a
+            # spec that has an otherwise usable design — the design review and
+            # the human gate both still sit downstream.
+            logger.warning("spec %s: testability check raised (%s) — "
+                           "proceeding without it", spec.id, exc)
+            findings = []
+        if findings:
+            kinds = sorted({f.kind for f in findings})
+            logger.info("spec %s: testability check found %d finding(s) %s — "
+                        "revising (architect retry %d)", spec.id, len(findings),
+                        kinds, task.retry_count + 1)
+            db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
+                            payload={"role": "testability_check",
+                                     "findings": len(findings), "kinds": kinds})
+            try:
+                (spec_dir / "design_review_feedback.md").write_text(
+                    design_testability.format_findings(findings))
+            except OSError as e:
+                logger.warning("spec %s: could not persist testability "
+                               "feedback: %s", spec.id, e)
+            db.increment_task_retry(task.id)
+            db.update_task_status(task.id, TaskStatus.PENDING)
+            return
 
     # Design review (#3): critique the design BEFORE implementation, since the
     # implementer follows it exactly. Bounded by the architect retry budget and
