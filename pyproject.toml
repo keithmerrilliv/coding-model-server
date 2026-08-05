@@ -24,7 +24,10 @@ dependencies = [
     "chromadb==1.4.1",
     "sentence-transformers==5.2.2",
     "pypdf>=5.1.0",
-    "tree_sitter_languages",
+    # Soft + unmaintained: no wheel exists for Python 3.13+, so the marker keeps
+    # `pip install -e .` working on newer interpreters (DEV-441). code_chunker
+    # degrades to simple chunking when it is absent.
+    "tree_sitter_languages; python_version < '3.13'",
     "ddgs>=9.10.0",
     "pyyaml>=6.0",
     # Soft: orchestrator falls back to FakeJiraClient if missing.

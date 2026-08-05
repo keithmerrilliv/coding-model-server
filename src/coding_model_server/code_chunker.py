@@ -1,8 +1,21 @@
 import os
 import logging
-from tree_sitter_languages import get_parser
+
+# tree_sitter_languages is unmaintained and publishes no wheel for Python 3.13+
+# (DEV-441), so on a newer interpreter it cannot be installed at all. Import it
+# softly, the way memory_service.py already treats this same package: a missing
+# backend disables language-aware chunking and every caller falls back to
+# simple_chunk(), instead of making this module unimportable and taking the
+# memory service down with it.
+try:
+    from tree_sitter_languages import get_parser
+except ImportError:
+    get_parser = None
 
 logger = logging.getLogger(__name__)
+
+if get_parser is None:
+    logger.warning("tree_sitter_languages not available; language-aware chunking disabled")
 
 class CodeChunker:
     def __init__(self):
@@ -119,6 +132,9 @@ class CodeChunker:
         return self.extension_map.get(ext_or_filename) or self.filename_map.get(ext_or_filename)
 
     def get_parser_for_ext(self, ext):
+        # No backend at all — every extension falls back to simple chunking.
+        if get_parser is None:
+            return None
         lang_name = self.get_lang_name(ext)
         if not lang_name:
             return None
