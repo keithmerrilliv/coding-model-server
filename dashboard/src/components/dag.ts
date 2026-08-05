@@ -2,10 +2,9 @@
 //
 // The autonomous pipeline isn't strictly DAG (retries loop back), so we
 // linearise it by chronological order and draw retry-loop edges as
-// dashed back-edges. The output wraps that chain into rows of ROW_SIZE: a
-// top-level "flowchart TB" stacking per-row subgraphs that are each
-// "direction LR". So a run reads left-to-right and wraps like text, instead
-// of running off the side as one long strip (DEV-439, then DEV-505).
+// dashed back-edges. The output is "flowchart LR" so the result reads
+// left-to-right in the rendered graph (DEV-439) — the pipeline is a long
+// mostly-linear chain, which is a wide strip rather than a tall column.
 //
 // Note on data shape: Tasks correspond to architect / implementer /
 // reviewer / supervisor steps. The planner is implicit (no Task row);
@@ -129,34 +128,28 @@ export function buildDagDefinition(data: SpecDetailResponse): string {
   ];
   entities.sort((a, b) => a.ts.localeCompare(b.ts));
 
-  // Collect the chain first, emit it as ROWS second.
-  //
-  // A spec's DAG grows with REJECTIONS, not with pipeline complexity:
-  // spec_9872c963 reached 15 nodes on 5 code_review + 4 design_approval gates
-  // where a clean run is ~6. Strictly horizontal (DEV-439) stopped the graph
-  // shrinking itself to fit, but traded that for a strip long enough to lose
-  // your place scrolling. Wrapping at ROW_SIZE keeps a whole run on screen.
-  //
-  // Mermaid cannot wrap a flowchart, so rows are built by hand: the chain is
-  // chunked into per-row subgraphs, each `direction LR`, stacked by the
-  // top-level `flowchart TB`. This is NOT the vertical layout DEV-439 replaced
-  // — within a row it still reads left-to-right; only the wrap is vertical.
-  const ROW_SIZE = 7;
+  const lines: string[] = ["flowchart LR"];
+  // Style classes for status colouring.
+  lines.push(
+    "  classDef done fill:#1e3a2e,stroke:#4ade80,color:#bbf7d0",
+    "  classDef failed fill:#3a1e1e,stroke:#f87171,color:#fecaca",
+    "  classDef running fill:#1e2e3a,stroke:#60a5fa,color:#bfdbfe",
+    "  classDef pending fill:#2e2e2e,stroke:#a3a3a3,color:#d4d4d4",
+    "  classDef phaseb fill:#3a2e1e,stroke:#fbbf24,color:#fef3c7",
+  );
 
-  type Chained = { id: string; def: string; cls?: string };
-  const chain: Chained[] = [];
-  // Phase-b annotations hang off a task by a dashed edge rather than sitting
-  // on the chain, so they must land in their parent's row or the subgraph
-  // boundary would drag them onto a rank of their own.
-  const sideNodes: { parent: string; id: string; def: string; cls: string }[] = [];
-  const edges: string[] = [];
-
-  chain.push({ id: "spec_start", def: `spec_start(["spec ${data.spec.id}"])` });
+  // Synthetic spec_start node so the first edge has a source.
+  lines.push(`  spec_start(["spec ${data.spec.id}"])`);
   let prevId = "spec_start";
+
+  const nodeStatusClass: Record<string, string> = {};
 
   for (const ent of entities) {
     if (ent.kind === "task") {
       const { id, def } = taskNode(ent.t);
+      lines.push(`  ${def}`);
+      lines.push(`  ${prevId} --> ${id}`);
+      prevId = id;
       const cls = ent.t.status === "done" || ent.t.status === "completed"
         ? "done"
         : ent.t.status === "failed" || ent.t.status === "cancelled"
@@ -164,10 +157,9 @@ export function buildDagDefinition(data: SpecDetailResponse): string {
         : ent.t.status === "running" || ent.t.status === "in_progress"
         ? "running"
         : "pending";
-      chain.push({ id, def, cls });
-      edges.push(`  ${prevId} --> ${id}`);
-      prevId = id;
+      nodeStatusClass[id] = cls;
 
+      // Annotate Phase b under the reviewer task.
       if (ent.t.role === "reviewer") {
         for (const pb of phaseBProviders(events)) {
           const pbId = `phaseb_${id}_${pb.provider}`;
@@ -175,80 +167,41 @@ export function buildDagDefinition(data: SpecDetailResponse): string {
           const pbLabel = escapeLabel(
             `${pbIcon} adversarial<br/><small>${pb.provider}</small><br/><small>${pb.model}</small>`,
           );
-          sideNodes.push({
-            parent: id, id: pbId, def: `${pbId}["${pbLabel}"]`, cls: "phaseb",
-          });
-          edges.push(`  ${id} -.-> ${pbId}`);
+          lines.push(`  ${pbId}["${pbLabel}"]`);
+          lines.push(`  ${id} -.-> ${pbId}`);
+          nodeStatusClass[pbId] = "phaseb";
         }
       }
     } else {
       const { id, def } = gateNode(ent.g);
+      lines.push(`  ${def}`);
       const edgeLabel = ent.g.reviewer_decision
         ? `|${ent.g.reviewer_decision}|`
         : ent.g.status === "pending"
         ? "|pending|"
         : "";
+      lines.push(`  ${prevId} -->${edgeLabel} ${id}`);
+      prevId = id;
       const cls = ent.g.reviewer_decision === "approved"
         ? "done"
         : ent.g.reviewer_decision === "rejected"
         ? "failed"
         : "pending";
-      chain.push({ id, def, cls });
-      edges.push(`  ${prevId} -->${edgeLabel} ${id}`);
-      prevId = id;
+      nodeStatusClass[id] = cls;
     }
   }
 
+  // Terminal node when the spec has reached a final status.
   if (["done", "failed", "cancelled"].includes(data.spec.status)) {
     const { id, def } = specEndNode(data.spec.status);
-    chain.push({
-      id, def, cls: data.spec.status === "done" ? "done" : "failed",
-    });
-    edges.push(`  ${prevId} --> ${id}`);
+    lines.push(`  ${def}`);
+    lines.push(`  ${prevId} --> ${id}`);
+    nodeStatusClass[id] = data.spec.status === "done" ? "done" : "failed";
   }
 
-  const lines: string[] = ["flowchart TB"];
-  lines.push(
-    "  classDef done fill:#1e3a2e,stroke:#4ade80,color:#bbf7d0",
-    "  classDef failed fill:#3a1e1e,stroke:#f87171,color:#fecaca",
-    "  classDef running fill:#1e2e3a,stroke:#60a5fa,color:#bfdbfe",
-    "  classDef pending fill:#2e2e2e,stroke:#a3a3a3,color:#d4d4d4",
-    "  classDef phaseb fill:#3a2e1e,stroke:#fbbf24,color:#fef3c7",
-    // The row containers are scaffolding, not information — no fill, no
-    // stroke, no label, so they never read as a grouping that means something.
-    "  classDef dagrow fill:none,stroke:none",
-  );
-
-  const rowIds: string[] = [];
-  for (let start = 0; start < chain.length; start += ROW_SIZE) {
-    const row = chain.slice(start, start + ROW_SIZE);
-    const rowId = `dagrow${start / ROW_SIZE}`;
-    rowIds.push(rowId);
-    // Quoted empty title: mermaid renders the subgraph id as the label when
-    // none is given, which would print "dagrow0" above every row.
-    lines.push(`  subgraph ${rowId} [" "]`);
-    lines.push("    direction LR");
-    for (const n of row) {
-      lines.push(`    ${n.def}`);
-      for (const s of sideNodes.filter((x) => x.parent === n.id)) {
-        lines.push(`    ${s.def}`);
-      }
-    }
-    lines.push("  end");
-  }
-
-  // Edges last, outside the subgraphs. Declared inside, a cross-row edge would
-  // pull its target back into the source's row and undo the wrap.
-  lines.push(...edges);
-
-  for (const n of chain) {
-    if (n.cls) lines.push(`  class ${n.id} ${n.cls}`);
-  }
-  for (const s of sideNodes) {
-    lines.push(`  class ${s.id} ${s.cls}`);
-  }
-  for (const rowId of rowIds) {
-    lines.push(`  class ${rowId} dagrow`);
+  // Apply the class lines at the bottom so they don't bloat the middle.
+  for (const [nodeId, cls] of Object.entries(nodeStatusClass)) {
+    lines.push(`  class ${nodeId} ${cls}`);
   }
 
   return lines.join("\n");
