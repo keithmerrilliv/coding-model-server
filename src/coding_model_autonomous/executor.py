@@ -51,6 +51,15 @@ DESIGN_REVIEW_AGENT = os.getenv("AUTONOMOUS_DESIGN_REVIEW_AGENT", "reviewer")
 DESIGN_REVIEW_MAX_TOKENS = int(os.getenv("AUTONOMOUS_DESIGN_REVIEW_MAX_TOKENS", "8000"))
 DESIGN_REVIEW_MAX_REVISIONS = int(os.getenv("AUTONOMOUS_DESIGN_REVIEW_MAX_REVISIONS", "1"))
 
+# DEV-481 fix 1: mechanical testability check on the design's Criterion Seams.
+# Its own budget, so a testability bounce never spends the design review's
+# single revision. Two rounds: one to add a missing section, one to fix what
+# the section then reveals.
+TESTABILITY_CHECK_ENABLED = os.getenv(
+    "AUTONOMOUS_TESTABILITY_CHECK", "1").lower() not in ("0", "false", "no")
+TESTABILITY_CHECK_MAX_ROUNDS = int(
+    os.getenv("AUTONOMOUS_TESTABILITY_CHECK_MAX_ROUNDS", "2"))
+
 # Robustness: how many times to re-run the reviewer when its output is
 # truncated/unparseable before treating it as a soft FAIL (→ supervisor/retry)
 # instead of failing the whole spec. The 122B reviewer's degenerate truncation
@@ -283,6 +292,14 @@ ARCHITECT_SYSTEM_PROMPT = textwrap.dedent("""\
 
     ## Acceptance Criteria Checklist
     - [ ] <each criterion from the spec, restated in testable form>
+
+    ## Criterion Seams
+    <ONE entry per checklist item, IN THE SAME ORDER, naming the API a test
+    would use. Every entry needs all three steps, and every symbol must be one
+    this design declares:>
+    - <criterion> | setup: `<call that builds the starting state>` | act:
+      `<call that invokes the behaviour>` | assert: `<expression that observes
+      the outcome>`
     <<<END>>>
 
     <<<COMPLEXITY>>>
@@ -340,8 +357,13 @@ ARCHITECT_SYSTEM_PROMPT = textwrap.dedent("""\
        behaviour, and (c) observe the outcome — using only the API in this
        document. If any of the three is unreachable, the DESIGN is wrong, not
        the criterion. Concretely:
-         - state the conformances a comparison needs — an enum that a criterion
-           compares for equality must be declared Equatable;
+         - state the conformances a comparison needs — ANY type a criterion
+           compares for equality must be declared Equatable, not just enums.
+           This reaches through the standard library: a criterion asserting two
+           collections are identical needs the ELEMENT type Equatable, because
+           a dictionary or array is only Equatable when its element is. A design
+           that says `cells: [Position: Mushroom]` and asks for "the same seed
+           produces an identical field" must declare `Mushroom` Equatable;
          - keep state a criterion must set up reachable — a read-only collection
            whose only initialiser is seeded cannot be positioned for a boundary
            test, so give it a test-visible initialiser or an entry point that
@@ -350,6 +372,14 @@ ARCHITECT_SYSTEM_PROMPT = textwrap.dedent("""\
            value in prose, so a test can assert against the same symbol.
        A checklist item you cannot sketch as a three-line test against your own
        API is a design defect. Fix the design before emitting it.
+    11. The `## Criterion Seams` section is where rule 10 is made checkable, and
+       it is verified mechanically before your design reaches a human. One entry
+       per checklist item, same order, all three steps present, and every
+       backticked symbol declared somewhere in this document. `Type.member`
+       naming a member you never declared is rejected, as is an assert comparing
+       a type you never declared Equatable, as is a setup writing state you
+       declared read-only. Write the seams as you write the checklist — if you
+       cannot name the seam, change the API until you can.
     """)
 
 IMPLEMENTER_SYSTEM_PROMPT = textwrap.dedent("""\
