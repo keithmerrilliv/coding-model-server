@@ -264,5 +264,21 @@ def test_huge_retry_after_is_bounded():
                            side_effect=[_resp_h(503, {"Retry-After": "999"}),
                                         _resp_h(200)]), \
          mock.patch.object(http.time, "sleep", sleeps.append):
-        http.post_chat_completion("m", [], timeout=10, retry_5xx=True)
+        http.post_chat_completion("m", [], timeout=1800, retry_5xx=True)
     assert sleeps == [60.0], "a bogus/huge header must not park the pipeline"
+
+
+def test_retry_after_is_also_bounded_by_the_callers_timeout():
+    """DEV-491 added a second bound, and it is the tighter one here.
+
+    A server-directed wait is budgeted against the caller's own timeout, so a
+    60s sleep is never taken on behalf of a task whose entire budget is 10s.
+    Previously the 60s clamp was the only bound and this slept 60.
+    """
+    sleeps = []
+    with mock.patch.object(http._SESSION, "post",
+                           side_effect=[_resp_h(503, {"Retry-After": "999"}),
+                                        _resp_h(200)]), \
+         mock.patch.object(http.time, "sleep", sleeps.append):
+        http.post_chat_completion("m", [], timeout=10, retry_5xx=True)
+    assert sleeps and sleeps[0] <= 10.0

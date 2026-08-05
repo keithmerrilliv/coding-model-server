@@ -246,7 +246,26 @@ async def metrics_middleware(request: Request, call_next):
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
-    """Custom HTTP exception handler for OpenAI-compatible error format"""
+    """Custom HTTP exception handler for OpenAI-compatible error format.
+
+    exc.headers must be forwarded (DEV-491). This handler rebuilds every
+    HTTPException into a fresh JSONResponse, and for months it dropped the
+    headers on the way — silently defeating three backpressure signals that
+    were correctly set at the raise site and correctly honoured by the client:
+
+        chat.py    Retry-After: 5   model swap deferred, drains in seconds
+        chat.py    Retry-After: 30  insufficient VRAM
+        runtime.py Retry-After: N   admission-control backpressure
+
+    The orchestrator's post_chat_completion has honoured Retry-After since
+    DEV-137. With the header stripped it fell back to the 10/30/60 CUDA-OOM
+    schedule instead — the server said "5s", the client heard nothing. Not one
+    `retrying after 5.0s` appears in a full day of logs.
+
+    Worth noting a header alone is not enough: honouring a 5s Retry-After makes
+    the fixed 4-attempt budget expire ~6x SOONER, which is why the caller-side
+    deadline in _http.py landed with this.
+    """
     return JSONResponse(
         status_code=exc.status_code,
         content={
@@ -255,7 +274,8 @@ async def http_exception_handler(request: Request, exc: HTTPException):
                 "type": "invalid_request_error" if exc.status_code < 500 else "server_error",
                 "code": exc.status_code
             }
-        }
+        },
+        headers=getattr(exc, "headers", None),
     )
 
 

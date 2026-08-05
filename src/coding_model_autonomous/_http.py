@@ -48,6 +48,21 @@ logger = logging.getLogger("orchestrator.http")
 # because VRAM release on Blackwell can take 10-30s after a llama-server exits.
 _BACKOFFS = (10.0, 30.0, 60.0)
 
+# A 503 carrying Retry-After is not a failure — it is the server saying "wait,
+# then ask again", and the wait has a known end. Two of them mean another spec
+# is mid-generation and the model cannot be swapped yet; those generations run
+# 10-20 minutes on this box, so a fixed 3-attempt budget is an order of
+# magnitude too short and exhaustion is guaranteed rather than exceptional.
+# spec_837b167f was cancelled that way after ~100s of waiting on a 20-minute
+# planner pass, discarding an approved plan, an approved design and two human
+# reviews (DEV-491).
+#
+# So server-directed waits get a deadline instead of an attempt count, bounded
+# by the caller's own per-role timeout (architect 2700s, implementer 1800s) —
+# the budget the task already has. They do not consume the _BACKOFFS budget,
+# which stays reserved for genuine transient 5xx.
+_BUSY_WAIT_CAP = float(os.getenv("AUTONOMOUS_BUSY_WAIT_CAP", "0")) or None
+
 
 def _headers() -> dict:
     headers = {"Content-Type": "application/json"}
@@ -85,7 +100,14 @@ def post_chat_completion(model, messages, *, timeout, skip_memory=True,
     resp = None
     n_attempts = len(_BACKOFFS) + 1
     next_delay = 0.0
-    for attempt in range(n_attempts):
+    # Server-directed waits (503 + Retry-After) are bounded by wall clock, not
+    # by attempts, so one spec's long generation can no longer cancel another
+    # (DEV-491). Everything else keeps the fixed schedule.
+    busy_budget = _BUSY_WAIT_CAP or timeout
+    busy_deadline = time.monotonic() + busy_budget
+    attempt = 0
+    busy_waits = 0
+    while attempt < n_attempts:
         if next_delay:
             logger.info("post_chat_completion: retrying after %.1fs (attempt %d/%d)",
                         next_delay, attempt + 1, n_attempts)
@@ -111,8 +133,9 @@ def post_chat_completion(model, messages, *, timeout, skip_memory=True,
                 "post_chat_completion: %s (attempt %d/%d) — retrying",
                 type(e).__name__, attempt + 1, n_attempts,
             )
+            attempt += 1
             continue
-        if resp.status_code < 500 or attempt == len(_BACKOFFS):
+        if resp.status_code < 500:
             break
         # Honor Retry-After, bounded (DEV-137). Every autonomous stage
         # transition is a model swap; the server's busy-swap 503 says
@@ -120,14 +143,48 @@ def post_chat_completion(model, messages, *, timeout, skip_memory=True,
         # the 10/30/60 OOM schedule instead added tens of seconds of dead
         # air per spec. 500s without the header keep the generous schedule.
         retry_after = resp.headers.get("Retry-After")
+        wait_s = None
         if retry_after:
             try:
-                next_delay = min(max(float(retry_after), 1.0), 60.0)
+                wait_s = min(max(float(retry_after), 1.0), 60.0)
             except (TypeError, ValueError):
-                pass  # absent/non-numeric header — keep the schedule delay
+                wait_s = None  # non-numeric header — keep the schedule delay
+
+        # A 503 that names its own retry interval is a wait, not a failure: the
+        # server is refusing *for now* to protect an in-flight stream, and will
+        # accept once that finishes. Spending the 4-attempt failure budget on it
+        # is what cancelled spec_837b167f (DEV-491), and honouring the 5s
+        # interval on a fixed budget would have exhausted it ~6x FASTER. So
+        # these wait against a deadline and never consume an attempt.
+        if resp.status_code == 503 and wait_s is not None:
+            remaining = busy_deadline - time.monotonic()
+            if remaining <= 0:
+                logger.error(
+                    "post_chat_completion: server still busy after %.0fs "
+                    "(the task's own budget) — giving up: %s",
+                    busy_budget, resp.text[:160].replace("\n", " "),
+                )
+                break
+            next_delay = min(wait_s, remaining)
+            busy_waits += 1
+            # Logged sparsely: at 5s intervals a 20-minute wait is ~240 rounds,
+            # and a line each would bury everything else in the journal.
+            if busy_waits == 1 or busy_waits % 12 == 0:
+                logger.info(
+                    "post_chat_completion: server busy, waiting %.1fs "
+                    "(%d so far, %.0fs of %.0fs budget left): %s",
+                    next_delay, busy_waits, remaining, busy_budget,
+                    resp.text[:120].replace("\n", " "),
+                )
+            continue
+        if attempt == len(_BACKOFFS):
+            break
+        if wait_s is not None:
+            next_delay = wait_s
         logger.warning(
             "post_chat_completion: %d from server (attempt %d/%d, body=%s)",
             resp.status_code, attempt + 1, n_attempts,
             resp.text[:200].replace("\n", " "),
         )
+        attempt += 1
     return resp
