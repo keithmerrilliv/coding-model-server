@@ -86,6 +86,7 @@ class RunTestsResponse(BaseModel):
     # decides what a shrink means, since only the spec knows whether a rewrite
     # was intended.
     overwrites: list[dict] = []
+    integration_warnings: list[str] = []
 
 
 async def verify_runner_key(x_runner_key: Optional[str] = Header(None)) -> None:
@@ -177,7 +178,13 @@ def run_tests_endpoint(req: RunTestsRequest) -> RunTestsResponse:
             # nobody, and the repo's own green tests then report the run as a
             # PASS (DEV-399). Catch that here, before spending a build on it.
             try:
-                check_patch_integrated(wt, patch_dicts, req.framework)
+                # Warnings cover the PARTIAL case — some files landed, some did
+                # not. They ride the run's output rather than a new response
+                # field, because output already reaches the reviewer and the
+                # gate, and DEV-492's `overwrites` is already a signal nothing
+                # consumes (DEV-526).
+                integration_warnings = check_patch_integrated(
+                    wt, patch_dicts, req.framework)
             except IntegrationError as e:
                 logger.error("spec %s: patch not integrated — %s", req.spec_id, e)
                 return RunTestsResponse(
@@ -225,6 +232,10 @@ def run_tests_endpoint(req: RunTestsRequest) -> RunTestsResponse:
     duration = time.monotonic() - start
     logger.info("test result: %s in %.1fs (%d chars output)",
                 "PASS" if passed else "FAIL", duration, len(output))
+    if integration_warnings:
+        # First, not last: a 20k-char xcodebuild log buries a trailing note,
+        # and this changes how the whole result should be read.
+        output = "\n".join(integration_warnings) + "\n\n" + output
     for ow in overwrites:
         if ow.get("suspected_reconstruction"):
             logger.warning(
