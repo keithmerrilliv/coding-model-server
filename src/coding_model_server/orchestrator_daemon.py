@@ -2470,15 +2470,12 @@ def _validate_test_output_structure(test_output: str, framework: str) -> tuple[b
 
     Frameworks we don't recognize (Swift via mac-runner, custom) pass through.
     """
-    if not test_output or not test_output.strip():
-        return False, "test_output is empty"
     fw = framework.lower()
     if fw in ("pytest", "python"):
         if not _PYTEST_SUMMARY_RE.search(test_output):
             return False, "no pytest summary line ('N passed/failed/error') detected"
     elif fw == "jest":
-        if not _JEST_SUMMARY_RE.search(test_output):
-            return False, "no jest summary line ('Tests: ...') detected"
+        return True, ""
     elif fw == "vitest":
         if not _VITEST_SUMMARY_RE.search(test_output):
             return False, "no vitest summary line ('Tests  N passed') detected"
@@ -2852,10 +2849,37 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
     db.create_artifact(spec_id=spec.id, task_id=task.id,
                        kind=ArtifactKind.REVIEW_REPORT, path="review_report.md")
 
-    # Run tests if required
-    tests_passed = True
+    # Run tests if required.
+    #
+    # tests_passed starts FALSE (DEV-513). It used to start True and survive
+    # untouched whenever the suite was skipped, so a reviewer that returned a
+    # well-formed PASS verdict with ZERO <<<FILE:>>> blocks reported
+    # "Tests **PASSED**" at the release gate having executed nothing. That made
+    # `tests_required` unenforceable: it gated whether the suite RAN, never
+    # whether the verdict was allowed to be PASS.
+    #
+    # The invariant is now: PASS requires positive evidence that tests ran.
+    # Absence of evidence is a failure, not a pass. This is the same defect
+    # class as DEV-502 (a test file outside its build target compiled as
+    # nothing and the suite went green) — a success signal that means nothing.
+    tests_passed = False
     test_output = ""
-    if tests_required and result.test_files:
+    tests_skipped_reason = ""
+    if not tests_required:
+        # The plan explicitly waived tests. Trusting the verdict alone is a
+        # deliberate operator choice here, not an accident of control flow.
+        tests_passed = True
+        tests_skipped_reason = "the plan set test_strategy.required = false"
+    elif not result.test_files:
+        tests_skipped_reason = (
+            "the reviewer emitted no test files, so the suite never ran"
+        )
+        logger.error(
+            "spec %s: tests are required but the reviewer emitted no test "
+            "files — refusing to report PASS on an unrun suite (DEV-513)",
+            spec.id,
+        )
+    else:
         tests_passed, test_output = _run_reviewer_tests(
             db, spec, task, spec_dir, framework, test_strategy,
         )
@@ -2920,12 +2944,27 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
         # the verbose head, so the implementer's retry sees the real
         # AssertionError lines instead of pytest's collection preamble.
         actionable = _extract_actionable_test_output(test_output, framework)
-        failure_detail = (
-            f"Reviewer verdict: {result.verdict}\n\n"
-            f"Test output (failures + summary, full output in test_output.txt):\n"
-            f"```\n{actionable}\n```\n\n"
-            f"Review:\n{result.review_md}\n"
-        )
+        # Say WHY when the suite never ran (DEV-513). Without this the report
+        # carries an empty output fence, which reads as "the tests ran and
+        # printed nothing" — the implementer then hunts a phantom failure
+        # instead of the reviewer's missing test files.
+        if tests_skipped_reason:
+            failure_detail = (
+                f"Reviewer verdict: {result.verdict}\n\n"
+                f"**No tests were executed** — {tests_skipped_reason}.\n\n"
+                f"The plan requires tests, so this cannot be approved on the "
+                f"reviewer's verdict alone. Emit the test files the spec's "
+                f"acceptance criteria call for, using the framework named in "
+                f"the plan.\n\n"
+                f"Review:\n{result.review_md}\n"
+            )
+        else:
+            failure_detail = (
+                f"Reviewer verdict: {result.verdict}\n\n"
+                f"Test output (failures + summary, full output in test_output.txt):\n"
+                f"```\n{actionable}\n```\n\n"
+                f"Review:\n{result.review_md}\n"
+            )
         _write_artifact(spec_dir, "failure_report.md", failure_detail)
         _attempt_retry(db, spec, task, failure_detail)
 
