@@ -96,13 +96,35 @@ class TestGuardIsWiredIntoTheGate:
 
     def test_accept_plan_checks_before_creating_the_human_gate(self):
         """An operator should not spend a review round approving a plan that
-        will destroy work."""
+        will destroy work.
+
+        The check moved behind _unreadable_declared_modifications once the
+        DEV-492 read path landed: the question is no longer "does this spec
+        modify a file" but "is there a modified file we still cannot read".
+        Its position relative to the gate is what this test protects.
+        """
         import inspect
         src = inspect.getsource(od._accept_plan)
-        assert "_declared_file_modifications" in src
+        assert "_unreadable_declared_modifications" in src
         gate_at = src.index("GateType.PLAN_APPROVAL")
-        check_at = src.index("_declared_file_modifications")
+        check_at = src.index("_unreadable_declared_modifications")
         assert check_at < gate_at, "the guard must run before the gate is created"
+
+    def test_a_readable_modification_is_no_longer_blocked(self, monkeypatch):
+        """The guard existed because the pipeline could not read files. Once it
+        can, blocking would stop exactly the specs the read path enables."""
+        from coding_model_autonomous import test_runner
+
+        monkeypatch.setattr(
+            test_runner, "fetch_repo_files",
+            lambda repo, paths, base_ref: ([(p, "x") for p in paths], []))
+
+        class _S:
+            id = "spec_x"
+
+        spec_md = "| path | change |\n| `A/B.swift` | modify (line 1) |\n"
+        assert od._unreadable_declared_modifications(
+            _S(), "test_strategy:\n  repo: proj\n", spec_md) == []
 
 
 class TestRunnerOverwriteDetector:

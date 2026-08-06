@@ -467,6 +467,42 @@ def _declared_file_modifications(spec_md: str) -> list[str]:
     ]
 
 
+def _unreadable_declared_modifications(
+    spec: Spec, yaml_text: str, spec_md: str
+) -> list[str]:
+    """Declared-modify paths the pipeline still cannot read (DEV-492).
+
+    Empty means every file the spec says it will modify can be fetched at
+    base_ref, so the implementer will be editing rather than inventing and the
+    plan is safe to run. Non-empty is the original hazard and still blocks.
+
+    Reads the plan from *yaml_text* rather than spec.normalized_yaml: at plan
+    acceptance the plan has not been persisted yet.
+    """
+    import yaml as _yaml
+
+    paths = _declared_file_modifications(spec_md)
+    if not paths:
+        return []
+    try:
+        plan = _yaml.safe_load(yaml_text) or {}
+        strategy = plan.get("test_strategy")
+    except _yaml.YAMLError:
+        strategy = None
+    if not isinstance(strategy, dict) or not strategy.get("repo"):
+        # No registered repo to read from — unchanged from before the read path.
+        return paths
+    try:
+        files, _ = test_runner.fetch_repo_files(
+            strategy["repo"], paths, strategy.get("base_ref") or "HEAD")
+    except Exception as e:
+        logger.warning("spec %s: could not probe declared modifications (%s)",
+                       spec.id, e)
+        return paths
+    got = {p for p, _ in files}
+    return [p for p in paths if p not in got]
+
+
 def _fetch_existing_files_for_spec(spec: Spec, spec_md: str) -> list[tuple[str, str]]:
     """Current contents of the files this spec marks as modified (DEV-492).
 
@@ -566,10 +602,16 @@ def _accept_plan(db: Database, spec: Spec, spec_dir, result: PlannerYaml) -> Non
     # Checked before the human gate for the same reason DEV-426 moved test_strategy
     # validation here: an operator should not spend a review round approving a plan
     # the pipeline cannot execute without destroying work.
+    # The block is now conditional on the files actually being unreadable. When
+    # DEV-492's read path can serve them the pipeline is no longer guessing, so
+    # refusing would block precisely the specs the read path exists to enable.
+    # Probing here doubles as a pre-flight: a change-surface row naming a path
+    # that does not exist at base_ref is caught before a human reviews the plan,
+    # not after the implementer has written an invention over it.
     if not ALLOW_UNREAD_FILE_MODIFICATION:
-        modified = _declared_file_modifications(spec_md)
-        if modified:
-            _block_plan_for_unreadable_modification(db, spec, modified)
+        unreadable = _unreadable_declared_modifications(spec, yaml_text, spec_md)
+        if unreadable:
+            _block_plan_for_unreadable_modification(db, spec, unreadable)
             return
 
     db.update_spec_status(

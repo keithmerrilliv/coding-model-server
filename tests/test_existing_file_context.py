@@ -182,3 +182,40 @@ def test_a_read_failure_never_kills_the_spec(monkeypatch):
     monkeypatch.setattr(test_runner, "fetch_repo_files", boom)
     assert od._fetch_existing_files_for_spec(
         _spec("test_strategy:\n  repo: proj\n"), MODIFY_SPEC) == []
+
+
+# ── the plan gate no longer blocks what it can now read ──────────────────────
+
+def test_plan_gate_allows_a_modify_spec_once_the_files_are_readable(monkeypatch):
+    """The DEV-492 guard was a hard stop because the pipeline could not read
+    files. Now that it can, the guard must not block the very specs the read
+    path exists to enable."""
+    from coding_model_server import orchestrator_daemon as od
+    monkeypatch.setattr(
+        test_runner, "fetch_repo_files",
+        lambda repo, paths, base_ref: ([(p, "content") for p in paths], []))
+    assert od._unreadable_declared_modifications(
+        _spec(""), "test_strategy:\n  repo: electric-sheep\n", MODIFY_SPEC) == []
+
+
+def test_plan_gate_still_blocks_when_a_file_cannot_be_read(monkeypatch):
+    """The original hazard is unchanged: refuse rather than overwrite blind."""
+    from coding_model_server import orchestrator_daemon as od
+    monkeypatch.setattr(test_runner, "fetch_repo_files",
+                        lambda repo, paths, base_ref: ([], ["gone"]))
+    assert od._unreadable_declared_modifications(
+        _spec(""), "test_strategy:\n  repo: electric-sheep\n", MODIFY_SPEC
+    ) == ["ElectricSheep/ForcingStrategy.swift"]
+
+
+def test_plan_gate_still_blocks_without_a_registered_repo():
+    from coding_model_server import orchestrator_daemon as od
+    assert od._unreadable_declared_modifications(
+        _spec(""), "test_strategy:\n  framework: pytest\n", MODIFY_SPEC
+    ) == ["ElectricSheep/ForcingStrategy.swift"]
+
+
+def test_plan_gate_ignores_greenfield_specs():
+    from coding_model_server import orchestrator_daemon as od
+    assert od._unreadable_declared_modifications(
+        _spec(""), "test_strategy:\n  repo: electric-sheep\n", "no table") == []
