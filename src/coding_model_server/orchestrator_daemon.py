@@ -1091,7 +1091,8 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
         db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
                         payload={"role": "architect",
                                  "result_kind": type(result).__name__,
-                                 "attempt": attempt})
+                                 "attempt": attempt,
+                                 **executor.agent_event_fields(meta)})
         if not isinstance(result, ParseError):
             if attempt > 1:
                 logger.info("spec %s: architect parsed cleanly on attempt %d/%d",
@@ -1168,6 +1169,7 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
                         kinds, task.retry_count + 1)
             db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
                             payload={"role": "testability_check",
+                                     "model_call": False,
                                      "findings": len(findings), "kinds": kinds})
             try:
                 (spec_dir / "design_review_feedback.md").write_text(
@@ -1268,8 +1270,8 @@ def _run_design_review(db: Database, spec: Spec, task, spec_dir,
         return "PASS", ""
     verdict, notes = executor.parse_design_review(raw)
     db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
-                    payload={"role": "design_review", "agent": meta.get("agent"),
-                             "verdict": verdict})
+                    payload={"role": "design_review", "verdict": verdict,
+                             **executor.agent_event_fields(meta)})
     try:
         (spec_dir / "design_review.md").write_text(f"VERDICT: {verdict}\n\n{raw}")
     except OSError:
@@ -1342,6 +1344,7 @@ def _generate_implementation(
     db: Database, spec: Spec, task, spec_dir,
     spec_md: str, design_md: str, chosen_agent: "str | None",
     clarifications: list, rejection_notes: "str | None",
+    tally: "dict | None" = None,
 ) -> "ImplementerResult | ParseError":
     """Produce the implementation for a spec.
 
@@ -1356,7 +1359,7 @@ def _generate_implementation(
                     "threshold %d)", spec.id, n_files, executor.MANIFEST_FILE_THRESHOLD)
         return _generate_via_manifest(
             db, spec, task, spec_dir, spec_md, design_md,
-            chosen_agent, clarifications, rejection_notes,
+            chosen_agent, clarifications, rejection_notes, tally=tally,
         )
 
     # Single-call path: one response with every file, budget scaled to the design.
@@ -1372,6 +1375,8 @@ def _generate_implementation(
     raw = call_agent("implementer", messages, agent=chosen_agent,
                      max_tokens=impl_max_tokens, meta=meta)
     _note_truncation(db, spec, task, "implementer", meta, impl_max_tokens)
+    if tally is not None:
+        executor.accumulate_agent_fields(tally, meta)
     return parse_implementer_response(raw)
 
 
@@ -1557,6 +1562,7 @@ def _parse_cited_paths(rejection_notes: str, known_paths) -> set:
 def _build_from_manifest(
     db, spec, task, spec_md, design_md, entries, chosen_agent,
     clarifications, rejection_notes, *, prior_files, only, raw,
+    tally: "dict | None" = None,
 ) -> "ImplementerResult | ParseError":
     """Produce every file in the manifest, in dependency order.
 
@@ -1585,7 +1591,7 @@ def _build_from_manifest(
             content = _generate_one_file(
                 db, spec, task, spec_md, design_md, entries, entry,
                 written, chosen_agent, clarifications, rejection_notes,
-                existing_by_path=existing_by_path,
+                existing_by_path=existing_by_path, tally=tally,
             )
             generated += 1
         if content is None and prior_files and entry.path in prior_files:
@@ -1611,6 +1617,7 @@ def _build_from_manifest(
         db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
                         payload={"role": "manifest",
                                  "agent": chosen_agent or executor.role_to_agent("implementer"),
+                                 "model_call": False,
                                  "anomaly": "per_file_failures",
                                  "paths": failures,
                                  "stale_fallbacks": stale_fallbacks})
@@ -1627,6 +1634,7 @@ def _generate_via_manifest(
     db: Database, spec: Spec, task, spec_dir,
     spec_md: str, design_md: str, chosen_agent: "str | None",
     clarifications: list, rejection_notes: "str | None",
+    tally: "dict | None" = None,
 ) -> "ImplementerResult | ParseError":
     """Manifest → per-file generation.
 
@@ -1666,6 +1674,7 @@ def _generate_via_manifest(
                 db.record_event(
                     EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
                     payload={"role": "manifest", "mode": "widened_after_repeat",
+                             "model_call": False,
                              "repeats": repeats, "would_have_regenerated": sorted(cited),
                              "regenerating": len(entries)})
                 cited, widened = set(), True  # full regeneration below
@@ -1681,6 +1690,7 @@ def _generate_via_manifest(
                 db.record_event(
                     EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
                     payload={"role": "manifest", "mode": "widened_unattributed",
+                             "model_call": False,
                              "would_have_regenerated": sorted(cited),
                              "regenerating": len(entries)})
                 cited, widened = set(), True
@@ -1692,12 +1702,14 @@ def _generate_via_manifest(
                 db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
                                 payload={"role": "manifest", "mode": "targeted_retry",
                                          "agent": chosen_agent or executor.role_to_agent("implementer"),
+                                         "model_call": False,
                                          "regenerated": sorted(cited),
                                          "reused": len(entries) - len(cited)})
                 result = _build_from_manifest(
                     db, spec, task, spec_md, design_md, entries, chosen_agent,
                     clarifications, rejection_notes,
                     prior_files=prior_files, only=cited, raw="targeted-retry",
+                    tally=tally,
                 )
                 if not isinstance(result, ParseError):
                     _persist_manifest(spec_dir, entries)
@@ -1713,6 +1725,11 @@ def _generate_via_manifest(
         agent=chosen_agent, max_tokens=executor.MANIFEST_MAX_TOKENS, meta=meta,
     )
     _note_truncation(db, spec, task, "manifest", meta, executor.MANIFEST_MAX_TOKENS)
+    # Before the ParseError return: a manifest call that failed to parse still
+    # cost the attempt a full generation, and rotating away from it is exactly
+    # the case a cost-per-attempt query wants to see.
+    if tally is not None:
+        executor.accumulate_agent_fields(tally, meta)
     manifest = parse_manifest_response(manifest_raw)
     if isinstance(manifest, ParseError):
         logger.warning("spec %s: manifest parse failed (%s) — rotating",
@@ -1720,9 +1737,9 @@ def _generate_via_manifest(
         return manifest  # propagate → caller's rotation retry
     db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
                     payload={"role": "manifest",
-                             "agent": chosen_agent or executor.role_to_agent("implementer"),
                              "files": len(manifest.entries),
-                             "paths": [e.path for e in manifest.entries]})
+                             "paths": [e.path for e in manifest.entries],
+                             **executor.agent_event_fields(meta)})
     logger.info("spec %s: manifest = %d files: %s", spec.id,
                 len(manifest.entries), ", ".join(e.path for e in manifest.entries))
 
@@ -1731,7 +1748,7 @@ def _generate_via_manifest(
     result = _build_from_manifest(
         db, spec, task, spec_md, design_md, manifest.entries, chosen_agent,
         clarifications, rejection_notes,
-        prior_files=None, only=None, raw=manifest.raw,
+        prior_files=None, only=None, raw=manifest.raw, tally=tally,
     )
     if not isinstance(result, ParseError):
         _persist_manifest(spec_dir, manifest.entries)
@@ -1828,7 +1845,8 @@ def _repair_manifest_dirs(db, spec, task, entries, design_md: str) -> int:
         repaired += 1
     if repaired:
         db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
-                        payload={"role": "manifest", "repaired_paths": repaired})
+                        payload={"role": "manifest", "model_call": False,
+                                 "repaired_paths": repaired})
     return repaired
 
 
@@ -1898,6 +1916,7 @@ def _verify_manifest_workspace(db, spec, task, spec_dir) -> "tuple[list, list]":
                      spec.id, ", ".join(still_missing))
     db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
                     payload={"role": "implementer",
+                             "model_call": False,
                              "anomaly": "manifest_files_missing",
                              "restored": restored,
                              "still_missing": still_missing,
@@ -1910,6 +1929,7 @@ def _generate_one_file(
     manifest_entries: list, entry, written: list, chosen_agent: "str | None",
     clarifications: list, rejection_notes: "str | None",
     existing_by_path: "dict[str, str] | None" = None,
+    tally: "dict | None" = None,
 ) -> "str | None":
     """Generate a single file's content, with bounded parse-retries. Returns the
     content (associated with the manifest's canonical path) or None on failure."""
@@ -1925,6 +1945,12 @@ def _generate_one_file(
             agent=chosen_agent, max_tokens=executor.PER_FILE_MAX_TOKENS, meta=meta,
             memory_query=executor.file_memory_query(entry),
         )
+        # Counted before any early return below: a truncated or unparseable
+        # call still spent the GPU time and the tokens, and an attempt's cost
+        # that omits its failed calls understates exactly the attempts worth
+        # studying.
+        if tally is not None:
+            executor.accumulate_agent_fields(tally, meta)
         _note_truncation(db, spec, task, f"per-file:{entry.path}", meta,
                          executor.PER_FILE_MAX_TOKENS)
         if meta.get("truncated"):
@@ -1997,16 +2023,24 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
     # Generate the implementation — either as one call (small designs) or
     # file-by-file via a manifest (large designs). Both return an
     # ImplementerResult (list of files) or a ParseError handled identically below.
+    # One attempt spans 1 call (single-call mode) or 1 + N (manifest mode);
+    # the tally sums them so this event answers "what did this attempt cost"
+    # with a single number per axis (DEV-528).
+    tally: dict = {}
     result = _generate_implementation(
         db, spec, task, spec_dir, spec_md, design_md,
-        chosen_agent, clarifications, rejection_notes,
+        chosen_agent, clarifications, rejection_notes, tally=tally,
     )
 
     db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
                     payload={"role": "implementer",
-                             "agent": chosen_agent or task.agent,
                              "result_kind": type(result).__name__,
-                             "retry": task.retry_count})
+                             "retry": task.retry_count,
+                             # The tally reports the agent the calls actually
+                             # went to; fall back to the rotation pick when no
+                             # call reported one (every call raised).
+                             "agent": chosen_agent or task.agent,
+                             **executor.agent_event_fields(tally)})
 
     if isinstance(result, ParseError):
         logger.error("spec %s: implementer response unparseable: %s",
@@ -2060,6 +2094,7 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
     if result.duplicate_paths:
         db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
                         payload={"role": "implementer",
+                                 "model_call": False,
                                  "anomaly": "duplicate_file_paths",
                                  "paths": result.duplicate_paths,
                                  "retry": task.retry_count})
@@ -2073,7 +2108,8 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
         for note in norm_notes:
             logger.info("spec %s: boilerplate normalized — %s", spec.id, note)
         db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
-                        payload={"role": "implementer", "normalized": norm_notes})
+                        payload={"role": "implementer", "model_call": False,
+                                 "normalized": norm_notes})
 
     # Write all files
     for rel_path, content in result.files:
@@ -2453,6 +2489,7 @@ def _route_build_failure_to_architect(db: Database, spec: Spec, task, spec_dir,
 
     db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
                     payload={"role": "implementer",
+                             "model_call": False,
                              "routed_to": "architect",
                              "reason": "persistent_build_diagnostics",
                              "persistent": sorted(persistent)[:8],
@@ -2842,8 +2879,14 @@ def _run_reviewer_adversarial(db: Database, spec: Spec, task, spec_dir,
             db.record_event(
                 EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
                 payload={"role": "adversarial_test_writer",
+                         # provider-qualified: `model` alone collides across
+                         # providers, and `agent` is the column every other
+                         # role writes, so a per-agent query must find one
+                         # spelling here too (DEV-528).
+                         "agent": f"{r.provider}:{r.model}",
                          "provider": r.provider,
                          "model": r.model,
+                         "duration_ms": r.duration_ms,
                          "tests_added": len(r.files_written),
                          "passed": adv_passed if r.files_written else None,
                          "error": r.error,
@@ -2883,8 +2926,10 @@ def _run_reviewer_adversarial(db: Database, spec: Spec, task, spec_dir,
             db.record_event(
                 EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
                 payload={"role": "adversarial_test_writer",
+                         "agent": f"{r.provider}:{r.model}",
                          "provider": r.provider,
                          "model": r.model,
+                         "duration_ms": r.duration_ms,
                          "tests_added": 0,
                          "passed": None,
                          "error": r.error,
@@ -2927,7 +2972,8 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
 
     db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
                     payload={"role": "reviewer",
-                             "result_kind": type(result).__name__})
+                             "result_kind": type(result).__name__,
+                             **executor.agent_event_fields(meta)})
 
     if isinstance(result, ParseError):
         logger.error("spec %s: reviewer response unparseable%s: %s", spec.id,
@@ -2970,6 +3016,7 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
     if result.duplicate_paths:
         db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
                         payload={"role": "reviewer",
+                                 "model_call": False,
                                  "anomaly": "duplicate_test_paths",
                                  "paths": result.duplicate_paths,
                                  "retry": task.retry_count})
@@ -3409,6 +3456,7 @@ def _harness_retry(db: Database, spec: Spec, task, spec_dir: Path,
             db.update_task_status(t.id, TaskStatus.PENDING)
     db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
                     payload={"role": "harness_guard",
+                             "model_call": False,
                              "free_retry": used + 1,
                              "reason": reason[:300]})
     logger.info("spec %s: harness defect — free retry %d/%d issued (%s)",
@@ -3548,9 +3596,9 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
 
     db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=impl_task.id,
                     payload={"role": "synthesizer",
-                             "agent": _SYNTHESIS_AGENT,
                              "attempts": len(attempts),
-                             "files": len(result.files)})
+                             "files": len(result.files),
+                             **executor.agent_event_fields(meta)})
 
     # Wipe the live attempt so synthesis doesn't collide with it. Snapshot
     # first so we keep the corpus.
@@ -3659,7 +3707,7 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
     db.record_event(EventKind.AGENT_RAN, spec_id=spec.id,
                     task_id=impl_task.id,
                     payload={"role": "synthesis_repair",
-                             "agent": _SYNTHESIS_AGENT,
+                             **executor.agent_event_fields(repair_meta),
                              # None when the repair was triggered by a build
                              # failure, which has no pass rate to report
                              # (DEV-469) — the reason is recorded instead.
