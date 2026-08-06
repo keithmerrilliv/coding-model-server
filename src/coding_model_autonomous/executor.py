@@ -382,6 +382,41 @@ ARCHITECT_SYSTEM_PROMPT = textwrap.dedent("""\
        cannot name the seam, change the API until you can.
     """)
 
+# Swift value semantics: ~29% of every build diagnostic this pipeline has
+# produced (DEV-511), and the same errors recur across EVERY implementer in the
+# rotation — which points at missing shared instruction rather than a gap in any
+# one model, since a model-specific weakness would produce different failures
+# per agent (DEV-431).
+#
+# It is the corner of Swift with no analogue in the Python/TypeScript these
+# models are saturated with, so the training prior actively works against them.
+#
+# Lives in the SYSTEM prompt, not interpolated into the user message: system
+# prompts are the stable cached prefix (DEV-409), and this is prepended to every
+# per-file call — 26 of them in one manifest build — so an interpolated version
+# would cost a cache miss each time. Deliberately unconditional for the same
+# reason; branching on language would break the prefix.
+#
+# Scoped to the ~29% mutability class only. The larger ~62% cross-file class
+# (DEV-467) is an architecture problem and is untouched by this.
+SWIFT_VALUE_SEMANTICS = textwrap.dedent("""\
+
+    # Swift value semantics (skip if you are not writing Swift)
+    - `struct` and `enum` are VALUE types. Any method that assigns to `self` or
+      to a stored property must be marked `mutating`.
+    - `mutating` is invalid on a `class`. Classes are reference types; their
+      methods mutate freely and must never be marked `mutating`.
+    - A `let` stored property cannot be reassigned after init, and cannot be the
+      left side of a mutating operator (`+=`, `append`, …).
+    - `private(set) var` is readable everywhere but writable ONLY inside the
+      declaring type. Writing it from another type does not compile.
+    - You cannot call a `mutating` method through a `let` binding, a computed
+      property, or a dictionary subscript. Bind to a `var` first, mutate, then
+      write back.
+    - A struct gets its memberwise `init` only if it declares no `init` of its
+      own, and that init's parameter order follows declaration order.
+    """)
+
 IMPLEMENTER_SYSTEM_PROMPT = textwrap.dedent("""\
     You are the IMPLEMENTER agent for an autonomous software development service.
     You receive a specification and an architecture design, and you produce
@@ -429,7 +464,7 @@ IMPLEMENTER_SYSTEM_PROMPT = textwrap.dedent("""\
     11. Pinned dependencies: in package.json, pyproject.toml, requirements.txt,
         Cargo.toml, etc., pin to an exact version. No `^`, no `~`, no `>=`
         ranges. The reviewer rejects unpinned dependencies on sight.
-    """)
+    """) + SWIFT_VALUE_SEMANTICS
 
 REVIEWER_SYSTEM_PROMPT = textwrap.dedent("""\
     You are the REVIEWER for an autonomous software service. You receive the
@@ -522,7 +557,7 @@ REVIEWER_SYSTEM_PROMPT = textwrap.dedent("""\
          Cargo.toml — `^`, `~`, `>=` ranges all fail. (package.json dep ranges
          are auto-pinned before you see the code, so they should already be exact.)
        Cite the exact file:line in `### Verdict Evidence`.
-    """)
+    """) + SWIFT_VALUE_SEMANTICS
 
 
 # ── Agent calling ────────────────────────────────────────────────────────────
@@ -1081,9 +1116,51 @@ def file_memory_query(entry: "ManifestEntry") -> str:
     ]))[:_MEMORY_QUERY_MAX_CHARS]
 
 
+def _render_reference_files(reference_files: list[tuple[str, str]]) -> str:
+    """Read-only view of files the spec puts off-limits (DEV-492 / DEV-427).
+
+    Protected files are stripped from the dispatch payload, so neither role has
+    ever seen them — yet they are compiled into the build, and everything they
+    declare is already in scope. That blind spot is what produced Centipede
+    run 5's `invalid redeclaration of 'Field'`: the design created a second
+    `Field` because the one in the protected scaffold was invisible to it.
+
+    Visibility here is safe by construction: a protected path can never be
+    written back, so showing it cannot widen what the pipeline may change.
+    """
+    out = [
+        "## Existing files you may NOT change (read-only context)\n\n",
+        "These files already exist and are already compiled into the target. "
+        "The spec puts them off-limits: anything you write to these paths is "
+        "discarded, not merged. Do NOT create, modify, emit or re-declare "
+        "them.\n\n"
+        "They are shown so you can USE what they already provide. Everything "
+        "they declare — types, constants, functions — is in scope already. "
+        "Declaring any of it a second time is a redeclaration error, not a "
+        "new feature; reference the existing declaration instead, or extend "
+        "it in a file you are allowed to write.\n\n",
+    ]
+    budget = EXISTING_FILES_MAX_CHARS
+    omitted: list[str] = []
+    for path, content in reference_files:
+        if len(content) > budget:
+            omitted.append(path)
+            continue
+        budget -= len(content)
+        out.append(f"### {path} (read-only)\n\n````\n{content}\n````\n\n")
+    if omitted:
+        out.append(
+            "**Not shown** (over the context budget), but still off-limits and "
+            "still compiled in: " + ", ".join(omitted) + "\n\n"
+        )
+    return "".join(out)
+
+
 def build_architect_message(spec_md: str,
                             rejection_notes: str | None = None,
-                            plan_yaml: str | None = None) -> list[dict[str, str]]:
+                            plan_yaml: str | None = None,
+                            reference_files: list[tuple[str, str]] | None = None,
+                            ) -> list[dict[str, str]]:
     user_parts: list[str] = []
     # On a re-run (design-review rejection or supervisor design-revision), the
     # prior design led to the failure below. The implementer builds the design
@@ -1102,6 +1179,8 @@ def build_architect_message(spec_md: str,
     constraints_block = _render_plan_constraints(plan_yaml) if plan_yaml else None
     if constraints_block:
         user_parts.append(constraints_block + "\n\n---\n\n")
+    if reference_files:
+        user_parts.append(_render_reference_files(reference_files) + "---\n\n")
     user_parts.append(
         "## Specification\n\n"
         f"{spec_md}\n\n---\n\n"
@@ -1257,6 +1336,7 @@ def build_implementer_message(
     rejection_notes: str | None = None,
     clarifications: list[str] | None = None,
     existing_files: list[tuple[str, str]] | None = None,
+    reference_files: list[tuple[str, str]] | None = None,
 ) -> list[dict[str, str]]:
     user_parts: list[str] = []
     # Clarifications go BEFORE the spec so the implementer reads them as the
@@ -1286,6 +1366,9 @@ def build_implementer_message(
     if existing_files:
         user_parts.append("\n\n")
         user_parts.append(_render_existing_files(existing_files))
+    if reference_files:
+        user_parts.append("\n\n")
+        user_parts.append(_render_reference_files(reference_files))
     if rejection_notes:
         user_parts.extend([
             "\n\n## Previous Attempt — Review Feedback\n\n",
@@ -1368,7 +1451,7 @@ PER_FILE_SYSTEM_PROMPT = textwrap.dedent("""\
     3. TypeScript: `any` is forbidden — use `unknown` + narrowing or a real type.
     4. Pin dependencies to exact versions (no `^`, `~`, `>=`) in any manifest file.
     5. Write complete, working content — no TODO placeholders, no elisions.
-    """)
+    """) + SWIFT_VALUE_SEMANTICS
 
 
 @dataclass
@@ -1963,7 +2046,7 @@ SYNTHESIS_SYSTEM_PROMPT = textwrap.dedent("""\
     - Keep test files (`tests/test_*.py`) — write them yourself if the
       attempts disagree on which tests should exist. Tests are part of
       the deliverable.
-    """)
+    """) + SWIFT_VALUE_SEMANTICS
 
 
 def build_synthesis_message(

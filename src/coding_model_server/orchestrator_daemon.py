@@ -503,6 +503,77 @@ def _unreadable_declared_modifications(
     return [p for p in paths if p not in got]
 
 
+def _drop_undeliverable_manifest_entries(spec: Spec, entries: list) -> list:
+    """Remove manifest entries that can never be delivered (DEV-499).
+
+    In manifest mode each file costs its own agent call, so an entry on
+    `protected_paths` is a guaranteed-wasted call: DEV-427 strips those paths
+    before dispatch, the worktree keeps base_ref's copy, and whatever was
+    generated is discarded. On Centipede run 5 that was 1 of 7 calls.
+
+    It also corrupts a signal. The runner banners every off-limits file the
+    implementer touched, which is how a reviewer spots an implementer going out
+    of bounds — but when the manifest *told* it to write the file, the banner
+    reports a violation that never happened and buries the real ones.
+
+    Filtered here rather than in the manifest prompt because a prompt rule is
+    advisory and this one has to hold.
+    """
+    strategy = _load_plan(spec).get("test_strategy")
+    protected = set()
+    if isinstance(strategy, dict):
+        protected = {str(p).strip() for p in (strategy.get("protected_paths") or []) if p}
+    if not protected:
+        return entries
+    kept, dropped = [], []
+    for e in entries:
+        (dropped if e.path.strip() in protected else kept).append(e)
+    if dropped:
+        # Logged, never silent: _verify_manifest_workspace (DEV-106) treats a
+        # manifest-declared file missing from the workspace as an anomaly, and
+        # this is a deliberate omission rather than that.
+        logger.info("spec %s: dropped %d protected path(s) from the manifest — "
+                    "they cannot be delivered and each would cost a generation "
+                    "call: %s", spec.id, len(dropped),
+                    ", ".join(e.path for e in dropped))
+    return kept
+
+
+def _fetch_protected_files_for_spec(spec: Spec) -> list[tuple[str, str]]:
+    """Read-only contents of the spec's `protected_paths` (DEV-492 / DEV-427).
+
+    Protected files are dropped before dispatch so the pipeline cannot write
+    them — but they are still compiled into the target, and neither the
+    architect nor the implementer has ever been able to see what they declare.
+    Centipede run 5 died on `invalid redeclaration of 'Field'` for exactly that
+    reason: the design created a type the protected scaffold already had.
+
+    Showing them cannot widen what the pipeline may change, since the write
+    path drops these paths regardless of what any role produces.
+    """
+    strategy = _load_plan(spec).get("test_strategy")
+    if not isinstance(strategy, dict):
+        return []
+    repo = strategy.get("repo")
+    paths = [p for p in (strategy.get("protected_paths") or []) if p]
+    if not repo or not paths:
+        return []
+    try:
+        files, problems = test_runner.fetch_repo_files(
+            repo, paths, strategy.get("base_ref") or "HEAD")
+    except Exception as e:
+        logger.warning("spec %s: protected-file read failed (%s); roles will "
+                       "not see what those files declare", spec.id, e)
+        return []
+    for problem in problems:
+        logger.warning("spec %s: protected-file read problem — %s", spec.id, problem)
+    if files:
+        logger.info("spec %s: supplied %d protected file(s) as read-only "
+                    "context: %s", spec.id, len(files),
+                    ", ".join(p for p, _ in files))
+    return files
+
+
 def _fetch_existing_files_for_spec(spec: Spec, spec_md: str) -> list[tuple[str, str]]:
     """Current contents of the files this spec marks as modified (DEV-492).
 
@@ -1072,8 +1143,9 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
     if not plan_yaml:
         logger.warning("spec %s: no plan.yaml on disk or in DB — architect "
                        "runs without plan constraints", spec.id)
-    messages = build_architect_message(spec_md, rejection_notes=rejection_notes,
-                                       plan_yaml=plan_yaml)
+    messages = build_architect_message(
+        spec_md, rejection_notes=rejection_notes, plan_yaml=plan_yaml,
+        reference_files=_fetch_protected_files_for_spec(spec))
 
     # Architect output is structured (<<<DESIGN>>> / <<<COMPLEXITY>>> blocks).
     # The model occasionally drifts and returns prose without the markers; one
@@ -1364,6 +1436,7 @@ def _generate_implementation(
     messages = build_implementer_message(
         spec_md, design_md, rejection_notes=rejection_notes,
         clarifications=clarifications, existing_files=existing_files,
+        reference_files=_fetch_protected_files_for_spec(spec),
     )
     impl_max_tokens = executor.implementer_max_tokens_for(design_md)
     logger.info("spec %s: single-call implementer budget=%d tokens (~%d files)",
@@ -1718,6 +1791,7 @@ def _generate_via_manifest(
         logger.warning("spec %s: manifest parse failed (%s) — rotating",
                        spec.id, manifest.reason)
         return manifest  # propagate → caller's rotation retry
+    manifest.entries = _drop_undeliverable_manifest_entries(spec, manifest.entries)
     db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
                     payload={"role": "manifest",
                              "agent": chosen_agent or executor.role_to_agent("implementer"),
