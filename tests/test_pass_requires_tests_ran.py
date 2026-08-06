@@ -48,12 +48,27 @@ class TestTheInvariant:
             "tests_passed must start False — a True default survives an unrun "
             "suite and reports PASS at the release gate")
 
-    def test_no_test_files_is_not_a_pass(self):
-        """A reviewer emitting zero test files must not reach the gate green."""
+    def test_a_workspace_with_no_tests_is_not_a_pass(self):
+        """A suite that does not exist must not reach the gate green.
+
+        Originally this asserted on `not result.test_files` — whether the
+        REVIEWER emitted tests. That is a different proposition from whether a
+        suite exists, and it fired twice in production against runs where the
+        implementer's tests had already run and passed, discarding a
+        verified-green result each time. The invariant is unchanged; the
+        question it asks is now the right one.
+        """
         src = _reviewer_gate_source()
-        assert "not result.test_files" in src, (
-            "the empty-test-files case must be handled explicitly, not fall "
+        assert "_workspace_has_test_files(" in src, (
+            "the no-tests-anywhere case must be handled explicitly, not fall "
             "through to the initial value")
+
+    def test_the_no_tests_check_considers_both_roles(self):
+        """Implementer-written tests are just as real as reviewer-written ones."""
+        from coding_model_server.orchestrator_daemon import _workspace_has_test_files
+        assert _workspace_has_test_files([("a/bTests.swift", "")], []) is True
+        assert _workspace_has_test_files([], [("tests/test_a.py", "")]) is True
+        assert _workspace_has_test_files([("a/b.swift", "")], []) is False
 
     def test_a_waived_suite_is_the_only_unconditional_pass(self):
         """tests_required=False is a deliberate operator choice and may pass."""
