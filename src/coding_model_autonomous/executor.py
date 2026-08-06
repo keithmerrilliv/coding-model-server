@@ -1205,11 +1205,58 @@ def parse_design_review(raw: str) -> tuple[str, str]:
     return "FAIL", body[vm.end():].strip()
 
 
+# Ceiling on existing-file context injected into the implementer prompt
+# (DEV-492). The single-call implementer runs at 32k tokens total, and the
+# spec, design and clarifications all have to fit alongside. ~60k chars is
+# roughly 15k tokens — enough for the handful of files a change actually
+# touches, small enough that it cannot crowd out the instructions telling the
+# model what to do with them. Files past the ceiling are named, never silently
+# dropped: "you were not shown X" is actionable, a missing section is not.
+EXISTING_FILES_MAX_CHARS = int(
+    os.getenv("AUTONOMOUS_EXISTING_FILES_MAX_CHARS", "60000"))
+
+
+def _render_existing_files(existing_files: list[tuple[str, str]]) -> str:
+    """Current repo contents, framed as ground truth the model must preserve.
+
+    Deliberately not wrapped in the <<<FILE:…>>> delimiters the implementer
+    emits — those are parsed out of the *response*, and echoing the input
+    format invites the model to treat these as already-emitted files.
+    """
+    out = [
+        "## Current contents of files you must modify\n\n",
+        "These are the ACTUAL contents in the repository right now. They are "
+        "ground truth and outrank any description of these files in the spec "
+        "or design. Reproduce every declaration exactly as it appears here "
+        "except for the specific changes the design calls for — do not "
+        "rewrite, reorder, re-indent, modernise or 'improve' anything you "
+        "were not asked to change. Anything you drop is deleted from the "
+        "repository.\n\n",
+    ]
+    budget = EXISTING_FILES_MAX_CHARS
+    omitted: list[str] = []
+    for path, content in existing_files:
+        if len(content) > budget:
+            omitted.append(path)
+            continue
+        budget -= len(content)
+        out.append(f"### {path}\n\n````\n{content}\n````\n\n")
+    if omitted:
+        out.append(
+            "**Not shown** (over the context budget): "
+            + ", ".join(omitted)
+            + ". You have NOT seen these files. Do not emit them — emitting a "
+              "file you have not read would replace it with an invention.\n\n"
+        )
+    return "".join(out)
+
+
 def build_implementer_message(
     spec_md: str,
     design_md: str,
     rejection_notes: str | None = None,
     clarifications: list[str] | None = None,
+    existing_files: list[tuple[str, str]] | None = None,
 ) -> list[dict[str, str]]:
     user_parts: list[str] = []
     # Clarifications go BEFORE the spec so the implementer reads them as the
@@ -1233,6 +1280,12 @@ def build_implementer_message(
         "\n\n## Architecture Design\n\n",
         design_md,
     ])
+    # After the design, so the model reads intent first and then the reality it
+    # has to preserve — and close to the task instruction, where it is most
+    # salient at the moment of writing (DEV-492).
+    if existing_files:
+        user_parts.append("\n\n")
+        user_parts.append(_render_existing_files(existing_files))
     if rejection_notes:
         user_parts.extend([
             "\n\n## Previous Attempt — Review Feedback\n\n",

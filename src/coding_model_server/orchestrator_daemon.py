@@ -467,6 +467,46 @@ def _declared_file_modifications(spec_md: str) -> list[str]:
     ]
 
 
+def _fetch_existing_files_for_spec(spec: Spec, spec_md: str) -> list[tuple[str, str]]:
+    """Current contents of the files this spec marks as modified (DEV-492).
+
+    Returns [] for the greenfield case (no change-surface rows), for local
+    frameworks whose repo is not on the Mac, and whenever the read path is
+    unavailable — the implementer then behaves exactly as it did before this
+    existed. Never raises: a spec must not fail because a git read failed.
+    """
+    paths = _declared_file_modifications(spec_md)
+    if not paths:
+        return []
+    strategy = _load_plan(spec).get("test_strategy")
+    if not isinstance(strategy, dict):
+        return []
+    repo = strategy.get("repo")
+    if not repo:
+        # No registered repo means no runner-side checkout to read from; this
+        # is the local-framework case (pytest/node), where the spec dir is the
+        # whole world and there is nothing to fetch.
+        return []
+    base_ref = strategy.get("base_ref") or "HEAD"
+    try:
+        files, problems = test_runner.fetch_repo_files(repo, paths, base_ref)
+    except Exception as e:  # never let a read failure kill the spec
+        logger.warning("spec %s: existing-file read failed (%s); the "
+                       "implementer will not see the files it must modify",
+                       spec.id, e)
+        return []
+    for problem in problems:
+        logger.warning("spec %s: existing-file read problem — %s",
+                       spec.id, problem)
+    if files:
+        logger.info("spec %s: supplied %d existing file(s) to the implementer: %s",
+                    spec.id, len(files), ", ".join(p for p, _ in files))
+    else:
+        logger.warning("spec %s: %d file(s) marked modify but none could be "
+                       "read — implementer is working blind", spec.id, len(paths))
+    return files
+
+
 def _block_plan_for_unreadable_modification(
     db: Database, spec: Spec, paths: list[str]
 ) -> None:
@@ -1278,9 +1318,10 @@ def _generate_implementation(
         )
 
     # Single-call path: one response with every file, budget scaled to the design.
+    existing_files = _fetch_existing_files_for_spec(spec, spec_md)
     messages = build_implementer_message(
         spec_md, design_md, rejection_notes=rejection_notes,
-        clarifications=clarifications,
+        clarifications=clarifications, existing_files=existing_files,
     )
     impl_max_tokens = executor.implementer_max_tokens_for(design_md)
     logger.info("spec %s: single-call implementer budget=%d tokens (~%d files)",

@@ -89,6 +89,63 @@ class RunTestsResponse(BaseModel):
     integration_warnings: list[str] = []
 
 
+class ReadFilesRequest(BaseModel):
+    repo: str = Field(..., description="Symbolic name registered in repos.yml")
+    base_ref: str = "HEAD"
+    paths: list[str] = []
+
+
+class ReadFileResult(BaseModel):
+    path: str
+    # Exactly one of these is set. `content is None` means the file could not
+    # be read; `error` says why, so the caller can tell "does not exist at this
+    # ref" (the design named a file that isn't there) apart from "too large".
+    content: Optional[str] = None
+    error: Optional[str] = None
+
+
+class ReadFilesResponse(BaseModel):
+    files: list[ReadFileResult] = []
+
+
+# Caps exist to protect the *implementer's* token budget, not the runner's
+# memory. A single-call implementer runs at 32k tokens (DEV-492's read path
+# feeds straight into that prompt), so handing back a 400KB generated file
+# would crowd out the design and the spec and make the fix less likely, not
+# more. Better to report the file as over-cap and let the caller decide.
+READ_FILES_PER_FILE_MAX_BYTES = int(
+    os.getenv("CODING_MODEL_RUNNER_READ_FILE_MAX_BYTES", "262144"))
+READ_FILES_TOTAL_MAX_BYTES = int(
+    os.getenv("CODING_MODEL_RUNNER_READ_TOTAL_MAX_BYTES", "1048576"))
+READ_FILES_MAX_PATHS = int(
+    os.getenv("CODING_MODEL_RUNNER_READ_MAX_PATHS", "40"))
+
+
+def _reject_unsafe_read_path(rel: str) -> Optional[str]:
+    """Reason to refuse *rel*, or None if it is safe to read.
+
+    `git show <ref>:<path>` is already confined to the repository tree — it
+    resolves against the ref, not the filesystem, so it cannot reach /etc or
+    follow a symlink out. These checks are defence in depth and, more usefully,
+    they turn a confusing git error into a clear one.
+    """
+    if not rel or not rel.strip():
+        return "empty path"
+    if rel.startswith("/"):
+        return "absolute paths are not accepted"
+    if ".." in Path(rel).parts:
+        return "path escapes the repository"
+    return None
+
+
+def _git_show(repo: Path, ref: str, rel: str) -> subprocess.CompletedProcess:
+    """`git show ref:path` returning bytes, never raising on a missing path."""
+    return subprocess.run(
+        ["git", "-C", str(repo), "show", f"{ref}:{rel}"],
+        capture_output=True, check=False,
+    )
+
+
 async def verify_runner_key(x_runner_key: Optional[str] = Header(None)) -> None:
     if not Config.API_KEY:
         if Config.ALLOW_UNAUTH:
@@ -112,6 +169,75 @@ async def health() -> dict:
 async def list_repos() -> dict:
     """Registered repo names — authenticated (see health())."""
     return {"repos": sorted(Config.repos().keys())}
+
+
+@app.post(
+    "/v1/read_files",
+    response_model=ReadFilesResponse,
+    dependencies=[Depends(verify_runner_key)],
+)
+def read_files_endpoint(req: ReadFilesRequest) -> ReadFilesResponse:
+    """Return file contents at *base_ref* so the implementer can edit rather
+    than reinvent (DEV-492).
+
+    Reads with `git show <ref>:<path>`, which resolves any path at any ref
+    directly — no worktree, no checkout, no lifecycle to clean up. That matters
+    because this runs on the dispatch path: a `worktree add`/`remove` pair per
+    read would be far more expensive than the read itself.
+
+    Per-file errors are returned in-band rather than raised. One unreadable
+    path must not deny the implementer the other nine — a partial answer is
+    strictly better than none, and the caller can see exactly what is missing.
+    """
+    repos = Config.repos()
+    if req.repo not in repos:
+        raise HTTPException(
+            400,
+            f"unknown repo '{req.repo}' — register it in {Config.REPOS_FILE}",
+        )
+    repo_path = repos[req.repo]
+
+    results: list[ReadFileResult] = []
+    budget = READ_FILES_TOTAL_MAX_BYTES
+    for rel in req.paths[:READ_FILES_MAX_PATHS]:
+        err = _reject_unsafe_read_path(rel)
+        if err:
+            results.append(ReadFileResult(path=rel, error=err))
+            continue
+        proc = _git_show(repo_path, req.base_ref, rel)
+        if proc.returncode != 0:
+            # git's own message names the ref and path; it is the most useful
+            # thing to hand back ("path does not exist in <ref>"). stdout/stderr
+            # are bytes here because the file itself may not be text.
+            detail = proc.stderr.decode("utf-8", "replace").strip()
+            results.append(ReadFileResult(
+                path=rel, error=(detail or "git show failed")[:300],
+            ))
+            continue
+        raw = proc.stdout
+        if len(raw) > READ_FILES_PER_FILE_MAX_BYTES:
+            results.append(ReadFileResult(
+                path=rel,
+                error=(f"file is {len(raw)} bytes, over the "
+                       f"{READ_FILES_PER_FILE_MAX_BYTES}-byte per-file cap"),
+            ))
+            continue
+        if len(raw) > budget:
+            results.append(ReadFileResult(
+                path=rel, error="total response budget exhausted"))
+            continue
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            results.append(ReadFileResult(path=rel, error="not valid UTF-8"))
+            continue
+        budget -= len(raw)
+        results.append(ReadFileResult(path=rel, content=text))
+
+    found = sum(1 for r in results if r.content is not None)
+    logger.info("read_files: repo=%s ref=%s requested=%d returned=%d",
+                req.repo, req.base_ref, len(req.paths), found)
+    return ReadFilesResponse(files=results)
 
 
 @app.post(

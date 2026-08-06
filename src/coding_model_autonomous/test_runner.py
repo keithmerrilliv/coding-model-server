@@ -726,6 +726,62 @@ def _run_mac_runner_tests(
     return bool(data.get("passed")), output
 
 
+def fetch_repo_files(
+    repo: str,
+    paths: list[str],
+    base_ref: str = "HEAD",
+    timeout: int = 30,
+) -> tuple[list[tuple[str, str]], list[str]]:
+    """Read *paths* from the Mac runner at *base_ref* (DEV-492).
+
+    Returns ``(files, problems)`` — files as (path, content) pairs, problems as
+    human-readable strings naming what could not be read.
+
+    **Fails soft by design.** If the runner is unreachable, or is an older
+    build with no ``/v1/read_files`` route, this returns no files and one
+    problem rather than raising. The implementer then runs exactly as it did
+    before this feature existed: worse, but not broken. That property is what
+    lets the two hosts be deployed in either order, and keeps a Mac restart
+    mid-flight from failing a spec.
+
+    The timeout is short on purpose. This is a git read, not a build — if it
+    has not answered in 30s the link is in trouble, and stalling the whole
+    execution pass behind it buys nothing.
+    """
+    if not paths:
+        return [], []
+    url = f"{MAC_RUNNER_URL.rstrip('/')}/v1/read_files"
+    payload = {"repo": repo, "base_ref": base_ref, "paths": list(paths)}
+    try:
+        resp = _SESSION.post(
+            url, json=payload,
+            headers={"X-Runner-Key": MAC_RUNNER_API_KEY}, timeout=timeout,
+        )
+    except requests.RequestException as e:
+        return [], [f"could not reach the runner's read path: {e}"]
+    if resp.status_code == 404:
+        return [], ["runner has no /v1/read_files route (needs redeploy)"]
+    if resp.status_code != 200:
+        return [], [f"read_files HTTP {resp.status_code}: {resp.text[:300]}"]
+    try:
+        data = resp.json()
+    except ValueError:
+        return [], ["read_files returned a non-JSON response"]
+
+    files: list[tuple[str, str]] = []
+    problems: list[str] = []
+    for item in data.get("files") or []:
+        path = str(item.get("path", ""))
+        content = item.get("content")
+        if content is None:
+            problems.append(f"{path}: {item.get('error') or 'unreadable'}")
+        else:
+            files.append((path, content))
+    logger.info("read_files: repo=%s ref=%s requested=%d got=%d problems=%d",
+                repo, base_ref, len(paths), len(files), len(problems))
+    return files, problems
+
+
 def run_tests(
     spec_dir: Path,
     framework: str = "pytest",
