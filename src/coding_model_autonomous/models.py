@@ -69,6 +69,15 @@ class EventKind(str, Enum):
     GATE_CREATED = "gate_created"
     GATE_RESPONDED = "gate_responded"
     PLANNER_RAN = "planner_ran"
+    # AGENT_RAN covers two things, and a per-agent query must not pool them
+    # (DEV-528). A real model call carries `agent` plus `duration_ms` and,
+    # when the server reported it, token counts — build the payload with
+    # executor.agent_event_fields(meta) so the spelling matches everywhere.
+    # The rest are anomaly and routing records that piggyback on this kind
+    # without any model having run — a widened manifest, a duplicate-path
+    # warning, a free retry. Those set `model_call: False`, which is what
+    # a cost or quality query filters on. Events predating the field have
+    # neither marker; `duration_ms IS NOT NULL` is the fallback discriminator.
     AGENT_RAN = "agent_ran"              # architect/implementer/reviewer completed
     OUTPUT_TRUNCATED = "output_truncated"  # an agent response hit max_tokens (finish_reason=length)
     TEST_RAN = "test_ran"                # subprocess test execution completed

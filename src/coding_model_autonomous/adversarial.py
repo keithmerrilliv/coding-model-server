@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import os
 import textwrap
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -75,6 +76,11 @@ class AdversarialProviderResult:
     files_written: list[tuple[str, str]]   # (basename, content)
     error: Optional[str] = None            # "<ExcType>: <message>" if call raised
     skipped: bool = False                  # True when provider returned 0 blocks
+    duration_ms: Optional[int] = None      # wall-clock of the provider call
+    # No token counts: these are third-party CLIs, and they do not report usage
+    # the way the local server does. duration_ms is the only cost axis
+    # available here, which is worth knowing when reading a per-agent table
+    # that has both (DEV-528).
 
 
 def _resolve_providers() -> list[str]:
@@ -338,6 +344,7 @@ def generate_adversarial_tests(
             provider, model, ADVERSARIAL_MAX_TOKENS, ADVERSARIAL_TIMEOUT,
             prefix, len(user_content) // 1024,
         )
+        t0 = time.monotonic()
         try:
             files = _generate_for_provider(provider, prefix, user_content, spec_dir)
         except Exception as e:  # noqa: BLE001 — fail-open per provider
@@ -349,8 +356,10 @@ def generate_adversarial_tests(
             )
             results.append(AdversarialProviderResult(
                 provider=provider, model=model, files_written=[], error=err,
+                duration_ms=int((time.monotonic() - t0) * 1000),
             ))
             continue
+        elapsed_ms = int((time.monotonic() - t0) * 1000)
 
         if not files:
             logger.info(
@@ -361,11 +370,13 @@ def generate_adversarial_tests(
             )
             results.append(AdversarialProviderResult(
                 provider=provider, model=model, files_written=[], skipped=True,
+                duration_ms=elapsed_ms,
             ))
             continue
 
         results.append(AdversarialProviderResult(
             provider=provider, model=model, files_written=files,
+            duration_ms=elapsed_ms,
         ))
         logger.info("phase-b: %s wrote %d adversarial test file(s)",
                     provider, len(files))
