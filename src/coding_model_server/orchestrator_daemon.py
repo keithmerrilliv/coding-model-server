@@ -1649,6 +1649,10 @@ def _build_from_manifest(
     # Fetched once for the whole manifest rather than per file: one runner call
     # instead of N, which matters on a link that drops every ~66s (DEV-518).
     existing_by_path = dict(_fetch_existing_files_for_spec(spec, spec_md))
+    # Fetched once for the whole manifest, same as the editable files: each
+    # per-file call is isolated and would otherwise be blind to what the
+    # protected scaffold already declares (Centipede run 8).
+    reference_files = _fetch_protected_files_for_spec(spec)
     for entry in entries:
         # Manifest mode chains one blocking agent call per file — the
         # longest uninterruptible stretch in the daemon. Check for a
@@ -1665,6 +1669,7 @@ def _build_from_manifest(
                 db, spec, task, spec_md, design_md, entries, entry,
                 written, chosen_agent, clarifications, rejection_notes,
                 existing_by_path=existing_by_path, tally=tally,
+                reference_files=reference_files,
             )
             generated += 1
         if content is None and prior_files and entry.path in prior_files:
@@ -2004,6 +2009,7 @@ def _generate_one_file(
     clarifications: list, rejection_notes: "str | None",
     existing_by_path: "dict[str, str] | None" = None,
     tally: "dict | None" = None,
+    reference_files: "list[tuple[str, str]] | None" = None,
 ) -> "str | None":
     """Generate a single file's content, with bounded parse-retries. Returns the
     content (associated with the manifest's canonical path) or None on failure."""
@@ -2015,7 +2021,8 @@ def _generate_one_file(
             "implementer",
             build_per_file_message(spec_md, design_md, manifest_entries, entry,
                                    written_summary, clarifications, rejection_notes,
-                                   existing_content=existing_content),
+                                   existing_content=existing_content,
+                                   reference_files=reference_files),
             agent=chosen_agent, max_tokens=executor.PER_FILE_MAX_TOKENS, meta=meta,
             memory_query=executor.file_memory_query(entry),
         )

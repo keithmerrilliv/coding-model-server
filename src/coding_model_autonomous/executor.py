@@ -1809,6 +1809,7 @@ def build_per_file_message(
     clarifications: list[str] | None = None,
     rejection_notes: str | None = None,
     existing_content: str | None = None,
+    reference_files: list[tuple[str, str]] | None = None,
 ) -> list[dict[str, str]]:
     manifest_block = "\n".join(
         f"- {e.path} — {e.purpose}" + (f"  [exports: {e.exports}]" if e.exports else "")
@@ -1830,6 +1831,15 @@ def build_per_file_message(
     ])
     if target.exports:
         parts.append(f"\nExpected exports / contents: {target.exports}\n")
+    # Protected files must reach the per-file path too. Each call here is
+    # isolated — the model sees the manifest and interface summaries of what has
+    # been written, but nothing about files the spec put off-limits, which are
+    # nonetheless compiled into the target. Centipede run 8 proved the cost: the
+    # architect had this context and correctly used the scaffold's `Field`, then
+    # the per-file implementer, which did not, declared `struct Field` in
+    # World.swift and reproduced run 5's `invalid redeclaration of 'Field'`.
+    if reference_files:
+        parts.append("\n" + _render_reference_files(reference_files))
     # Manifest mode writes one file per call, so unlike the single-call path it
     # needs only the target's own current content — which is exactly the file at
     # risk of being reconstructed (DEV-492).

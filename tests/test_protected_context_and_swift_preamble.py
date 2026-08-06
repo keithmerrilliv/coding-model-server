@@ -179,3 +179,44 @@ def test_preamble_stays_short_because_it_is_multiplied():
     size (26 on one observed build)."""
     assert len(SWIFT_VALUE_SEMANTICS.splitlines()) <= 20
     assert len(SWIFT_VALUE_SEMANTICS) < 1200
+
+
+# ── manifest mode must get the protected context too ─────────────────────────
+
+def test_per_file_calls_carry_protected_context():
+    """Centipede run 8 caught this hole the hard way.
+
+    The architect had the scaffold and correctly used its `Field`. The per-file
+    implementer did not, declared `struct Field` in World.swift, and reproduced
+    run 5's `invalid redeclaration of 'Field'` — the exact defect the read path
+    exists to prevent. Any design at or above the manifest threshold takes this
+    path, so the role most able to cause the collision was the one still blind.
+    """
+    from coding_model_autonomous.executor import build_per_file_message, ManifestEntry
+    target = ManifestEntry(path="Sources/CentipedeCore/World.swift",
+                           purpose="world state", exports="")
+    text = _user(build_per_file_message(
+        "spec", "design", [target], target, "nothing yet",
+        reference_files=[("Sources/CentipedeCore/GameState.swift",
+                          "public enum Field {\n    public static let columns = 30\n}")],
+    ))
+    assert "may NOT change" in text
+    assert "public enum Field" in text
+    assert "in scope already" in text
+
+
+def test_per_file_without_protected_files_is_unchanged():
+    from coding_model_autonomous.executor import build_per_file_message, ManifestEntry
+    target = ManifestEntry(path="A/New.swift", purpose="create", exports="")
+    text = _user(build_per_file_message("spec", "design", [target], target, "none"))
+    assert "may NOT change" not in text
+
+
+def test_manifest_path_fetches_protected_files_once():
+    """One runner call for the whole manifest, not one per file — the link drops
+    often enough (DEV-518) that N round trips are N chances to lose one."""
+    import inspect
+    from coding_model_server import orchestrator_daemon as od
+    src = inspect.getsource(od._build_from_manifest)
+    assert src.count("_fetch_protected_files_for_spec(") == 1
+    assert src.index("_fetch_protected_files_for_spec(") < src.index("for entry in entries:")
