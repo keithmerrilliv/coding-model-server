@@ -216,7 +216,7 @@ def test_run_architect_reads_plan_yaml_from_the_spec_dir(db):
     class _Stop(Exception):
         pass
 
-    def capture(spec_md, rejection_notes=None, plan_yaml=None):
+    def capture(spec_md, rejection_notes=None, plan_yaml=None, **_kw):
         seen["plan_yaml"] = plan_yaml
         raise _Stop  # skip the agent call — the handoff is the test
 
@@ -238,7 +238,7 @@ def test_run_architect_falls_back_to_the_db_copy(db):
     class _Stop(Exception):
         pass
 
-    def capture(spec_md, rejection_notes=None, plan_yaml=None):
+    def capture(spec_md, rejection_notes=None, plan_yaml=None, **_kw):
         seen["plan_yaml"] = plan_yaml
         raise _Stop
 
