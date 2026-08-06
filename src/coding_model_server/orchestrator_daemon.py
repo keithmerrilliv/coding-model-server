@@ -2620,6 +2620,38 @@ def _validate_test_output_structure(test_output: str, framework: str) -> tuple[b
     return True, ""
 
 
+# Paths that carry tests, across the frameworks this pipeline dispatches:
+# a tests/ or Tests/ directory component, pytest's test_*.py, Swift's
+# *Tests.swift, and the JS *.test.* / *.spec.* conventions.
+_TEST_PATH_RE = re.compile(
+    r"(^|/)[Tt]ests?/|(^|/)test_[^/]+\.py$|[Tt]ests\.swift$|\.(test|spec)\.[jt]sx?$"
+)
+
+
+def _workspace_has_test_files(
+    code_files: "list[tuple[str, str]]",
+    reviewer_test_files: "list[tuple[str, str]]",
+) -> bool:
+    """Whether any test file exists to run — from EITHER role (DEV-513).
+
+    The invariant this protects is "never report PASS on a suite that does not
+    exist". The original form asked whether the *reviewer* emitted tests, which
+    is a different question: when the implementer has already written them and
+    the reviewer correctly judges coverage complete, that reads a correct
+    judgement as an unrun suite. It fired twice in production and discarded a
+    verified-green run both times — the second time on a reviewer that declined
+    to add tests by explicit reference to the spec's own artifact-hygiene
+    criterion.
+
+    `_run_reviewer_tests` runs whatever is in the spec dir, and the
+    implementer's tests are in the spec dir, so the reviewer adding nothing is
+    no obstacle to running them.
+    """
+    if reviewer_test_files:
+        return True
+    return any(_TEST_PATH_RE.search(path) for path, _ in code_files)
+
+
 def _collect_reviewer_code_files(db: Database, spec_id: str,
                                  spec_dir) -> list[tuple[str, str]]:
     """Gather implementer code artifacts as (path, content) for the reviewer.
@@ -3005,13 +3037,14 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
         # deliberate operator choice here, not an accident of control flow.
         tests_passed = True
         tests_skipped_reason = "the plan set test_strategy.required = false"
-    elif not result.test_files:
+    elif not _workspace_has_test_files(code_files, result.test_files):
         tests_skipped_reason = (
-            "the reviewer emitted no test files, so the suite never ran"
+            "no test file exists anywhere in the workspace, so the suite "
+            "would be vacuous"
         )
         logger.error(
-            "spec %s: tests are required but the reviewer emitted no test "
-            "files — refusing to report PASS on an unrun suite (DEV-513)",
+            "spec %s: tests are required but no test file exists in the "
+            "workspace — refusing to report PASS on a vacuous suite (DEV-513)",
             spec.id,
         )
     else:
