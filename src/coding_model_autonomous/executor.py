@@ -23,6 +23,7 @@ import logging
 import os
 import re
 import textwrap
+import time
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -545,11 +546,18 @@ def call_agent(
 
     If *meta* is provided, it is populated with response metadata the caller
     can inspect after the call:
+      - ``meta["agent"]``: the resolved model name, so the caller can attribute
+        an event to it without re-deriving the role→agent mapping.
+      - ``meta["duration_ms"]``: wall-clock for the call, retry backoff included.
+      - ``meta["prompt_tokens"]`` / ``["completion_tokens"]`` / ``["total_tokens"]``:
+        usage as reported by the server; absent when it reported none.
       - ``meta["finish_reason"]``: the model's stop reason ("stop", "length", …)
       - ``meta["truncated"]``: True when finish_reason == "length", i.e. the
         output hit ``max_tokens`` and was cut off mid-stream. The implementer
         path uses this to emit an OUTPUT_TRUNCATED event instead of letting a
         half-written file surface as a bogus reviewer "missing file" FAIL.
+
+    ``agent_event_fields(meta)`` packages the first four for an event payload.
 
     *memory_query* is what RAG retrieves on, for roles that opted in. Without
     it the server embeds the last user message, which for these prompts leads
@@ -580,11 +588,19 @@ def call_agent(
     extra = {}
     if use_memory and memory_query:
         extra["memory_query"] = memory_query
+    # Wall-clock over the whole call, backoff included (DEV-528). retry_5xx
+    # means a model-swap OOM can spend 10-30s sleeping before the request that
+    # finally succeeds, and that is real time the spec sat waiting — so it
+    # belongs in the figure a "cost per attempt" query reads. Measured here
+    # rather than at the ~20 event call sites so every agent is timed the same
+    # way; monotonic because the box runs NTP and a step would give a negative.
+    t0 = time.monotonic()
     resp = post_chat_completion(
         agent, messages, timeout=timeout, max_tokens=max_tokens,
         temperature=0.2, retry_5xx=True, skip_memory=not use_memory,
         **extra,
     )
+    duration_ms = int((time.monotonic() - t0) * 1000)
     resp.raise_for_status()
     data = resp.json()
 
@@ -597,6 +613,18 @@ def call_agent(
 
     if meta is not None:
         meta["agent"] = agent  # resolved model — lets callers attribute events
+        meta["duration_ms"] = duration_ms
+        # The server returns OpenAI-style `usage` on every non-streaming
+        # completion (streaming.build_completion_response). llama_server
+        # substitutes zeros when a backend omits it, so a zero total means
+        # "not reported" rather than a free call — record nothing in that
+        # case, because a missing number and a genuine 0 must not read alike.
+        usage = data.get("usage") or {}
+        if usage.get("total_tokens"):
+            for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                val = usage.get(key)
+                if isinstance(val, int) and val >= 0:
+                    meta[key] = val
         try:
             fr = (data["choices"][0].get("finish_reason") or "").lower()
         except (KeyError, IndexError, AttributeError):
@@ -611,6 +639,67 @@ def call_agent(
             )
 
     return content
+
+
+def agent_event_fields(meta: Optional[dict]) -> dict:
+    """Telemetry subset of a ``call_agent`` *meta*, for an AGENT_RAN payload.
+
+    Every AGENT_RAN event that records a real model call routes its
+    attribution through here, so the fields are spelled identically at all
+    of them (DEV-528). A query that groups by agent cannot work when one
+    site writes ``agent`` and another writes ``model``, which is how the
+    adversarial path drifted.
+
+    Keys absent from *meta* are omitted rather than stored as None: an event
+    predating this change and one whose usage went unreported should look the
+    same to a reader, and neither should be mistaken for a measured zero.
+    """
+    if not meta:
+        return {}
+    out = {
+        key: meta[key]
+        for key in ("agent", "duration_ms", "prompt_tokens",
+                    "completion_tokens", "total_tokens", "calls")
+        if meta.get(key) is not None
+    }
+    # Carried because it changes how an attempt reads: a truncated response is
+    # a budget failure, not a model failure, and the two should not pool.
+    if meta.get("truncated"):
+        out["truncated"] = True
+    return out
+
+
+def accumulate_agent_fields(tally: dict, meta: Optional[dict]) -> dict:
+    """Fold one ``call_agent`` *meta* into a running *tally*, and return it.
+
+    Manifest mode builds one implementer attempt out of 1 + N model calls —
+    the manifest, then a file at a time. DEV-528 asks for cost "per attempt",
+    so those sum: the question "what did this attempt cost" has one answer,
+    not thirty.
+
+    The tally uses the same key names as a *meta*, so ``agent_event_fields``
+    renders either. ``calls`` is kept alongside because a 3-call attempt and a
+    30-call one that happen to total the same are not the same event, and the
+    mean per call is only recoverable if the count survives.
+    """
+    if not meta:
+        return tally
+    # Last writer wins. Within one attempt every call uses the same agent —
+    # rotation happens between attempts, not inside one — so this is stable;
+    # it is a fallback for the case where an early call reported nothing.
+    if meta.get("agent"):
+        tally["agent"] = meta["agent"]
+    for key in ("duration_ms", "prompt_tokens", "completion_tokens",
+                "total_tokens"):
+        val = meta.get(key)
+        if val is not None:
+            tally[key] = tally.get(key, 0) + val
+    tally["calls"] = tally.get("calls", 0) + 1
+    # Any truncated call taints the attempt: the file it was writing is
+    # half-finished regardless of how the remaining calls went.
+    if meta.get("truncated"):
+        tally["truncated"] = True
+    return tally
 
 
 # ── Response parsers ─────────────────────────────────────────────────────────
