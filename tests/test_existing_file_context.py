@@ -219,3 +219,29 @@ def test_plan_gate_ignores_greenfield_specs():
     from coding_model_server import orchestrator_daemon as od
     assert od._unreadable_declared_modifications(
         _spec(""), "test_strategy:\n  repo: electric-sheep\n", "no table") == []
+
+
+# ── manifest mode gets it too ────────────────────────────────────────────────
+
+def test_per_file_message_carries_the_target_file_when_it_exists():
+    """Manifest mode writes one file per call, so it needs only the target's own
+    content — which is precisely the file at risk of reconstruction."""
+    from coding_model_autonomous.executor import build_per_file_message, ManifestEntry
+    target = ManifestEntry(path="A/B.swift", purpose="edit it", exports="")
+    msgs = build_per_file_message(
+        "spec", "design", [target], target, "nothing yet",
+        existing_content="struct Keep {}\nstruct AlsoKeep {}\n",
+    )
+    text = _user_text(msgs)
+    assert "ALREADY EXISTS" in text
+    assert "struct AlsoKeep {}" in text
+    assert "deleted from the repository" in text
+
+
+def test_per_file_message_unchanged_for_a_new_file():
+    """A created file has no existing content; the prompt must not imply one."""
+    from coding_model_autonomous.executor import build_per_file_message, ManifestEntry
+    target = ManifestEntry(path="A/New.swift", purpose="create it", exports="")
+    text = _user_text(build_per_file_message(
+        "spec", "design", [target], target, "nothing yet"))
+    assert "ALREADY EXISTS" not in text

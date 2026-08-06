@@ -1567,6 +1567,9 @@ def _build_from_manifest(
     failures: list = []
     stale_fallbacks: list = []
     generated = 0
+    # Fetched once for the whole manifest rather than per file: one runner call
+    # instead of N, which matters on a link that drops every ~66s (DEV-518).
+    existing_by_path = dict(_fetch_existing_files_for_spec(spec, spec_md))
     for entry in entries:
         # Manifest mode chains one blocking agent call per file — the
         # longest uninterruptible stretch in the daemon. Check for a
@@ -1582,6 +1585,7 @@ def _build_from_manifest(
             content = _generate_one_file(
                 db, spec, task, spec_md, design_md, entries, entry,
                 written, chosen_agent, clarifications, rejection_notes,
+                existing_by_path=existing_by_path,
             )
             generated += 1
         if content is None and prior_files and entry.path in prior_files:
@@ -1905,16 +1909,19 @@ def _generate_one_file(
     db: Database, spec: Spec, task, spec_md: str, design_md: str,
     manifest_entries: list, entry, written: list, chosen_agent: "str | None",
     clarifications: list, rejection_notes: "str | None",
+    existing_by_path: "dict[str, str] | None" = None,
 ) -> "str | None":
     """Generate a single file's content, with bounded parse-retries. Returns the
     content (associated with the manifest's canonical path) or None on failure."""
     written_summary = summarize_written_files(written)
+    existing_content = (existing_by_path or {}).get(entry.path)
     for attempt in range(executor.PER_FILE_PARSE_RETRIES + 1):
         meta: dict = {}
         raw = call_agent(
             "implementer",
             build_per_file_message(spec_md, design_md, manifest_entries, entry,
-                                   written_summary, clarifications, rejection_notes),
+                                   written_summary, clarifications, rejection_notes,
+                                   existing_content=existing_content),
             agent=chosen_agent, max_tokens=executor.PER_FILE_MAX_TOKENS, meta=meta,
             memory_query=executor.file_memory_query(entry),
         )

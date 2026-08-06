@@ -1622,6 +1622,7 @@ def build_per_file_message(
     written_summary: str,
     clarifications: list[str] | None = None,
     rejection_notes: str | None = None,
+    existing_content: str | None = None,
 ) -> list[dict[str, str]]:
     manifest_block = "\n".join(
         f"- {e.path} — {e.purpose}" + (f"  [exports: {e.exports}]" if e.exports else "")
@@ -1643,6 +1644,18 @@ def build_per_file_message(
     ])
     if target.exports:
         parts.append(f"\nExpected exports / contents: {target.exports}\n")
+    # Manifest mode writes one file per call, so unlike the single-call path it
+    # needs only the target's own current content — which is exactly the file at
+    # risk of being reconstructed (DEV-492).
+    if existing_content is not None:
+        parts.extend([
+            f"\n## Current content of {target.path} — this file ALREADY EXISTS\n\n",
+            "You are EDITING this file, not writing it from scratch. What "
+            "follows is its actual content in the repository. Reproduce every "
+            "declaration exactly except for the specific changes asked of you "
+            "above; anything you omit is deleted from the repository.\n\n",
+            f"````\n{existing_content}\n````\n",
+        ])
     if rejection_notes:
         parts.extend([
             "\n## Reviewer feedback to address in this file\n\n",
