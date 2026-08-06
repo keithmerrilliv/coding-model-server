@@ -41,6 +41,14 @@ KIND_READONLY_SETUP = "readonly_setup"
 # DEV-509: the design's named types and its allocated files must agree.
 KIND_TYPE_WITHOUT_FILE = "type_without_file"
 KIND_FILE_WITHOUT_TYPE = "file_without_type"
+# DEV-523: a seam step that names no call is not a seam. Every other rule in
+# this module reads backticked spans, so a step written as English prose is
+# not merely unchecked — it makes all of them unreachable.
+KIND_PROSE_SEAM = "prose_seam"
+KIND_ELIDED_STEP = "elided_step"
+# DEV-525: a collection of tuples on a type declaring Equatable. Unlike the
+# rules above this needs no seam — it is wrong in the declaration itself.
+KIND_TUPLE_CONFORMANCE = "tuple_conformance"
 
 FILE_STRUCTURE_HEADING = "File Structure"
 
@@ -162,6 +170,17 @@ def _code_spans(text: str) -> list[str]:
     return re.findall(r"`([^`]+)`", text)
 
 
+# A span that stands in for a call rather than naming one: a bare ellipsis, or
+# an assignment whose right-hand side is elided (`let snapshot = ...`). Run 7's
+# criterion 15 was the latter — it carries a span, so requiring a span alone
+# does not reach it. `world.step(...)` is unaffected: no `=`, not bare.
+_PLACEHOLDER_SPAN_RE = re.compile(r"^(?:\.{3}|…)$|=\s*(?:\.{3}|…)\s*$")
+
+
+def _is_placeholder_span(span: str) -> bool:
+    return bool(_PLACEHOLDER_SPAN_RE.search(span.strip()))
+
+
 # ── the design's own vocabulary ──────────────────────────────────────────────
 
 def declared_types(design_md: str) -> set[str]:
@@ -241,6 +260,53 @@ def _declares_equatable(design_md: str, type_name: str) -> bool:
                 re.search(r"\b(Equatable|Hashable)\b", line):
             return True
     return False
+
+
+# DEV-525: a collection whose element is a tuple. Swift tuples conform to no
+# protocol, so such a property can never be Equatable and the enclosing type
+# can never synthesise `==`. `->` excluded so an array of closures — a
+# different (and rarer) problem — does not land in this message.
+_TUPLE_COLLECTION_RE = re.compile(r"\[[^\]]*\([^)]*,[^)]*\)[^\]]*\]")
+
+
+def _tuple_collection_members(design_md: str) -> list[tuple[str, str, str]]:
+    """(enclosing type, member, declared type) for the one shape always wrong.
+
+    Scoped to members of a type that declares Equatable/Hashable, because that
+    is where the conformance cannot be synthesised and therefore where the
+    design is definitely broken. A tuple collection on a type nobody compares
+    is legal Swift and must stay silent (DEV-440).
+
+    Indentation gives the nesting: run 7 v4 nested `MushroomEntry` inside
+    `WorldSnapshot`, and both declared Equatable, so the enclosing declaration
+    is whichever one is still open at the member's indent.
+    """
+    body = _section(design_md, DATA_MODELS_HEADING)
+    decl_re = re.compile(
+        r"^(\s*)(?:struct|class|enum|actor)\s+([A-Z]\w*)([^{]*)")
+    member_re = re.compile(r"^(\s*)(?:let|var)\s+([a-z]\w*)\s*:\s*(.+?)\s*$")
+
+    out: list[tuple[str, str, str]] = []
+    stack: list[tuple[int, str, bool]] = []  # (indent, name, declares_eq)
+    for line in body.splitlines():
+        if m := decl_re.match(line):
+            indent = len(m.group(1))
+            while stack and stack[-1][0] >= indent:
+                stack.pop()
+            stack.append((indent, m.group(2),
+                          bool(re.search(r"\b(Equatable|Hashable)\b", m.group(3)))))
+            continue
+        if m := member_re.match(line):
+            indent = len(m.group(1))
+            while stack and stack[-1][0] >= indent:
+                stack.pop()
+            if not stack or not stack[-1][2]:
+                continue  # no enclosing type, or it claims no conformance
+            typ = m.group(3).rstrip(",")
+            hit = _TUPLE_COLLECTION_RE.search(typ)
+            if hit and "->" not in hit.group(0):
+                out.append((stack[-1][1], m.group(2), typ))
+    return out
 
 
 def _readonly_members(design_md: str) -> set[str]:
@@ -428,20 +494,97 @@ def _check_readonly(seam: Seam, readonly: set[str]) -> list[Finding]:
     return findings
 
 
+def _check_names_a_call(seam: Seam) -> list[Finding]:
+    """DEV-523: every seam step must name a call, not describe one.
+
+    Run 7 emitted 16 seams for 16 criteria and produced zero findings, while
+    four of those criteria had no reachable setup at all. The reason is
+    structural rather than a missing rule: `_check_symbols` resolves
+    `Type.member` inside backticked spans, `_check_readonly` looks for an
+    assignment, `_check_equatable` needs a `==`. A step written as English
+    prose — "place single-segment chain at rightmost column" — offers none of
+    those, so every rule fails open and the seam is recorded as complete.
+
+    So this is not one more rule alongside the others. It is the precondition
+    that makes them reachable at all.
+
+    Deliberately narrow, because a false finding here costs an architect
+    revision out of a budget shared with human rejections and DEV-468's
+    routing (DEV-440). "This step contains no backticked span" is not a
+    judgement call, which is what makes it safe to enforce.
+    """
+    prose: list[str] = []
+    elided: list[str] = []
+    for label, step in (("setup", seam.setup), ("act", seam.act),
+                        ("assert", seam.assert_)):
+        if not step.strip():
+            continue  # empty steps are Seam.missing()'s business, not ours
+        spans = _code_spans(step)
+        if not spans:
+            prose.append(label)
+        elif all(_is_placeholder_span(s) for s in spans):
+            elided.append(label)
+
+    findings: list[Finding] = []
+    if prose:
+        findings.append(Finding(
+            kind=KIND_PROSE_SEAM,
+            criterion=seam.criterion,
+            detail=(
+                f"the {' and '.join(prose)} step describes what a test would do "
+                f"but names no API to do it with. Write each step as the actual "
+                f"call in backticks — `world.place(chain, at: Position(col: 29, "
+                f"row: 0))` rather than \"place a chain at the rightmost "
+                f"column\". If no call exists to write, that is the defect: the "
+                f"criterion has no reachable setup and the API needs a seam."),
+        ))
+    if elided:
+        findings.append(Finding(
+            kind=KIND_ELIDED_STEP,
+            criterion=seam.criterion,
+            detail=(
+                f"the {' and '.join(elided)} step is a placeholder — its only "
+                f"code span elides the call with `...`. Name the real "
+                f"expression. An elided step is how a criterion with no "
+                f"reachable API reads as though it had one."),
+        ))
+    return findings
+
+
 def check_design_testability(design_md: str) -> list[Finding]:
     """Findings for a design whose checklist its own API cannot carry out.
 
     Empty list means "nothing mechanically detectable", NOT "the design is
     testable" — the design review and the human gate remain the real checks.
     """
+    # DEV-525 runs FIRST and unconditionally: this defect is in the type
+    # declaration, so it holds whether or not the design has a checklist or a
+    # seam section to strand. Every other rule below reasons about criteria;
+    # this one reasons about Swift.
+    tuple_findings = [
+        Finding(
+            kind=KIND_TUPLE_CONFORMANCE,
+            criterion=f"{owner}.{member}",
+            detail=(
+                f"`{owner}` declares Equatable but `{member}: {typ}` is a "
+                f"collection of TUPLES. Swift tuples conform to no protocol, "
+                f"so this element can never be Equatable and `{owner}` cannot "
+                f"synthesise `==` — this does not compile however it is "
+                f"written. Replace the tuple with a named struct that declares "
+                f"Equatable, and check every sibling property for the same "
+                f"shape before re-emitting."),
+        )
+        for owner, member, typ in _tuple_collection_members(design_md)
+    ]
+
     criteria = parse_checklist(design_md)
     if not criteria:
-        # No checklist to strand. Nothing here can be assessed.
-        return []
+        # No checklist to strand. Nothing criterion-shaped can be assessed.
+        return tuple_findings
 
     seams = parse_seams(design_md)
     if not seams:
-        return [Finding(
+        return tuple_findings + [Finding(
             kind=KIND_NO_SECTION,
             criterion="",
             detail=(
@@ -452,7 +595,7 @@ def check_design_testability(design_md: str) -> list[Finding]:
                 f"name a seam for is a design defect, not a test problem."),
         )]
 
-    findings: list[Finding] = []
+    findings: list[Finding] = list(tuple_findings)
     if len(seams) != len(criteria):
         findings.append(Finding(
             kind=KIND_COUNT_MISMATCH,
@@ -465,6 +608,7 @@ def check_design_testability(design_md: str) -> list[Finding]:
     types = declared_types(design_md)
     members = declared_members(design_md)
     readonly = _readonly_members(design_md)
+
 
     for i, seam in enumerate(seams):
         # Prefer the checklist's own wording when the counts line up, so the
@@ -482,6 +626,7 @@ def check_design_testability(design_md: str) -> list[Finding]:
                     f"needs all three — construct the state, invoke the "
                     f"behaviour, observe the outcome."),
             ))
+        findings.extend(_check_names_a_call(labelled))
         findings.extend(_check_symbols(labelled, types, design_md))
         findings.extend(_check_equatable(labelled, types, members, design_md))
         findings.extend(_check_untyped_comparison(labelled, members))
