@@ -364,7 +364,15 @@ ARCHITECT_SYSTEM_PROMPT = textwrap.dedent("""\
            collections are identical needs the ELEMENT type Equatable, because
            a dictionary or array is only Equatable when its element is. A design
            that says `cells: [Position: Mushroom]` and asks for "the same seed
-           produces an identical field" must declare `Mushroom` Equatable;
+           produces an identical field" must declare `Mushroom` Equatable.
+           TUPLES NEVER CONFORM TO ANY PROTOCOL IN SWIFT — not Equatable, not
+           Hashable, not anything, and no annotation changes that. So an array
+           or dictionary OF tuples can never be Equatable, and a type holding
+           one cannot synthesise `==` however it is declared. Replace the tuple
+           with a named struct that declares the conformance. Check EVERY
+           stored property for this, not just the one you were asked about:
+           this rule has been broken twice in sibling properties of the same
+           type, once in a revision that had just fixed it next door;
          - keep state a criterion must set up reachable — a read-only collection
            whose only initialiser is seeded cannot be positioned for a boundary
            test, so give it a test-visible initialiser or an entry point that
@@ -379,8 +387,14 @@ ARCHITECT_SYSTEM_PROMPT = textwrap.dedent("""\
        backticked symbol declared somewhere in this document. `Type.member`
        naming a member you never declared is rejected, as is an assert comparing
        a type you never declared Equatable, as is a setup writing state you
-       declared read-only. Write the seams as you write the checklist — if you
-       cannot name the seam, change the API until you can.
+       declared read-only. EVERY STEP MUST NAME A CALL IN BACKTICKS — a step
+       written as prose ("place a chain at the rightmost column") is rejected,
+       and so is one that elides the call (`let snapshot = ...`). Write the
+       actual expression a test would run. If there is no call to write, you
+       have found a criterion your API cannot reach: that is the defect this
+       section exists to surface, so fix the API rather than describing the
+       intent. Write the seams as you write the checklist — if you cannot name
+       the seam, change the API until you can.
     """)
 
 # Swift value semantics: ~29% of every build diagnostic this pipeline has
