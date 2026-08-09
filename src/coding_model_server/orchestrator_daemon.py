@@ -2057,6 +2057,26 @@ def _generate_one_file(
     return None
 
 
+def _normalize_generated_files(db: Database, spec: Spec, task, files, role: str):
+    """Apply deterministic boilerplate fixes and record what changed.
+
+    Every path that writes model-generated files must go through this. DEV-540
+    was reachable precisely because only the implementer did: the synthesis and
+    repair outputs were written raw, and the repair is where run 8 actually
+    died — it emitted eight Swift files with no `import Foundation` and nothing
+    stood between that and the compiler.
+    """
+    normalized, notes = executor.normalize_boilerplate(files)
+    if not notes:
+        return files
+    for note in notes:
+        logger.info("spec %s: boilerplate normalized — %s", spec.id, note)
+    db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
+                    payload={"role": role, "model_call": False,
+                             "normalized": notes})
+    return normalized
+
+
 def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
     # Wipe artifacts from earlier retries so the new implementer starts
     # from a clean slate. No-op on retry-0.
@@ -2180,17 +2200,12 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
                                  "paths": result.duplicate_paths,
                                  "retry": task.retry_count})
 
-    # Deterministically pin boilerplate (package.json dependency ranges) so the
-    # single most mechanical reviewer FAIL — unpinned deps — never depends on the
-    # model getting it right. See executor.normalize_boilerplate (#3).
-    normalized, norm_notes = executor.normalize_boilerplate(result.files)
-    if norm_notes:
-        result.files = normalized
-        for note in norm_notes:
-            logger.info("spec %s: boilerplate normalized — %s", spec.id, note)
-        db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
-                        payload={"role": "implementer", "model_call": False,
-                                 "normalized": norm_notes})
+    # Deterministically fix boilerplate the reviewer checks — unpinned deps,
+    # and a Swift file missing `import Foundation` — so the most mechanical
+    # FAILs never depend on the model getting them right. See
+    # executor.normalize_boilerplate (#3, DEV-540).
+    result.files = _normalize_generated_files(
+        db, spec, task, result.files, "implementer")
 
     # Write all files
     for rel_path, content in result.files:
@@ -3697,6 +3712,8 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
         except OSError:
             pass
 
+    result.files = _normalize_generated_files(
+        db, spec, impl_task, result.files, "synthesizer")
     for rel_path, content in result.files:
         _write_artifact(spec_dir, rel_path, content)
         db.create_artifact(spec_id=spec.id, task_id=impl_task.id,
@@ -3781,6 +3798,8 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
         return False, test_output
 
     # Overlay only the files the repair emitted; everything else stays.
+    repair.files = _normalize_generated_files(
+        db, spec, impl_task, repair.files, "synthesis_repair")
     for rel_path, content in repair.files:
         _write_artifact(spec_dir, rel_path, content)
         db.create_artifact(spec_id=spec.id, task_id=impl_task.id,
