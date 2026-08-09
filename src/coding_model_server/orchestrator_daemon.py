@@ -2071,6 +2071,58 @@ def _generate_one_file(
     return None
 
 
+# How many consecutive requeues to allow before admitting the runner is not
+# coming back on its own. Each requeue costs one implementer generation, so
+# this is not free: three covers a sleeping Mac or a link re-enumeration
+# (DEV-518, which clears in seconds to minutes) without regenerating all night
+# against a Mac that is simply switched off.
+_MAX_UNREACHABLE_REQUEUES = 3
+
+
+def _requeue_for_unreachable_runner(db: Database, spec: Spec, task) -> bool:
+    """Put the task back in the queue after a transport-only build check.
+
+    Returns True when the caller should return without opening a gate.
+
+    Mirrors what the daemon already does when the *model* server is
+    unreachable (`_TRANSPORT_ERRORS` in _run_task): reset to PENDING, leave the
+    spec EXECUTING, let the next tick re-run it — and deliberately do not touch
+    retry_count, because a sleeping Mac is not an implementer's mistake.
+
+    Bounded, because a requeue re-runs the implementer and that is a whole
+    generation. Past the cap we do open a gate, but one that says the runner is
+    unreachable rather than one that asks someone to review code nobody has
+    compiled.
+    """
+    prior = sum(
+        1 for e in db.list_events_by_kind(
+            spec_id=spec.id, kind=EventKind.TEST_RAN, limit=20)
+        if (e.payload or {}).get("phase") == "pre_gate_build_check"
+        and (e.payload or {}).get("runner_unreachable")
+    )
+    if prior >= _MAX_UNREACHABLE_REQUEUES:
+        logger.error(
+            "spec %s: runner still unreachable after %d requeue(s) — "
+            "escalating to a human; this is an infrastructure fault, not a "
+            "code review", spec.id, prior)
+        return False
+
+    db.record_event(EventKind.TEST_RAN, spec_id=spec.id, task_id=task.id,
+                    payload={"phase": "pre_gate_build_check",
+                             "passed": False,
+                             "runner_unreachable": True,
+                             "requeue": prior + 1,
+                             "retry": task.retry_count})
+    db.update_task_status(task.id, TaskStatus.PENDING)
+    logger.warning(
+        "spec %s: mac-runner unreachable — requeued for retry %d/%d without "
+        "burning an implementer attempt (still at %d/%d); the next tick will "
+        "try again",
+        spec.id, prior + 1, _MAX_UNREACHABLE_REQUEUES,
+        task.retry_count, MAX_RETRIES)
+    return True
+
+
 def _normalize_generated_files(db: Database, spec: Spec, task, files, role: str):
     """Apply deterministic boilerplate fixes and record what changed.
 
@@ -2288,6 +2340,15 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
                 "summary and no compiler diagnostic in %d chars of output; "
                 "the build is unverified, not confirmed",
                 spec.id, len(build_output))
+            # DEV-538: and now act on it. Opening a code_review gate here asks
+            # the most expensive, slowest resource in the system to adjudicate
+            # a question no one has the evidence to answer, and then waits
+            # forever — run 8 sat on exactly this for 3930 minutes across three
+            # reboots. The runner comes back on its own, so the right move is
+            # to put the work down and pick it up again.
+            if test_runner.is_runner_unreachable(build_output):
+                if _requeue_for_unreachable_runner(db, spec, task):
+                    return
 
     if build_reason is not None:
         # Straight back to the implementer with the compiler's own words. No
@@ -2674,6 +2735,17 @@ def _build_check_line(build_passed: bool | None, build_output: str = "",
     if _observed_a_test_run(build_output, framework):
         return ("Build check: **compiled**, but the suite has failing tests — "
                 "the failures are behaviour, not a build error.\n")
+    # DEV-538: a gate reached this way has already been requeued to the cap, so
+    # say what is actually wrong. Naming it a code review invites someone to
+    # review the code, when the code is not the thing that failed and no
+    # reading of it can settle the question.
+    if test_runner.is_runner_unreachable(build_output):
+        return ("Build check: **could not run — the Mac runner was "
+                "unreachable.** This is an infrastructure fault, not a verdict "
+                "on the code, and it was retried to the requeue cap before "
+                "reaching you. Nothing here has been compiled. Bring the "
+                "runner back and reject this gate to retry; do not approve it "
+                "on a reading of the diff.\n")
     return ("Build check: **inconclusive** — the runner returned neither a test "
             "summary nor a recognised compiler diagnostic, so nothing here "
             "confirms the code builds. Treat the build as unverified.\n")
