@@ -14,6 +14,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 
 import requests
 from pathlib import Path
@@ -636,6 +637,59 @@ def _drop_protected(patch_files: list[dict],
     return kept, dropped
 
 
+# ── Transport failure, told apart from a test failure (DEV-538) ─────────────
+#
+# A dispatch that never reached the runner says nothing about the code, but it
+# used to come back in the same `(False, str)` shape a genuine test failure
+# does, leaving every caller to re-derive "this told us nothing" from the
+# absence of two other things. This marker is the signal; is_runner_unreachable
+# is how callers branch on it.
+RUNNER_UNREACHABLE = "mac-runner unreachable"
+
+# Connection-level failures fail fast (the Mac is asleep, the tunnel is gone),
+# so retrying is nearly free and covers DEV-518's link re-enumeration, which
+# clears in seconds. A read timeout is the opposite: it has already waited the
+# full window — 330s in run 8 — so a second attempt costs another one. Retry it
+# once, in case the runner was mid-wake, and no more.
+_DISPATCH_CONNECT_BACKOFFS = (5, 15)
+_DISPATCH_READ_TIMEOUT_RETRIES = 1
+
+
+def is_runner_unreachable(output: str) -> bool:
+    """True when *output* is a transport failure rather than a test result."""
+    return RUNNER_UNREACHABLE in (output or "")
+
+
+def _dispatch_with_retry(url: str, payload: dict, headers: dict,
+                         http_timeout: int):
+    """POST to the runner, retrying transport failures with bounded backoff.
+
+    Raises the last requests.RequestException if every attempt fails.
+    """
+    read_timeouts = 0
+    connect_attempt = 0
+    while True:
+        try:
+            return _SESSION.post(url, json=payload, headers=headers,
+                                 timeout=http_timeout)
+        except requests.Timeout as e:
+            read_timeouts += 1
+            if read_timeouts > _DISPATCH_READ_TIMEOUT_RETRIES:
+                raise
+            logger.warning("mac-runner read timeout after %ds — retrying once "
+                           "in case the runner was waking (%s)",
+                           http_timeout, e)
+        except requests.ConnectionError as e:
+            if connect_attempt >= len(_DISPATCH_CONNECT_BACKOFFS):
+                raise
+            delay = _DISPATCH_CONNECT_BACKOFFS[connect_attempt]
+            connect_attempt += 1
+            logger.warning("mac-runner unreachable (%s) — retry %d/%d in %ds",
+                           type(e).__name__, connect_attempt,
+                           len(_DISPATCH_CONNECT_BACKOFFS), delay)
+            time.sleep(delay)
+
+
 def _run_mac_runner_tests(
     spec_dir: Path,
     framework: str,
@@ -699,9 +753,9 @@ def _run_mac_runner_tests(
     logger.info("dispatching %s to mac-runner %s (timeout=%ds, %d files)",
                 framework, url, timeout, len(patch_files))
     try:
-        resp = _SESSION.post(url, json=payload, headers=headers, timeout=http_timeout)
+        resp = _dispatch_with_retry(url, payload, headers, http_timeout)
     except requests.RequestException as e:
-        return False, f"mac-runner unreachable at {url}: {e}"
+        return False, f"{RUNNER_UNREACHABLE} at {url}: {e}"
 
     if resp.status_code != 200:
         return False, f"mac-runner HTTP {resp.status_code}: {resp.text[:2000]}"
