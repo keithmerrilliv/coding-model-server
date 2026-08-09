@@ -174,8 +174,8 @@ def _strip_thinking(text: str) -> str:
     return _server_strip_thinking(text).strip()
 
 
-def _write_artifact(spec_dir: Path, rel_path: str, content: str) -> Path:
-    """Write a file to the spec workspace with path-traversal protection.
+def artifact_path(spec_dir: Path, rel_path: str) -> Path:
+    """Resolve a spec-relative artifact path, rejecting traversal.
 
     Strips leading ``/`` so models can't write absolute paths (Python's
     ``Path / "/abs"`` would discard the left operand). Then resolves
@@ -184,6 +184,10 @@ def _write_artifact(spec_dir: Path, rel_path: str, content: str) -> Path:
     Uses Path.is_relative_to (not str.startswith): the latter would treat
     /work/abc-evil/x as nested under /work/abc, so a sibling-prefix dir
     escape would not be caught. is_relative_to compares path components.
+
+    Separate from _write_artifact so a caller that needs to *read* what is
+    currently at a path — the DEV-541 pre-repair snapshot — resolves it the
+    same way the write will, rather than reimplementing the rules and drifting.
     """
     # Strip leading slashes only — do NOT use lstrip("./") which eats
     # individual chars and would normalize "../../../x" into "x".
@@ -193,6 +197,12 @@ def _write_artifact(spec_dir: Path, rel_path: str, content: str) -> Path:
     abs_path = (spec_dir / rel_path).resolve()
     if not abs_path.is_relative_to(spec_root):
         raise ValueError(f"Path traversal rejected: {rel_path}")
+    return abs_path
+
+
+def _write_artifact(spec_dir: Path, rel_path: str, content: str) -> Path:
+    """Write a file to the spec workspace with path-traversal protection."""
+    abs_path = artifact_path(spec_dir, rel_path)
     abs_path.parent.mkdir(parents=True, exist_ok=True)
     abs_path.write_text(content)
     return abs_path

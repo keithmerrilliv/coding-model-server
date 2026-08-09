@@ -1510,15 +1510,24 @@ _SIG_PATH_RE = re.compile(r"(/\S+?/)?([\w.+-]+\.\w+):\d+:\d+:")
 _SIG_ERROR_RE = re.compile(r"error: (.+)")
 
 
-def _diagnostic_messages(notes: str) -> set:
-    """The distinct error messages in a failure report, location-stripped.
+def _attributed_diagnostics(notes: str) -> list:
+    """Location-stripped message of every attributed diagnostic, in order.
+
+    One entry per diagnostic *occurrence*. Callers asking "which defects are
+    here?" build a set from this; callers asking "did the build get worse?"
+    count it. Those are different questions, and the gap between them is wide:
+    run 8's repair output carries 27 diagnostics drawn from 6 distinct
+    messages, so deduplicating first discards most of the magnitude. A set
+    comparison can therefore score a regression as an improvement whenever the
+    new errors repeat one message — which is exactly what a dropped import
+    does (DEV-541).
 
     Worktree paths and line numbers move between dispatches without changing
-    what the defect is, so both are removed before comparison.
+    what the defect is, so both are removed.
     """
     if not notes:
-        return set()
-    msgs = set()
+        return []
+    msgs = []
     for line in notes.splitlines():
         # Only diagnostics that name a file:line say anything about the code.
         # Bare driver lines — `error: fatalError`, `error: emit-module command
@@ -1534,8 +1543,13 @@ def _diagnostic_messages(notes: str) -> set:
             continue
         msg = _SIG_PATH_RE.sub(r"\2:", match.group(1).strip())
         if msg:
-            msgs.add(msg)
+            msgs.append(msg)
     return msgs
+
+
+def _diagnostic_messages(notes: str) -> set:
+    """The distinct error messages in a failure report, location-stripped."""
+    return set(_attributed_diagnostics(notes))
 
 
 def _failure_signature(notes: str) -> str:
@@ -3797,6 +3811,25 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
                        "the original failure", spec.id, repair.reason)
         return False, test_output
 
+    # DEV-541: the repair is a proposal, not a commit. Snapshot every path it
+    # is about to touch, so a repair that comes back worse can be undone. This
+    # is the last operation before the spec dies — whatever sits on disk when
+    # this returns is what the run is judged on and what any later replay
+    # reads — which makes it the least defensible place to keep unverified
+    # output. Run 8 went 3 diagnostics → 14 here, and the 14 were what
+    # survived. Note the parse-failure branch just above already declines to
+    # overwrite on a bad repair; this extends the same care to a repair that
+    # parses cleanly and is simply worse.
+    pre_repair_state: dict[str, str | None] = {}
+    for rel_path, _ in repair.files:
+        try:
+            target = executor.artifact_path(spec_dir, rel_path)
+        except ValueError:
+            continue  # traversal — the write below will reject it too
+        pre_repair_state[rel_path] = (
+            target.read_text() if target.is_file() else None)
+    pre_repair_diags = _attributed_diagnostics(test_output)
+
     # Overlay only the files the repair emitted; everything else stays.
     repair.files = _normalize_generated_files(
         db, spec, impl_task, repair.files, "synthesis_repair")
@@ -3824,19 +3857,77 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
                              "files_offered": len(result.files),
                              "files_changed": len(repair.files),
                              "changed_paths": [p for p, _ in repair.files]})
-    tests_passed, test_output = _run_tests_with_guard(
+    # `test_output` still holds the PRE-repair failure; the repair's own result
+    # goes to a separate name so the rollback below has something to return.
+    repair_passed, repair_output = _run_tests_with_guard(
         spec.id, spec_dir, framework, framework_opts,
         output_label="Post-repair test runner output:",
         fail_log=("spec %s: post-repair test_output failed structural "
                   "validation (%s); forcing tests_passed=False"),
     )
+    post_repair_diags = _attributed_diagnostics(repair_output)
+    new_classes = sorted(set(post_repair_diags) - set(pre_repair_diags))
+
+    # Keep the repair if it passed, or if it strictly reduced the number of
+    # diagnostics. Anything else — more of them, or the same count rearranged —
+    # is not evidence of progress, and the spec fails either way, so the state
+    # with fewer known defects is the one worth keeping.
+    #
+    # Count occurrences, NOT distinct messages. A dropped import produces many
+    # diagnostics repeating one message, so the deduplicated set barely moves
+    # while the build collapses — run 8's repair output is 27 diagnostics from
+    # 6 distinct messages. Comparing sets would have rolled that particular
+    # case back too (6 > 3), but only by luck: a regression whose errors all
+    # share a single message reads as an improvement, and there is a test
+    # pinning exactly that shape.
+    #
+    # DEV-541 originally specified "more diagnostics OR any new class". That
+    # over-rejects: a repair going 12 → 1 would be discarded merely because the
+    # single survivor is new, which is plainly the wrong call. The count is the
+    # criterion; new classes are reported, not vetoed.
+    improved = repair_passed or len(post_repair_diags) < len(pre_repair_diags)
+
+    if not improved:
+        for rel_path, previous in pre_repair_state.items():
+            try:
+                target = executor.artifact_path(spec_dir, rel_path)
+            except ValueError:
+                continue
+            if previous is None:
+                target.unlink(missing_ok=True)  # the repair invented this file
+            else:
+                target.write_text(previous)
+        repair_passed, repair_output = False, test_output
+
+    db.record_event(EventKind.TEST_RAN, spec_id=spec.id, task_id=impl_task.id,
+                    payload={"phase": "synthesis_repair",
+                             "passed": repair_passed,
+                             "errors_before": len(pre_repair_diags),
+                             "errors_after": len(post_repair_diags),
+                             "new_diagnostic_classes": new_classes,
+                             "rolled_back": not improved})
+
     try:
-        (spec_dir / "test_output.txt").write_text(test_output)
+        (spec_dir / "test_output.txt").write_text(repair_output)
     except OSError:
         pass
-    logger.info("spec %s: synthesis repair result: %s", spec.id,
-                "PASS" if tests_passed else "FAIL — spec fails as before")
-    return tests_passed, test_output
+
+    if repair_passed:
+        outcome = "PASS"
+    elif improved:
+        outcome = (f"FAIL — repair improved the build "
+                   f"({len(pre_repair_diags)} → {len(post_repair_diags)} "
+                   f"diagnostics) but the suite still fails")
+    else:
+        outcome = (f"FAIL — repair did not improve the build "
+                   f"({len(pre_repair_diags)} → {len(post_repair_diags)} "
+                   f"diagnostics); rolled back to the pre-repair state")
+    logger.info("spec %s: synthesis repair result: %s", spec.id, outcome)
+    if new_classes:
+        logger.info("spec %s: repair introduced %d diagnostic class(es) not "
+                    "seen before it ran: %s", spec.id, len(new_classes),
+                    "; ".join(new_classes[:3]))
+    return repair_passed, repair_output
 
 
 def _legacy_attempt_retry(db: Database, spec: Spec, task, failure_detail: str) -> None:
