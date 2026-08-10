@@ -1269,10 +1269,34 @@ def _render_reference_files(reference_files: list[tuple[str, str]]) -> str:
     return "".join(out)
 
 
+def _render_approval_conditions(notes: str, *, approved: str,
+                                author: str) -> str:
+    """Operator conditions attached to an APPROVED gate (DEV-546).
+
+    Rejection notes propagated and demonstrably worked; approval notes were
+    stored, mirrored to Jira, and read by nobody, while the API accepted them
+    identically on both decisions. A reviewer who approves "with these three
+    one-liners fixed" was talking to no one.
+
+    The wording matters as much as the plumbing. This is NOT a rejection: the
+    artefact was approved and must not be re-litigated or rewritten wholesale.
+    It is a short list of conditions attached to that approval.
+    """
+    return (
+        f"## Reviewer conditions on the approved {approved}\n\n"
+        f"The {approved} below was **approved** — do not redesign or "
+        f"re-litigate it. The {author} attached the following conditions to "
+        f"that approval, and they are HARD REQUIREMENTS at the same authority "
+        f"as the specification. Apply each one literally.\n\n"
+        f"{notes.strip()}\n"
+    )
+
+
 def build_architect_message(spec_md: str,
                             rejection_notes: str | None = None,
                             plan_yaml: str | None = None,
                             reference_files: list[tuple[str, str]] | None = None,
+                            approval_conditions: str | None = None,
                             ) -> list[dict[str, str]]:
     user_parts: list[str] = []
     # On a re-run (design-review rejection or supervisor design-revision), the
@@ -1292,6 +1316,13 @@ def build_architect_message(spec_md: str,
     constraints_block = _render_plan_constraints(plan_yaml) if plan_yaml else None
     if constraints_block:
         user_parts.append(constraints_block + "\n\n---\n\n")
+    # DEV-546: alongside the plan's own constraints, since both are the
+    # operator speaking about the same approved plan.
+    if approval_conditions and approval_conditions.strip():
+        user_parts.append(
+            _render_approval_conditions(approval_conditions, approved="plan",
+                                        author="operator")
+            + "\n---\n\n")
     if reference_files:
         user_parts.append(_render_reference_files(reference_files) + "---\n\n")
     user_parts.append(
@@ -1450,6 +1481,7 @@ def build_implementer_message(
     clarifications: list[str] | None = None,
     existing_files: list[tuple[str, str]] | None = None,
     reference_files: list[tuple[str, str]] | None = None,
+    approval_conditions: str | None = None,
 ) -> list[dict[str, str]]:
     user_parts: list[str] = []
     # Clarifications go BEFORE the spec so the implementer reads them as the
@@ -1467,6 +1499,13 @@ def build_implementer_message(
         for i, item in enumerate(clarifications, start=1):
             user_parts.append(f"{i}. {item}\n")
         user_parts.append("\n")
+    # DEV-546: with the clarifications, and for the same reason — both are the
+    # operator speaking at spec authority, and both are read before the design
+    # so the model does not treat the design as the last word.
+    if approval_conditions and approval_conditions.strip():
+        user_parts.append(
+            _render_approval_conditions(approval_conditions, approved="design",
+                                        author="reviewer") + "\n")
     user_parts.extend([
         "## Specification\n\n",
         spec_md,
@@ -1791,8 +1830,13 @@ def build_manifest_message(
     spec_md: str,
     design_md: str,
     clarifications: list[str] | None = None,
+    approval_conditions: str | None = None,
 ) -> list[dict[str, str]]:
     parts: list[str] = []
+    if approval_conditions and approval_conditions.strip():
+        # DEV-546: a condition can change the file SET, not just file contents.
+        parts.append(_render_approval_conditions(
+            approval_conditions, approved="design", author="reviewer") + "\n")
     if clarifications:
         parts.append("## Operator clarifications (hard requirements)\n\n")
         for i, item in enumerate(clarifications, start=1):
@@ -1820,6 +1864,7 @@ def build_per_file_message(
     rejection_notes: str | None = None,
     existing_content: str | None = None,
     reference_files: list[tuple[str, str]] | None = None,
+    approval_conditions: str | None = None,
 ) -> list[dict[str, str]]:
     manifest_block = "\n".join(
         f"- {e.path} — {e.purpose}" + (f"  [exports: {e.exports}]" if e.exports else "")
@@ -1831,6 +1876,11 @@ def build_per_file_message(
         for i, item in enumerate(clarifications, start=1):
             parts.append(f"{i}. {item}\n")
         parts.append("\n")
+    # DEV-546: this is where the code is actually written, so a condition the
+    # reviewer attached to the approved design has to reach here too.
+    if approval_conditions and approval_conditions.strip():
+        parts.append(_render_approval_conditions(
+            approval_conditions, approved="design", author="reviewer") + "\n")
     parts.extend([
         "## Specification\n\n", spec_md,
         "\n\n## Architecture Design\n\n", design_md,
