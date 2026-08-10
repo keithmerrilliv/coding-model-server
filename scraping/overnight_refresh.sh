@@ -16,7 +16,7 @@ set -uo pipefail   # no -e: a partial crawl should still get ingested
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 OUT="${1:?usage: overnight_refresh.sh <outdir> [server]}"
-SERVER="${2:-192.168.1.3}"
+SERVER="${2:-192.0.2.11}"
 LOG="$OUT/../overnight.log"
 mkdir -p "$OUT"
 
@@ -66,7 +66,7 @@ echo "=== ingesting ${#FILES[@]} framework files (crawl rc=$SCRAPE_RC) ==="
 # Ingest even on a non-zero crawl rc: rc=1 means some fetches gave up, which
 # makes the sweep incomplete, not the captured pages invalid. Dedup is by
 # content hash server-side, so re-ingesting overlap is harmless.
-ADMIN_API_KEY="$(ssh -o BatchMode=yes zooshly \
+ADMIN_API_KEY="$(ssh -o BatchMode=yes gitserver \
     'grep -m1 "^ADMIN_API_KEY=" ~/Dev/coding-model-server/.env | cut -d= -f2-')" \
 python3 "$SCRIPT_DIR/ingest_apple_docs_json.py" --server "$SERVER" "$OUT"
 INGEST_RC=$?

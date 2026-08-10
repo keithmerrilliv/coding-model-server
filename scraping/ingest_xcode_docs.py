@@ -12,7 +12,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 
 # Server configuration
-LINUX_SERVER_IP = os.getenv("CODING_MODEL_SERVER_IP", "192.168.50.101")
+LINUX_SERVER_IP = os.getenv("CODING_MODEL_SERVER_IP", "192.0.2.10")
 MEMORY_API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/memory"
 
 # Local Xcode Documentation paths

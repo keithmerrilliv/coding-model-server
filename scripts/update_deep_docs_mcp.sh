@@ -23,7 +23,7 @@
 # "it started" is not the test — "it returned proposals" is.
 set -uo pipefail
 
-REPO="${REPO:-/home/keith-merrill/Dev/coding-model-server}"
+REPO="${REPO:-/home/youruser/Dev/coding-model-server}"
 MCP="$REPO/tools/appledeepdoc-mcp"
 SERVER="${CODING_MODEL_SERVER_IP:-127.0.0.1}"
 PORT="${CODING_MODEL_SERVER_PORT:-5000}"

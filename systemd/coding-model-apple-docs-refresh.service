@@ -1,3 +1,8 @@
+# TEMPLATE — substitute the placeholders before installing:
+#   sed -e "s|/home/youruser|$HOME|g" -e "s|^User=youruser|User=$USER|" \
+#       -e "s|^Group=youruser|Group=$USER|" systemd/coding-model-apple-docs-refresh.service | sudo tee /etc/systemd/system/coding-model-apple-docs-refresh.service
+# Paths assume the checkout lives at $HOME/Dev/coding-model-server; adjust
+# WorkingDirectory and ExecStart if yours is elsewhere.
 [Unit]
 Description=Refresh the Apple documentation RAG collection
 # The refresh talks to /v1/memory/delete and /v1/memory on the local server, so
@@ -8,12 +13,12 @@ After=coding-model-server.service network-online.target
 
 [Service]
 Type=oneshot
-User=keith-merrill
-WorkingDirectory=/home/keith-merrill/Dev/coding-model-server
-EnvironmentFile=-/home/keith-merrill/Dev/coding-model-server/.env
+User=youruser
+WorkingDirectory=/home/youruser/Dev/coding-model-server
+EnvironmentFile=-/home/youruser/Dev/coding-model-server/.env
 Environment="PYTHONUNBUFFERED=1"
 Environment="CODING_MODEL_SERVER_IP=127.0.0.1"
-ExecStart=/home/keith-merrill/Dev/coding-model-server/scraping/refresh_apple_docs.sh
+ExecStart=/home/youruser/Dev/coding-model-server/scraping/refresh_apple_docs.sh
 
 # A crawl of ~30k pages at a polite delay runs several hours. Without this the
 # default TimeoutStartSec would kill it mid-run — the same mismatch that makes

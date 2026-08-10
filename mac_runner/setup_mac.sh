@@ -2,7 +2,7 @@
 #
 # Bootstrap the Mac runner + reverse tunnel. Run ON THE MAC, from the repo root:
 #
-#   bash mac_runner/setup_mac.sh keith-merrill@10.0.0.123
+#   bash mac_runner/setup_mac.sh youruser@192.0.2.20
 #
 # The argument is the Linux box as user@host. DERIVE it rather than trusting a
 # value written down anywhere — that LAN has been re-homed repeatedly, and a
@@ -17,7 +17,7 @@ set -euo pipefail
 TARGET="${1:-}"
 if [[ -z "${TARGET}" || "${TARGET}" != *@* ]]; then
   echo "usage: bash mac_runner/setup_mac.sh <linux-user>@<linux-host>" >&2
-  echo "   e.g. bash mac_runner/setup_mac.sh keith-merrill@10.0.0.123" >&2
+  echo "   e.g. bash mac_runner/setup_mac.sh youruser@192.0.2.20" >&2
   exit 2
 fi
 

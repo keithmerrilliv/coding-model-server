@@ -56,7 +56,7 @@ Create a `.env` file in the root directory with the following variables:
 APPLE_DEEP_DOCS_PATH=/path/to/appledeepdoc-mcp/run.sh
 
 # Server Configuration
-CODING_MODEL_SERVER_IP=192.168.50.101
+CODING_MODEL_SERVER_IP=192.0.2.10
 CODING_MODEL_SERVER_PORT=5000
 ```
 

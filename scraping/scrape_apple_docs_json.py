@@ -4,7 +4,7 @@
 WHY THIS EXISTS, given scrape_generic_docs.py already scrapes Apple docs:
 
   1. That script shells out to `cupertino`, which is installed on neither the
-     Mac Studio nor zooshly, and cannot be installed as documented —
+     Mac Studio nor gitserver, and cannot be installed as documented —
      CONFIGURATION.md says `brew install cupertino` but no such formula
      exists (it is github.com/mihaelamj/cupertino, a source build). The other
      documented source, the Apple Deep Docs MCP server, needs
@@ -31,7 +31,7 @@ retrieval can tell stable API from beta churn.
 Usage:
     python3 scrape_apple_docs_json.py --dry-run Metal
     python3 scrape_apple_docs_json.py --out output-json Metal SwiftUI
-    python3 scrape_apple_docs_json.py --ingest --server 192.168.1.3 Metal
+    python3 scrape_apple_docs_json.py --ingest --server 192.0.2.11 Metal
 """
 
 import argparse
@@ -280,7 +280,7 @@ def main():
     ap.add_argument("--dry-run", action="store_true",
                     help="crawl and report, write nothing, ingest nothing")
     ap.add_argument("--ingest", action="store_true")
-    ap.add_argument("--server", default=os.getenv("CODING_MODEL_SERVER_IP", "192.168.1.3"))
+    ap.add_argument("--server", default=os.getenv("CODING_MODEL_SERVER_IP", "192.0.2.11"))
     ap.add_argument("--port", default=os.getenv("CODING_MODEL_SERVER_PORT", "5000"))
     ap.add_argument("--admin-key", default=os.getenv("ADMIN_API_KEY", ""))
     ap.add_argument("--delay", type=float, default=0.25)

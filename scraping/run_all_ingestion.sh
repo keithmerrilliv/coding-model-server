@@ -3,7 +3,7 @@
 # Run All Ingestion Scripts — Repopulate the RAG Database (Parallel)
 # =============================================================================
 # Usage:  ./run_all_ingestion.sh [server_ip]
-#   server_ip defaults to CODING_MODEL_SERVER_IP env var, then 192.168.50.101
+#   server_ip defaults to CODING_MODEL_SERVER_IP env var, then 192.0.2.10
 #
 # DO NOT clear the database before running this. That instruction used to live
 # here, and combined with scrapers that exited zero while producing nothing
@@ -25,7 +25,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LOG_DIR="$SCRIPT_DIR/ingestion_logs"
 mkdir -p "$LOG_DIR"
 
-export CODING_MODEL_SERVER_IP="${1:-${CODING_MODEL_SERVER_IP:-192.168.50.101}}"
+export CODING_MODEL_SERVER_IP="${1:-${CODING_MODEL_SERVER_IP:-192.0.2.10}}"
 MEMORY_URL="http://${CODING_MODEL_SERVER_IP}:5000/v1/memory"
 
 # Colors

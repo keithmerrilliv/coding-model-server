@@ -12,7 +12,7 @@ Builds are now arguments and missing ones are skipped with a warning:
 
     ./venv/bin/python scripts/benchmark_builds.py
     ./venv/bin/python scripts/benchmark_builds.py \
-        --build cu128=/home/keith-merrill/Dev/llama.cpp/build-cu128/bin
+        --build cu128=/home/youruser/Dev/llama.cpp/build-cu128/bin
 
 With no --build, this just measures the current production binary — useful as a
 baseline, but the comparison is the point, so pass at least one alternate.
@@ -28,7 +28,7 @@ import sys
 from _llama_bench import PORT, PROMPT, TOOLS, free_gpu, measure, restore_server
 
 DEFAULT_MODEL = (
-    "/home/keith-merrill/.lmstudio/models/unsloth/"
+    "/home/youruser/.lmstudio/models/unsloth/"
     "Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf"
 )
 # Identical across builds — the point is to vary only the binary.

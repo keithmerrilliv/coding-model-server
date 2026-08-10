@@ -60,7 +60,7 @@ def _wire(monkeypatch, behave):
 def _happy(cmd):
     """Default behavior: everything succeeds, the guest answers at an IP."""
     if cmd[:2] == ["tart", "ip"]:
-        return subprocess.CompletedProcess(cmd, 0, stdout="10.0.0.9\n", stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout="192.0.2.21\n", stderr="")
     if "xcodebuild test" in cmd[-1]:
         return subprocess.CompletedProcess(cmd, 0, stdout="guest tests ok", stderr="")
     return None

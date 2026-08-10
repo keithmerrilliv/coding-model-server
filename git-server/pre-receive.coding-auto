@@ -12,8 +12,8 @@
 #     non-fast-forward by construction
 # Anything else — refs/heads/*, tags, HEAD, notes — is rejected outright.
 #
-# Source of truth lives in the coding-model-server repo (zooshly/ dir);
-# installed here by zooshly/setup_coding_auto.sh. Keep the two in sync.
+# Source of truth lives in the coding-model-server repo (gitserver/ dir);
+# installed here by gitserver/setup_coding_auto.sh. Keep the two in sync.
 
 principal="$(id -un)"
 [ "$principal" = "coding-auto" ] || exit 0

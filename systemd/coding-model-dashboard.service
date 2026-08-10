@@ -1,3 +1,8 @@
+# TEMPLATE — substitute the placeholders before installing:
+#   sed -e "s|/home/youruser|$HOME|g" -e "s|^User=youruser|User=$USER|" \
+#       -e "s|^Group=youruser|Group=$USER|" systemd/coding-model-dashboard.service | sudo tee /etc/systemd/system/coding-model-dashboard.service
+# Paths assume the checkout lives at $HOME/Dev/coding-model-server; adjust
+# WorkingDirectory and ExecStart if yours is elsewhere.
 [Unit]
 Description=Coding Model Dashboard (static SPA server)
 # The dashboard polls coding-model-server's /v1/* endpoints, but we only need the
@@ -11,10 +16,10 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-User=keith-merrill
-Group=keith-merrill
-WorkingDirectory=/home/keith-merrill/Dev/coding-model-server
-ExecStart=/home/keith-merrill/Dev/coding-model-server/venv/bin/python scripts/serve_dashboard.py
+User=youruser
+Group=youruser
+WorkingDirectory=/home/youruser/Dev/coding-model-server
+ExecStart=/home/youruser/Dev/coding-model-server/venv/bin/python scripts/serve_dashboard.py
 Restart=always
 RestartSec=5
 TimeoutStopSec=10
@@ -29,8 +34,8 @@ Environment="PYTHONUNBUFFERED=1"
 #   CODING_MODEL_DASHBOARD_HOST=127.0.0.1  (0.0.0.0 is the LAN opt-in, DEV-192)
 #   CODING_MODEL_DASHBOARD_PORT=3001
 #   CODING_MODEL_DASHBOARD_ROOT=<repo>/dashboard/dist
-EnvironmentFile=-/home/keith-merrill/Dev/coding-model-server/.env
-EnvironmentFile=-/home/keith-merrill/.config/coding-model-server/.env
+EnvironmentFile=-/home/youruser/Dev/coding-model-server/.env
+EnvironmentFile=-/home/youruser/.config/coding-model-server/.env
 
 # Resource limits
 LimitNOFILE=4096

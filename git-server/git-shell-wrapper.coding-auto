@@ -1,6 +1,6 @@
 #!/bin/sh
 # DEV-419: forced command for the coding-auto SSH principal.
-# Installed to /home/coding-auto/git-shell-wrapper by zooshly/setup_coding_auto.sh
+# Installed to /home/coding-auto/git-shell-wrapper by gitserver/setup_coding_auto.sh
 # and referenced from authorized_keys (command="..."), so every login runs this
 # regardless of what the client asked for.
 #

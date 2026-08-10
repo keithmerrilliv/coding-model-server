@@ -1,3 +1,8 @@
+# TEMPLATE — substitute the placeholders before installing:
+#   sed -e "s|/home/youruser|$HOME|g" -e "s|^User=youruser|User=$USER|" \
+#       -e "s|^Group=youruser|Group=$USER|" systemd/coding-model-server.service | sudo tee /etc/systemd/system/coding-model-server.service
+# Paths assume the checkout lives at $HOME/Dev/coding-model-server; adjust
+# WorkingDirectory and ExecStart if yours is elsewhere.
 [Unit]
 Description=Coding Model Multi-Agent Server (FastAPI)
 After=network.target nvidia-persistenced.service
@@ -7,10 +12,10 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-User=keith-merrill
-Group=keith-merrill
-WorkingDirectory=/home/keith-merrill/Dev/coding-model-server
-ExecStart=/home/keith-merrill/Dev/coding-model-server/venv/bin/python -m coding_model_server.server
+User=youruser
+Group=youruser
+WorkingDirectory=/home/youruser/Dev/coding-model-server
+ExecStart=/home/youruser/Dev/coding-model-server/venv/bin/python -m coding_model_server.server
 Restart=always
 RestartSec=10
 TimeoutStopSec=60
@@ -25,8 +30,8 @@ Environment="PYTHONUNBUFFERED=1"
 
 # Model configuration. Prefer ~/.config/coding-model-server/.env (keeps secrets out of
 # the repo); repo-local .env is kept as a fallback during migration.
-EnvironmentFile=-/home/keith-merrill/Dev/coding-model-server/.env
-EnvironmentFile=-/home/keith-merrill/.config/coding-model-server/.env
+EnvironmentFile=-/home/youruser/Dev/coding-model-server/.env
+EnvironmentFile=-/home/youruser/.config/coding-model-server/.env
 
 # Resource limits
 LimitNOFILE=65536

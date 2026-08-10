@@ -1,3 +1,8 @@
+# TEMPLATE — substitute the placeholders before installing:
+#   sed -e "s|/home/youruser|$HOME|g" -e "s|^User=youruser|User=$USER|" \
+#       -e "s|^Group=youruser|Group=$USER|" systemd/coding-model-orchestrator.service | sudo tee /etc/systemd/system/coding-model-orchestrator.service
+# Paths assume the checkout lives at $HOME/Dev/coding-model-server; adjust
+# WorkingDirectory and ExecStart if yours is elsewhere.
 [Unit]
 Description=Coding Model Autonomous Orchestrator Daemon
 # Wait for the inference server before starting — we'll talk to its
@@ -9,10 +14,10 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-User=keith-merrill
-Group=keith-merrill
-WorkingDirectory=/home/keith-merrill/Dev/coding-model-server
-ExecStart=/home/keith-merrill/Dev/coding-model-server/venv/bin/python -m coding_model_server.orchestrator_daemon
+User=youruser
+Group=youruser
+WorkingDirectory=/home/youruser/Dev/coding-model-server
+ExecStart=/home/youruser/Dev/coding-model-server/venv/bin/python -m coding_model_server.orchestrator_daemon
 Restart=always
 RestartSec=10
 TimeoutStopSec=30
@@ -27,8 +32,8 @@ Environment="PYTHONUNBUFFERED=1"
 
 # Configuration (poll interval, log level, Jira creds in 1c) lives in .env.
 # Prefer ~/.config/coding-model-server/.env; repo-local .env kept as migration fallback.
-EnvironmentFile=-/home/keith-merrill/Dev/coding-model-server/.env
-EnvironmentFile=-/home/keith-merrill/.config/coding-model-server/.env
+EnvironmentFile=-/home/youruser/Dev/coding-model-server/.env
+EnvironmentFile=-/home/youruser/.config/coding-model-server/.env
 
 # Resource limits
 LimitNOFILE=65536
@@ -101,7 +106,7 @@ ProtectProc=default
 # above is read by the systemd MANAGER before this namespace exists, so the
 # daemon still receives the values — only in-process reads (i.e. LLM-authored
 # test code running unsandboxed) are denied.
-InaccessiblePaths=-/home/keith-merrill/.ssh -/home/keith-merrill/.gnupg -/home/keith-merrill/.aws -/home/keith-merrill/.config/git -/home/keith-merrill/.config/coding-model-server -/home/keith-merrill/Dev/coding-model-server/.env
+InaccessiblePaths=-/home/youruser/.ssh -/home/youruser/.gnupg -/home/youruser/.aws -/home/youruser/.config/git -/home/youruser/.config/coding-model-server -/home/youruser/Dev/coding-model-server/.env
 # LLM-generated tests are sandboxed separately via bubblewrap — see
 # coding_model_autonomous/executor.py::run_tests. Install `bubblewrap` on the host:
 #   apt install bubblewrap

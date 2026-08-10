@@ -26,7 +26,7 @@ polkit.addRule(function(action, subject) {
     if (action.id !== "org.freedesktop.systemd1.manage-units") {
         return polkit.Result.NOT_HANDLED;
     }
-    if (subject.user !== "keith-merrill") {
+    if (subject.user !== "youruser") {
         return polkit.Result.NOT_HANDLED;
     }
 

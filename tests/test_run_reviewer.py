@@ -124,13 +124,13 @@ def test_review_report_artifact_written(db, spec_and_task):
 class TestVerifyReviewCitations:
     """The cite-check regex must treat URLs / IP:port as non-citations.
 
-    Regression: `http://192.168.50.101:3001/` matched `50.101:3001` as a
+    Regression: `http://192.0.2.10:3001/` matched `50.101:3001` as a
     `file.ext:line` cite, annotating mid-URL and logging a spurious 100%
     unverified rate on clean reviews.
     """
 
     def test_url_with_ip_port_is_not_a_citation(self, tmp_path):
-        md = "Evidence: server runs at http://192.168.50.101:3001/ and works."
+        md = "Evidence: server runs at http://192.0.2.10:3001/ and works."
         annotated, checked, unverified = d._verify_review_citations(md, tmp_path)
         assert checked == 0          # nothing looked like a cite
         assert unverified == 0

@@ -1,6 +1,11 @@
+# TEMPLATE — substitute the placeholders before installing:
+#   sed -e "s|/home/youruser|$HOME|g" -e "s|^User=youruser|User=$USER|" \
+#       -e "s|^Group=youruser|Group=$USER|" systemd/coding-model-mcp-update.timer | sudo tee /etc/systemd/system/coding-model-mcp-update.timer
+# Paths assume the checkout lives at $HOME/Dev/coding-model-server; adjust
+# WorkingDirectory and ExecStart if yours is elsewhere.
 [Unit]
 Description=Monthly Apple Deep Docs MCP update
-Documentation=file:///home/keith-merrill/Dev/coding-model-server/scripts/update_deep_docs_mcp.sh
+Documentation=file:///home/youruser/Dev/coding-model-server/scripts/update_deep_docs_mcp.sh
 
 [Timer]
 # First Sunday of the month, 04:00. Two hours after the weekly docs refresh

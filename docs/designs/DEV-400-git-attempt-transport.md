@@ -7,7 +7,7 @@
 ## Decision in one paragraph
 
 Spec attempts move from JSON `patch_files` payloads to branches on the local
-git server (`zooshly:/srv/private/git`), in a dedicated ref namespace
+git server (`gitserver:/srv/private/git`), in a dedicated ref namespace
 `refs/auto/spec/<spec_id>/attempt-<n>`, every attempt cut from one pinned
 `base_sha` recorded on the spec. The orchestrator is the only writer; the Mac
 runner becomes fetch-only; humans never see the namespace unless they ask for
@@ -46,7 +46,7 @@ patch-writing step, which it deletes.
   index the DB already tracks. Refs are **create-only**: an attempt is
   written once and never force-pushed or rewritten.
 * `base_sha` is resolved **once**, at spec bootstrap, from the repo's
-  default branch on zooshly, and stored on the spec row. Every attempt
+  default branch on gitserver, and stored on the spec row. Every attempt
   branches from it. This replaces the floating `base_ref: HEAD` and is a
   correctness fix on its own.
 * Each role commits its own work on the attempt branch (architect design
@@ -58,7 +58,7 @@ patch-writing step, which it deletes.
 ### Who does what
 
 * **Orchestrator (only writer):** keeps a per-repo bare cache under
-  `var/git-cache/<repo>.git` cloned from zooshly. To publish an attempt it
+  `var/git-cache/<repo>.git` cloned from gitserver. To publish an attempt it
   makes a temp worktree at `base_sha`, applies the parsed
   `<<<FILE:>>>` output exactly where `spec_dir` receives it today, commits
   per role, pushes the attempt ref. One flock per repo cache serializes
@@ -67,7 +67,7 @@ patch-writing step, which it deletes.
 * **Mac runner (fetch-only):** `RunTestsRequest` gains `attempt_ref`;
   `workspace.worktree()` becomes `git fetch origin <attempt_ref>` +
   `worktree add --detach FETCH_HEAD`. The runner's `repos.yml` clones
-  already have zooshly as origin. The runner holds **no push credential
+  already have gitserver as origin. The runner holds **no push credential
   at all**.
 * **Humans:** unaffected. `refs/auto/*` is outside the default fetch
   refspec, so a human `git pull` never downloads model-authored commits.
@@ -78,7 +78,7 @@ patch-writing step, which it deletes.
 
 ### 1. Isolation (security-relevant, cf. DEV-397/398)
 
-* Dedicated SSH principal on zooshly (e.g. `coding-auto`), forced-command
+* Dedicated SSH principal on gitserver (e.g. `coding-auto`), forced-command
   `git-shell`, used only by the orchestrator.
 * A `pre-receive` hook on every bare repo enforces, for that principal:
   ref name matches `^refs/auto/spec/[A-Za-z0-9_-]+/attempt-[0-9]+$`;
@@ -90,13 +90,13 @@ patch-writing step, which it deletes.
 
 ### 2. Repo coverage (settle first — the ticket's own gate)
 
-* zooshly stays the **single trust boundary**. Attempts never touch
+* gitserver stays the **single trust boundary**. Attempts never touch
   GitHub.
-* ElectricSheep (GitHub-backed, not among the eleven zooshly bare repos)
-  gets a zooshly mirror. Recommended mechanism: the Mac Studio working
-  copy adds zooshly as a second push remote (`git remote set-url --add
+* ElectricSheep (GitHub-backed, not among the eleven gitserver bare repos)
+  gets a gitserver mirror. Recommended mechanism: the Mac Studio working
+  copy adds gitserver as a second push remote (`git remote set-url --add
   --push`), so the mirror updates on every human push with **no GitHub
-  credential stored on zooshly** and no scheduled job to rot. The pipeline
+  credential stored on gitserver** and no scheduled job to rot. The pipeline
   pins `base_sha` from the mirror; if the mirror lags GitHub, attempts
   build against a slightly older base — safe, visible, and fixed by the
   next human push.
@@ -149,20 +149,20 @@ patch-writing step, which it deletes.
 
 ## Failure modes
 
-* **zooshly unreachable:** attempt publish or runner fetch fails with a
+* **gitserver unreachable:** attempt publish or runner fetch fails with a
   clear transport error — same failure class and same operator story as
   "mac-runner unreachable" today. The spec stays re-runnable; nothing is
   half-applied (a ref either exists or does not).
 * **Push rejected by hook:** treated as a pipeline bug, fails the task
   loudly. The hook is a tripwire, not a control flow.
 * **Cache corruption:** `var/git-cache` is disposable; re-clone from
-  zooshly.
+  gitserver.
 
 ## Rollout (smallest useful experiment first)
 
 1. **Phase 0 — server prep:** `coding-auto` principal + pre-receive hook on
    the pilot repo only. Pilot: `JSONParser.git` (small, already on
-   zooshly; `MetalGameOfLife.git` is the alternate).
+   gitserver; `MetalGameOfLife.git` is the alternate).
 2. **Phase 1 — dual-write:** orchestrator publishes attempt refs alongside
    the existing `patch_files` payload; runner still consumes payloads.
    Verify refs, trailers, and `git diff` sanity on a real spec run.
@@ -183,7 +183,7 @@ Each phase is its own DEV ticket at implementation time (ticket-per-concern).
 1. Pilot repo: `JSONParser.git` or `MetalGameOfLife.git`?
 2. Retention window for closed specs' refs: 30 days?
 3. ElectricSheep mirror via Mac Studio dual-push remote (recommended) or a
-   zooshly-side scheduled fetch from GitHub (needs egress + a job to tend)?
+   gitserver-side scheduled fetch from GitHub (needs egress + a job to tend)?
 4. Should reviewer feedback move to commit-anchored notes in the same
    change, or stay free-text until DEV-391 is scheduled? (This design only
    creates the substrate.)

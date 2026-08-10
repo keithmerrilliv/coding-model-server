@@ -51,13 +51,13 @@ def gated(monkeypatch):
     "rm -fr /*",
     "rm -rf /home",
     "rm -rf /home/*",
-    "rm -rf /home/keith-merrill",
-    "rm -rf /home/keith-merrill/",
+    "rm -rf /home/youruser",
+    "rm -rf /home/youruser/",
     "rm -rf ~",
     "rm -rf $HOME",
     "find / -name '*.py' -delete",
-    "find /home/keith-merrill -type f -exec rm {} \\;",
-    "python3 -c \"import shutil; shutil.rmtree('/home/keith-merrill')\"",
+    "find /home/youruser -type f -exec rm {} \\;",
+    "python3 -c \"import shutil; shutil.rmtree('/home/youruser')\"",
     "dd if=/dev/zero of=/dev/sda",
     "rm -rf / && echo done",
 ])
@@ -70,7 +70,7 @@ def test_denied_unconditionally(command):
 @pytest.mark.parametrize("command", [
     # Deleting a path *inside* a home directory is a legitimate agent action.
     # It must warn (dangerous), but it must not be hard-denied.
-    "rm -rf /home/keith-merrill/Dev/project/build",
+    "rm -rf /home/youruser/Dev/project/build",
     "rm -rf ./node_modules",
     "rm -rf build",
 ])

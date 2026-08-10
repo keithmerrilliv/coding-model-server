@@ -103,7 +103,7 @@ def test_unauth_mode_allows_loopback_client():
 def test_unauth_mode_rejects_lan_client():
     with _patch_key(""):
         with pytest.raises(HTTPException) as exc:
-            _verify(_request_from("192.168.1.50"))
+            _verify(_request_from("192.0.2.13"))
         assert exc.value.status_code == 401
 
 
@@ -115,8 +115,8 @@ def test_unauth_mode_rejects_clientless_request():
 
 def test_key_mode_accepts_admin_header_and_bearer():
     with _patch_key("sekrit"):
-        _verify(_request_from("192.168.1.50"), x_admin_key="sekrit")
-        _verify(_request_from("192.168.1.50"), authorization="Bearer sekrit")
+        _verify(_request_from("192.0.2.13"), x_admin_key="sekrit")
+        _verify(_request_from("192.0.2.13"), authorization="Bearer sekrit")
 
 
 def test_key_mode_rejects_wrong_or_missing_key():

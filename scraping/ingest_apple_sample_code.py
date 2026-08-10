@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from coding_model_server.code_chunker import CodeChunker
 
 # Server Configuration
-LINUX_SERVER_IP = os.getenv("CODING_MODEL_SERVER_IP", "192.168.50.101")
+LINUX_SERVER_IP = os.getenv("CODING_MODEL_SERVER_IP", "192.0.2.10")
 MEMORY_API_URL = f"http://{LINUX_SERVER_IP}:5000/v1/memory"
 
 INDEX_URLS = [

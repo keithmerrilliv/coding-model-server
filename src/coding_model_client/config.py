@@ -7,7 +7,7 @@ import logging
 # ---------------------------------------------------------------------------
 
 class Config:
-    LINUX_SERVER_IP = os.getenv("CODING_MODEL_SERVER_IP", "192.168.50.101")
+    LINUX_SERVER_IP = os.getenv("CODING_MODEL_SERVER_IP", "192.0.2.10")
     # One base URL, one port knob (DEV-151). The port literal used to be
     # baked into every URL constant, so moving the server via
     # CODING_MODEL_SERVER_PORT (the same env the autonomous package reads)

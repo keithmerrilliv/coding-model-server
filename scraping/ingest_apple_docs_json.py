@@ -13,7 +13,7 @@ prose. The real source URL travels in metadata instead.
 
 Usage:
     python3 ingest_apple_docs_json.py --dry-run  <dir>
-    python3 ingest_apple_docs_json.py --server 192.168.1.3 --admin-key ... <dir>
+    python3 ingest_apple_docs_json.py --server 192.0.2.11 --admin-key ... <dir>
 """
 
 import argparse
@@ -49,7 +49,7 @@ def chunk_text(text, size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("indir")
-    ap.add_argument("--server", default=os.getenv("CODING_MODEL_SERVER_IP", "192.168.1.3"))
+    ap.add_argument("--server", default=os.getenv("CODING_MODEL_SERVER_IP", "192.0.2.11"))
     ap.add_argument("--port", default=os.getenv("CODING_MODEL_SERVER_PORT", "5000"))
     ap.add_argument("--admin-key", default=os.getenv("ADMIN_API_KEY", ""))
     ap.add_argument("--dry-run", action="store_true")

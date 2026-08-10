@@ -44,7 +44,7 @@ because every one of them is a VRAM-budget decision that has been measured.
 ### Client
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CODING_MODEL_SERVER_IP` | `192.168.50.101` | Server IP address. Note the autonomous CLI defaults the same var to `127.0.0.1`. |
+| `CODING_MODEL_SERVER_IP` | `192.0.2.10` | Server IP address. Note the autonomous CLI defaults the same var to `127.0.0.1`. |
 | `CODING_MODEL_SERVER_PORT` | `5000` | Server port used by the autonomous CLI. |
 | `PERMISSION_MODE` | `default` | `default` / `acceptEdits` / `yolo` |
 | `ALLOW_ALL` | *(unset)* | Legacy alias — equivalent to `PERMISSION_MODE=yolo`. |

@@ -9,7 +9,7 @@ client, or the orchestrator.
 Two hosts are assumed:
 
 - **Mac dev machine** — `/Users/km4/Dev/qwen-server` (you run the client here).
-- **Linux server** — `/home/keith-merrill/Dev/coding-model-server` (runs the
+- **Linux server** — `/home/youruser/Dev/coding-model-server` (runs the
   server, orchestrator, and monitor via systemd).
 
 Note the two checkouts sit at *different* directory names: the Mac was never
@@ -65,7 +65,7 @@ chmod 600 ~/.config/coding-model-server/.env
 ```sh
 mkdir -p ~/.config/coding-model-server
 chmod 700 ~/.config/coding-model-server
-mv /home/keith-merrill/Dev/coding-model-server/.env ~/.config/coding-model-server/.env
+mv /home/youruser/Dev/coding-model-server/.env ~/.config/coding-model-server/.env
 chmod 600 ~/.config/coding-model-server/.env
 ```
 
@@ -169,7 +169,7 @@ sudo journalctl -u coding-model-monitor -n 100 --no-pager
 
 ## 5. Grant non-root monitor access to RAPL counters (Linux server)
 
-`coding-model-monitor.service` now runs as `keith-merrill` instead of root. It
+`coding-model-monitor.service` now runs as `youruser` instead of root. It
 needs read access to the Intel RAPL energy counters under `/sys/class/powercap/`.
 
 Check current permissions:
@@ -182,7 +182,7 @@ If it's root-only (the default), grant read access via POSIX ACL — this
 survives reboots on most distros:
 
 ```sh
-sudo setfacl -m u:keith-merrill:r /sys/class/powercap/intel-rapl:0/energy_uj
+sudo setfacl -m u:youruser:r /sys/class/powercap/intel-rapl:0/energy_uj
 # Repeat for any other counters monitor_resources.py reads. List candidates:
 ls /sys/class/powercap/*/energy_uj
 ```
@@ -191,7 +191,7 @@ Alternatively, put the file's group in a group the user already belongs to
 and `chmod g+r`.
 
 If you prefer to keep the monitor running as root, revert just the
-`User=keith-merrill` line in `coding-model-monitor.service` back to `User=root`.
+`User=youruser` line in `coding-model-monitor.service` back to `User=root`.
 
 ---
 
@@ -220,7 +220,7 @@ On the Mac dev machine:
 
 ```sh
 # Client can reach the server with the new key. Set CODING_MODEL_SERVER_IP in
-# ~/.config/coding-model-server/.env first — it defaults to 192.168.50.101.
+# ~/.config/coding-model-server/.env first — it defaults to 192.0.2.10.
 ./bin/start-client.sh
 ```
 
@@ -239,7 +239,7 @@ A clean start prints `Connected to <your server IP>` and no
 | Env loading | `bin/start.sh`, `bin/start-client.sh` | Prefer `~/.config/coding-model-server/.env`; repo `.env` is a fallback with warning |
 | Systemd env path | `coding-model-server.service`, `coding-model-orchestrator.service` | `EnvironmentFile=-%h/.config/coding-model-server/.env` added |
 | Systemd hardening | all four `.service` files | `PrivateTmp`, `ProtectKernel*`, `LockPersonality`, `ProtectSystem=strict`, `ReadWritePaths` |
-| Monitor privileges | `coding-model-monitor.service` | `User=root` → `User=keith-merrill` |
+| Monitor privileges | `coding-model-monitor.service` | `User=root` → `User=youruser` |
 | Test sandbox | `src/coding_model_autonomous/executor.py` | LLM-generated pytest/jest wrapped in `bwrap` (no network, no `/home`, no env inheritance); opt-out via `CODING_MODEL_ALLOW_UNSANDBOXED_TESTS=1` |
 | Docs | `.env.example`, `docs/CONFIGURATION.md`, `docs/TUTORIAL.md` | Updated defaults, documented new flags and env path |
 
@@ -303,7 +303,7 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.codingmodel.runner.p
 #    the orchestrator has no route to it. See "Transport" below for the details.
 brew install autossh
 cp mac_runner/com.codingmodel.tunnel.plist ~/Library/LaunchAgents/
-ssh keith-merrill@linux-server true    # once by hand: seeds ~/.ssh/known_hosts
+ssh youruser@linux-server true    # once by hand: seeds ~/.ssh/known_hosts
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.codingmodel.tunnel.plist
 
 # 7. Verify from the Linux box — expect {"status":"ok"} and nothing else
@@ -359,7 +359,7 @@ systemctl --user restart coding-model-orchestrator
 The runner binds loopback, so this tunnel is the *only* path to it:
 
 ```sh
-ssh -NT -R 5050:localhost:5050 keith-merrill@linux-server
+ssh -NT -R 5050:localhost:5050 youruser@linux-server
 ```
 
 This makes the Mac runner reachable at `http://127.0.0.1:5050` on the
@@ -376,7 +376,7 @@ brew install autossh
 cp mac_runner/com.codingmodel.tunnel.plist ~/Library/LaunchAgents/
 # Connect once by hand first, so the host key is in ~/.ssh/known_hosts —
 # BatchMode means the agent can never answer a host-key prompt.
-ssh keith-merrill@linux-server true
+ssh youruser@linux-server true
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.codingmodel.tunnel.plist
 ```
 

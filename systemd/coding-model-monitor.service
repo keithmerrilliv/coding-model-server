@@ -1,3 +1,8 @@
+# TEMPLATE — substitute the placeholders before installing:
+#   sed -e "s|/home/youruser|$HOME|g" -e "s|^User=youruser|User=$USER|" \
+#       -e "s|^Group=youruser|Group=$USER|" systemd/coding-model-monitor.service | sudo tee /etc/systemd/system/coding-model-monitor.service
+# Paths assume the checkout lives at $HOME/Dev/coding-model-server; adjust
+# WorkingDirectory and ExecStart if yours is elsewhere.
 [Unit]
 Description=Coding Model Resource Monitor (Power & DB Size)
 After=network.target
@@ -8,10 +13,10 @@ Type=simple
 #   - nvidia-smi (works as any user)
 #   - read access to /sys/class/powercap/*/energy_uj (may require `chmod g+r`
 #     or adding the user to a group with read access; alternatively run once
-#     as root to grant: setfacl -m u:keith-merrill:r /sys/class/powercap/intel-rapl:0/energy_uj)
-User=keith-merrill
-WorkingDirectory=/home/keith-merrill/Dev/coding-model-server
-ExecStart=/usr/bin/python3 /home/keith-merrill/Dev/coding-model-server/scripts/monitor_resources.py
+#     as root to grant: setfacl -m u:youruser:r /sys/class/powercap/intel-rapl:0/energy_uj)
+User=youruser
+WorkingDirectory=/home/youruser/Dev/coding-model-server
+ExecStart=/usr/bin/python3 /home/youruser/Dev/coding-model-server/scripts/monitor_resources.py
 Restart=always
 RestartSec=10
 
@@ -28,7 +33,7 @@ RestrictSUIDSGID=yes
 RestrictRealtime=yes
 LockPersonality=yes
 ProtectSystem=strict
-ReadWritePaths=/home/keith-merrill/Dev/coding-model-server
+ReadWritePaths=/home/youruser/Dev/coding-model-server
 
 [Install]
 WantedBy=multi-user.target

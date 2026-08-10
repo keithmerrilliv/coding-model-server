@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Scheduled Apple-docs refresh. Designed to run unattended on zooshly, where
+# Scheduled Apple-docs refresh. Designed to run unattended on gitserver, where
 # both the RAG and the server live — the scraper is stdlib-only and the
 # ingester needs requests, so nothing here depends on the Mac being awake.
 #

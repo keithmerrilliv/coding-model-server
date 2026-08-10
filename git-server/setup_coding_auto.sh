@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
 # setup_coding_auto.sh — DEV-419 (phase 0 of DEV-400): create the coding-auto
-# SSH principal on zooshly and wire the pilot repo (JSONParser.git) for it.
+# SSH principal on gitserver and wire the pilot repo (JSONParser.git) for it.
 #
-#   sudo bash zooshly/setup_coding_auto.sh
+#   sudo bash gitserver/setup_coding_auto.sh
 #
 # Root is needed for: useradd, writing another user's authorized_keys, and
 # group surgery. Everything else about phase 0 (the pre-receive hook, the
@@ -19,7 +19,7 @@
 #      (restrict = no pty, no forwarding, no X11, no agent).
 #   3. Grants the principal write access to JSONParser.git only: chgrp to
 #      coding-auto, group-writable + setgid dirs, core.sharedRepository=group.
-#      Adds keith-merrill to the coding-auto group so objects the pipeline
+#      Adds youruser to the coding-auto group so objects the pipeline
 #      writes stay readable/gc-able by the operator.
 #   4. Installs the pre-receive hook from this directory (create-only
 #      refs/auto/spec/<id>/attempt-<n> namespace for this principal).
@@ -28,7 +28,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PRINCIPAL=coding-auto
-OPERATOR=keith-merrill
+OPERATOR=youruser
 REPO=/srv/private/git/JSONParser.git
 PUBKEY="/home/${OPERATOR}/.ssh/coding_auto_ed25519.pub"
 

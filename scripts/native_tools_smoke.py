@@ -24,7 +24,7 @@ import requests
 REPO = Path(__file__).resolve().parent.parent
 LLAMA_SERVER = REPO / "tools" / "llama-server"
 LIBS = REPO / "tools"
-MODEL = Path("/home/keith-merrill/.lmstudio/models/unsloth/GLM-4.7-Flash-GGUF/GLM-4.7-Flash-Q4_K_M.gguf")
+MODEL = Path("/home/youruser/.lmstudio/models/unsloth/GLM-4.7-Flash-GGUF/GLM-4.7-Flash-Q4_K_M.gguf")
 PORT = int(os.environ.get("SMOKE_PORT", "8082"))
 LOG = Path("/tmp/native-tools-smoke.log")
 

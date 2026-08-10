@@ -1,3 +1,8 @@
+# TEMPLATE — substitute the placeholders before installing:
+#   sed -e "s|/home/youruser|$HOME|g" -e "s|^User=youruser|User=$USER|" \
+#       -e "s|^Group=youruser|Group=$USER|" systemd/coding-model-mcp-update.service | sudo tee /etc/systemd/system/coding-model-mcp-update.service
+# Paths assume the checkout lives at $HOME/Dev/coding-model-server; adjust
+# WorkingDirectory and ExecStart if yours is elsewhere.
 [Unit]
 Description=Update the vendored Apple Deep Docs MCP checkout
 # It restarts coding-model-server as part of the update (the MCP is a child
@@ -7,12 +12,12 @@ After=coding-model-server.service network-online.target
 
 [Service]
 Type=oneshot
-User=keith-merrill
-WorkingDirectory=/home/keith-merrill/Dev/coding-model-server
-EnvironmentFile=-/home/keith-merrill/Dev/coding-model-server/.env
+User=youruser
+WorkingDirectory=/home/youruser/Dev/coding-model-server
+EnvironmentFile=-/home/youruser/Dev/coding-model-server/.env
 Environment="PYTHONUNBUFFERED=1"
 Environment="CODING_MODEL_SERVER_IP=127.0.0.1"
-ExecStart=/home/keith-merrill/Dev/coding-model-server/scripts/update_deep_docs_mcp.sh
+ExecStart=/home/youruser/Dev/coding-model-server/scripts/update_deep_docs_mcp.sh
 
 # A git pull plus pip install plus restart plus smoke test. Nowhere near the
 # docs refresh's hours, but well over the default.

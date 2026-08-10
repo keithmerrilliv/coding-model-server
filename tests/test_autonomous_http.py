@@ -184,10 +184,10 @@ def test_internal_url_is_loopback_by_default(monkeypatch):
 def test_internal_url_ignores_server_ip(monkeypatch):
     # The advertised LAN IP must NOT redirect internal calls.
     monkeypatch.delenv("CODING_MODEL_INTERNAL_HOST", raising=False)
-    monkeypatch.setenv("CODING_MODEL_SERVER_IP", "10.0.0.123")
+    monkeypatch.setenv("CODING_MODEL_SERVER_IP", "192.0.2.20")
     reloaded = importlib.reload(http)
     try:
-        assert "10.0.0.123" not in reloaded.API_URL
+        assert "192.0.2.20" not in reloaded.API_URL
         assert reloaded.API_URL == "http://127.0.0.1:5000/v1/chat/completions"
     finally:
         importlib.reload(http)
@@ -206,13 +206,13 @@ def test_internal_host_empty_falls_back_to_loopback(monkeypatch):
 
 def test_internal_host_explicit_override(monkeypatch):
     # Split-host topologies can still opt in via the dedicated var.
-    monkeypatch.setenv("CODING_MODEL_INTERNAL_HOST", "192.168.1.9")
+    monkeypatch.setenv("CODING_MODEL_INTERNAL_HOST", "192.0.2.12")
     reloaded = importlib.reload(http)
     try:
-        assert reloaded.API_URL == "http://192.168.1.9:5000/v1/chat/completions"
+        assert reloaded.API_URL == "http://192.0.2.12:5000/v1/chat/completions"
     finally:
         # Restore env FIRST, then reload, so the module is left on the loopback
-        # default instead of leaking 192.168.1.9 to later test modules.
+        # default instead of leaking 192.0.2.12 to later test modules.
         monkeypatch.undo()
         importlib.reload(http)
 

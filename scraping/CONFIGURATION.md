@@ -22,7 +22,7 @@ The system uses environment variables for configuration. Create a `.env` file in
 APPLE_DEEP_DOCS_PATH=/Users/km4/Dev/Coding Model/appledeepdoc-mcp/run.sh
 
 # Server Configuration
-CODING_MODEL_SERVER_IP=192.168.50.101
+CODING_MODEL_SERVER_IP=192.0.2.10
 CODING_MODEL_SERVER_PORT=5000
 ```
 
