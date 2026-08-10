@@ -11,11 +11,13 @@ costs a full generation), and the rotation itself — including that the
 implementer is never told the code failed to compile when it did not.
 """
 import json
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
 
 import coding_model_server.orchestrator_daemon as d
+from coding_model_autonomous import executor
 from coding_model_autonomous.db import Database
 from coding_model_autonomous.executor import ImplementerResult
 from coding_model_autonomous.models import (
@@ -48,6 +50,37 @@ Building for debugging...
 error: 'DeterministicRNG' is inaccessible due to 'private' protection level
 error: fatalError
 """
+
+# Run 9's actual terminal shape: it compiled, all 19 tests were launched, and
+# the process trapped before any could report. Note the trailing driver line —
+# _detect_build_failure matches it, so this output is classified a build
+# failure even though it compiled. See the test that pins that below.
+RUN9_TRAP_BUILD = """\
+◇ Test run started.
+◇ Test "C4: Chain advances with segments following" started.
+Building for debugging...
+[7/10] Compiling CentipedeCore World.swift
+/Users/km4/Library/Caches/coding-model-runner/worktrees/spec_9ff962b9-09f0ad65/\
+Sources/CentipedeCore/World.swift:238:20: warning: value 'updateIdx' was \
+defined but never used; consider replacing with boolean test [#no-usage]
+Build complete! (3.00s)
+error: Process 'swiftpm-testing-helper --parallel' exited with unexpected signal code 5
+"""
+
+# The shape this ticket's synthesis wiring targets: compiled, the runner said
+# nothing parseable, and no `error:` line anywhere — so today there is no
+# diagnostic, no pass rate, and the repair round is skipped as unexplained.
+COMPILED_NO_SUMMARY = """\
+Building for debugging...
+[7/10] Compiling CentipedeCore World.swift
+/Users/km4/Library/Caches/coding-model-runner/worktrees/spec_x-1/\
+Sources/CentipedeCore/World.swift:238:20: warning: value 'updateIdx' was \
+defined but never used; consider replacing with boolean test [#no-usage]
+Build complete! (3.00s)
+◇ Test run started.
+"""
+
+NO_SIGNAL = "the runner produced nothing useful\n"
 
 
 # ── the parse ────────────────────────────────────────────────────────────────
@@ -278,3 +311,153 @@ def test_warnings_are_recorded_on_the_event_even_when_not_blocking(db, impl_spec
     assert checks, "the pre-gate check must record an event"
     assert checks[-1]["warnings"] == 1
     assert checks[-1]["blocking_warnings"] == []
+
+
+# ── the synthesis repair trigger ─────────────────────────────────────────────
+
+@pytest.fixture
+def synth_spec(db):
+    spec = db.create_spec(title="demo", source_md_path="spec.md")
+    spec_dir = db.spec_dir(spec.id)
+    (spec_dir / "spec.md").write_text("# spec")
+    (spec_dir / "design.md").write_text("# design")
+    (spec_dir / "impl.swift").write_text("struct A {}")
+    db.update_spec_status(spec.id, SpecStatus.EXECUTING)
+    impl = db.create_task(spec_id=spec.id, agent="implementer",
+                          role="implementer", title="build")
+    return db.get_spec(spec.id), impl, spec_dir
+
+
+def _synth(db, spec, impl, spec_dir, first_output, *, opts=None):
+    """Drive _run_synthesis to its repair decision.
+
+    Returns (repaired, repair_kwargs) — repair_kwargs is None when no repair
+    round ran.
+    """
+    synth = SimpleNamespace(files=[("impl.swift", "struct A {}")])
+    calls = {"agent": 0}
+
+    def _agent(*a, **k):
+        calls["agent"] += 1
+        return "raw"
+
+    repair_builder = mock.MagicMock(return_value=[])
+    with mock.patch.object(d, "call_agent", side_effect=_agent), \
+         mock.patch.object(d, "build_synthesis_message", return_value=[]), \
+         mock.patch.object(d, "parse_implementer_response", return_value=synth), \
+         mock.patch.object(d, "run_tests",
+                           side_effect=[(False, first_output),
+                                        (False, first_output)]), \
+         mock.patch.object(d.executor, "build_synthesis_repair_message",
+                           repair_builder):
+        d._run_synthesis(db, spec, impl, spec_dir, "swift_test", opts or {})
+    repaired = calls["agent"] >= 2
+    kwargs = repair_builder.call_args.kwargs if repair_builder.call_args else None
+    return repaired, kwargs
+
+
+def test_compiled_with_no_summary_now_gets_a_repair_round(db, synth_spec):
+    """Compiled, no summary, no diagnostic — previously abandoned as an
+    unexplained failure. The warning is the explanation."""
+    spec, impl, spec_dir = synth_spec
+    repaired, kwargs = _synth(db, spec, impl, spec_dir, COMPILED_NO_SUMMARY)
+    assert repaired is True
+    assert kwargs["build_diagnostic"] is None, "it compiled — do not claim otherwise"
+    assert "World.swift:238:20" in kwargs["warning_diagnostic"]
+
+
+def test_driver_error_output_still_takes_the_build_failure_path(db, synth_spec):
+    """Run 9's real terminal output, pinned as a limitation rather than a win.
+
+    It compiled, but the harness printed `error: Process … signal code 5`, and
+    _detect_build_failure matches that bare driver line — so this is routed as
+    a build failure and the repair is told the code does not compile, which is
+    false. Overriding that here would mean claiming "the build succeeded" for a
+    genuine emit-module failure, which is the same class of lie in the other
+    direction, so it is deliberately left alone. Fixing it means teaching the
+    build-failure path about unattributed driver errors, which is DEV-435's
+    surface, not this ticket's.
+    """
+    spec, impl, spec_dir = synth_spec
+    assert d._attributed_diagnostics(RUN9_TRAP_BUILD) == []
+    repaired, kwargs = _synth(db, spec, impl, spec_dir, RUN9_TRAP_BUILD)
+    assert repaired is True
+    assert kwargs["build_diagnostic"] is not None
+    assert kwargs["warning_diagnostic"] is None
+
+
+def test_unexplained_failure_still_does_not_repair(db, synth_spec):
+    """No summary, no diagnostic and nothing the compiler objected to is still
+    the broken-runner case — do not spend the call."""
+    spec, impl, spec_dir = synth_spec
+    repaired, _ = _synth(db, spec, impl, spec_dir, NO_SIGNAL)
+    assert repaired is False
+
+
+def test_build_failure_still_takes_precedence_at_synthesis(db, synth_spec):
+    spec, impl, spec_dir = synth_spec
+    repaired, kwargs = _synth(db, spec, impl, spec_dir,
+                              SWIFT_BUILD_FAILURE + RUN9_TRAP_BUILD)
+    assert repaired is True
+    assert kwargs["build_diagnostic"] is not None
+    assert kwargs["warning_diagnostic"] is None
+
+
+def test_near_miss_is_untouched_by_a_warning(db, synth_spec):
+    """A measurable pass rate is still the near-miss path, warning or not."""
+    spec, impl, spec_dir = synth_spec
+    near_miss = ("Executed 20 tests\n18 passed, 2 failed in 1.2s\n"
+                 "/wt/worktrees/s-1/Sources/A.swift:3:4: warning: value 'x' "
+                 "was defined but never used\n")
+    repaired, kwargs = _synth(db, spec, impl, spec_dir, near_miss)
+    assert repaired is True
+    assert kwargs["build_diagnostic"] is None
+    assert kwargs["warning_diagnostic"] is None
+
+
+def test_protected_path_warning_does_not_trigger_a_repair(db, synth_spec):
+    spec, impl, spec_dir = synth_spec
+    out = ("Build complete!\n/wt/worktrees/s-1/Sources/CentipedeCore/"
+           "GameState.swift:12:9: warning: value 'q' was defined but never used\n")
+    repaired, _ = _synth(db, spec, impl, spec_dir, out,
+                         opts={"protected_paths":
+                               ["Sources/CentipedeCore/GameState.swift"]})
+    assert repaired is False
+
+
+def test_kill_switch_also_covers_synthesis(db, synth_spec, monkeypatch):
+    monkeypatch.setattr(d, "BLOCK_ON_BUILD_WARNINGS", False)
+    spec, impl, spec_dir = synth_spec
+    repaired, _ = _synth(db, spec, impl, spec_dir, COMPILED_NO_SUMMARY)
+    assert repaired is False
+
+
+# ── the repair prompt ────────────────────────────────────────────────────────
+
+def _repair_text(**kw):
+    msgs = executor.build_synthesis_repair_message(
+        "# spec", "# design", [("A.swift", "struct A {}")], "output", **kw)
+    return msgs[-1]["content"]
+
+
+def test_warning_prompt_does_not_claim_either_existing_state():
+    """Saying the build failed sends it hunting a syntax error that is not
+    there; the near-miss wording is worse, because nothing here passed."""
+    text = _repair_text(warning_diagnostic="  - A.swift:1:1: value 'x' unused")
+    assert "does NOT compile" not in text
+    assert "passes most tests" not in text
+    assert "already passes most of its tests" not in text
+    assert "COMPILED" in text
+    assert "no usable test result" in text
+    assert "A.swift:1:1" in text
+
+
+def test_existing_two_prompts_are_byte_identical():
+    """DEV-522's build prompt and DEV-406's near-miss prompt are pinned."""
+    build_before = _repair_text(build_diagnostic="boom")
+    near_before = _repair_text()
+    # Passing the new kwarg alongside the old one changes nothing.
+    assert _repair_text(build_diagnostic="boom",
+                        warning_diagnostic="  - A.swift:1:1: x") == build_before
+    assert "does NOT compile" in build_before
+    assert "already passes most of its tests" in near_before

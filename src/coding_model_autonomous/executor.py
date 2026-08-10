@@ -2352,6 +2352,7 @@ def build_synthesis_repair_message(
     files: "list[tuple[str, str]]",
     failing_output: str,
     build_diagnostic: str | None = None,
+    warning_diagnostic: str | None = None,
 ) -> list[dict[str, str]]:
     """One targeted repair round on a synthesized artifact.
 
@@ -2370,17 +2371,53 @@ def build_synthesis_repair_message(
     while the fix belongs at the DECLARATION. Run 6 of spec_1ba2db3d died one
     word from compiling because the repair rewrote the test that cited the
     error instead of adding ``: Equatable`` to the type.
+
+    ``warning_diagnostic`` is the third case (DEV-547): the code compiled and
+    the run produced no usable test result — run 9 of spec_9ff962b9 trapped at
+    runtime with 19 tests started and 0 completed — but the compiler flagged
+    generated code as contradicting itself. That is neither of the cases above.
+    Saying the build failed would send the model hunting a syntax error that
+    does not exist; the near-miss wording is worse still, because nothing here
+    is known to pass. Both existing prompts are left byte-identical.
     """
     building = build_diagnostic is not None
+    warning_only = not building and warning_diagnostic is not None
+    if building:
+        state = "\n\n## Current implementation (does NOT compile)\n\n"
+    elif warning_only:
+        state = "\n\n## Current implementation (compiles; no usable test result)\n\n"
+    else:
+        state = "\n\n## Current implementation (passes most tests)\n\n"
     parts = [
         "## Specification\n\n", spec_md,
         "\n\n## Architecture Design\n\n", design_md,
-        "\n\n## Current implementation (does NOT compile)\n\n" if building
-        else "\n\n## Current implementation (passes most tests)\n\n",
+        state,
     ]
     for relpath, content in files:
         parts.append(f"### {relpath}\n\n```\n{content}\n```\n\n")
-    if building:
+    if warning_only:
+        parts.append(
+            "## Compiler warnings on generated code\n\n```\n"
+            + warning_diagnostic + "\n```\n\n"
+            "## Test runner output\n\n```\n" + failing_output + "\n```\n\n"
+            "---\n\n"
+            "This implementation COMPILED, but the test run produced no usable "
+            "result — so nothing here is known to pass, and none of it is "
+            "protected. Do not go looking for a syntax error; there is none.\n\n"
+            "The warnings above are the evidence. Each one is a place where the "
+            "compiler proved the code does not do what it reads as doing: a "
+            "conditional binding reported as unused means the condition is not "
+            "testing what it appears to test; unreachable code and always-true "
+            "comparisons mean a branch can never run. A defect of that shape "
+            "commonly traps at runtime and takes the whole test process down "
+            "before any test can report, which matches what happened here.\n\n"
+            "Fix the CAUSE of each warning, then re-check the surrounding logic "
+            "for the same mistake — a wrong condition is rarely alone. Change a "
+            "test only when the test is itself what is wrong.\n\n"
+            "Output <<<FILE: path>>>…<<<END_FILE>>> blocks for every file you "
+            "change, each with its complete content."
+        )
+    elif building:
         parts.append(
             "## Compiler diagnostics\n\n```\n" + failing_output + "\n```\n\n"
             "---\n\n"

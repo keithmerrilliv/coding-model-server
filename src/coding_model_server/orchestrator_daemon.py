@@ -1678,6 +1678,14 @@ def _blocking_build_warnings(output: str,
             if w.blocking]
 
 
+def _format_build_warnings(warnings: "list[BuildWarning]") -> str:
+    """One `path:line:col: message [#id]` bullet per warning."""
+    return "\n".join(
+        f"  - {w.located()}: {w.message}"
+        + (f"  [#{w.diag_id}]" if w.diag_id else "")
+        for w in warnings)
+
+
 def _build_warning_feedback(warnings: "list[BuildWarning]") -> str:
     """Implementer-facing note for a build that compiled but is not trustworthy.
 
@@ -1685,10 +1693,7 @@ def _build_warning_feedback(warnings: "list[BuildWarning]") -> str:
     *did* compile, and saying otherwise would send the implementer looking for
     a syntax error that does not exist.
     """
-    listed = "\n".join(
-        f"  - {w.located()}: {w.message}"
-        + (f"  [#{w.diag_id}]" if w.diag_id else "")
-        for w in warnings)
+    listed = _format_build_warnings(warnings)
     return (
         "## The build succeeded, but the compiler contradicted the code\n\n"
         "No review was performed. The code compiled — this is not a build "
@@ -4032,13 +4037,30 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
     # with no repair attempted.
     rate = _test_pass_rate(test_output)
     build_failed = _detect_build_failure(test_output, framework, tests_passed)
+    # DEV-547: the unmeasurable case is not always unexplained. Run 9 of
+    # spec_9ff962b9 compiled, started all 19 tests and trapped — no summary, so
+    # no pass rate, and no compiler error either — while the compiler had named
+    # the defect as a warning on the exact line. Consulted only when nothing
+    # failed to compile, since a real diagnostic is better feedback.
+    warning_blocking: list = []
+    if not build_failed and BLOCK_ON_BUILD_WARNINGS:
+        warning_blocking = _blocking_build_warnings(
+            test_output, (framework_opts or {}).get("protected_paths"))
     if rate is None and build_failed:
         logger.info("spec %s: synthesis failed to build (%s) — one targeted "
                     "repair round", spec.id, build_failed)
+    elif rate is None and warning_blocking:
+        logger.info("spec %s: synthesis produced no test summary and no "
+                    "compiler diagnostic, but %d blocking warning(s) on "
+                    "generated code — one targeted repair round: %s",
+                    spec.id, len(warning_blocking),
+                    "; ".join(f"{w.located()} {w.message}"
+                              for w in warning_blocking[:3]))
     elif rate is None:
-        # No summary and no compiler diagnostic: the runner itself is suspect,
-        # which is the hallucinated-PASS case the structural guard handles.
-        # Repairing generated code cannot fix that, so do not spend the call.
+        # No summary, no compiler diagnostic and nothing the compiler objected
+        # to: the runner itself is suspect, which is the hallucinated-PASS case
+        # the structural guard handles. Repairing generated code cannot fix
+        # that, so do not spend the call.
         logger.info("spec %s: synthesis failure not measurable and shows no "
                     "compiler diagnostic — no repair round", spec.id)
         return tests_passed, test_output
@@ -4050,15 +4072,19 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
     else:
         logger.info("spec %s: synthesis near-miss (%.0f%% pass) — one targeted "
                     "repair round", spec.id, rate * 100)
-    # DEV-522: tell the repair which kind of failure it is looking at. At this
-    # point `rate is None` means exactly "arrived via the build-failure branch"
-    # — the two early returns above have already discarded the unmeasurable and
-    # far-from-passing cases — so it is the same discriminator the event's
-    # `trigger` field uses. The near-miss prompt is left byte-identical.
+    # DEV-522: tell the repair which kind of failure it is looking at. With
+    # `rate is None` there are now two ways to be here — failed to build, or
+    # DEV-547's compiled-but-contradicted — and `build_failed` separates them,
+    # since the warning branch is only reachable when it is falsy. The two
+    # early returns above have already discarded the unexplained and
+    # far-from-passing cases. Both existing prompts stay byte-identical.
     repair_messages = executor.build_synthesis_repair_message(
         spec_md, design_md, result.files,
         _extract_actionable_test_output(test_output, framework),
         build_diagnostic=build_failed if rate is None else None,
+        warning_diagnostic=(_format_build_warnings(warning_blocking)
+                            if rate is None and not build_failed
+                            and warning_blocking else None),
     )
     repair_meta: dict = {}
     try:
@@ -4111,7 +4137,12 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
                              # (DEV-469) — the reason is recorded instead.
                              "pre_repair_pass_rate": (
                                  round(rate, 3) if rate is not None else None),
-                             "trigger": ("build_failure" if rate is None
+                             # DEV-547 adds a third value; keeping the two
+                             # existing spellings byte-identical so queries
+                             # written against them still work.
+                             "trigger": ("build_failure"
+                                         if rate is None and build_failed
+                                         else "build_warning" if rate is None
                                          else "near_miss"),
                              # DEV-522: this used to be a bare `files` count of
                              # what the repair EMITTED, which reads as what the
