@@ -2,7 +2,20 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-A local LLM inference server with a multi-agent CLI client. The server provides an OpenAI-compatible API backed by llama.cpp, supporting multiple model configurations with automatic VRAM management. The client is an agentic coding assistant that can execute shell commands, read/write files, search codebases, and manage long-running tasks.
+A local, self-hosted multi-agent coding system. You give it a markdown spec; a
+pipeline of specialised agents plans, designs, implements, compiles, tests and
+repairs the result, stopping at review gates for a human decision. Everything
+runs on your own hardware — an OpenAI-compatible llama.cpp server with automatic
+VRAM management underneath, and an agentic CLI client on top that executes
+shell commands, edits files and searches codebases locally.
+
+It is built around the assumption that **the agents will be wrong**, and that
+the interesting engineering is in what catches them: compiling before a human is
+asked to review, routing a recurring diagnostic back to whoever actually caused
+it, rolling back a "repair" that made the build worse, and refusing to tell a
+model its code failed to compile when it did not.
+
+[Results so far](#results-so-far), including the failures, are below.
 
 ## Architecture
 
@@ -292,6 +305,44 @@ out (not recommended — tests then run with the orchestrator's privileges).
 **Orchestrator daemon:** Runs as a separate systemd unit (`coding-model-orchestrator.service`). Polls the SQLite task store, calls agents via the inference API, runs tests via subprocess. Independent of the interactive client.
 
 See `docs/TUTORIAL.md` for an end-to-end walkthrough of the pipeline.
+
+### Results so far
+
+Honest version, because the failures are the useful part.
+
+**What works unattended.** Two specs have gone from markdown to merged code with
+no human corrections beyond approving the gates — both *modify-existing-code*
+tasks against a real macOS Swift app: cancelling an in-flight generation from a
+Stop button, and a top-k sampling mask. Design approved first attempt,
+implementer's first attempt compiled, suite green.
+
+**What does not, yet.** A harder greenfield spec — the logic core of a Centipede
+clone: seeded mushroom field, chain locomotion, split-on-hit, 17 acceptance
+criteria — has failed **nine times**. It is the spec this project has learned
+the most from:
+
+| Run | How far it got |
+|----|----|
+| 1 | Five implementer attempts, none compiled |
+| 3 | Reached synthesis; three design-level Swift errors consumed the retry budget |
+| 5 | **First end-to-end run.** 21 tests executed, 12 passed — failures behavioural, not structural |
+| 6 | Two words from compiling: a struct reached through `Dictionary` needed `Equatable` |
+| 7–8 | Died on generated files missing `import Foundation`; a repair round then made the build *worse* |
+| 9 | **Compiled.** All 19 tests launched, then the process trapped — one inverted conditional emptied a collection every tick |
+
+Run 9's defect had been flagged by the Swift compiler, on the exact line, as an
+unused-binding warning — in output the pipeline captured, parsed for errors, and
+discarded the warnings from. That is now a blocking check.
+
+**The pattern worth stating:** nearly every failure has been a *system* defect,
+not a model-capability one. A gate that claimed a build succeeded when nothing
+had compiled. A repair prompt telling the model its code "passes most tests"
+about code that did not build. A reviewer's approval notes accepted by the API,
+mirrored to the issue tracker, and read by no agent. Each was found by running
+the thing end to end against a real compiler and reading what it actually said.
+
+Every defect above is tracked, with the evidence that produced it, and the fix
+is pinned by a regression test.
 
 ## API
 
