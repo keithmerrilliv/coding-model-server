@@ -43,6 +43,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
+from typing import NamedTuple
 
 import requests
 from dotenv import load_dotenv
@@ -1552,6 +1553,157 @@ def _diagnostic_messages(notes: str) -> set:
     return set(_attributed_diagnostics(notes))
 
 
+# ── Compiler warnings as signal (DEV-547) ────────────────────────────────────
+#
+# Run 9 of DEV-102 compiled, launched all 19 tests, and died on a runtime trap
+# with zero tests completed. The defect was one inverted conditional that
+# emptied `chains` on every step(), and the compiler had already named it, on
+# the line, in output we captured and parsed:
+#
+#   World.swift:238:20: warning: value 'updateIdx' was defined but never used;
+#                       consider replacing with boolean test [#no-usage]
+#
+# Errors drive control flow throughout this module; warnings were carried along
+# as text and read by nobody. For model-written code that is the wrong trade.
+# The warning classes a human reviewer learns to skim past are precisely the
+# fingerprints of a model emitting confused control flow.
+_BUILD_WARNING_RE = re.compile(
+    r"^\s*(\S.*?):(\d+):(\d+): warning: (.+)$", re.MULTILINE)
+
+# The trailing `[#no-usage]` id modern Swift appends. Absent on older
+# toolchains and on most other compilers, so it is recorded when present and
+# never required for a match.
+_WARNING_DIAG_ID_RE = re.compile(r"\s*\[#([\w.-]+)\]\s*$")
+
+# Deliberately narrow. A false positive costs a full implementer generation
+# plus a runner dispatch, so this holds only classes where the compiler has
+# *proved* that the code contradicts its apparent intent. Style warnings a
+# human would rightly ignore — "never mutated; consider changing to 'let'",
+# "was never used; consider replacing with '_'" on a loop index — are recorded
+# and deliberately NOT blocked.
+_BLOCKING_WARNING_RES = (
+    # `if let x = <expr>` where x is never read. Swift emits this only when the
+    # binding is pointless, which means the condition is not testing what it
+    # appears to test. Run 9's defect, verbatim.
+    re.compile(r"was defined but never used", re.I),
+    # A branch the model wrote and then made unreachable.
+    re.compile(r"will never be executed", re.I),
+    # A condition the compiler can fold to a constant.
+    re.compile(r"comparison .*?always (?:true|false)", re.I),
+    re.compile(r"condition is always (?:true|false)", re.I),
+)
+
+# Kept switchable: this is the first check in the pipeline that can reject an
+# attempt whose build *succeeded*, so it needs a way off without a deploy.
+BLOCK_ON_BUILD_WARNINGS = os.getenv(
+    "AUTONOMOUS_BLOCK_ON_BUILD_WARNINGS", "1").lower() not in ("0", "false", "no")
+
+
+class BuildWarning(NamedTuple):
+    """One `path:line:col: warning:` diagnostic lifted from a build."""
+    path: str          # repo-relative where derivable, else as emitted
+    line: int
+    column: int
+    diag_id: str       # "no-usage" etc., "" when the toolchain emits none
+    message: str       # id stripped
+    blocking: bool
+
+    def located(self) -> str:
+        return f"{self.path}:{self.line}:{self.column}"
+
+
+def _short_diagnostic_path(path: str) -> str:
+    """Drop the per-dispatch worktree prefix, keeping the repo-relative tail.
+
+    Runner paths look like
+    `/Users/km4/…/worktrees/spec_9ff962b9-09f0ad65/Sources/CentipedeCore/World.swift`
+    and the prefix changes on every dispatch, so it is noise in an artifact and
+    breaks any comparison against `protected_paths`.
+    """
+    norm = (path or "").replace("\\", "/")
+    marker = "/worktrees/"
+    idx = norm.find(marker)
+    if idx == -1:
+        return norm
+    tail = norm[idx + len(marker):]
+    # …/worktrees/<dispatch-dir>/<repo-relative path>
+    parts = tail.split("/", 1)
+    return parts[1] if len(parts) == 2 else norm
+
+
+def _parse_build_warnings(output: str,
+                          protected_paths=None) -> "list[BuildWarning]":
+    """Every located warning in *output*, flagged for whether it should block.
+
+    A warning on a protected path is never blocking: the pipeline cannot edit
+    those files, so rejecting an attempt over one would loop forever (DEV-427
+    drops them before dispatch, so the worktree holds `main`'s copy).
+
+    The caret echo line the compiler prints under a diagnostic repeats the
+    message verbatim but carries no `path:line:col`, so it never matches and
+    no de-duplication is needed for it.
+    """
+    if not output:
+        return []
+    protected = {str(p).strip().lstrip("./")
+                 for p in (protected_paths or []) if p}
+    seen = set()
+    found: list[BuildWarning] = []
+    for match in _BUILD_WARNING_RE.finditer(output):
+        raw_path, line, column, message = match.groups()
+        message = message.strip()
+        diag_id = ""
+        id_match = _WARNING_DIAG_ID_RE.search(message)
+        if id_match:
+            diag_id = id_match.group(1)
+            message = _WARNING_DIAG_ID_RE.sub("", message).strip()
+        path = _short_diagnostic_path(raw_path)
+        key = (path, line, column, message)
+        if key in seen:
+            continue
+        seen.add(key)
+        on_protected = path in protected or any(
+            path.endswith("/" + p) for p in protected)
+        blocking = not on_protected and any(
+            r.search(message) for r in _BLOCKING_WARNING_RES)
+        found.append(BuildWarning(path, int(line), int(column),
+                                  diag_id, message, blocking))
+    return found
+
+
+def _blocking_build_warnings(output: str,
+                             protected_paths=None) -> "list[BuildWarning]":
+    """The subset of _parse_build_warnings that should reject an attempt."""
+    return [w for w in _parse_build_warnings(output, protected_paths)
+            if w.blocking]
+
+
+def _build_warning_feedback(warnings: "list[BuildWarning]") -> str:
+    """Implementer-facing note for a build that compiled but is not trustworthy.
+
+    Careful not to repeat DEV-477's mistake in the other direction: this build
+    *did* compile, and saying otherwise would send the implementer looking for
+    a syntax error that does not exist.
+    """
+    listed = "\n".join(
+        f"  - {w.located()}: {w.message}"
+        + (f"  [#{w.diag_id}]" if w.diag_id else "")
+        for w in warnings)
+    return (
+        "## The build succeeded, but the compiler contradicted the code\n\n"
+        "No review was performed. The code compiled — this is not a build "
+        "failure — but the compiler proved that the following lines do not do "
+        "what they read as doing, and every one is in a file this spec "
+        "generated:\n\n"
+        f"{listed}\n\n"
+        "These are not style notes. A conditional binding reported as unused "
+        "means the condition is not testing what it appears to test; "
+        "unreachable code and always-true comparisons mean a branch cannot "
+        "run. Each one is a defect that compiles.\n\n"
+        "Fix every warning above and re-emit ALL files.\n"
+    )
+
+
 def _failure_signature(notes: str) -> str:
     """Order- and location-independent fingerprint of a failure's diagnostics.
 
@@ -2297,6 +2449,8 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
     build_output = ""
     build_passed = None
     build_framework = ""
+    build_warnings: list = []
+    blocking_warnings: list = []
     ts_for_build = _load_plan(spec).get("test_strategy")
     if isinstance(ts_for_build, dict) and ts_for_build.get("framework"):
         fw = build_framework = ts_for_build["framework"]
@@ -2308,15 +2462,31 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
                           "validation (%s)"),
             )
             build_reason = _detect_build_failure(build_output, fw, build_passed)
+            # DEV-547: warnings are only consulted when nothing failed to
+            # compile. A real diagnostic is strictly better feedback, and
+            # stacking the two would bury it.
+            build_warnings = _parse_build_warnings(
+                build_output, ts_for_build.get("protected_paths"))
+            if build_reason is None and BLOCK_ON_BUILD_WARNINGS:
+                blocking_warnings = [w for w in build_warnings if w.blocking]
         except Exception as e:  # never let the check itself stall the spec
             logger.warning("spec %s: pre-gate build check errored (%s) — "
                            "falling through to the review gate", spec.id, e)
             build_reason = None
+            blocking_warnings = []
 
         db.record_event(EventKind.TEST_RAN, spec_id=spec.id, task_id=task.id,
                         payload={"phase": "pre_gate_build_check",
                                  "passed": build_passed if not build_reason else False,
                                  "build_failed": build_reason is not None,
+                                 # DEV-547/DEV-529: warnings become queryable
+                                 # rather than living only in the raw log.
+                                 "warnings": len(build_warnings),
+                                 "blocking_warnings": [
+                                     {"path": w.path, "line": w.line,
+                                      "diag_id": w.diag_id,
+                                      "message": w.message}
+                                     for w in blocking_warnings],
                                  "retry": task.retry_count})
 
         # DEV-478: keep the runner's own words whatever the outcome. Previously
@@ -2350,21 +2520,32 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
                 if _requeue_for_unreachable_runner(db, spec, task):
                     return
 
-    if build_reason is not None:
+    if build_reason is not None or blocking_warnings:
         # Straight back to the implementer with the compiler's own words. No
         # human gate: there is nothing here for a reviewer to decide.
-        _write_artifact(spec_dir, "build_failure.txt", build_output)
-        actionable = _extract_actionable_test_output(
-            build_output, ts_for_build["framework"])
-        feedback = (
-            f"## The code does not compile\n\n"
-            f"No review was performed — the build failed, so there is nothing "
-            f"to review yet. First compiler diagnostic:\n\n"
-            f"    {build_reason}\n\n"
-            f"{_diagnostic_completeness_note(build_output)}"
-            f"Fix every diagnostic below and re-emit ALL files.\n\n"
-            f"```\n{actionable}\n```\n"
-        )
+        if build_reason is not None:
+            _write_artifact(spec_dir, "build_failure.txt", build_output)
+            actionable = _extract_actionable_test_output(
+                build_output, ts_for_build["framework"])
+            feedback = (
+                f"## The code does not compile\n\n"
+                f"No review was performed — the build failed, so there is nothing "
+                f"to review yet. First compiler diagnostic:\n\n"
+                f"    {build_reason}\n\n"
+                f"{_diagnostic_completeness_note(build_output)}"
+                f"Fix every diagnostic below and re-emit ALL files.\n\n"
+                f"```\n{actionable}\n```\n"
+            )
+        else:
+            # DEV-547: compiled, but on proof the code contradicts itself.
+            _write_artifact(spec_dir, "build_warnings.txt", build_output)
+            feedback = _build_warning_feedback(blocking_warnings)
+            logger.warning(
+                "spec %s: build compiled but %d blocking warning(s) on "
+                "generated files — rotating implementer: %s", spec.id,
+                len(blocking_warnings),
+                "; ".join(f"{w.located()} {w.message}"
+                          for w in blocking_warnings[:3]))
         # DEV-468: when the same diagnostics survive repeated implementer
         # attempts, the implementer is not the author of the defect — the
         # design is, and it is re-read unchanged on every retry, so no number
@@ -2375,8 +2556,15 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
         # `final class`, a `static` split with no receiver, and a reference to
         # an undeclared nested type. Each retry read the design, wrote them
         # again, and failed identically.
-        if _route_build_failure_to_architect(db, spec, task, spec_dir,
-                                             feedback, build_reason):
+        #
+        # Not reached on the DEV-547 warning path: _persistent_diagnostics
+        # reads `error:` lines, and a warning-only rejection has none, so the
+        # call would always return False. Skipping it says so out loud rather
+        # than relying on that coincidence. A warning that survives repeated
+        # attempts is just as much a design defect, but teaching the persistence
+        # detector about warnings is DEV-529's shape of work, not this ticket's.
+        if build_reason is not None and _route_build_failure_to_architect(
+                db, spec, task, spec_dir, feedback, build_reason):
             return
 
         # The budget applies here exactly as it does on the parse-failure and
@@ -2404,14 +2592,19 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
             spec_id=spec.id,
             task_id=task.id,
             gate_type=GateType.CODE_REVIEW,
-            prompt_md="## Automated build-failure retry (DEV-429)",
+            prompt_md=("## Automated build-failure retry (DEV-429)"
+                       if build_reason is not None else
+                       "## Automated build-warning retry (DEV-547)"),
         )
         db.respond_to_gate(synth_gate.id, "rejected", notes=feedback)
         db.increment_task_retry(task.id)
         db.update_task_status(task.id, TaskStatus.PENDING)
-        logger.info("spec %s: build failed (%s), rotating implementer "
-                    "without a human gate (attempt %d/%d)",
-                    spec.id, build_reason, task.retry_count + 1, MAX_RETRIES)
+        logger.info("spec %s: %s, rotating implementer "
+                    "without a human gate (attempt %d/%d)", spec.id,
+                    f"build failed ({build_reason})" if build_reason is not None
+                    else (f"build compiled with "
+                          f"{len(blocking_warnings)} blocking warning(s)"),
+                    task.retry_count + 1, MAX_RETRIES)
         return
 
     # DEV-427: the dispatch drops off-limits files so the worktree keeps the
