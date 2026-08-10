@@ -366,24 +366,23 @@ def test_compiled_with_no_summary_now_gets_a_repair_round(db, synth_spec):
     assert "World.swift:238:20" in kwargs["warning_diagnostic"]
 
 
-def test_driver_error_output_still_takes_the_build_failure_path(db, synth_spec):
-    """Run 9's real terminal output, pinned as a limitation rather than a win.
+def test_run9_output_now_takes_the_warning_path(db, synth_spec):
+    """Run 9's real terminal output. This test previously pinned a LIMITATION:
+    the harness printed `error: Process … signal code 5` after a clean build,
+    _detect_build_failure matched that bare driver line, and the repair was
+    told the code did not compile — false, and it buried the warning.
 
-    It compiled, but the harness printed `error: Process … signal code 5`, and
-    _detect_build_failure matches that bare driver line — so this is routed as
-    a build failure and the repair is told the code does not compile, which is
-    false. Overriding that here would mean claiming "the build succeeded" for a
-    genuine emit-module failure, which is the same class of lie in the other
-    direction, so it is deliberately left alone. Fixing it means teaching the
-    build-failure path about unattributed driver errors, which is DEV-435's
-    surface, not this ticket's.
+    DEV-548 made the ordering the discriminator, so the same bytes now reach
+    the warning path. Kept and inverted rather than deleted, because the
+    interesting thing about this fixture is that it *used* to go the other way.
     """
     spec, impl, spec_dir = synth_spec
     assert d._attributed_diagnostics(RUN9_TRAP_BUILD) == []
+    assert d._detect_test_process_crash(RUN9_TRAP_BUILD) is not None
     repaired, kwargs = _synth(db, spec, impl, spec_dir, RUN9_TRAP_BUILD)
     assert repaired is True
-    assert kwargs["build_diagnostic"] is not None
-    assert kwargs["warning_diagnostic"] is None
+    assert kwargs["build_diagnostic"] is None, "it compiled — do not claim otherwise"
+    assert "World.swift:238:20" in kwargs["warning_diagnostic"]
 
 
 def test_unexplained_failure_still_does_not_repair(db, synth_spec):

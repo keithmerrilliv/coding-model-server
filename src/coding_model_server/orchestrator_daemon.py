@@ -2492,6 +2492,11 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
                                       "diag_id": w.diag_id,
                                       "message": w.message}
                                      for w in blocking_warnings],
+                                 # DEV-548: "compiled then crashed" is its own
+                                 # outcome and DEV-529's taxonomy will want it
+                                 # separated from a build failure.
+                                 "test_process_crashed":
+                                     _detect_test_process_crash(build_output),
                                  "retry": task.retry_count})
 
         # DEV-478: keep the runner's own words whatever the outcome. Previously
@@ -2508,7 +2513,18 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
 
         # DEV-477: neither a summary nor a diagnostic means the check told us
         # nothing — an infrastructure fault, not a verdict on the code.
+        #
+        # DEV-548 carves out the case where it told us plenty: a build that
+        # completed and then took a signal. That is a runtime defect with a
+        # clean compile behind it, so it is neither inconclusive nor an
+        # infrastructure fault, and it must not be requeued as one.
         if (build_passed is False and build_reason is None
+                and _detect_test_process_crash(build_output)):
+            logger.warning(
+                "spec %s: pre-gate build check compiled and then crashed — %s; "
+                "this is a runtime defect, not a build failure",
+                spec.id, _detect_test_process_crash(build_output))
+        elif (build_passed is False and build_reason is None
                 and not _observed_a_test_run(build_output, fw)):
             logger.warning(
                 "spec %s: pre-gate build check is inconclusive — no test "
@@ -2776,6 +2792,62 @@ def _diagnostic_completeness_note(output: str) -> str:
     return note + "\n"
 
 
+# ── Built, then died: not the same as never built (DEV-548) ─────────────────
+#
+# `_BUILD_FAILURE_RES["swift_test"]` accepts a bare `^error: ` line, which is
+# what catches the unattributed compile-stage failures DEV-435 documented
+# (`error: emit-module command failed`, `error: fatalError`). It also matches
+# anything the *test harness* prints, including long after the build finished.
+#
+# Run 9 of DEV-102 ended with `Build complete! (3.00s)`, 19 tests launched, and
+# then `error: Process '…swiftpm-testing-helper…' exited with unexpected signal
+# code 5`. That was classified as "the code does not compile" — told to the
+# model in those words, while the only located evidence in the output was the
+# warning DEV-547 parses. Ordering is the cheap discriminator: an unattributed
+# error *after* a completed build is not the compiler rejecting the code.
+_BUILD_COMPLETE_RES = {
+    "swift_test": re.compile(r"^Build complete!", re.MULTILINE),
+    "xcodebuild_test": re.compile(
+        r"^\*\* BUILD SUCCEEDED \*\*|^Build complete!", re.MULTILINE),
+}
+
+# A diagnostic that names a file:line:col is always the compiler talking.
+_LINE_ATTRIBUTED_RE = re.compile(r":\d+:\d+: (?:error|warning): ")
+
+# Driver lines that name a *compile* stage stay build failures wherever they
+# appear, so DEV-435's case is untouched. `fatalError` is the swift driver
+# reporting a crashed sub-job during the build and is kept here deliberately:
+# demoting it would change today's behaviour on every failed Swift build.
+_COMPILE_STAGE_ERROR_RE = re.compile(
+    r"error: .*\b(?:emit-module|compile|link|build)\b.*command failed"
+    r"|error: fatalError"
+    r"|The following build commands failed")
+
+_TEST_PROCESS_CRASH_RE = re.compile(
+    r"^error: Process '(?P<proc>[^']*)' exited with unexpected signal code "
+    r"(?P<signal>\d+)", re.MULTILINE)
+
+
+def _detect_test_process_crash(output: str) -> str | None:
+    """Short reason when the test binary died on a signal (DEV-548).
+
+    This is a third outcome beside "failed to build" and "tests failed": the
+    code compiled, the harness started, and the process was killed before it
+    could report. Under `--parallel` a single trap takes every test down with
+    it, which is why run 9 produced 19 started and 0 completed.
+
+    A behavioural defect, not a build one — an out-of-range subscript, a
+    force-unwrapped nil, a failed precondition.
+    """
+    if not output:
+        return None
+    match = _TEST_PROCESS_CRASH_RE.search(output)
+    if match is None:
+        return None
+    return (f"the test process exited on signal {match.group('signal')} "
+            f"before any test reported")
+
+
 def _detect_build_failure(output: str, framework: str, passed: bool) -> str | None:
     """Return a short reason when *output* shows the code never built.
 
@@ -2783,17 +2855,35 @@ def _detect_build_failure(output: str, framework: str, passed: bool) -> str | No
     fine, and some tests legitimately print the word "error" in their own
     output. Returning None means "this is a real test failure, or we cannot
     tell" — both of which keep the normal gate path.
+
+    DEV-548: an unattributed `error:` printed after the build completed is not
+    a build failure. It is some later process exiting non-zero, and calling it
+    a compile failure makes the pipeline state something false to the model.
     """
     if passed or not output:
         return None
     pattern = _BUILD_FAILURE_RES.get(framework.lower())
     if pattern is None:
         return None
-    match = pattern.search(output)
-    if match is None:
-        return None
-    line = output[match.start():].splitlines()[0].strip()
-    return line[:200] if line else "compiler diagnostic present"
+    complete = _BUILD_COMPLETE_RES.get(framework.lower())
+    complete_match = complete.search(output) if complete else None
+    completed_at = complete_match.start() if complete_match else None
+
+    for match in pattern.finditer(output):
+        line = output[match.start():].splitlines()[0].strip()
+        if not line:
+            continue
+        # The compiler naming a file, or a driver naming a compile stage:
+        # a build failure wherever it appears.
+        if (_LINE_ATTRIBUTED_RE.search(line)
+                or _COMPILE_STAGE_ERROR_RE.search(line)):
+            return line[:200]
+        # Bare `error:` after the build finished — a later process failing,
+        # not the compiler. Keep looking; something earlier may be real.
+        if completed_at is not None and match.start() > completed_at:
+            continue
+        return line[:200]
+    return None
 
 
 # DEV-468: how many consecutive implementer attempts may produce the same
@@ -2944,6 +3034,18 @@ def _build_check_line(build_passed: bool | None, build_output: str = "",
                 "reaching you. Nothing here has been compiled. Bring the "
                 "runner back and reject this gate to retry; do not approve it "
                 "on a reading of the diff.\n")
+    # DEV-548: "no summary" is not automatically "we learned nothing". A build
+    # that completed and then took a signal tells us a great deal — the code
+    # compiles and traps at runtime — and calling that inconclusive would send
+    # a reviewer looking for a build problem that does not exist.
+    crash = _detect_test_process_crash(build_output)
+    if crash:
+        return (f"Build check: **compiled, then crashed** — {crash}. The build "
+                f"succeeded, so this is a runtime defect, not a build error. "
+                f"No test reported a result, so the suite proves nothing "
+                f"either way: under a parallel runner a single trap "
+                f"(out-of-range index, force-unwrapped nil, failed "
+                f"precondition) takes every test down with it.\n")
     return ("Build check: **inconclusive** — the runner returned neither a test "
             "summary nor a recognised compiler diagnostic, so nothing here "
             "confirms the code builds. Treat the build as unverified.\n")
