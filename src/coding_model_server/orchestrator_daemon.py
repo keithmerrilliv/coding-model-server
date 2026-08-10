@@ -1144,9 +1144,16 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
     if not plan_yaml:
         logger.warning("spec %s: no plan.yaml on disk or in DB — architect "
                        "runs without plan constraints", spec.id)
+    plan_conditions = _approved_gate_conditions(
+        db, spec.id, GateType.PLAN_APPROVAL)
+    if plan_conditions:
+        logger.info("spec %s: carrying %d chars of plan-approval conditions "
+                    "into the architect prompt (DEV-546)",
+                    spec.id, len(plan_conditions))
     messages = build_architect_message(
         spec_md, rejection_notes=rejection_notes, plan_yaml=plan_yaml,
-        reference_files=_fetch_protected_files_for_spec(spec))
+        reference_files=_fetch_protected_files_for_spec(spec),
+        approval_conditions=plan_conditions)
 
     # Architect output is structured (<<<DESIGN>>> / <<<COMPLEXITY>>> blocks).
     # The model occasionally drifts and returns prose without the markers; one
@@ -1292,6 +1299,29 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
                 spec.id)
 
 
+def _approved_gate_conditions(db: Database, spec_id: str, gate_type) -> "str | None":
+    """Notes a human attached when APPROVING a gate of *gate_type* (DEV-546).
+
+    Rejection notes propagate and demonstrably work — three design rejections
+    on run 9 each produced a design that addressed the named items. Approval
+    notes were stored on the gate row, mirrored to Jira, and read by nobody,
+    while the API accepted `notes` identically on both decisions and the gate
+    prompt invited them. Nothing told the reviewer the difference.
+
+    That is not merely a gap, it forces a false choice. The correct review of
+    run 9's design 6 was "approve, and fix these three one-liners while you
+    implement". The options on offer were "approve and say nothing that
+    matters" or "reject and spend another architect round on three lines".
+    Taking the former cost an implementer attempt rediscovering, through the
+    compiler, a defect that was already written down.
+    """
+    gate = _latest_gate_of_type(db, spec_id, gate_type)
+    if gate is None or gate.status != GateStatus.APPROVED:
+        return None
+    notes = (gate.reviewer_notes or "").strip()
+    return notes or None
+
+
 def _latest_architect_feedback(db: Database, spec: Spec, spec_dir: Path) -> "str | None":
     """Feedback for an architect re-run, combining the two sources:
       * design_review_feedback.md — the design-review rejection (#3), consumed
@@ -1427,12 +1457,21 @@ def _generate_implementation(
     caller handles identically (rotation retry on ParseError).
     """
     n_files = executor.estimate_design_file_count(design_md)
+    # DEV-546: conditions the reviewer attached when APPROVING this design.
+    # Fetched here so both generation paths get them from one place.
+    approval_conditions = _approved_gate_conditions(
+        db, spec.id, GateType.DESIGN_APPROVAL)
+    if approval_conditions:
+        logger.info("spec %s: carrying %d chars of design-approval conditions "
+                    "into the implementer prompt (DEV-546)",
+                    spec.id, len(approval_conditions))
     if executor.use_manifest_mode(design_md):
         logger.info("spec %s: manifest mode (design enumerates ~%d files >= "
                     "threshold %d)", spec.id, n_files, executor.MANIFEST_FILE_THRESHOLD)
         return _generate_via_manifest(
             db, spec, task, spec_dir, spec_md, design_md,
             chosen_agent, clarifications, rejection_notes, tally=tally,
+            approval_conditions=approval_conditions,
         )
 
     # Single-call path: one response with every file, budget scaled to the design.
@@ -1441,6 +1480,7 @@ def _generate_implementation(
         spec_md, design_md, rejection_notes=rejection_notes,
         clarifications=clarifications, existing_files=existing_files,
         reference_files=_fetch_protected_files_for_spec(spec),
+        approval_conditions=approval_conditions,
     )
     impl_max_tokens = executor.implementer_max_tokens_for(design_md)
     logger.info("spec %s: single-call implementer budget=%d tokens (~%d files)",
@@ -1807,6 +1847,7 @@ def _build_from_manifest(
     db, spec, task, spec_md, design_md, entries, chosen_agent,
     clarifications, rejection_notes, *, prior_files, only, raw,
     tally: "dict | None" = None,
+    approval_conditions: "str | None" = None,
 ) -> "ImplementerResult | ParseError":
     """Produce every file in the manifest, in dependency order.
 
@@ -1841,6 +1882,7 @@ def _build_from_manifest(
                 written, chosen_agent, clarifications, rejection_notes,
                 existing_by_path=existing_by_path, tally=tally,
                 reference_files=reference_files,
+                approval_conditions=approval_conditions,
             )
             generated += 1
         if content is None and prior_files and entry.path in prior_files:
@@ -1884,6 +1926,7 @@ def _generate_via_manifest(
     spec_md: str, design_md: str, chosen_agent: "str | None",
     clarifications: list, rejection_notes: "str | None",
     tally: "dict | None" = None,
+    approval_conditions: "str | None" = None,
 ) -> "ImplementerResult | ParseError":
     """Manifest → per-file generation.
 
@@ -1958,7 +2001,7 @@ def _generate_via_manifest(
                     db, spec, task, spec_md, design_md, entries, chosen_agent,
                     clarifications, rejection_notes,
                     prior_files=prior_files, only=cited, raw="targeted-retry",
-                    tally=tally,
+                    tally=tally, approval_conditions=approval_conditions,
                 )
                 if not isinstance(result, ParseError):
                     _persist_manifest(spec_dir, entries)
@@ -1970,7 +2013,8 @@ def _generate_via_manifest(
     # ── Full generation: manifest call + per-file ─────────────────────────────
     meta: dict = {}
     manifest_raw = call_agent(
-        "implementer", build_manifest_message(spec_md, design_md, clarifications),
+        "implementer", build_manifest_message(spec_md, design_md, clarifications,
+                                             approval_conditions=approval_conditions),
         agent=chosen_agent, max_tokens=executor.MANIFEST_MAX_TOKENS, meta=meta,
     )
     _note_truncation(db, spec, task, "manifest", meta, executor.MANIFEST_MAX_TOKENS)
@@ -1999,6 +2043,7 @@ def _generate_via_manifest(
         db, spec, task, spec_md, design_md, manifest.entries, chosen_agent,
         clarifications, rejection_notes,
         prior_files=None, only=None, raw=manifest.raw, tally=tally,
+        approval_conditions=approval_conditions,
     )
     if not isinstance(result, ParseError):
         _persist_manifest(spec_dir, manifest.entries)
@@ -2181,6 +2226,7 @@ def _generate_one_file(
     existing_by_path: "dict[str, str] | None" = None,
     tally: "dict | None" = None,
     reference_files: "list[tuple[str, str]] | None" = None,
+    approval_conditions: "str | None" = None,
 ) -> "str | None":
     """Generate a single file's content, with bounded parse-retries. Returns the
     content (associated with the manifest's canonical path) or None on failure."""
@@ -2193,7 +2239,8 @@ def _generate_one_file(
             build_per_file_message(spec_md, design_md, manifest_entries, entry,
                                    written_summary, clarifications, rejection_notes,
                                    existing_content=existing_content,
-                                   reference_files=reference_files),
+                                   reference_files=reference_files,
+                                   approval_conditions=approval_conditions),
             agent=chosen_agent, max_tokens=executor.PER_FILE_MAX_TOKENS, meta=meta,
             memory_query=executor.file_memory_query(entry),
         )
