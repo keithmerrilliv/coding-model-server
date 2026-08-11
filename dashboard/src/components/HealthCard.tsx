@@ -28,7 +28,8 @@ const HealthCard: React.FC = () => {
   const getRelativeTime = (isoString: string) => {
     try {
       const diff = Date.now() - new Date(isoString).getTime();
-      const seconds = Math.floor(diff / 1000);
+      // Clock skew between browser and server can make diff slightly negative
+      const seconds = Math.max(0, Math.floor(diff / 1000));
       if (seconds < 60) return `${seconds}s ago`;
       const minutes = Math.floor(seconds / 60);
       return `${minutes}m ago`;
