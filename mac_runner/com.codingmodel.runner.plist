@@ -14,16 +14,16 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/youruser/Dev/qwen-server/venv/bin/python</string>
+    <string>/Users/youruser/Dev/coding-model-server/venv/bin/python</string>
     <string>-m</string>
     <string>mac_runner.server</string>
   </array>
 
-  <!-- NOT stale: the Mac checkout really lives at ~/Dev/qwen-server (the
-       GitHub remote is still qwen-server.git). Renaming this without
-       renaming the directory breaks the runner. See docs/SECURITY_MIGRATION.md. -->
+  <!-- WorkingDirectory must match the actual checkout location (the remote is
+       coding-model-server.git since 2026-08). Renaming one without the other
+       breaks the runner. See docs/SECURITY_MIGRATION.md. -->
   <key>WorkingDirectory</key>
-  <string>/Users/youruser/Dev/qwen-server</string>
+  <string>/Users/youruser/Dev/coding-model-server</string>
 
   <key>EnvironmentVariables</key>
   <dict>
