@@ -8,8 +8,8 @@ machine and diagram 1 is the whole of it. But two things drive behaviour that a
 state machine cannot express, and they are where the complexity actually lives:
 
 - **The transition is chosen by a classifier, not by the state.** One test
-  dispatch produces output that is sorted into six outcomes, and the outcome
-  decides where control goes. Same state, same event, six destinations
+  dispatch produces output that is sorted into seven outcomes, and the outcome
+  decides where control goes. Same state, same event, seven destinations
   (diagram 5).
 - **Budgets are orthogonal counters that gate transitions.** The same state and
   the same event lead to different places depending on a counter that is
@@ -32,20 +32,28 @@ stateDiagram-v2
     [*] --> pending_plan: spec submitted
     pending_plan --> needs_clarification: planner has questions
     needs_clarification --> pending_plan: human answers
-    pending_plan --> plan_review: plan.yaml produced
+    needs_clarification --> cancelled: human rejects the questions
+    pending_plan --> pending_plan: plan fails validation (automatic)
+    pending_plan --> plan_review: plan.yaml produced and valid
+    pending_plan --> failed: validation rounds exhausted
     plan_review --> pending_plan: rejected (replan)
     plan_review --> executing: approved
+    plan_review --> failed: gate vanished (defensive)
     executing --> done: release gate approved
     executing --> failed: budget exhausted / unrecoverable
-    executing --> cancelled: operator cancels
     done --> [*]
     failed --> [*]
     cancelled --> [*]
 ```
 
-`plan_review` is also entered automatically when plan validation rejects the
-plan itself — up to `PLAN_VALIDATION_MAX_ROUNDS` (2) times, with no human
-involved. A third failure fails the spec before anyone sees it.
+Plan validation runs *before* `plan_review` is ever entered: an invalid plan is
+rejected straight back to `pending_plan`, automatically — up to
+`PLAN_VALIDATION_MAX_ROUNDS` (2) replans with no human involved. A third
+failure fails the spec before anyone sees it.
+
+Note the edge that is **not** there: nothing in the code writes `cancelled`
+except a human rejecting a clarification gate. Cancelling a spec that is
+already executing takes DB surgery (DEV-493 tracks giving it a real path).
 
 ---
 
@@ -83,11 +91,14 @@ Three consequences that shape everything else:
   VRAM, and launches the next. A swap requested while another request is in
   flight is refused with a 503 rather than killing the live request.
 - **Four spec workers share that one GPU.** They are concurrent in the
-  orchestrator and serialised at the model. The practical rule: **do not run two
-  specs at once.** The client retries a deferred swap on a 10/30/60s backoff,
-  which was sized for VRAM release — but a swap deferred behind *another spec's
-  generation* waits 10–20 minutes, outlasts the backoff, and can fail the second
-  spec outright.
+  orchestrator and serialised at the model. The practical rule remains: **run
+  one spec at a time.** A swap refused because another request holds the model
+  comes back as a 503 with `Retry-After`, and the client waits it out without
+  consuming a retry attempt — only *transport* errors burn attempts, on a
+  10/30/60s backoff. The wait is bounded by the per-role call timeout (45 min
+  architect, 30 min implementer), so contention behind another spec's
+  generation no longer fails the second spec outright (DEV-491); it spends
+  wall-clock, and only a generation that outlasts the role timeout fails.
 - **The build is not local.** Swift and Xcode work is dispatched over HTTP to a
   runner on another machine, which materialises a git worktree per dispatch,
   applies the generated files, runs the suite once, and returns the output. That
@@ -98,10 +109,14 @@ Three consequences that shape everything else:
 
 ---
 
-## 3. Inside `executing`: three tasks, four gates
+## 3. Inside `executing`: tasks and gates
 
-`executing` bootstraps three tasks — architect, implementer, reviewer — which
-run in order. Each has its own `retry_count`. Human gates are the diamonds.
+`executing` bootstraps one task per phase in `plan.yaml` — in practice three:
+architect, implementer, reviewer — run in order, each with its own
+`retry_count`. Three human gate types live inside `executing`
+(`design_approval`, `code_review`, `release_approval`); clarification and plan
+approval have already happened by now. The diamonds marked HUMAN are human;
+the testability check and the classifier are automated.
 
 ```mermaid
 flowchart TD
@@ -118,7 +133,7 @@ flowchart TD
     CLASS -->|clean| CGATE{code_review<br/>HUMAN}
     CLASS -->|build failed / blocking warning| IMPL
     CLASS -->|same diagnostic twice| ARCH
-    CLASS -->|runner unreachable| BUILD
+    CLASS -->|"runner unreachable:<br/>requeue, NOT charged"| IMPL
 
     CGATE -->|rejected + notes| IMPL
     CGATE -->|approved| REV[reviewer<br/>runs the real suite]
@@ -142,6 +157,10 @@ Two edges are worth naming because they are the ones people miss:
 - **`IMPL -.-> SYNTH`** is the escape hatch. Exhausting the retry budget does
   not fail the spec; the accumulated attempts are merged, because the union of
   six near-misses is often closer to correct than any single one of them.
+- **`CLASS --> IMPL` on runner-unreachable** re-runs the whole implementer
+  generation: the task is set back to PENDING, uncharged. There is no way to
+  re-run just the build check, so a free requeue still costs a full generation
+  of wall-clock — which is why the requeue budget in section 7 is small.
 
 ---
 
@@ -151,75 +170,83 @@ Two edges are worth naming because they are the ones people miss:
 
 ```mermaid
 flowchart TD
-    D[/approved design/] --> N{"how many files<br/>does it enumerate?"}
-    N -->|"&lt; 8"| ONE["SINGLE CALL<br/>every file in one response<br/>budget scales with the design"]
-    N -->|"≥ 8"| MAN["MANIFEST CALL<br/>file list, dependency order"]
+    D[/approved design/] --> N{"too big for one call?<br/>files ≥ 8 OR units ≥ 8"}
+    N -->|"no"| ONE["SINGLE CALL<br/>every file in one response<br/>budget scales with the design"]
+    N -->|"yes"| MAN["MANIFEST CALL<br/>file list, dependency order"]
     MAN --> PF["one bounded call PER FILE<br/>each sees the manifest, the design,<br/>and a summary of files already written"]
     ONE --> OUT[/files written/]
     PF --> OUT
-    OUT -.->|"retry citing specific files"| TGT["TARGETED RETRY<br/>regenerate only cited files,<br/>reuse the rest from the snapshot"]
+    OUT -.->|"retry citing specific files<br/>(manifest mode ONLY)"| TGT["TARGETED RETRY<br/>regenerate only cited files,<br/>reuse the rest from the snapshot"]
     TGT --> OUT
 ```
 
 The fork exists because one capped response cannot hold a large project. The
 cost is that per-file calls each see a *summary* of their siblings rather than
 their source, so inter-file contracts can drift — a method renamed in file 3
-that file 9 still calls. Targeted retry has the mirror problem: reusing
-uncited files is what makes a retry affordable, and also what lets a defect in
-an uncited file survive every attempt. When a diagnostic cites only test files
-but the real fault is in the module, the retry regenerates the tests forever.
-That is why the upstream route in diagram 6 exists.
+that file 9 still calls. Targeted retry — which only exists in manifest mode,
+since it needs the prior run's manifest to know what to reuse — has the mirror
+problem: reusing uncited files is what makes a retry affordable, and also what
+lets a defect in an uncited file survive the attempt. When a diagnostic cites
+only test files but the real fault is in the module, a targeted retry
+regenerates the wrong files. Two guards bound that: after
+`AUTONOMOUS_TARGETED_RETRY_MAX_REPEATS` (1) targeted attempts fail on the
+identical diagnostic, the next retry widens to a full regeneration — and notes
+carrying any *unattributed* error widen it immediately. The upstream route in
+diagram 6 exists for the same problem one level up, where widening the retry
+cannot help because the defect is in the design.
 
 `AUTONOMOUS_IMPLEMENTER_MODE` forces `single` or `manifest` if you need to pin
-it; the default decides per design at a threshold of 8 files.
+it; the default (`auto`) takes manifest mode when the design enumerates
+`AUTONOMOUS_MANIFEST_FILE_THRESHOLD` (8) or more files — or 8 or more declared
+units, the guard for designs whose file list understates their size.
 
 ---
 
 ## 5. Classifying one test dispatch
 
 This is the part a state machine cannot draw. A single runner call returns
-`(passed, output)`, and *six* different conclusions can follow. Order matters —
-each check exists because a real run was misdiagnosed without it.
+`(passed, output)`, and *seven* different conclusions can follow. Order
+matters — each check exists because a real run was misdiagnosed without it.
 
 ```mermaid
 flowchart TD
     IN[/runner returns passed + output/] --> P{passed?}
-    P -->|yes| OK([compiled, suite green<br/>→ human code_review gate])
-    P -->|no| ATTR{"a diagnostic naming<br/>file:line:col?"}
+    P -->|yes| WARN
+    P -->|no| DIAG{"a recognised error line?<br/>attributed file:line:col, a compile-stage<br/>driver line, or a bare 'error:'<br/>BEFORE 'Build complete!'"}
 
-    ATTR -->|yes| BF([BUILD FAILURE<br/>→ implementer, charged])
-    ATTR -->|no| DRV{"compile-stage driver error?<br/>emit-module / compile /<br/>link command failed, fatalError"}
+    DIAG -->|"yes — first match<br/>in output order"| BF([BUILD FAILURE<br/>→ implementer, charged])
+    DIAG -->|"nothing recognised, or only a bare<br/>'error:' after a completed build"| CRASH{"test process died<br/>on a signal?"}
 
-    DRV -->|yes| BF
-    DRV -->|no| DONEMARK{"bare error AFTER<br/>'Build complete!'?"}
-
-    DONEMARK -->|no| BF
-    DONEMARK -->|yes| CRASH{"test process died<br/>on a signal?"}
-
-    CRASH -->|yes| TRAP([COMPILED, THEN CRASHED<br/>runtime defect, not a build one])
-    CRASH -->|no| WARN{"blocking warning on<br/>a generated file?"}
-
+    CRASH -->|yes| TRAP[COMPILED, THEN CRASHED<br/>runtime defect, not a build one]
     TRAP --> WARN
-    WARN -->|yes| WB([WARNING BLOCK<br/>→ implementer, charged])
-    WARN -->|no| SUMM{"a test summary<br/>in the output?"}
+    CRASH -->|no| SUMM{"a test summary<br/>in the output?"}
 
-    SUMM -->|yes| TF([TEST FAILURE<br/>behaviour → human gate])
+    SUMM -->|yes| WARN
     SUMM -->|no| UNREACH{"runner unreachable?"}
 
-    UNREACH -->|yes| RQ([INCONCLUSIVE<br/>→ requeue, NOT charged])
-    UNREACH -->|no| INC([INCONCLUSIVE<br/>→ human gate, build unverified])
+    UNREACH -->|yes| RQ([INCONCLUSIVE<br/>→ requeue the implementer task,<br/>NOT charged])
+    UNREACH -->|no| INC[build unverified]
+    INC --> WARN
+
+    WARN{"blocking warning on a<br/>generated file?<br/>(narrow allowlist)"} -->|yes| WB([WARNING BLOCK<br/>→ implementer, charged])
+    WARN -->|no| GATE([human code_review gate<br/>worded: suite green ·<br/>test failures · compiled-then-crashed ·<br/>build unverified])
 ```
+
+The warning check is a final intercept, not a branch of its own: it is
+consulted on every path where nothing failed to compile — including a green
+suite — because a blocking warning is the compiler proving the code contradicts
+itself regardless of what the tests said. The requeue is the one exit that
+bypasses it: no code reached the compiler, so there is nothing to intercept.
 
 Why each branch exists, since every one of them is a scar:
 
 | Branch | The failure it prevents |
 |---|---|
 | `passed?` first | Some suites legitimately print the word "error"; a green suite proves the build was fine. |
-| attributed before driver | Cascade errors in test files are consequences; the module-level cause has no file:line. |
-| compile-stage driver errors | `emit-module command failed` is a real build failure with no attribution — it must not be demoted. |
+| one scan for attributed *and* driver lines | Both are recognised in a single pass over the output — whichever appears first wins, and both mean BUILD FAILURE. The driver patterns (`emit-module` / `compile` / `link command failed`, `fatalError`) exist because a module-level cause has no `file:line` to attribute, and must not be demoted for it. |
 | the `Build complete!` ordering test | The harness prints `error:` long after the build finished. Without this, a run that compiled and then trapped was reported to the model as "your code does not compile". |
 | crash as its own outcome | Under a parallel runner one trap takes every test down, so "no summary" is not "we learned nothing". |
-| warnings | The compiler frequently names the defect on the exact line and nothing was reading it. |
+| warnings, narrow allowlist | The compiler frequently names the defect on the exact line and nothing was reading it. Only the allowlist blocks — unused value/binding, unreachable code, always-true/false comparison; style warnings are recorded but never block. `AUTONOMOUS_BLOCK_ON_BUILD_WARNINGS=0` turns the whole intercept off. |
 | unreachable → requeue | A sleeping laptop is not the implementer's mistake, and must not spend its budget. |
 
 ---
@@ -231,21 +258,31 @@ Same failure, three destinations, decided by evidence rather than by state.
 ```mermaid
 %%{init: {'themeVariables': {'fontSize': '30px'}}}%%
 flowchart TD
-    F[/attempt failed/] --> Q1{same located diagnostic<br/>as the previous attempt?}
-    Q1 -->|yes| A[route to ARCHITECT<br/>implementer NOT charged]
+    F[/build failed/] --> Q1{"same located diagnostic<br/>as the previous attempt,<br/>AND the architect has<br/>retries left?"}
+    Q1 -->|yes| A[route to ARCHITECT<br/>implementer NOT charged<br/>architect IS charged]
     Q1 -->|no| Q2{implementer<br/>retry_count &lt; 5?}
     Q2 -->|yes| I[retry IMPLEMENTER<br/>charged, notes attached]
     Q2 -->|no| S[SYNTHESIS<br/>merge every attempt]
-    S --> Q3{does it build?}
-    Q3 -->|no| R1[repair round<br/>aimed at the diagnostic]
-    Q3 -->|"yes, but ≥80% tests pass"| R2[repair round<br/>aimed at the failures]
-    Q3 -->|"yes, but &lt;80%"| X([fail — too far from passing<br/>to be worth a call])
+    S --> Q3{"what does the merge's<br/>own build say?"}
+    Q3 -->|"build failed<br/>(recognised diagnostic)"| R1[repair round<br/>aimed at the diagnostic]
+    Q3 -->|"compiled, no summary,<br/>blocking warning"| R1B[repair round<br/>aimed at the warning]
+    Q3 -->|"suite ran, ≥80% pass"| R2[repair round<br/>aimed at the failures]
+    Q3 -->|"suite ran, &lt;80%"| X([fail — too far from passing<br/>to be worth a call])
+    Q3 -->|"no summary, no diagnostic,<br/>no warning"| X2([no repair — the runner is<br/>suspect, not the code;<br/>the failure stands])
     R1 --> V{did the repair<br/>strictly reduce diagnostics?}
+    R1B --> V
     R2 --> V
     V -->|yes| K[keep it]
     V -->|no| RB[ROLL BACK<br/>restore pre-repair files]
     RB --> X
 ```
+
+Two preconditions the boxes cannot hold: the upstream route needs an architect
+task to exist *with retries left* — otherwise the failure falls through to an
+ordinary, charged implementer retry — and a WARNING BLOCK never takes the
+upstream route at all; only build failures do. "Not charged" refers to the
+implementer: the architect's own `retry_count` is incremented for every routed
+failure, which is what stops the loop from being free.
 
 The rollback exists because a repair round once fixed the defect it was given
 and simultaneously stripped `import Foundation` from every file, taking the
@@ -265,10 +302,14 @@ table to read first when a run ends somewhere surprising.
 | Design review revisions | 1 | `AUTONOMOUS_DESIGN_REVIEW_MAX_REVISIONS` | Automated design-review rejections. |
 | Plan validation rounds | 2 | `AUTONOMOUS_PLAN_VALIDATION_MAX_ROUNDS` | Automatic replans before the spec fails. |
 | Upstream-routing threshold | 1 | `AUTONOMOUS_BUILD_FAILURE_ARCHITECT_THRESHOLD` | Consecutive identical diagnostics before the design is blamed. |
-| Unreachable-runner requeues | 3 | — | Consecutive free requeues before escalating to a human. |
+| Unreachable-runner requeues | 3 | — | Free requeues before escalating to a human — counted across the spec's last 20 test dispatches, *not* consecutively. Three scattered outages exhaust it the same as three in a row. |
 | Synthesis repair rounds | 1 | — | Hard-coded. One repair, then the run ends. |
 | Repair pass-rate floor | 0.8 | `AUTONOMOUS_SYNTHESIS_REPAIR_MIN_RATE` | Below this, a repair call is not worth making. |
 | Parse retries | 2 / 2 | `AUTONOMOUS_ARCHITECT_PARSE_RETRIES`, `AUTONOMOUS_PER_FILE_PARSE_RETRIES` | Malformed agent output before giving up. |
+| Warning blocking | on | `AUTONOMOUS_BLOCK_ON_BUILD_WARNINGS` | The whole WARNING BLOCK intercept in diagram 5. `0` disables it. |
+| Targeted-retry repeats | 1 | `AUTONOMOUS_TARGETED_RETRY_MAX_REPEATS` | Identical targeted failures before the retry widens to a full regeneration. |
+| Manifest threshold | 8 | `AUTONOMOUS_MANIFEST_FILE_THRESHOLD` | Files (or declared units) a design enumerates before the implementer forks to manifest mode (diagram 4). |
+| Supervisor transitions | 8 | `AUTONOMOUS_MAX_SUPERVISOR_TRANSITIONS` | Budget for the supervisor, which is **off by default** (`AUTONOMOUS_SUPERVISOR=0`). When enabled, it replaces the fixed rejection edges in diagram 3 with an agent decision; nothing else in this document changes. |
 
 **Three traps in the accounting**, each of which has cost a real run:
 
