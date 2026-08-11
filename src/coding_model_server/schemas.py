@@ -75,6 +75,12 @@ class ChatCompletionRequest(BaseModel):
     # know their real subject pass it here — e.g. the target file's path,
     # purpose and exports. Falls back to the last user message when unset.
     memory_query: Optional[str] = None
+    # Variables handed to llama-server's Jinja chat template, e.g.
+    # {"enable_thinking": false} on a hybrid template like Qwen3.6's (DEV-556).
+    # Overrides the agent's own `chat_template_kwargs` when present; when both
+    # are unset nothing is sent and the template's default applies, which is
+    # every request's behaviour before this field existed.
+    chat_template_kwargs: Optional[Dict[str, Any]] = None
 
     @field_validator('messages')
     @classmethod

@@ -68,7 +68,8 @@ def _create_model_config(path_env, path_default, n_gpu_layers, n_ctx=32768, n_ba
 
 
 def _create_agent_config(description, system_prompt, model_config, executor=False,
-                         system_prompt_native_tools=None):
+                         system_prompt_native_tools=None,
+                         chat_template_kwargs=None):
     """Helper function to create standardized agent configurations.
 
     ``system_prompt_native_tools`` is an optional alternative system prompt that
@@ -76,6 +77,18 @@ def _create_agent_config(description, system_prompt, model_config, executor=Fals
     array. Use it to drop marker-format guidance for tools that have been
     migrated to native function-calls (otherwise the marker docs collide with
     the schema and the model emits malformed hybrids).
+
+    ``chat_template_kwargs`` is forwarded to llama-server's Jinja renderer, so
+    a hybrid template's conditionals can be set per AGENT rather than per call
+    site — most importantly ``{'enable_thinking': False}`` (DEV-556). Two agents
+    may then share one GGUF and differ only in whether the template opens a
+    reasoning block, which is what makes the thinking-on/off head-to-head a
+    plain roster comparison with no model swap.
+
+    Omitted by default: absent the key the payload is byte-identical to what
+    the server sent before this existed, so every agent keeps the template's
+    own default until one deliberately opts out. Requires ``--jinja`` on the
+    model (llama-server ignores it otherwise).
     """
     config = {
         'description': description,
@@ -86,6 +99,8 @@ def _create_agent_config(description, system_prompt, model_config, executor=Fals
         config['executor'] = True
     if system_prompt_native_tools is not None:
         config['system_prompt_native_tools'] = system_prompt_native_tools
+    if chat_template_kwargs:
+        config['chat_template_kwargs'] = dict(chat_template_kwargs)
     return config
 
 
@@ -874,6 +889,29 @@ Update these after each retrieval step. They help you stay organized and efficie
             _ARCHITECT_SYSTEM_PROMPT,
             _DENSE_27B,
             executor=True
+        ),
+        # Same GGUF, same prompt, reasoning block suppressed — the second arm of
+        # the DEV-556 head-to-head. Qwen3.6's template gates <think> behind
+        # enable_thinking, and we never sent it, so max_tokens has always been a
+        # thinking-PLUS-design budget of which only the design half is visible:
+        # the reasoning is generated, counted by the server's usage, and then
+        # dropped by strip_thinking before call_agent sees a byte of it. Run 12
+        # spent 16000 completion tokens and 30.5 minutes to emit ~500 tokens of
+        # design, then wrote the whole design in 5369 on the identical prompt
+        # (DEV-543). 6 of 20 architect calls across runs 10-12 truncated, every
+        # one exactly at the ceiling.
+        #
+        # NOT yet the incumbent. Fourteen good designs came out of this model
+        # WITH thinking on and we have no sample of it designing without, so
+        # cheaper is not yet known to be as good — see DEV-93/DEV-99 for two
+        # times the measurement contradicted the intuition here. Repoint
+        # AUTONOMOUS_ARCHITECT_AGENT only once the judged eval says so.
+        'dense_architect_nothink': _create_agent_config(
+            'Architect (no reasoning) — Qwen3.6-27B MTP Q4_K_M, enable_thinking=False (DEV-556 eval arm; identical to dense_architect otherwise)',
+            _ARCHITECT_SYSTEM_PROMPT,
+            _DENSE_27B,
+            executor=True,
+            chat_template_kwargs={'enable_thinking': False},
         ),
         # Supervisor — meta-orchestrator. Always invoked with native tools
         # (decide()), never with marker-based shell tools, so executor=False.
