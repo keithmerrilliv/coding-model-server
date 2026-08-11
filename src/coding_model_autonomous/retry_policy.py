@@ -16,6 +16,7 @@ cycle. This module has no edges back into the daemon.
 from __future__ import annotations
 
 import logging
+import hashlib
 import shutil
 from pathlib import Path
 
@@ -246,11 +247,25 @@ def _read_retry_attempts(spec_dir: Path) -> list[dict]:
                 files[str(rel)] = path.read_text(errors="replace")
             except OSError:
                 continue
+        # DEV-553: the snapshot already contains the design.md that was
+        # current when this attempt ran, because _snapshot_retry copies the
+        # whole spec_dir. Digest it so synthesis can tell which attempts were
+        # written against a design the architect has since revised. No new
+        # state to thread — the evidence was already on disk.
+        design = root / "design.md"
+        digest = ""
+        if design.is_file():
+            try:
+                digest = hashlib.sha1(
+                    design.read_bytes()).hexdigest()[:12]
+            except OSError:
+                pass
         return {
             "retry": retry_index,
             "agent": "snapshot",
             "files": files,
             "test_summary": test_output[-1500:] if test_output else "",
+            "design_digest": digest,
         }
 
     if history.exists():
