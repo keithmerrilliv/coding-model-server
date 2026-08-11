@@ -344,11 +344,16 @@ budget table. Read it before changing anything in the orchestrator.
 
 Honest version, because the failures are the useful part.
 
-**What works unattended.** Two specs have gone from markdown to merged code with
-no human corrections beyond approving the gates — both *modify-existing-code*
-tasks against a real macOS Swift app: cancelling an in-flight generation from a
-Stop button, and a top-k sampling mask. Design approved first attempt,
-implementer's first attempt compiled, suite green.
+**What works unattended.** Two specs have gone from markdown spec to an
+approved, test-passing patch against a real macOS Swift app — a Stop button
+that cancels in-flight generation, and a top-k sampling mask — every line
+written by the pipeline. The first was as clean as it sounds: design approved
+first attempt, implementer's first attempt compiled, suite green. The second
+earned it the hard way: one design rejection and four code-review rejections,
+each rejection's notes feeding the retry — including one where the reviewer's
+note contained the exact fix. No human edited the code; the review notes are
+where the human steering lives. The operator applies the approved patch — the
+pipeline does not push (DEV-535).
 
 **What does not, yet.** A harder greenfield spec — the logic core of a Centipede
 clone: seeded mushroom field, chain locomotion, split-on-hit, 17 acceptance
