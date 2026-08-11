@@ -2046,6 +2046,63 @@ def _first_swift_code_line(lines: list[str]) -> int:
     return len(lines)
 
 
+# DEV-552: a generated file may not redeclare a type a protected file already
+# declares. Anchored at column 0 on both sides deliberately — a NESTED type of
+# the same name is a different type in a different scope and is perfectly
+# legal, so matching indented declarations would delete working files over a
+# name collision that the compiler is perfectly happy with. `extension` is
+# absent from the alternation for the same reason: extending a protected type
+# is the correct way to add to it.
+_SWIFT_TOPLEVEL_DECL_RE = re.compile(
+    r"^(?:(?:public|internal|fileprivate|private|final|open|indirect)\s+)*"
+    r"(?:struct|class|enum|protocol|actor|typealias)\s+([A-Za-z_]\w*)",
+    re.MULTILINE)
+
+
+def declared_top_level_types(content: str) -> "set[str]":
+    """Type names declared at file scope in Swift source."""
+    return set(_SWIFT_TOPLEVEL_DECL_RE.findall(_swift_code_only(content)))
+
+
+def protected_type_collisions(
+    files: "list[tuple[str, str]]",
+    protected_files: "list[tuple[str, str]]",
+) -> "list[tuple[str, list[str], bool]]":
+    """Generated files that redeclare a type a protected file already declares.
+
+    Returns one entry per offending file: `(path, colliding names, total)`,
+    where *total* is True when EVERY top-level type the file declares collides
+    — i.e. the file is a pure duplicate and dropping it loses nothing.
+
+    Run 10 of DEV-102 died on exactly this. The synthesis repair invented
+    `Sources/CentipedeCore/Field.swift` declaring `public struct Field`, while
+    the protected `GameState.swift` already declared `public enum Field`. Every
+    diagnostic in that final build came from the one invented file, and the
+    pipeline could not have fixed it on a later attempt either: the file it
+    collides with is one it is forbidden to edit.
+
+    A protected file is never itself an offender — it is not generated, and it
+    is dropped from the dispatch anyway.
+    """
+    protected_paths = {p for p, _ in protected_files}
+    declared: set[str] = set()
+    for path, content in protected_files:
+        if path.endswith(".swift"):
+            declared |= declared_top_level_types(content)
+    if not declared:
+        return []
+
+    out: list[tuple[str, list[str], bool]] = []
+    for path, content in files:
+        if not path.endswith(".swift") or path in protected_paths:
+            continue
+        mine = declared_top_level_types(content)
+        hits = sorted(mine & declared)
+        if hits:
+            out.append((path, hits, mine == set(hits)))
+    return out
+
+
 def _ensure_foundation_import(content: str) -> tuple[str, list[str]]:
     """Add `import Foundation` to Swift source that needs it and lacks it.
 
@@ -2345,6 +2402,7 @@ def build_synthesis_message(
     design_md: str,
     attempts: list[dict],
     review_notes: list[str] | None = None,
+    reference_files: list[tuple[str, str]] | None = None,
 ) -> list[dict[str, str]]:
     """Build a single synthesis prompt that gives the model the full
     rotation history (code + per-attempt test outcome) and asks for a
@@ -2363,6 +2421,11 @@ def build_synthesis_message(
         "## Specification\n\n", spec_md,
         "\n\n## Architecture Design\n\n", design_md,
     ]
+    # DEV-552: synthesis was the only generation that could not see the files
+    # it is forbidden to edit, and it is reached only after every retry is
+    # spent — the worst possible place to be missing that context.
+    if reference_files:
+        parts.append("\n\n" + _render_reference_files(reference_files))
     if review_notes:
         parts.append("\n\n## Reviewer feedback on the attempts below\n\n")
         parts.append(
@@ -2403,6 +2466,7 @@ def build_synthesis_repair_message(
     failing_output: str,
     build_diagnostic: str | None = None,
     warning_diagnostic: str | None = None,
+    reference_files: list[tuple[str, str]] | None = None,
 ) -> list[dict[str, str]]:
     """One targeted repair round on a synthesized artifact.
 
@@ -2441,8 +2505,13 @@ def build_synthesis_repair_message(
     parts = [
         "## Specification\n\n", spec_md,
         "\n\n## Architecture Design\n\n", design_md,
-        state,
     ]
+    # DEV-552: the repair is the LAST generation of the run. Run 10 died here
+    # because it invented a file redeclaring a type the protected scaffold
+    # already had — it had never been shown that scaffold.
+    if reference_files:
+        parts.append("\n\n" + _render_reference_files(reference_files))
+    parts.append(state)
     for relpath, content in files:
         parts.append(f"### {relpath}\n\n```\n{content}\n```\n\n")
     if warning_only:

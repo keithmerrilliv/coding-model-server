@@ -2327,7 +2327,53 @@ def _requeue_for_unreachable_runner(db: Database, spec: Spec, task) -> bool:
     return True
 
 
-def _normalize_generated_files(db: Database, spec: Spec, task, files, role: str):
+def _drop_protected_type_collisions(db: Database, spec: Spec, task, files,
+                                    role: str, protected_files):
+    """Discard generated files that redeclare a type a protected file owns.
+
+    DEV-552. Prompting is not enough on its own: run 10's repair invented
+    `Field.swift` declaring a type the protected `GameState.swift` already
+    declared, and every diagnostic in that final build came from that one file.
+    Worse, no later attempt could have recovered — the file it collides with is
+    one the pipeline is forbidden to edit, so the error is unreachable from
+    anything the model is allowed to change.
+
+    Conservative on purpose. A file is dropped only when EVERY top-level type
+    it declares collides, which is the pure-duplicate case and loses nothing.
+    A file that also declares wanted types is left alone and merely logged:
+    the build will fail either way, and deleting real work to avoid a
+    diagnostic would be the worse trade.
+    """
+    if not protected_files:
+        return files
+    try:
+        collisions = executor.protected_type_collisions(files, protected_files)
+    except Exception as e:  # never let a lint step break a generation
+        logger.warning("spec %s: protected-type check errored (%s) — skipping",
+                       spec.id, e)
+        return files
+    if not collisions:
+        return files
+
+    dropped = {path for path, _, total in collisions if total}
+    for path, names, total in collisions:
+        logger.warning(
+            "spec %s: generated %s redeclares protected type(s) %s — %s",
+            spec.id, path, ", ".join(names),
+            "dropping the file" if total else
+            "KEEPING it (it declares other types too); the build will fail")
+    db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
+                    payload={"role": role, "model_call": False,
+                             "anomaly": "protected_type_collision",
+                             "dropped": sorted(dropped),
+                             "collisions": [
+                                 {"path": p, "types": n, "dropped": t}
+                                 for p, n, t in collisions]})
+    return [(p, c) for p, c in files if p not in dropped]
+
+
+def _normalize_generated_files(db: Database, spec: Spec, task, files, role: str,
+                               protected_files=None):
     """Apply deterministic boilerplate fixes and record what changed.
 
     Every path that writes model-generated files must go through this. DEV-540
@@ -2335,7 +2381,12 @@ def _normalize_generated_files(db: Database, spec: Spec, task, files, role: str)
     repair outputs were written raw, and the repair is where run 8 actually
     died — it emitted eight Swift files with no `import Foundation` and nothing
     stood between that and the compiler.
+
+    DEV-552 hangs the protected-type check here for the same reason: this is
+    the one choke point every generated file already passes through.
     """
+    files = _drop_protected_type_collisions(
+        db, spec, task, files, role, protected_files)
     normalized, notes = executor.normalize_boilerplate(files)
     if not notes:
         return files
@@ -2475,7 +2526,8 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
     # FAILs never depend on the model getting them right. See
     # executor.normalize_boilerplate (#3, DEV-540).
     result.files = _normalize_generated_files(
-        db, spec, task, result.files, "implementer")
+        db, spec, task, result.files, "implementer",
+        protected_files=_fetch_protected_files_for_spec(spec))
 
     # Write all files
     for rel_path, content in result.files:
@@ -4100,8 +4152,13 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
                 "via agent=%s", spec.id, len(attempts), len(review_notes),
                 _SYNTHESIS_AGENT)
 
+    # DEV-552: fetched once for the whole synthesis phase — the merge prompt,
+    # the repair prompt, and both collision checks all use the same list.
+    protected_files = _fetch_protected_files_for_spec(spec)
+
     messages = build_synthesis_message(spec_md, design_md, attempts,
-                                       review_notes=review_notes)
+                                       review_notes=review_notes,
+                                       reference_files=protected_files)
 
     # Synthesis merges every attempt's files into one final response — the same
     # single-call emit-everything constraint as the implementer, so it gets the
@@ -4146,7 +4203,8 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
             pass
 
     result.files = _normalize_generated_files(
-        db, spec, impl_task, result.files, "synthesizer")
+        db, spec, impl_task, result.files, "synthesizer",
+        protected_files=protected_files)
     for rel_path, content in result.files:
         _write_artifact(spec_dir, rel_path, content)
         db.create_artifact(spec_id=spec.id, task_id=impl_task.id,
@@ -4234,6 +4292,7 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
         warning_diagnostic=(_format_build_warnings(warning_blocking)
                             if rate is None and not build_failed
                             and warning_blocking else None),
+        reference_files=protected_files,
     )
     repair_meta: dict = {}
     try:
@@ -4272,7 +4331,8 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
 
     # Overlay only the files the repair emitted; everything else stays.
     repair.files = _normalize_generated_files(
-        db, spec, impl_task, repair.files, "synthesis_repair")
+        db, spec, impl_task, repair.files, "synthesis_repair",
+        protected_files=protected_files)
     for rel_path, content in repair.files:
         _write_artifact(spec_dir, rel_path, content)
         db.create_artifact(spec_id=spec.id, task_id=impl_task.id,
