@@ -30,7 +30,7 @@ RUN9_WARNING_BUILD = """\
 Building for debugging...
 [6/10] Compiling CentipedeCore GameState.swift
 [7/10] Compiling CentipedeCore World.swift
-/Users/km4/Library/Caches/coding-model-runner/worktrees/spec_9ff962b9-09f0ad65/\
+/Users/youruser/Library/Caches/coding-model-runner/worktrees/spec_9ff962b9-09f0ad65/\
 Sources/CentipedeCore/World.swift:238:20: warning: value 'updateIdx' was \
 defined but never used; consider replacing with boolean test [#no-usage]
 236 |         var newChains: [CentipedeChain] = []
@@ -46,7 +46,7 @@ Executed 19 tests, with 0 failures
 
 SWIFT_BUILD_FAILURE = """\
 Building for debugging...
-/Users/km4/.../worktrees/spec_x-1/Sources/CentipedeCore/World.swift:17:19: \
+/Users/youruser/.../worktrees/spec_x-1/Sources/CentipedeCore/World.swift:17:19: \
 error: 'DeterministicRNG' is inaccessible due to 'private' protection level
 error: fatalError
 """
@@ -60,7 +60,7 @@ RUN9_TRAP_BUILD = """\
 ◇ Test "C4: Chain advances with segments following" started.
 Building for debugging...
 [7/10] Compiling CentipedeCore World.swift
-/Users/km4/Library/Caches/coding-model-runner/worktrees/spec_9ff962b9-09f0ad65/\
+/Users/youruser/Library/Caches/coding-model-runner/worktrees/spec_9ff962b9-09f0ad65/\
 Sources/CentipedeCore/World.swift:238:20: warning: value 'updateIdx' was \
 defined but never used; consider replacing with boolean test [#no-usage]
 Build complete! (3.00s)
@@ -73,7 +73,7 @@ error: Process 'swiftpm-testing-helper --parallel' exited with unexpected signal
 COMPILED_NO_SUMMARY = """\
 Building for debugging...
 [7/10] Compiling CentipedeCore World.swift
-/Users/km4/Library/Caches/coding-model-runner/worktrees/spec_x-1/\
+/Users/youruser/Library/Caches/coding-model-runner/worktrees/spec_x-1/\
 Sources/CentipedeCore/World.swift:238:20: warning: value 'updateIdx' was \
 defined but never used; consider replacing with boolean test [#no-usage]
 Build complete! (3.00s)

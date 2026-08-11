@@ -19,7 +19,7 @@ The system uses environment variables for configuration. Create a `.env` file in
 
 ```env
 # Scraping Configuration
-APPLE_DEEP_DOCS_PATH=/Users/km4/Dev/Coding Model/appledeepdoc-mcp/run.sh
+APPLE_DEEP_DOCS_PATH=/Users/youruser/Dev/Coding Model/appledeepdoc-mcp/run.sh
 
 # Server Configuration
 CODING_MODEL_SERVER_IP=192.0.2.10

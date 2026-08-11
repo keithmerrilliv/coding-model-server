@@ -26,7 +26,7 @@ from coding_model_autonomous.models import GateStatus, SpecStatus, TaskStatus
 COMPILED_THEN_CRASHED = """\
 Building for debugging...
 [7/10] Compiling CentipedeCore World.swift
-/Users/km4/Library/Caches/coding-model-runner/worktrees/spec_9ff962b9-09f0ad65/\
+/Users/youruser/Library/Caches/coding-model-runner/worktrees/spec_9ff962b9-09f0ad65/\
 Sources/CentipedeCore/World.swift:238:20: warning: value 'updateIdx' was \
 defined but never used; consider replacing with boolean test [#no-usage]
 [14/15] Linking CentipedePackageTests

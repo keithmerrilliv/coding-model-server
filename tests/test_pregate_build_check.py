@@ -24,7 +24,7 @@ from coding_model_autonomous.models import (
 SWIFT_BUILD_FAILURE = """\
 Building for debugging...
 [6/13] Compiling CentipedeCore Simulation.swift
-/Users/km4/.../Sources/CentipedeCore/MushroomGrid.swift:17:19: error: \
+/Users/youruser/.../Sources/CentipedeCore/MushroomGrid.swift:17:19: error: \
 'DeterministicRNG' is inaccessible due to 'private' protection level
 15 |
 17 |         var rng = DeterministicRNG(seed: seed)

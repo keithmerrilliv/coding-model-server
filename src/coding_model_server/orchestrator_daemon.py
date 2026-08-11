@@ -1656,7 +1656,7 @@ def _short_diagnostic_path(path: str) -> str:
     """Drop the per-dispatch worktree prefix, keeping the repo-relative tail.
 
     Runner paths look like
-    `/Users/km4/…/worktrees/spec_9ff962b9-09f0ad65/Sources/CentipedeCore/World.swift`
+    `/Users/youruser/…/worktrees/spec_9ff962b9-09f0ad65/Sources/CentipedeCore/World.swift`
     and the prefix changes on every dispatch, so it is noise in an artifact and
     breaks any comparison against `protected_paths`.
     """

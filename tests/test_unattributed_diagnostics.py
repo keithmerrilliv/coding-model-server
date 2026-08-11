@@ -17,7 +17,7 @@ Building for debugging...
 [9/12] Compiling CentipedeCore GameState.swift
 [10/12] Emitting module CentipedeCore
 error: emit-module command failed with exit code 1 (use -v to see invocation)
-/Users/km4/.../Tests/CentipedeCoreTests/FallOffTests.swift:7:17: error: cannot find 'World' in scope
+/Users/youruser/.../Tests/CentipedeCoreTests/FallOffTests.swift:7:17: error: cannot find 'World' in scope
  7 |     let world = World(seed: 1)
    |                 `- error: cannot find 'World' in scope
 """

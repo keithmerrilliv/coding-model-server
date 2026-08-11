@@ -24,7 +24,7 @@ from coding_model_autonomous.models import SpecStatus
 BUILD_FAILURE = """\
 Building for debugging...
 [9/16] Emitting module CentipedeCore
-/Users/km4/.../Sources/CentipedeCore/SeededRandomGenerator.swift:7:53: error: \
+/Users/youruser/.../Sources/CentipedeCore/SeededRandomGenerator.swift:7:53: error: \
 cannot convert value of type 'Int' to expected argument type 'Int64'
  7 |         self.state = seed != 0 ? UInt64(bitPattern: seed) : 1
 error: fatalError

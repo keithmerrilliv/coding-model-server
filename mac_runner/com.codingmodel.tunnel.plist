@@ -11,7 +11,7 @@
 
      1. brew install autossh
      2. Copy to ~/Library/LaunchAgents/com.codingmodel.tunnel.plist
-     3. Replace LINUX_USER@LINUX_HOST below with your Linux user@host, and km4
+     3. Replace LINUX_USER@LINUX_HOST below with your Linux user@host, and youruser
         with your macOS username.
 
         Do NOT copy an address out of this file or an old ticket. This slot
@@ -131,8 +131,8 @@
   <true/>
 
   <key>StandardOutPath</key>
-  <string>/Users/km4/Library/Logs/coding-model-tunnel.out.log</string>
+  <string>/Users/youruser/Library/Logs/coding-model-tunnel.out.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/km4/Library/Logs/coding-model-tunnel.err.log</string>
+  <string>/Users/youruser/Library/Logs/coding-model-tunnel.err.log</string>
 </dict>
 </plist>

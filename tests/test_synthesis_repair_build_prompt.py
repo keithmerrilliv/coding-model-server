@@ -26,7 +26,7 @@ from coding_model_autonomous.models import SpecStatus
 # The whole error set from spec_1ba2db3d's synthesis, trimmed.
 CONFORMANCE_FAILURE = """\
 [15/19] Emitting module CentipedeCore
-/Users/km4/.../Tests/CentipedeCoreTests/CentipedeLogicTests.swift:11:32: \
+/Users/youruser/.../Tests/CentipedeCoreTests/CentipedeLogicTests.swift:11:32: \
 error: operator function '==' requires that 'Mushroom' conform to 'Equatable'
 error: fatalError
 """

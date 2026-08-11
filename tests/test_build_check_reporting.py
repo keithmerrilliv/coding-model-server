@@ -41,7 +41,7 @@ DISPATCH_FAILURE = (
 # The real thing, trimmed from run 4's re-dispatched check.
 REAL_BUILD_FAILURE = (
     "Building for debugging...\n"
-    "/Users/km4/Library/Caches/coding-model-runner/worktrees/"
+    "/Users/youruser/Library/Caches/coding-model-runner/worktrees/"
     "spec_8dac1142-cfb386ed/Sources/CentipedeCore/WorldState.swift:92:33: "
     "error: cannot use mutating member on immutable value: 'field' is a "
     "'let' constant\n"

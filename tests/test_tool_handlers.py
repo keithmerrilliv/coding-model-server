@@ -138,8 +138,8 @@ class TestProtectedPath:
         under ~/Library. Neither may start prompting.
         """
         for p in (
-            "/Users/km4/Dev/proj/Chrome/theme.css",
-            "/Users/km4/Dev/proj/Safari/ext.js",
+            "/Users/youruser/Dev/proj/Chrome/theme.css",
+            "/Users/youruser/Dev/proj/Safari/ext.js",
             "/var/folders/ab/T/coding-model-work-z/out.txt",
             "~/Library/Caches/coding-model-runner/worktrees/x",
             "~/Documents/notes.md",

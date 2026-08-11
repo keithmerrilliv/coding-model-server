@@ -8,7 +8,7 @@ client, or the orchestrator.
 
 Two hosts are assumed:
 
-- **Mac dev machine** — `/Users/km4/Dev/qwen-server` (you run the client here).
+- **Mac dev machine** — `/Users/youruser/Dev/qwen-server` (you run the client here).
 - **Linux server** — `/home/youruser/Dev/coding-model-server` (runs the
   server, orchestrator, and monitor via systemd).
 
@@ -34,7 +34,7 @@ cd ~/Dev/coding-model-server && venv/bin/pip install -e .
 # Mac dev machine — client only. --no-deps avoids building llama-cpp-python,
 # transformers, and chromadb, none of which the client needs. The client runs
 # on requests + python-dotenv; rich and beautifulsoup4 are optional extras.
-cd /Users/km4/Dev/qwen-server && venv/bin/pip install -e . --no-deps
+cd /Users/youruser/Dev/qwen-server && venv/bin/pip install -e . --no-deps
 ```
 
 Verify:
@@ -56,7 +56,7 @@ scripts and systemd units now prefer `~/.config/coding-model-server/.env`.
 ```sh
 mkdir -p ~/.config/coding-model-server
 chmod 700 ~/.config/coding-model-server
-mv /Users/km4/Dev/qwen-server/.env ~/.config/coding-model-server/.env
+mv /Users/youruser/Dev/qwen-server/.env ~/.config/coding-model-server/.env
 chmod 600 ~/.config/coding-model-server/.env
 ```
 
@@ -279,8 +279,8 @@ than `sandbox-exec`:
 ```sh
 # 1. Create config dir and copy the examples in.
 mkdir -p ~/.config/coding-model-runner && chmod 700 ~/.config/coding-model-runner
-cp /Users/km4/Dev/qwen-server/mac_runner/env.example         ~/.config/coding-model-runner/.env
-cp /Users/km4/Dev/qwen-server/mac_runner/repos.example.yml   ~/.config/coding-model-runner/repos.yml
+cp /Users/youruser/Dev/qwen-server/mac_runner/env.example         ~/.config/coding-model-runner/.env
+cp /Users/youruser/Dev/qwen-server/mac_runner/repos.example.yml   ~/.config/coding-model-runner/repos.yml
 chmod 600 ~/.config/coding-model-runner/.env
 
 # 2. Generate an API key (DIFFERENT from ADMIN_API_KEY).
@@ -291,7 +291,7 @@ python3 -c "import secrets; print(secrets.token_urlsafe(32))"
 $EDITOR ~/.config/coding-model-runner/repos.yml
 
 # 4. Make sure the venv has the runner deps installed (see step 0).
-cd /Users/km4/Dev/qwen-server && venv/bin/pip install -e .
+cd /Users/youruser/Dev/qwen-server && venv/bin/pip install -e .
 
 # 5. Install the LaunchAgent (auto-start on login).
 cp mac_runner/com.codingmodel.runner.plist ~/Library/LaunchAgents/
@@ -312,15 +312,15 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.codingmodel.tunnel.p
 ```
 
 > **Both plists hardcode absolute paths.** The runner's `WorkingDirectory` and
-> `ProgramArguments` point at `/Users/km4/Dev/qwen-server` — LaunchAgent plists
+> `ProgramArguments` point at `/Users/youruser/Dev/qwen-server` — LaunchAgent plists
 > expand neither `~` nor environment variables, so if your checkout lives
-> elsewhere (or your username isn't `km4`) edit those two keys before
+> elsewhere (or your username isn't `youruser`) edit those two keys before
 > bootstrapping, or the agent will fail to start.
 >
 > The tunnel plist leaves the Linux host as a `LINUX_USER@LINUX_HOST` placeholder
 > (it previously hardcoded a since-stale `192.168.1.64`; derive the address per the
 > instructions in the plist rather than copying one). It likewise pins its log paths
-> under `/Users/km4`, and `/opt/homebrew/bin/autossh` (that path is Apple
+> under `/Users/youruser`, and `/opt/homebrew/bin/autossh` (that path is Apple
 > Silicon; Intel Homebrew installs to `/usr/local/bin/autossh`). launchd does not
 > search `PATH` for `argv[0]`, so that one must be absolute and correct.
 >

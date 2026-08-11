@@ -28,9 +28,9 @@ def db(tmp_path):
 
 def test_same_defect_across_dispatches_has_one_signature():
     """Worktree paths and line numbers move between attempts; the defect does not."""
-    a = ("/Users/km4/Caches/worktrees/spec_x-7f8a8795/Tests/T.swift:7:17: "
+    a = ("/Users/youruser/Caches/worktrees/spec_x-7f8a8795/Tests/T.swift:7:17: "
          "error: cannot find 'World' in scope")
-    b = ("/Users/km4/Caches/worktrees/spec_x-d14e1cfe/Tests/T.swift:12:9: "
+    b = ("/Users/youruser/Caches/worktrees/spec_x-d14e1cfe/Tests/T.swift:12:9: "
          "error: cannot find 'World' in scope")
     assert d._failure_signature(a) == d._failure_signature(b) != ""
 

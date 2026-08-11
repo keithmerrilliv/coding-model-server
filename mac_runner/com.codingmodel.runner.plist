@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- LaunchAgent template for the Mac runner.
      1. Copy to ~/Library/LaunchAgents/com.codingmodel.runner.plist
-     2. Replace km4 with your macOS username if different.
+     2. Replace youruser with your macOS username.
      3. Adjust ProgramArguments to point at your venv's python.
      4. Load: launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.codingmodel.runner.plist
         Unload: launchctl bootout   gui/$(id -u)/com.codingmodel.runner
@@ -14,7 +14,7 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/km4/Dev/qwen-server/venv/bin/python</string>
+    <string>/Users/youruser/Dev/qwen-server/venv/bin/python</string>
     <string>-m</string>
     <string>mac_runner.server</string>
   </array>
@@ -23,7 +23,7 @@
        GitHub remote is still qwen-server.git). Renaming this without
        renaming the directory breaks the runner. See docs/SECURITY_MIGRATION.md. -->
   <key>WorkingDirectory</key>
-  <string>/Users/km4/Dev/qwen-server</string>
+  <string>/Users/youruser/Dev/qwen-server</string>
 
   <key>EnvironmentVariables</key>
   <dict>
@@ -60,8 +60,8 @@
   <integer>30</integer>
 
   <key>StandardOutPath</key>
-  <string>/Users/km4/Library/Logs/coding-model-runner.out.log</string>
+  <string>/Users/youruser/Library/Logs/coding-model-runner.out.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/km4/Library/Logs/coding-model-runner.err.log</string>
+  <string>/Users/youruser/Library/Logs/coding-model-runner.err.log</string>
 </dict>
 </plist>
