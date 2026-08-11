@@ -335,7 +335,10 @@ out (not recommended — tests then run with the orchestrator's privileges).
 
 **Orchestrator daemon:** Runs as a separate systemd unit (`coding-model-orchestrator.service`). Polls the SQLite task store, calls agents via the inference API, runs tests via subprocess. Independent of the interactive client.
 
-See `docs/TUTORIAL.md` for an end-to-end walkthrough of the pipeline.
+**[docs/PIPELINE.md](docs/PIPELINE.md) is the map** — state machine, the
+build-output classifier, where a failure routes and who pays for it, and the
+budget table. Read it before changing anything in the orchestrator.
+`docs/TUTORIAL.md` is the end-to-end walkthrough.
 
 ### Results so far
 
