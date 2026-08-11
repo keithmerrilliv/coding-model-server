@@ -10,13 +10,16 @@ state machine cannot express, and they are where the complexity actually lives:
 - **The transition is chosen by a classifier, not by the state.** One test
   dispatch produces output that is sorted into six outcomes, and the outcome
   decides where control goes. Same state, same event, six destinations
-  (diagram 3).
+  (diagram 5).
 - **Budgets are orthogonal counters that gate transitions.** The same state and
   the same event lead to different places depending on a counter that is
-  nowhere in the state (the budget table, and diagram 4).
+  nowhere in the state (the budget table, and diagram 6).
 
 So: a state machine for the spine, a decision tree for the diagnosis, and a
 table for the accounting. Any one of the three alone is misleading.
+
+One more thing the diagrams cannot show, so read it before them: **specs are
+not isolated from each other.** Section 2 explains why.
 
 ---
 
@@ -46,7 +49,56 @@ involved. A third failure fails the spec before anyone sees it.
 
 ---
 
-## 2. Inside `executing`: three tasks, four gates
+## 2. Topology: three processes, one GPU
+
+Every diagram after this one draws a single spec as if it had the machine to
+itself. It does not, and the contention is the constraint most likely to
+surprise you.
+
+```mermaid
+flowchart LR
+    subgraph L["Linux box (GPU)"]
+        ORCH["orchestrator daemon<br/>4 spec workers, 5s poll"]
+        DB[("SQLite<br/>specs · tasks · gates · events")]
+        SRV["inference server :5000"]
+        LS["ONE llama-server child<br/>ONE model resident"]
+        SBX["bwrap + seccomp<br/>sandbox"]
+    end
+    subgraph M["Mac runner (separate machine)"]
+        RUN["runner :5050<br/>worktree per dispatch"]
+    end
+
+    ORCH <-->|"poll · record"| DB
+    ORCH -->|"agent call"| SRV
+    SRV --> LS
+    ORCH -->|"python/node tests"| SBX
+    ORCH -->|"HTTP: swift/xcode tests"| RUN
+    LS -.->|"agent change<br/>= model swap"| LS
+```
+
+Three consequences that shape everything else:
+
+- **One model is resident at a time.** Each agent maps to a model; switching
+  agents SIGTERMs the llama-server child, waits for the GPU to actually release
+  VRAM, and launches the next. A swap requested while another request is in
+  flight is refused with a 503 rather than killing the live request.
+- **Four spec workers share that one GPU.** They are concurrent in the
+  orchestrator and serialised at the model. The practical rule: **do not run two
+  specs at once.** The client retries a deferred swap on a 10/30/60s backoff,
+  which was sized for VRAM release — but a swap deferred behind *another spec's
+  generation* waits 10–20 minutes, outlasts the backoff, and can fail the second
+  spec outright.
+- **The build is not local.** Swift and Xcode work is dispatched over HTTP to a
+  runner on another machine, which materialises a git worktree per dispatch,
+  applies the generated files, runs the suite once, and returns the output. That
+  boundary is why "runner unreachable" is a distinct outcome in diagram 5, and
+  why a sleeping laptop is an infrastructure fault rather than a verdict on the
+  code. Python and Node suites run locally instead, confined by bubblewrap with
+  a seccomp filter, because they are LLM-written code executing on the host.
+
+---
+
+## 3. Inside `executing`: three tasks, four gates
 
 `executing` bootstraps three tasks — architect, implementer, reviewer — which
 run in order. Each has its own `retry_count`. Human gates are the diamonds.
@@ -62,7 +114,7 @@ flowchart TD
     DGATE -->|approved| IMPL[implementer<br/>writes the files]
 
     IMPL --> BUILD[/pre-gate build check<br/>dispatch to runner/]
-    BUILD --> CLASS{classify the output<br/>see diagram 3}
+    BUILD --> CLASS{classify the output<br/>see diagram 5}
     CLASS -->|clean| CGATE{code_review<br/>HUMAN}
     CLASS -->|build failed / blocking warning| IMPL
     CLASS -->|same diagnostic twice| ARCH
@@ -75,7 +127,7 @@ flowchart TD
     RGATE -->|rejected| IMPL
 
     IMPL -.->|retry_count reaches 5| SYNTH[synthesis<br/>merge all attempts]
-    SYNTH --> REPAIR{one repair round<br/>see diagram 4}
+    SYNTH --> REPAIR{one repair round<br/>see diagram 6}
     REPAIR -->|passes| RGATE
     REPAIR -->|still failing| FAIL([failed])
 ```
@@ -93,7 +145,37 @@ Two edges are worth naming because they are the ones people miss:
 
 ---
 
-## 3. Classifying one test dispatch
+## 4. How the implementer writes files
+
+"Implementer runs" hides a fork with real consequences for what can go wrong.
+
+```mermaid
+flowchart TD
+    D[/approved design/] --> N{"how many files<br/>does it enumerate?"}
+    N -->|"&lt; 8"| ONE["SINGLE CALL<br/>every file in one response<br/>budget scales with the design"]
+    N -->|"≥ 8"| MAN["MANIFEST CALL<br/>file list, dependency order"]
+    MAN --> PF["one bounded call PER FILE<br/>each sees the manifest, the design,<br/>and a summary of files already written"]
+    ONE --> OUT[/files written/]
+    PF --> OUT
+    OUT -.->|"retry citing specific files"| TGT["TARGETED RETRY<br/>regenerate only cited files,<br/>reuse the rest from the snapshot"]
+    TGT --> OUT
+```
+
+The fork exists because one capped response cannot hold a large project. The
+cost is that per-file calls each see a *summary* of their siblings rather than
+their source, so inter-file contracts can drift — a method renamed in file 3
+that file 9 still calls. Targeted retry has the mirror problem: reusing
+uncited files is what makes a retry affordable, and also what lets a defect in
+an uncited file survive every attempt. When a diagnostic cites only test files
+but the real fault is in the module, the retry regenerates the tests forever.
+That is why the upstream route in diagram 6 exists.
+
+`AUTONOMOUS_IMPLEMENTER_MODE` forces `single` or `manifest` if you need to pin
+it; the default decides per design at a threshold of 8 files.
+
+---
+
+## 5. Classifying one test dispatch
 
 This is the part a state machine cannot draw. A single runner call returns
 `(passed, output)`, and *six* different conclusions can follow. Order matters —
@@ -142,12 +224,13 @@ Why each branch exists, since every one of them is a scar:
 
 ---
 
-## 4. Where a failure goes, and who pays
+## 6. Where a failure goes, and who pays
 
 Same failure, three destinations, decided by evidence rather than by state.
 
 ```mermaid
-flowchart LR
+%%{init: {'themeVariables': {'fontSize': '30px'}}}%%
+flowchart TD
     F[/attempt failed/] --> Q1{same located diagnostic<br/>as the previous attempt?}
     Q1 -->|yes| A[route to ARCHITECT<br/>implementer NOT charged]
     Q1 -->|no| Q2{implementer<br/>retry_count &lt; 5?}
@@ -170,7 +253,7 @@ build from 3 errors to 14. Getting the target right is not sufficient.
 
 ---
 
-## 5. Budgets
+## 7. Budgets
 
 The counters that decide whether a transition is available at all. This is the
 table to read first when a run ends somewhere surprising.
@@ -202,7 +285,7 @@ table to read first when a run ends somewhere surprising.
 
 ---
 
-## 6. What reaches which agent
+## 8. What reaches which agent
 
 Feedback is not symmetric, and the asymmetries are deliberate.
 
@@ -213,11 +296,11 @@ Feedback is not symmetric, and the asymmetries are deliberate.
 | Clarification answers | Planner, then implementer | Rendered at spec authority. |
 | Plan `acceptance_criteria` | Architect | Supersede the spec where they differ; a criterion struck from the plan was struck on purpose. |
 | Protected files | Architect and implementer, read-only | They are compiled in but must not be edited. Without them, agents redeclare types that already exist. |
-| Compiler diagnostics | Implementer, or architect when recurring | See diagram 4. |
+| Compiler diagnostics | Implementer, or architect when recurring | See diagram 6. |
 
 ---
 
-## 7. Reading a run
+## 9. Reading a run
 
 ```bash
 coding-model-autonomous status <spec_id>   # where it is now
@@ -227,5 +310,5 @@ coding-model-autonomous gates              # what is waiting on you
 
 The `events` table is the audit trail: every agent call, every test dispatch,
 every gate, with the payload that drove the decision. When a run ends somewhere
-surprising, the answer is almost always a budget in section 5 or a branch in
-diagram 3 — in that order.
+surprising, the answer is almost always a budget in section 7 or a branch in
+diagram 5 — in that order.
