@@ -300,7 +300,44 @@ Feedback is not symmetric, and the asymmetries are deliberate.
 
 ---
 
-## 9. Reading a run
+## 9. Invariants worth knowing before you change anything
+
+Four rules that are not visible in any diagram and that the code depends on.
+
+**Feedback channels are consumed exactly once.** A design rejection is written
+to `design_review_feedback.md`, read by the next architect run, and **deleted on
+read**. A clarification gate is cancelled the moment its answer is taken. Both
+are deliberate: feedback that survives its cycle re-argues a settled point on
+the next one, and a gate that is not consumed is re-processed on every 5-second
+tick — which once meant a duplicate agent call and a fresh Jira issue per tick
+until the transition budget aborted the spec.
+
+**`protected_paths` is enforcement, not advice.** Those files are dropped from
+the dispatch, so the runner's worktree keeps `base_ref`'s copy. Write to one and
+your version is **discarded, not merged** — silently, from the agent's point of
+view. They are still shown to the architect and implementer read-only, because
+an agent that cannot see an existing type will redeclare it and collide. It also
+follows that a compiler warning on a protected path must never block an attempt:
+the pipeline cannot fix that file, so blocking would loop to exhaustion.
+
+**Jira is a mirror, not an input.** Gates are mirrored out for the audit trail
+and for notifications; only a *status change* is read back. On a stock workflow
+with no Rejected status this is asymmetric in a dangerous direction — **a plain
+close reads as approval.** To reject from Jira, add a comment starting with
+`REJECT` and then close the issue. A comment alone, on a still-open gate, is
+inert: annotate freely.
+
+**The event log is the measurement substrate, not just a log.** Every
+transition, agent call and test dispatch is recorded with its payload —
+duration, token counts and the agent that ran. Records where *no model ran* (a
+widened manifest, a routing decision, an anomaly) carry `model_call: false`, so
+a cost or latency query filters on that rather than attributing work to a model
+that did none. If you add a branch, record why it was taken; a decision that
+leaves no event is a decision nobody can audit later.
+
+---
+
+## 10. Reading a run
 
 ```bash
 coding-model-autonomous status <spec_id>   # where it is now
