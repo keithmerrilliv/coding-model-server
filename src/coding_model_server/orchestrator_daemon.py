@@ -4121,6 +4121,40 @@ def _collect_rejection_notes(db: Database, spec_id: str) -> list[str]:
     return notes
 
 
+def _repair_verdict(repair_passed: bool, pre_diags: list, post_diags: list,
+                    new_classes: list, protected_files) -> "tuple[bool, list]":
+    """Keep the synthesis repair, or roll it back? (DEV-541)
+
+    Returns ``(improved, protected symbols the repair collided with)``.
+
+    The count of diagnostic OCCURRENCES is the criterion, not the set of
+    distinct messages: a dropped import emits many diagnostics repeating one
+    message, so a deduplicated set barely moves while the build collapses.
+
+    New diagnostic classes are reported rather than vetoed, because vetoing
+    them over-rejects — a repair going 12 → 1 is obviously good even though its
+    single survivor is new.
+
+    The exception, added after run 10: a new class naming a symbol declared in
+    a PROTECTED file vetoes the repair whatever the count did. Run 10's repair
+    went 8 → 7 and was kept, when what it had actually done was invent a file
+    redeclaring `Field` from the protected scaffold. Every one of those 7
+    diagnostics was its own doing and none was reachable — the file it collided
+    with is one the pipeline may not edit, so no later attempt could resolve
+    it. A lower count does not make an unrecoverable build progress.
+    """
+    symbols: set = set()
+    for path, content in (protected_files or []):
+        if path.endswith(".swift"):
+            symbols |= executor.declared_top_level_types(content)
+    poisoned = sorted(
+        {sym for sym in symbols for cls in new_classes
+         if re.search(rf"\b{re.escape(sym)}\b", cls)})
+    improved = repair_passed or (len(post_diags) < len(pre_diags)
+                                 and not poisoned)
+    return improved, poisoned
+
+
 def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
                    framework: str, framework_opts: dict) -> tuple[bool, str]:
     """MAX_RETRIES escape hatch: synthesize the union of correct behaviors
@@ -4390,7 +4424,22 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
     # over-rejects: a repair going 12 → 1 would be discarded merely because the
     # single survivor is new, which is plainly the wrong call. The count is the
     # criterion; new classes are reported, not vetoed.
-    improved = repair_passed or len(post_repair_diags) < len(pre_repair_diags)
+    #
+    # …with one exception, added after run 10 produced the mirror case. That
+    # repair went 8 → 7, so count-only KEPT it — while what it had actually
+    # done was invent a file redeclaring `Field`, a type owned by a protected
+    # scaffold. Every one of those 7 diagnostics was the repair's own doing,
+    # and none of them was reachable: the file it collided with is one the
+    # pipeline may not edit, so no later attempt could have resolved it either.
+    #
+    # So a new diagnostic class that names a symbol declared in a protected
+    # file vetoes the repair regardless of the count. That is narrow on
+    # purpose — it does not touch the 12 → 1 case, whose new class is about
+    # ordinary generated code — and it keys on the one property that makes a
+    # regression permanent rather than merely bad.
+    improved, poisoned = _repair_verdict(
+        repair_passed, pre_repair_diags, post_repair_diags, new_classes,
+        protected_files)
 
     if not improved:
         for rel_path, previous in pre_repair_state.items():
@@ -4410,6 +4459,11 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
                              "errors_before": len(pre_repair_diags),
                              "errors_after": len(post_repair_diags),
                              "new_diagnostic_classes": new_classes,
+                             # DEV-541: which protected symbols the repair
+                             # collided with, empty when none. A rollback with
+                             # a non-empty list is a different animal from one
+                             # that merely failed to reduce the count.
+                             "protected_symbols_hit": poisoned,
                              "rolled_back": not improved})
 
     try:
@@ -4423,6 +4477,14 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
         outcome = (f"FAIL — repair improved the build "
                    f"({len(pre_repair_diags)} → {len(post_repair_diags)} "
                    f"diagnostics) but the suite still fails")
+    elif poisoned:
+        outcome = (f"FAIL — repair reduced the count "
+                   f"({len(pre_repair_diags)} → {len(post_repair_diags)} "
+                   f"diagnostics) but collided with protected symbol(s) "
+                   f"{', '.join(poisoned)}; rolled back to the pre-repair "
+                   f"state. A collision with a file the pipeline may not edit "
+                   f"is unrecoverable, so a lower count does not make it "
+                   f"progress")
     else:
         outcome = (f"FAIL — repair did not improve the build "
                    f"({len(pre_repair_diags)} → {len(post_repair_diags)} "
