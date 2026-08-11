@@ -1125,6 +1125,31 @@ def _start_task(db: Database, spec: Spec, task) -> None:
         db.update_spec_status(spec.id, SpecStatus.FAILED)
 
 
+def _testability_rounds_used(db: Database, spec_id: str) -> int:
+    """How many revisions the testability check has already forced (DEV-545).
+
+    Counted from the check's own prior firings, NOT from `task.retry_count`.
+    That counter is shared with human rejections, DEV-468's upstream routing
+    and crash recovery, so keying off it made the check retire itself for
+    reasons that had nothing to do with it — on run 9 both rounds were spent
+    before a human saw any design at all.
+    """
+    used = 0
+    try:
+        events = db.list_events_by_kind(spec_id=spec_id,
+                                        kind=EventKind.AGENT_RAN)
+    except Exception:
+        return 0
+    for ev in events:
+        try:
+            payload = json.loads(ev.payload_json or "{}")
+        except (TypeError, ValueError):
+            continue
+        if payload.get("role") == "testability_check" and payload.get("revised"):
+            used += 1
+    return used
+
+
 def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
     spec_md = (spec_dir / spec.source_md_path).read_text()
     # On a re-run (design-review rejection #3, or supervisor design-revision #4),
@@ -1225,8 +1250,20 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
     # a criterion whose type is never declared Equatable. Bounded separately from
     # the design review so a testability bounce cannot consume the review's
     # single revision, and capped so it can never loop.
-    if (executor.TESTABILITY_CHECK_ENABLED
-            and task.retry_count < executor.TESTABILITY_CHECK_MAX_ROUNDS):
+    #
+    # DEV-545: the check ALWAYS runs. Its budget bounds how many revisions it
+    # may force, not whether it may look — and the two were the same knob until
+    # run 9, where both rounds went on drafts no human ever saw and the two
+    # designs that did reach a human arrived unchecked. Run 11 repeated it: the
+    # unchecked design carried 11 prose seams, exactly the class the check had
+    # found 11 of one revision earlier.
+    #
+    # The budget is also counted from the check's OWN prior firings rather than
+    # from task.retry_count. retry_count is shared with human rejections,
+    # DEV-468's upstream routing and crash recovery, so the check used to
+    # retire itself for reasons that had nothing to do with it.
+    findings = []
+    if executor.TESTABILITY_CHECK_ENABLED:
         try:
             # DEV-509 runs alongside DEV-481's check: same gate, same budget,
             # same feedback file. Completeness first — a design missing a type
@@ -1243,15 +1280,23 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
             logger.warning("spec %s: testability check raised (%s) — "
                            "proceeding without it", spec.id, exc)
             findings = []
-        if findings:
-            kinds = sorted({f.kind for f in findings})
+
+    testability_note = ""
+    if findings:
+        kinds = sorted({f.kind for f in findings})
+        rounds_used = _testability_rounds_used(db, spec.id)
+        may_revise = rounds_used < executor.TESTABILITY_CHECK_MAX_ROUNDS
+        db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
+                        payload={"role": "testability_check",
+                                 "model_call": False,
+                                 "findings": len(findings), "kinds": kinds,
+                                 "rounds_used": rounds_used,
+                                 "revised": may_revise})
+        if may_revise:
             logger.info("spec %s: testability check found %d finding(s) %s — "
-                        "revising (architect retry %d)", spec.id, len(findings),
-                        kinds, task.retry_count + 1)
-            db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
-                            payload={"role": "testability_check",
-                                     "model_call": False,
-                                     "findings": len(findings), "kinds": kinds})
+                        "revising (round %d/%d)", spec.id, len(findings),
+                        kinds, rounds_used + 1,
+                        executor.TESTABILITY_CHECK_MAX_ROUNDS)
             try:
                 (spec_dir / "design_review_feedback.md").write_text(
                     design_testability.format_findings(findings))
@@ -1261,6 +1306,25 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
             db.increment_task_retry(task.id)
             db.update_task_status(task.id, TaskStatus.PENDING)
             return
+        # Revision budget spent. The findings are still true, and the human
+        # about to read this design is the only one left who can act on them —
+        # so they go ON the gate rather than into a log line nobody opens.
+        logger.warning(
+            "spec %s: testability check found %d finding(s) %s but its "
+            "revision budget is spent (%d/%d) — carrying them to the gate "
+            "instead of silently approving an unchecked design",
+            spec.id, len(findings), kinds, rounds_used,
+            executor.TESTABILITY_CHECK_MAX_ROUNDS)
+        testability_note = (
+            f"\n\n---\n\n"
+            f"## ⚠ Automated testability check: {len(findings)} unresolved "
+            f"finding(s)\n\n"
+            f"The check's revision budget "
+            f"({executor.TESTABILITY_CHECK_MAX_ROUNDS} rounds) is spent, so "
+            f"the architect was NOT sent back to fix these. They are still "
+            f"present in the design below.\n\n"
+            f"{design_testability.format_findings(findings)}\n"
+        )
 
     # Design review (#3): critique the design BEFORE implementation, since the
     # implementer follows it exactly. Bounded by the architect retry budget and
@@ -1294,6 +1358,7 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
             f"The architect has produced the following design. Approve to "
             f"begin implementation, or reject with notes.\n\n---\n\n"
             f"{result.design_md}\n"
+            f"{testability_note}"
         ),
     )
     logger.info("spec %s: architect done, design_approval gate created",
