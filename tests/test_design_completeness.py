@@ -259,3 +259,131 @@ struct WorldSnapshot: Equatable {
         """Only the file rule ignores them; they are real declarations."""
         assert "MushroomEntry" in dt.declared_types(self.NESTED)
         assert "MushroomEntry" not in dt.top_level_types(self.NESTED)
+
+
+# ── DEV-554: the same type declared more than once ──────────────────────────
+#
+# Run 11's design 4 declared `HitResult` three times in a row with the
+# architect's own deliberation between the versions, and its Criterion Seams
+# then referenced cases from two of the three mutually exclusive definitions.
+# Whichever enum reached the code, roughly half the seams could not compile —
+# and the design was over the manifest threshold, so nine independent per-file
+# generations each got to resolve the ambiguity their own way.
+
+RUN11_TRIPLE_DECLARATION = """\
+# Architecture: Demo
+
+## File Structure
+```
+Sources/CentipedeCore/
+├── HitResult.swift
+└── World.swift
+```
+
+## Data Models
+```swift
+enum HitResult: Equatable {
+    case mushroom(damageAfter: Int)
+    case empty
+}
+```
+We use an optional approach instead. Revised:
+```swift
+enum HitResult: Equatable {
+    case mushroom(remainingHits: Int)
+    case empty
+}
+```
+Simpler design that matches criteria directly:
+```swift
+enum HitResult: Equatable {
+    case mushroomDestroyed
+    case mushroomDamaged(Int)
+    case empty
+}
+```
+
+struct World { }
+"""
+
+
+class TestDuplicateTypeDeclaration:
+    def test_run11_hitresult_is_flagged(self):
+        assert dt.KIND_DUPLICATE_TYPE in _kinds(RUN11_TRIPLE_DECLARATION)
+
+    def test_it_names_the_type_and_the_count(self):
+        f = next(x for x in dt.check_design_completeness(RUN11_TRIPLE_DECLARATION)
+                 if x.kind == dt.KIND_DUPLICATE_TYPE)
+        assert "HitResult" in f.detail
+        assert "3 times" in f.detail
+
+    def test_it_says_to_re_check_the_seams(self):
+        """The redeclaration is the visible half; seams left pointing at the
+        abandoned version are the half that actually breaks the build."""
+        f = next(x for x in dt.check_design_completeness(RUN11_TRIPLE_DECLARATION)
+                 if x.kind == dt.KIND_DUPLICATE_TYPE)
+        assert "seam" in f.detail.lower()
+
+    def test_counts_are_exact(self):
+        assert dt.top_level_type_counts(RUN11_TRIPLE_DECLARATION)["HitResult"] == 3
+
+    def test_a_type_declared_once_is_silent(self):
+        design = """\
+# Architecture: Demo
+
+## Data Models
+```swift
+struct Position: Hashable { let col: Int }
+enum Direction { case left, right }
+```
+"""
+        assert dt.KIND_DUPLICATE_TYPE not in _kinds(design)
+
+    def test_extensions_are_not_redeclarations(self):
+        """Extending a type is the CORRECT way to add to one, including to a
+        protected type the pipeline may not edit."""
+        design = """\
+# Architecture: Demo
+
+## Data Models
+```swift
+struct Position: Hashable { let col: Int }
+extension Position { var isOrigin: Bool { col == 0 } }
+extension Position: CustomStringConvertible { }
+```
+"""
+        assert dt.KIND_DUPLICATE_TYPE not in _kinds(design)
+        assert dt.top_level_type_counts(design)["Position"] == 1
+
+    def test_a_nested_type_is_not_a_duplicate_of_a_top_level_one(self):
+        """A nested `Field` is a different type in a different scope. Counting
+        it would report a redeclaration the compiler is perfectly happy with."""
+        design = """\
+# Architecture: Demo
+
+## Data Models
+```swift
+struct World {
+    enum Field { case a }
+}
+struct Field { }
+```
+"""
+        counts = dt.top_level_type_counts(design)
+        assert counts["Field"] == 1
+        assert dt.KIND_DUPLICATE_TYPE not in _kinds(design)
+
+    def test_bullet_mentions_do_not_count(self):
+        """Bullets are prose; an architect may name a type in several of them."""
+        design = """\
+# Architecture: Demo
+
+## Data Models
+- `Position`: the grid coordinate
+- `Position`: also used as a dictionary key
+```swift
+struct Position: Hashable { let col: Int }
+```
+"""
+        assert dt.top_level_type_counts(design)["Position"] == 1
+        assert dt.KIND_DUPLICATE_TYPE not in _kinds(design)

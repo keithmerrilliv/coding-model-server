@@ -41,6 +41,7 @@ KIND_READONLY_SETUP = "readonly_setup"
 # DEV-509: the design's named types and its allocated files must agree.
 KIND_TYPE_WITHOUT_FILE = "type_without_file"
 KIND_FILE_WITHOUT_TYPE = "file_without_type"
+KIND_DUPLICATE_TYPE = "duplicate_type_declaration"
 # DEV-523: a seam step that names no call is not a seam. Every other rule in
 # this module reads backticked spans, so a step written as English prose is
 # not merely unchecked — it makes all of them unreachable.
@@ -232,6 +233,32 @@ def top_level_types(design_md: str) -> set[str]:
         if m:
             top.add(m.group(1))
     return top
+
+
+def top_level_type_counts(design_md: str) -> dict[str, int]:
+    """How many times Data Models declares each top-level type — DEV-554.
+
+    `top_level_types` returns a set, so a type declared three times is
+    indistinguishable from one declared once. Run 11's design 4 declared
+    `HitResult` three times in a row with the architect's own working notes
+    between the versions ("Actually simpler… No, criterion says… Let's just
+    track damage"), and its Criterion Seams then referenced cases from two of
+    the three mutually exclusive definitions.
+
+    Only fenced declarations are counted. The bullet spelling is prose and an
+    architect legitimately mentions a type in several bullets; counting those
+    would fire on ordinary writing.
+    """
+    body = _section(design_md, DATA_MODELS_HEADING)
+    decl = re.compile(
+        r"^(\s*)(?:struct|class|enum|protocol|actor|typealias|interface)\s+"
+        r"([A-Z]\w*)")
+    counts: dict[str, int] = {}
+    for line in body.splitlines():
+        m = decl.match(line)
+        if m and not m.group(1):
+            counts[m.group(2)] = counts.get(m.group(2), 0) + 1
+    return counts
 
 
 def declared_members(design_md: str) -> dict[str, str]:
@@ -734,6 +761,30 @@ def check_design_completeness(design_md: str) -> list[Finding]:
                 f"of what goes in it, so every attempt invents a different "
                 f"shape. Declare `{name}` with its storage and its entry "
                 f"points."),
+        ))
+
+    # DEV-554: the same type declared twice. `extension` is absent from the
+    # regex, so extending a type is never reported — that is the correct way to
+    # add to one. Nested declarations are excluded by the indentation guard, as
+    # in top_level_types.
+    for name, n in sorted(top_level_type_counts(design_md).items()):
+        if n < 2:
+            continue
+        findings.append(Finding(
+            kind=KIND_DUPLICATE_TYPE,
+            criterion="",
+            detail=(
+                f"`{name}` is declared {n} times in Data Models. Only one can "
+                f"exist — the rest are `invalid redeclaration of '{name}'`. "
+                f"This happens when a design is revised in place and the "
+                f"earlier version is left in the document; the reader cannot "
+                f"tell which one is meant, and a design over the manifest "
+                f"threshold is generated file-by-file, so each file's "
+                f"generation may resolve it differently. Worse, seams written "
+                f"against the abandoned version keep referencing members the "
+                f"surviving one does not have. Keep exactly one declaration of "
+                f"`{name}`, delete the others and the prose between them, and "
+                f"re-check every seam that mentions it."),
         ))
     return findings
 
