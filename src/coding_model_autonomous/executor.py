@@ -2403,6 +2403,7 @@ def build_synthesis_message(
     attempts: list[dict],
     review_notes: list[str] | None = None,
     reference_files: list[tuple[str, str]] | None = None,
+    current_design_digest: str | None = None,
 ) -> list[dict[str, str]]:
     """Build a single synthesis prompt that gives the model the full
     rotation history (code + per-attempt test outcome) and asks for a
@@ -2435,10 +2436,33 @@ def build_synthesis_message(
         )
         for i, note in enumerate(review_notes, 1):
             parts.append(f"### Review {i}\n\n{note}\n\n")
+    # DEV-553: the corpus is not homogeneous once the architect has revised.
+    # Run 10 merged six attempts spanning four designs and resurrected a
+    # signature a reviewer had explicitly struck two revisions earlier — the
+    # stale variant was simply more numerous than the current one.
+    stale = [a for a in attempts
+             if current_design_digest and a.get("design_digest")
+             and a["design_digest"] != current_design_digest]
     parts.append("\n\n## Prior Attempts\n\n")
-    for att in attempts:
+    if stale:
         parts.append(
-            f"### Attempt retry={att['retry']} (agent={att['agent']})\n\n"
+            f"**{len(stale)} of these {len(attempts)} attempts were written "
+            f"against an EARLIER version of the design and are marked "
+            f"SUPERSEDED below.** The architecture was revised after they ran, "
+            f"so where a superseded attempt and the design above disagree — a "
+            f"type, a signature, a return type — **the design above is "
+            f"correct and the attempt is wrong**. Their behaviour is still "
+            f"worth harvesting; their API is not. Do not reintroduce a "
+            f"signature that appears only in a superseded attempt.\n\n"
+        )
+    for att in attempts:
+        mark = ""
+        if current_design_digest and att.get("design_digest"):
+            mark = (" — SUPERSEDED design"
+                    if att["design_digest"] != current_design_digest
+                    else " — current design")
+        parts.append(
+            f"### Attempt retry={att['retry']} (agent={att['agent']}){mark}\n\n"
         )
         if att.get("test_summary"):
             parts.append("#### Test result\n\n```\n")

@@ -30,6 +30,7 @@ calling each agent. It must NOT serve HTTP itself.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import json
 import os
@@ -4190,9 +4191,33 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
     # the repair prompt, and both collision checks all use the same list.
     protected_files = _fetch_protected_files_for_spec(spec)
 
+    # DEV-553: attempts written against a design the architect has since
+    # revised carry an API a reviewer already struck. Mark them rather than
+    # drop them — run 10 had only ONE attempt against the final design, so
+    # filtering would have left nothing to merge.
+    # Digest the FILE, matching how _read_retry_attempts digests each
+    # snapshot's copy — hashing the decoded-then-re-encoded string instead
+    # would make every attempt look superseded the moment the file held a
+    # byte that did not round-trip.
+    current_design_digest = ""
+    if design_md_path.is_file():
+        try:
+            current_design_digest = hashlib.sha1(
+                design_md_path.read_bytes()).hexdigest()[:12]
+        except OSError:
+            pass
+    stale_n = sum(1 for a in attempts
+                  if a.get("design_digest")
+                  and a["design_digest"] != current_design_digest)
+    if stale_n:
+        logger.info("spec %s: %d of %d synthesis attempts were written "
+                    "against a superseded design — marked in the prompt "
+                    "(DEV-553)", spec.id, stale_n, len(attempts))
+
     messages = build_synthesis_message(spec_md, design_md, attempts,
                                        review_notes=review_notes,
-                                       reference_files=protected_files)
+                                       reference_files=protected_files,
+                                       current_design_digest=current_design_digest)
 
     # Synthesis merges every attempt's files into one final response — the same
     # single-call emit-everything constraint as the implementer, so it gets the
