@@ -195,3 +195,88 @@ def test_fewer_diagnostics_kept_even_when_the_survivor_is_new(tmp_path,
         tmp_path, monkeypatch, only_new, before, repair)
     assert out == only_new, "a strictly smaller diagnostic set is progress"
     assert on_disk["Sources/Z.swift"] == "much better\n"
+
+
+# ── DEV-541 widening: a collision with a protected symbol vetoes the repair ──
+#
+# Run 10 produced the mirror of the case this ticket was written for. Its
+# repair went 8 -> 7 diagnostics, so the count-only rule KEPT it — while what
+# it had done was invent Sources/CentipedeCore/Field.swift redeclaring `Field`
+# from the protected scaffold. All 7 surviving diagnostics were its own doing
+# and none was reachable: the file it collided with is one the pipeline may not
+# edit, so no later attempt could have resolved it.
+#
+# These call the production decision directly rather than mirroring it.
+
+GAMESTATE = """\
+public enum Field {
+    public static let columns = 30
+    public static let rows = 30
+}
+public struct GameState: Sendable { public var score = 0 }
+"""
+PROTECTED = [("Sources/CentipedeCore/GameState.swift", GAMESTATE)]
+
+
+def _diags(n):
+    return [f"cannot find 'x{i}' in scope" for i in range(n)]
+
+
+def test_run10_shape_is_now_rolled_back():
+    """8 -> 7 with a Field collision: the count says keep, the rule says no."""
+    improved, poisoned = od._repair_verdict(
+        False, _diags(8), _diags(7),
+        ["invalid redeclaration of 'Field'",
+         "ambiguous use of 'columns'", "ambiguous use of 'rows'"],
+        PROTECTED)
+    assert improved is False
+    assert poisoned == ["Field"]
+
+
+def test_the_12_to_1_case_is_still_kept():
+    """The reason this ticket rejected 'veto any new class' in the first
+    place. Its new class is about ordinary generated code, not the scaffold."""
+    improved, poisoned = od._repair_verdict(
+        False, _diags(12), _diags(1), ["cannot find 'Widget' in scope"],
+        PROTECTED)
+    assert improved is True
+    assert poisoned == []
+
+
+def test_a_passing_repair_is_kept_even_with_a_collision():
+    """If the suite passes, the build plainly compiled — nothing to veto."""
+    improved, _ = od._repair_verdict(
+        True, _diags(3), [], ["invalid redeclaration of 'Field'"], PROTECTED)
+    assert improved is True
+
+
+def test_no_protected_files_leaves_the_old_rule_intact():
+    improved, poisoned = od._repair_verdict(
+        False, _diags(8), _diags(7), ["invalid redeclaration of 'Field'"], [])
+    assert improved is True
+    assert poisoned == []
+
+
+def test_a_protected_symbol_mentioned_in_an_OLD_class_does_not_veto():
+    """Only classes the repair INTRODUCED can condemn it; a pre-existing
+    Field error that the repair inherited is not its fault."""
+    improved, poisoned = od._repair_verdict(
+        False, _diags(8), _diags(7), [], PROTECTED)
+    assert improved is True
+    assert poisoned == []
+
+
+def test_substring_matches_do_not_veto():
+    """`Fieldset` is not `Field`; word-boundary matching keeps this narrow."""
+    improved, poisoned = od._repair_verdict(
+        False, _diags(8), _diags(7), ["cannot find 'Fieldset' in scope"],
+        PROTECTED)
+    assert improved is True
+    assert poisoned == []
+
+
+def test_equal_count_still_rolls_back_regardless():
+    improved, poisoned = od._repair_verdict(
+        False, _diags(5), _diags(5), [], PROTECTED)
+    assert improved is False
+    assert poisoned == []

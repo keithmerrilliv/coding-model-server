@@ -30,6 +30,7 @@ calling each agent. It must NOT serve HTTP itself.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import json
 import os
@@ -2327,7 +2328,53 @@ def _requeue_for_unreachable_runner(db: Database, spec: Spec, task) -> bool:
     return True
 
 
-def _normalize_generated_files(db: Database, spec: Spec, task, files, role: str):
+def _drop_protected_type_collisions(db: Database, spec: Spec, task, files,
+                                    role: str, protected_files):
+    """Discard generated files that redeclare a type a protected file owns.
+
+    DEV-552. Prompting is not enough on its own: run 10's repair invented
+    `Field.swift` declaring a type the protected `GameState.swift` already
+    declared, and every diagnostic in that final build came from that one file.
+    Worse, no later attempt could have recovered — the file it collides with is
+    one the pipeline is forbidden to edit, so the error is unreachable from
+    anything the model is allowed to change.
+
+    Conservative on purpose. A file is dropped only when EVERY top-level type
+    it declares collides, which is the pure-duplicate case and loses nothing.
+    A file that also declares wanted types is left alone and merely logged:
+    the build will fail either way, and deleting real work to avoid a
+    diagnostic would be the worse trade.
+    """
+    if not protected_files:
+        return files
+    try:
+        collisions = executor.protected_type_collisions(files, protected_files)
+    except Exception as e:  # never let a lint step break a generation
+        logger.warning("spec %s: protected-type check errored (%s) — skipping",
+                       spec.id, e)
+        return files
+    if not collisions:
+        return files
+
+    dropped = {path for path, _, total in collisions if total}
+    for path, names, total in collisions:
+        logger.warning(
+            "spec %s: generated %s redeclares protected type(s) %s — %s",
+            spec.id, path, ", ".join(names),
+            "dropping the file" if total else
+            "KEEPING it (it declares other types too); the build will fail")
+    db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
+                    payload={"role": role, "model_call": False,
+                             "anomaly": "protected_type_collision",
+                             "dropped": sorted(dropped),
+                             "collisions": [
+                                 {"path": p, "types": n, "dropped": t}
+                                 for p, n, t in collisions]})
+    return [(p, c) for p, c in files if p not in dropped]
+
+
+def _normalize_generated_files(db: Database, spec: Spec, task, files, role: str,
+                               protected_files=None):
     """Apply deterministic boilerplate fixes and record what changed.
 
     Every path that writes model-generated files must go through this. DEV-540
@@ -2335,7 +2382,12 @@ def _normalize_generated_files(db: Database, spec: Spec, task, files, role: str)
     repair outputs were written raw, and the repair is where run 8 actually
     died — it emitted eight Swift files with no `import Foundation` and nothing
     stood between that and the compiler.
+
+    DEV-552 hangs the protected-type check here for the same reason: this is
+    the one choke point every generated file already passes through.
     """
+    files = _drop_protected_type_collisions(
+        db, spec, task, files, role, protected_files)
     normalized, notes = executor.normalize_boilerplate(files)
     if not notes:
         return files
@@ -2475,7 +2527,8 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
     # FAILs never depend on the model getting them right. See
     # executor.normalize_boilerplate (#3, DEV-540).
     result.files = _normalize_generated_files(
-        db, spec, task, result.files, "implementer")
+        db, spec, task, result.files, "implementer",
+        protected_files=_fetch_protected_files_for_spec(spec))
 
     # Write all files
     for rel_path, content in result.files:
@@ -4069,6 +4122,40 @@ def _collect_rejection_notes(db: Database, spec_id: str) -> list[str]:
     return notes
 
 
+def _repair_verdict(repair_passed: bool, pre_diags: list, post_diags: list,
+                    new_classes: list, protected_files) -> "tuple[bool, list]":
+    """Keep the synthesis repair, or roll it back? (DEV-541)
+
+    Returns ``(improved, protected symbols the repair collided with)``.
+
+    The count of diagnostic OCCURRENCES is the criterion, not the set of
+    distinct messages: a dropped import emits many diagnostics repeating one
+    message, so a deduplicated set barely moves while the build collapses.
+
+    New diagnostic classes are reported rather than vetoed, because vetoing
+    them over-rejects — a repair going 12 → 1 is obviously good even though its
+    single survivor is new.
+
+    The exception, added after run 10: a new class naming a symbol declared in
+    a PROTECTED file vetoes the repair whatever the count did. Run 10's repair
+    went 8 → 7 and was kept, when what it had actually done was invent a file
+    redeclaring `Field` from the protected scaffold. Every one of those 7
+    diagnostics was its own doing and none was reachable — the file it collided
+    with is one the pipeline may not edit, so no later attempt could resolve
+    it. A lower count does not make an unrecoverable build progress.
+    """
+    symbols: set = set()
+    for path, content in (protected_files or []):
+        if path.endswith(".swift"):
+            symbols |= executor.declared_top_level_types(content)
+    poisoned = sorted(
+        {sym for sym in symbols for cls in new_classes
+         if re.search(rf"\b{re.escape(sym)}\b", cls)})
+    improved = repair_passed or (len(post_diags) < len(pre_diags)
+                                 and not poisoned)
+    return improved, poisoned
+
+
 def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
                    framework: str, framework_opts: dict) -> tuple[bool, str]:
     """MAX_RETRIES escape hatch: synthesize the union of correct behaviors
@@ -4100,8 +4187,37 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
                 "via agent=%s", spec.id, len(attempts), len(review_notes),
                 _SYNTHESIS_AGENT)
 
+    # DEV-552: fetched once for the whole synthesis phase — the merge prompt,
+    # the repair prompt, and both collision checks all use the same list.
+    protected_files = _fetch_protected_files_for_spec(spec)
+
+    # DEV-553: attempts written against a design the architect has since
+    # revised carry an API a reviewer already struck. Mark them rather than
+    # drop them — run 10 had only ONE attempt against the final design, so
+    # filtering would have left nothing to merge.
+    # Digest the FILE, matching how _read_retry_attempts digests each
+    # snapshot's copy — hashing the decoded-then-re-encoded string instead
+    # would make every attempt look superseded the moment the file held a
+    # byte that did not round-trip.
+    current_design_digest = ""
+    if design_md_path.is_file():
+        try:
+            current_design_digest = hashlib.sha1(
+                design_md_path.read_bytes()).hexdigest()[:12]
+        except OSError:
+            pass
+    stale_n = sum(1 for a in attempts
+                  if a.get("design_digest")
+                  and a["design_digest"] != current_design_digest)
+    if stale_n:
+        logger.info("spec %s: %d of %d synthesis attempts were written "
+                    "against a superseded design — marked in the prompt "
+                    "(DEV-553)", spec.id, stale_n, len(attempts))
+
     messages = build_synthesis_message(spec_md, design_md, attempts,
-                                       review_notes=review_notes)
+                                       review_notes=review_notes,
+                                       reference_files=protected_files,
+                                       current_design_digest=current_design_digest)
 
     # Synthesis merges every attempt's files into one final response — the same
     # single-call emit-everything constraint as the implementer, so it gets the
@@ -4146,7 +4262,8 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
             pass
 
     result.files = _normalize_generated_files(
-        db, spec, impl_task, result.files, "synthesizer")
+        db, spec, impl_task, result.files, "synthesizer",
+        protected_files=protected_files)
     for rel_path, content in result.files:
         _write_artifact(spec_dir, rel_path, content)
         db.create_artifact(spec_id=spec.id, task_id=impl_task.id,
@@ -4234,6 +4351,7 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
         warning_diagnostic=(_format_build_warnings(warning_blocking)
                             if rate is None and not build_failed
                             and warning_blocking else None),
+        reference_files=protected_files,
     )
     repair_meta: dict = {}
     try:
@@ -4272,7 +4390,8 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
 
     # Overlay only the files the repair emitted; everything else stays.
     repair.files = _normalize_generated_files(
-        db, spec, impl_task, repair.files, "synthesis_repair")
+        db, spec, impl_task, repair.files, "synthesis_repair",
+        protected_files=protected_files)
     for rel_path, content in repair.files:
         _write_artifact(spec_dir, rel_path, content)
         db.create_artifact(spec_id=spec.id, task_id=impl_task.id,
@@ -4330,7 +4449,22 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
     # over-rejects: a repair going 12 → 1 would be discarded merely because the
     # single survivor is new, which is plainly the wrong call. The count is the
     # criterion; new classes are reported, not vetoed.
-    improved = repair_passed or len(post_repair_diags) < len(pre_repair_diags)
+    #
+    # …with one exception, added after run 10 produced the mirror case. That
+    # repair went 8 → 7, so count-only KEPT it — while what it had actually
+    # done was invent a file redeclaring `Field`, a type owned by a protected
+    # scaffold. Every one of those 7 diagnostics was the repair's own doing,
+    # and none of them was reachable: the file it collided with is one the
+    # pipeline may not edit, so no later attempt could have resolved it either.
+    #
+    # So a new diagnostic class that names a symbol declared in a protected
+    # file vetoes the repair regardless of the count. That is narrow on
+    # purpose — it does not touch the 12 → 1 case, whose new class is about
+    # ordinary generated code — and it keys on the one property that makes a
+    # regression permanent rather than merely bad.
+    improved, poisoned = _repair_verdict(
+        repair_passed, pre_repair_diags, post_repair_diags, new_classes,
+        protected_files)
 
     if not improved:
         for rel_path, previous in pre_repair_state.items():
@@ -4350,6 +4484,11 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
                              "errors_before": len(pre_repair_diags),
                              "errors_after": len(post_repair_diags),
                              "new_diagnostic_classes": new_classes,
+                             # DEV-541: which protected symbols the repair
+                             # collided with, empty when none. A rollback with
+                             # a non-empty list is a different animal from one
+                             # that merely failed to reduce the count.
+                             "protected_symbols_hit": poisoned,
                              "rolled_back": not improved})
 
     try:
@@ -4363,6 +4502,14 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
         outcome = (f"FAIL — repair improved the build "
                    f"({len(pre_repair_diags)} → {len(post_repair_diags)} "
                    f"diagnostics) but the suite still fails")
+    elif poisoned:
+        outcome = (f"FAIL — repair reduced the count "
+                   f"({len(pre_repair_diags)} → {len(post_repair_diags)} "
+                   f"diagnostics) but collided with protected symbol(s) "
+                   f"{', '.join(poisoned)}; rolled back to the pre-repair "
+                   f"state. A collision with a file the pipeline may not edit "
+                   f"is unrecoverable, so a lower count does not make it "
+                   f"progress")
     else:
         outcome = (f"FAIL — repair did not improve the build "
                    f"({len(pre_repair_diags)} → {len(post_repair_diags)} "
