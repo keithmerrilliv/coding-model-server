@@ -57,13 +57,39 @@ idle (30-min watchdog; in-flight requests block the kill).
 
 ## Quick Start
 
-### Server (Linux with NVIDIA GPU)
+### Prerequisites
+
+Read this first — two of these are **not** installed for you, and the server
+will not start without them.
+
+| | |
+|---|---|
+| **OS / hardware** | Linux with an NVIDIA GPU for the server. The client runs on macOS or Linux. |
+| **Python** | 3.12 |
+| **CUDA** | **12.8 — not 13.x.** CUDA 13.x has a compiler bug that silently disables MMQ kernels and costs roughly 7× on prefill (llama.cpp #18331, #18398). |
+| **`tools/llama-server`** | **You must supply this.** A llama.cpp build plus its shared libraries. It is the only inference backend, it is not in this repo, and `setup.sh` does not fetch it. See `docs/TUTORIAL.md` §5.3. |
+| **Model weights** | **You must supply these.** No GGUF ships here. `.env.example` lists the model slots; every one is optional, so start with a single small model and add more later. |
+| **VRAM** | Whatever you have. Most agents run with expert offload (`--cpu-moe`), keeping attention on the GPU and MoE experts on CPU, so a 16 GB card runs models far larger than it could hold. |
 
 ```bash
-git clone <repo-url> && cd coding-model-server
-./bin/setup.sh              # Creates venv, runs `pip install -e .`, sets up .env
-cp .env.example .env        # (bin/setup.sh does this too; edit IP, ports, model paths)
-./bin/start.sh              # Starts on port 5000
+git clone git@github.com:keithmerrilliv/coding-model-server.git
+cd coding-model-server
+./bin/setup.sh              # venv + `pip install -e .` + seeds .env
+```
+
+Then edit your `.env` before first launch. **`ADMIN_API_KEY` is required** — every
+launch path refuses to start with it empty or left at a placeholder:
+
+```bash
+python3 -c "import secrets; print(secrets.token_urlsafe(32))"   # generate one
+```
+
+For a purely local experiment, `CODING_MODEL_ALLOW_UNAUTH=1` permits an empty
+key, but only when `HOST` is loopback.
+
+```bash
+./bin/start.sh              # starts on port 5000
+curl localhost:5000/health  # sanity check
 ```
 
 Dependencies live in `pyproject.toml` (single source of truth). `bin/setup.sh`
@@ -72,19 +98,24 @@ packages importable, and wires the `coding-model-client` / `coding-model-autonom
 scripts. For the client's optional niceties (rich output, scraping) add the
 extra: `pip install -e '.[client]'`.
 
-The `tools/llama-server` binary must be present — it is the only inference
-backend, and `setup.sh` does not fetch it for you.
+Or as a systemd service. The units in `systemd/` are **templates** — they ship
+with `/home/youruser` placeholders, so substitute before installing:
 
-Or as a systemd service:
 ```bash
-sudo systemctl enable coding-model-server
-sudo systemctl start coding-model-server
-journalctl -u coding-model-server -f   # View logs
+sed -e "s|/home/youruser|$HOME|g" -e "s|^User=youruser|User=$USER|" \
+    -e "s|^Group=youruser|Group=$USER|" systemd/coding-model-server.service \
+  | sudo tee /etc/systemd/system/coding-model-server.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now coding-model-server
+journalctl -u coding-model-server -f   # view logs
 ```
 
-The repo ships four units in `systemd/`: `coding-model-server` (inference API),
-`coding-model-orchestrator` (autonomous mode), `coding-model-dashboard` (static
-dashboard on :3001), and `coding-model-monitor` (resource sampler).
+`systemd/` ships four services you will want — `coding-model-server` (inference
+API), `coding-model-orchestrator` (autonomous mode), `coding-model-dashboard`
+(static dashboard on :3001) and `coding-model-monitor` (resource sampler) — plus
+two optional timer-driven jobs, `coding-model-apple-docs-refresh` and
+`coding-model-mcp-update`, which only matter if you use the Apple-docs RAG
+collection. Every one is a template; substitute as above.
 
 After pulling code or editing a `systemd/*.service` unit, redeploy the running
 services (syncs units, reloads, restarts server → orchestrator → dashboard in
