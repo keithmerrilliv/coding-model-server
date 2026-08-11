@@ -1377,7 +1377,8 @@ class LlamaServerManager:
                                model_config: Optional[dict],
                                tools: Optional[List[Dict[str, Any]]],
                                tool_choice: Optional[Any],
-                               parallel_tool_calls: Optional[bool]) -> dict:
+                               parallel_tool_calls: Optional[bool],
+                               chat_template_kwargs: Optional[Dict[str, Any]] = None) -> dict:
         mc = model_config or {}
         payload = {
             "messages": openai_messages,
@@ -1402,6 +1403,12 @@ class LlamaServerManager:
             payload["tool_choice"] = tool_choice
         if parallel_tool_calls is not None:
             payload["parallel_tool_calls"] = parallel_tool_calls
+        # Jinja template variables — e.g. {'enable_thinking': False} against a
+        # hybrid template (DEV-556). Sent only when non-empty, so a model
+        # without --jinja and every agent that has not opted in produce exactly
+        # the payload they produced before this parameter existed.
+        if chat_template_kwargs:
+            payload["chat_template_kwargs"] = chat_template_kwargs
         return payload
 
     def proxy_stream(self, messages: List[dict], system_prompt: str,
@@ -1411,6 +1418,7 @@ class LlamaServerManager:
                      tools: Optional[List[Dict[str, Any]]] = None,
                      tool_choice: Optional[Any] = None,
                      parallel_tool_calls: Optional[bool] = None,
+                     chat_template_kwargs: Optional[Dict[str, Any]] = None,
                      req_id: Optional[str] = None,
                      reserved: bool = False,
                      upstream_cancel: Optional[UpstreamCancel] = None) -> Iterator[str]:
@@ -1449,6 +1457,7 @@ class LlamaServerManager:
             payload = self._build_request_payload(
                 openai_messages, max_tokens, temperature, True,
                 model_config, tools, tool_choice, parallel_tool_calls,
+                chat_template_kwargs,
             )
 
             completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
@@ -1571,6 +1580,7 @@ class LlamaServerManager:
                    tools: Optional[List[Dict[str, Any]]] = None,
                    tool_choice: Optional[Any] = None,
                    parallel_tool_calls: Optional[bool] = None,
+                   chat_template_kwargs: Optional[Dict[str, Any]] = None,
                    req_id: Optional[str] = None,
                    reserved: bool = False) -> dict:
         """Synchronous chat completion via the llama-server subprocess.
@@ -1587,6 +1597,7 @@ class LlamaServerManager:
         payload = self._build_request_payload(
             openai_messages, max_tokens, temperature, False,
             model_config, tools, tool_choice, parallel_tool_calls,
+            chat_template_kwargs,
         )
 
         with self.lock:

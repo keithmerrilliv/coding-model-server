@@ -413,6 +413,13 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
             system_prompt = agent_config['system_prompt']
 
         _maybe_inject_few_shot(request, agent_config)
+        # Jinja template variables (DEV-556). The agent carries the default so
+        # the roster holds the decision — `dense_architect_nothink` is the same
+        # GGUF with enable_thinking off — and an explicit request value wins, so
+        # a caller can override per call without a second roster entry. Both
+        # unset sends nothing, which is what every request did before this.
+        chat_template_kwargs = (request.chat_template_kwargs
+                                or agent_config.get('chat_template_kwargs'))
         # Keep the base (pre-RAG) prompt for token estimation: it is stable
         # across requests and stays in the tokenize cache, while rag_suffix is
         # the small volatile block, counted separately (DEV-113).
@@ -531,6 +538,7 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
                 est_prompt_tokens=est_prompt_tokens,
                 tools=request.tools, tool_choice=request.tool_choice,
                 parallel_tool_calls=request.parallel_tool_calls,
+                chat_template_kwargs=chat_template_kwargs,
                 req_id=req_id, reserved=True,
                 upstream_cancel=upstream_cancel)
 
@@ -602,6 +610,7 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
                 clamped_max, request.temperature, model_config=model_config,
                 tools=request.tools, tool_choice=request.tool_choice,
                 parallel_tool_calls=request.parallel_tool_calls,
+                chat_template_kwargs=chat_template_kwargs,
                 req_id=req_id, reserved=True)
         )
 
