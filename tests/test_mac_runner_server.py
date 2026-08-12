@@ -210,15 +210,20 @@ def test_shipped_profile_denies_credentials_and_home_writes():
 
     profile = Path(server.__file__).parent / "sandbox.sb"
     text = profile.read_text()
-    # $HOME is read-only by default...
-    assert '(deny file-write* (subpath (param "HOME")))' in text
+    # Writes are denied by default (DEV-527 inverted the old HOME-only deny,
+    # which left /opt/homebrew/bin and other PATH dirs writable)...
+    assert '(deny file-write*)' in text
     # ...except the build's own directories, passed as parameters.
     assert '(subpath (param "WORKTREE"))' in text
     assert '(subpath (param "DERIVED_DATA"))' in text
-    # Credential material is unreadable, including the runner's own config.
+    # No outbound IP network from inside the sandbox (DEV-527 exfil close).
+    assert '(deny network-outbound' in text
+    # Credential material is unreadable, including the runner's own config and
+    # the stores DEV-527 added (~/.claude holds a live token).
     assert '/.ssh' in text
     assert "Keychains" in text
     assert ".config/coding-model-runner" in text
+    assert '/.claude' in text
 
 
 # ── DEV-170 / DEV-171: health disclosure and git option confusion ────────────

@@ -3,19 +3,18 @@
 #
 # Runs the given profile under sandbox-exec with the same -D params the runner
 # passes (frameworks.wrap_sandbox) and asserts the write/network/read boundary
-# holds — and that a real toolchain compile still works inside it. This is
-# ISOLATED from the live runner: it reads whatever profile you point it at
-# (default: the hardened candidate), never touching the deployed sandbox.sb, so
-# it is safe to run while the runner is live.
+# holds — and that a real toolchain compile still works inside it. It only ever
+# READS the profile and runs throwaway commands, so it is safe to run while the
+# runner is live (it does not dispatch a build).
 #
-#   bash mac_runner/validate_sandbox_profile.sh                       # candidate
-#   bash mac_runner/validate_sandbox_profile.sh mac_runner/sandbox.sb # the live one
+#   bash mac_runner/validate_sandbox_profile.sh                            # live sandbox.sb
+#   bash mac_runner/validate_sandbox_profile.sh mac_runner/some-other.sb   # a candidate
 #
 # Exit 0 iff every security assertion holds.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROFILE="${1:-$HERE/sandbox.hardened.sb}"
+PROFILE="${1:-$HERE/sandbox.sb}"
 SBEXEC="/usr/bin/sandbox-exec"
 
 [ -f "$PROFILE" ]  || { echo "no such profile: $PROFILE"; exit 2; }

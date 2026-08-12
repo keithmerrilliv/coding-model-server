@@ -1,26 +1,42 @@
-;; Sandbox profile for LLM-authored builds/tests run by mac_runner (DEV-126).
+;; Sandbox profile for LLM-authored builds/tests run by mac_runner
+;; (DEV-126, hardened per DEV-527).
 ;;
-;; The Linux orchestrator sandboxes its test runs (bubblewrap + seccomp); the
-;; Mac side ran swift/xcodebuild bare. This profile closes that asymmetry for
-;; the two things LLM-authored code must never do on the workstation:
+;; LIVE profile: Config.SANDBOX_PROFILE reads this file and sandbox-exec -f
+;; reads it at dispatch time, so a change takes effect on the very next build —
+;; edit only in a dispatch gap, and re-validate first
+;; (mac_runner/validate_sandbox_profile.sh), because a bad profile fails that
+;; build and is scored as a failing test run (test_runner.py). Deployed
+;; 2026-08-12 after the validation passed 12/12 and a real Centipede swift_test
+;; passed under it.
 ;;
-;;   * read credential material — SSH keys (including the tunnel key that
-;;     reaches the GPU host), keychains, cloud credentials, and the runner's
-;;     own config/API key;
-;;   * write anywhere in $HOME outside the build's own directories — no
-;;     LaunchAgents persistence, no dotfile implants.
+;; What changed from the original DEV-126 profile, and why (DEV-527, audit
+;; 2026-08-04):
 ;;
-;; It is deliberately default-allow: xcodebuild's system surface (mach
-;; services, IOKit, simulators, toolchain paths) is vast and undocumented,
-;; and a default-deny profile that was never tuned on real builds bricks the
-;; runner. Subtractive rules keep builds working while removing the assets
-;; that matter. Later rules take precedence in SBPL, so the write re-allows
-;; below carve build directories back out of the $HOME write denial.
+;;   The original is (allow default) with subtractive denies. That is right for
+;;   the SYSTEM surface — xcodebuild's mach/IOKit/toolchain needs are vast and a
+;;   default-deny profile that was never tuned bricks the runner. But it does
+;;   NOT hold for writes or network, where the deny-list was enumerable and
+;;   provably incomplete:
 ;;
-;; Parameters (supplied by the runner via sandbox-exec -D):
-;;   HOME          the runner user's home directory
-;;   WORKTREE      the per-request git worktree being built/tested
-;;   DERIVED_DATA  xcodebuild's derivedDataPath
+;;     * WRITES: the only write deny was (subpath HOME). Everything OUTSIDE
+;;       $HOME stayed writable — including /opt/homebrew/bin and /usr/local/bin,
+;;       both on the runner's PATH and user-writable on Apple Silicon. Sandboxed
+;;       test code could drop an executable `git`/`xcodebuild` there; the NEXT
+;;       dispatch runs those UNSANDBOXED (workspace._git, integration.
+;;       _tracked_paths) as the runner user, with CODING_MODEL_RUNNER_API_KEY in
+;;       the environment and the SSH tunnel reachable. A full escape.
+;;
+;;     * NETWORK: there was no network rule at all, so a test body could read a
+;;       credential the read deny-list did not name and POST it out.
+;;
+;;   Fix: keep (allow default) for the system surface, but INVERT writes (deny
+;;   all, re-allow the build's own dirs — writes are enumerable in a way the
+;;   system surface is not) and DENY IP network (local IPC over unix sockets
+;;   stays, so the toolchain can still reach system daemons). Reads gain the
+;;   named credential stores the original list missed.
+;;
+;; Parameters (supplied by the runner via sandbox-exec -D, see
+;; frameworks.wrap_sandbox): HOME, WORKTREE, DERIVED_DATA, SIGNING_KEYCHAIN.
 ;;
 ;; Escape hatch: CODING_MODEL_RUNNER_SANDBOX=0 runs unwrapped.
 
@@ -29,46 +45,91 @@
 (allow default)
 
 ;; ── Credential material: unreadable ─────────────────────────────────────────
+;; The original six, plus the stores the 2026-08-04 audit found still readable
+;; (~/.claude/.credentials.json is the concrete one — this repo's own tooling
+;; keeps a live token there). A deny-list of secrets is only as current as the
+;; last person who thought about it; the durable form is deny-by-default reads
+;; under $HOME (see the commented block after the write rules), which needs a
+;; real-build validation pass before it can ship.
 (deny file-read*
   (subpath (string-append (param "HOME") "/.ssh"))
   (subpath (string-append (param "HOME") "/.aws"))
   (subpath (string-append (param "HOME") "/.gnupg"))
   (subpath (string-append (param "HOME") "/.config/coding-model-runner"))
   (literal (string-append (param "HOME") "/.netrc"))
-  (subpath (string-append (param "HOME") "/Library/Keychains")))
+  (subpath (string-append (param "HOME") "/Library/Keychains"))
+  ;; DEV-527 additions:
+  (subpath (string-append (param "HOME") "/.claude"))
+  (subpath (string-append (param "HOME") "/.docker"))
+  (subpath (string-append (param "HOME") "/.kube"))
+  (subpath (string-append (param "HOME") "/.config/gh"))
+  (literal (string-append (param "HOME") "/.gitconfig"))
+  (literal (string-append (param "HOME") "/.git-credentials")))
 
 ;; ── Signing certificate: readable, and ONLY when a signing keychain is named ─
-;; codesign runs inside this sandbox and needs the certificate's private key.
-;; With the blanket keychain deny above it cannot see any identity, so every
-;; xcodebuild run failed with "No certificate for team '...' matching '<sha>'
-;; found" — while the runner, which resolves identities OUTSIDE the sandbox,
-;; reported the certificate present. Six signing theories died on that
-;; discrepancy (DEV-398).
-;;
-;; SBPL is last-match-wins, so this re-allows exactly one keychain file. Point
-;; SIGNING_KEYCHAIN at a DEDICATED keychain holding only the signing identity —
-;; not the login keychain, which holds every saved password on the machine and
-;; would be handed wholesale to LLM-authored test code. When the parameter is
-;; empty this rule matches nothing and the deny above stands unchanged.
-;; `literal`, not `subpath`: a keychain is a FILE, and subpath matches a
-;; directory tree, so the first attempt matched nothing and the deny above
-;; silently stood — the build kept reporting the certificate missing. Both
-;; forms are listed because `security create-keychain foo.keychain` produces
-;; foo.keychain-db on current macOS, and which name ends up configured varies.
+;; Unchanged from DEV-398 — do not regress. codesign runs inside this sandbox
+;; and needs the certificate's private key; SBPL is last-match-wins, so this
+;; re-allows exactly one keychain file over the blanket Keychains deny above.
+;; Point SIGNING_KEYCHAIN at a DEDICATED keychain, never the login keychain.
+;; Empty param -> "/nonexistent/..." (wrap_sandbox) -> matches nothing.
 (allow file-read*
   (literal (param "SIGNING_KEYCHAIN"))
   (literal (string-append (param "SIGNING_KEYCHAIN") "-db"))
   (subpath (param "SIGNING_KEYCHAIN")))
 
-;; ── $HOME: read-only except the build's own directories ────────────────────
-(deny file-write* (subpath (param "HOME")))
+;; ── Writes: deny by default, re-allow only the build's own directories ───────
+;; INVERTED from the DEV-126 profile (which denied only $HOME). Writes are
+;; enumerable, so deny-by-default is tractable here and closes the PATH-implant
+;; escape. Anything a real build legitimately writes that is NOT below must be
+;; added HERE (established empirically — a missing path fails the build with a
+;; sandbox denial naming it).
+(deny file-write*)
 
 (allow file-write*
   (subpath (param "WORKTREE"))
   (subpath (param "DERIVED_DATA"))
-  ;; SPM + clang module caches, xcodebuild scratch. The runner's default
-  ;; WORKTREE_ROOT/DERIVED_DATA live under Caches too, so custom locations
-  ;; are covered by the params above and defaults by these.
+  ;; SPM + clang module caches, xcodebuild scratch. Default WORKTREE_ROOT /
+  ;; DERIVED_DATA live under Caches too, so custom locations are covered by the
+  ;; params above and the defaults by these.
   (subpath (string-append (param "HOME") "/Library/Caches"))
   (subpath (string-append (param "HOME") "/Library/Developer"))
-  (subpath (string-append (param "HOME") "/Library/org.swift.swiftpm")))
+  (subpath (string-append (param "HOME") "/Library/org.swift.swiftpm"))
+  ;; Ambient scratch a toolchain genuinely needs, previously covered only by the
+  ;; blanket (allow default): the per-user temp/cache tree and world temp dirs.
+  (subpath "/private/var/folders")
+  (subpath "/private/tmp")
+  (subpath "/private/var/tmp")
+  (subpath "/tmp"))
+
+;; Device writes: /dev/null, ttys, fd redirects — data writes to existing device
+;; nodes only (not node creation), which is not a persistence/PATH vector.
+(allow file-write-data
+  (subpath "/dev"))
+
+;; ── Durable reads hardening (OPTIONAL — validate before enabling) ────────────
+;; The read deny-list above is still an enumeration. The durable form denies
+;; reads by default UNDER $HOME and re-allows the toolchain's own dirs. It is
+;; commented out because it must be proven not to break a real signed xcodebuild
+;; run first (the system surface stays default-allow; only $HOME flips):
+;;
+;;   (deny file-read* (subpath (param "HOME")))
+;;   (allow file-read*
+;;     (subpath (param "WORKTREE"))
+;;     (subpath (param "DERIVED_DATA"))
+;;     (subpath (string-append (param "HOME") "/Library/Caches"))
+;;     (subpath (string-append (param "HOME") "/Library/Developer"))
+;;     (subpath (string-append (param "HOME") "/Library/org.swift.swiftpm"))
+;;     (subpath (string-append (param "HOME") "/Library/MobileDevice"))
+;;     (literal (param "SIGNING_KEYCHAIN"))
+;;     (literal (string-append (param "SIGNING_KEYCHAIN") "-db")))
+
+;; ── Network: no IP sockets from inside the sandbox ───────────────────────────
+;; Exfiltration needs an outbound socket. SwiftPM dependency resolution is a
+;; SEPARATE unsandboxed pre-step (build_resolve_cmd, DEV-294), so the sandboxed
+;; build/test needs no internet. Deny IP in/out/bind (incl. localhost); leave
+;; AF_UNIX alone (allowed by the default base) so the toolchain can still reach
+;; launchd/syslog/etc. over local IPC, which is not an exfiltration path. A
+;; denied connect() fails fast with EPERM — it does not hang.
+(deny network-outbound (remote ip "*:*"))
+(deny network-inbound (local ip "*:*"))
+(deny network-bind (local ip "*:*"))
