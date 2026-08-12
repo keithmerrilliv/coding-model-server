@@ -86,6 +86,27 @@ class TestProtectedPath:
             prot, _ = th._is_protected_path(p)
             assert prot, f"{p} must be protected"
 
+    def test_case_variant_paths_are_protected(self):
+        """Regression: macOS/Windows filesystems are case-insensitive, but the
+        component check compared case-sensitively and realpath() does not fold
+        case — so "~/.SSH/id_rsa" opened the real "~/.ssh/id_rsa" while the gate
+        waved it through, defeating the read-and-exfil prompt on the platform
+        the client mostly runs on. Every case variant must now be protected;
+        this holds on case-sensitive filesystems too (folding only adds matches).
+        """
+        for p in (
+            "~/.SSH/id_rsa_prod",      # bare-name dir, upper-case
+            "~/.Ssh/config",
+            "~/.GnuPG/secring.gpg",
+            "~/.AWS/config",           # rooted dir, upper-case
+            "~/Library/COOKIES/x",
+            "~/Library/KEYCHAINS/login.keychain-db",
+            "/ETC/passwd",
+            "~/.SSH/ID_RSA",           # protected filename, upper-case basename
+        ):
+            prot, why = th._is_protected_path(p)
+            assert prot, f"{p} must be protected regardless of case"
+
     def test_symlink_to_protected_path_is_caught(self, tmp_path):
         """The reason realpath is used at all: a link pointing at a protected file."""
         link = tmp_path / "innocent.txt"

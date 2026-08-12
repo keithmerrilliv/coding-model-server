@@ -559,7 +559,16 @@ def _run_local_tests(spec_dir: Path, framework: str, timeout: int) -> tuple[bool
             for p in spec_dir.rglob(f"*.test.{ext}")
             if "retry_history" not in p.relative_to(spec_dir).parts
         )
-        raw_cmd = ["node", "--test", *test_files] if test_files else ["node", "--test"]
+        # Pin the TAP reporter explicitly. On Node >= 22 the default `--test`
+        # reporter is `spec` even when stdout is piped (not a TTY), printing
+        # `ℹ tests/pass/fail` instead of TAP's `# tests/pass/fail`. The
+        # orchestrator's anti-hallucination guard (_NODE_TEST_SUMMARY_RE) only
+        # recognises the TAP summary, so an unpinned reporter makes a genuinely
+        # green run get force-failed as "no node:test summary detected". TAP is
+        # what the structural validator — and every node_test test here —
+        # expects, so make the pipeline reporter-default-independent.
+        # An empty *test_files auto-discovers from cwd, preserving the fallback.
+        raw_cmd = ["node", "--test", "--test-reporter=tap", *test_files]
     else:
         # `--import-mode=importlib`: import each test module by its full path
         # instead of pytest's default 'prepend' mode, which keys modules by

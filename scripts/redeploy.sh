@@ -56,25 +56,70 @@ else
     SERVICES+=(coding-model-monitor)
   fi
 
+  # The systemd + polkit templates ship `youruser` / `/home/youruser`
+  # placeholders (each unit header documents the sed recipe). This script runs
+  # under sudo, so $USER/$HOME here are ROOT's — NOT the service account.
+  # Installing a raw template would point ExecStart at /home/youruser/... and
+  # key the polkit rule to user "youruser", neither of which exists, so every
+  # service would fail on the next restart and restart-only would silently
+  # regress to interactive polkit auth (DEV-293). Substitute before installing,
+  # using the invoking operator (SUDO_USER) as the service account and falling
+  # back to whatever User= the already-installed unit carries.
+  SVC_USER="${SUDO_USER:-}"
+  if [[ -z "${SVC_USER}" || "${SVC_USER}" == "root" ]]; then
+    SVC_USER="$(sed -n 's|^User=\(.*\)|\1|p' "${UNIT_DIR}/coding-model-server.service" 2>/dev/null | head -1)"
+  fi
+  if [[ -z "${SVC_USER}" || "${SVC_USER}" == "root" || "${SVC_USER}" == "youruser" ]]; then
+    echo "!! Could not determine the service account to substitute into the unit" >&2
+    echo "   templates (SUDO_USER unset/root and no usable User= in the installed" >&2
+    echo "   unit). Run via sudo from the service user's login so SUDO_USER is set:" >&2
+    echo "     sudo bash ${BASH_SOURCE[0]}" >&2
+    exit 1
+  fi
+  SVC_HOME="$(getent passwd "${SVC_USER}" | cut -d: -f6 || true)"
+  SVC_HOME="${SVC_HOME:-/home/${SVC_USER}}"
+
+  # Render a template to $2 with the operator's account and paths. The repo
+  # path is taken from $REPO (the checkout this script runs from), not assumed
+  # to be $HOME/Dev/coding-model-server, so a non-standard checkout location
+  # still gets correct WorkingDirectory/ExecStart/EnvironmentFile paths. Order
+  # matters: rewrite the repo prefix first, then any remaining home prefix.
+  render_template() {  # render_template <src> <dst>
+    sed -e "s|/home/youruser/Dev/coding-model-server|${REPO}|g" \
+        -e "s|/home/youruser|${SVC_HOME}|g" \
+        -e "s|^User=youruser|User=${SVC_USER}|" \
+        -e "s|^Group=youruser|Group=${SVC_USER}|" \
+        "$1" > "$2"
+  }
+
   echo "==> Repo:    ${REPO}"
+  echo "==> Account: User=${SVC_USER} Group=${SVC_USER} Home=${SVC_HOME} (from ${SUDO_USER:+SUDO_USER}${SUDO_USER:-installed unit})"
   echo "==> Backing up current unit files to ${BACKUP}"
   mkdir -p "${BACKUP}"
   for s in "${SERVICES[@]}"; do
     [[ -f "${UNIT_DIR}/${s}.service" ]] && cp -a "${UNIT_DIR}/${s}.service" "${BACKUP}/"
   done
 
-  echo "==> Syncing unit files from repo (only when changed)"
+  echo "==> Syncing unit files from repo (substituted; only when changed)"
   for s in "${SERVICES[@]}"; do
     src="${REPO}/systemd/${s}.service"
     dst="${UNIT_DIR}/${s}.service"
     if [[ ! -f "${src}" ]]; then
       echo "    ! repo unit missing: ${src} (skipping)"
-    elif cmp -s "${src}" "${dst}" 2>/dev/null; then
+      continue
+    fi
+    # Compare the SUBSTITUTED output against what's installed, not the raw
+    # template — the installed unit is always substituted, so a raw compare
+    # would report "changed" forever and reinstall placeholder units every run.
+    rendered="$(mktemp)"
+    render_template "${src}" "${rendered}"
+    if cmp -s "${rendered}" "${dst}" 2>/dev/null; then
       echo "    = ${s}: already up to date"
     else
-      install -m 0644 "${src}" "${dst}"
+      install -m 0644 "${rendered}" "${dst}"
       echo "    + ${s}: updated"
     fi
+    rm -f "${rendered}"
   done
 
   # The polkit rule is what makes --restart-only sudo-free. It used to exist
@@ -86,12 +131,20 @@ else
   polkit_dst="/etc/polkit-1/rules.d/49-coding-model.rules"
   if [[ ! -f "${polkit_src}" ]]; then
     echo "    ! repo rule missing: ${polkit_src} (skipping)"
-  elif cmp -s "${polkit_src}" "${polkit_dst}" 2>/dev/null; then
-    echo "    = polkit rule: already up to date"
   else
-    [[ -f "${polkit_dst}" ]] && cp -a "${polkit_dst}" "${BACKUP}/"
-    install -m 0644 -o root -g root "${polkit_src}" "${polkit_dst}"
-    echo "    + polkit rule: installed (polkitd picks it up automatically)"
+    # The rule gates on subject.user === "youruser"; substitute the real
+    # service account or it matches nobody and restart-only silently falls back
+    # to interactive auth (DEV-293 — the exact failure this rule exists to fix).
+    rendered="$(mktemp)"
+    sed -e "s|\"youruser\"|\"${SVC_USER}\"|g" "${polkit_src}" > "${rendered}"
+    if cmp -s "${rendered}" "${polkit_dst}" 2>/dev/null; then
+      echo "    = polkit rule: already up to date"
+    else
+      [[ -f "${polkit_dst}" ]] && cp -a "${polkit_dst}" "${BACKUP}/"
+      install -m 0644 -o root -g root "${rendered}" "${polkit_dst}"
+      echo "    + polkit rule: installed (polkitd picks it up automatically)"
+    fi
+    rm -f "${rendered}"
   fi
 
   echo "==> systemctl daemon-reload"
