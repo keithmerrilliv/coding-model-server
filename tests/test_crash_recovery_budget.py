@@ -6,7 +6,11 @@ so a task whose agent call deterministically crashes the daemon looped
 RUNNING → crash → systemd restart → PENDING forever; restarts more than 60s
 apart never trip StartLimitBurst, so nothing bounded the loop.
 
-Recovery now burns a retry, and past MAX_RETRIES it fails the spec.
+Recovery still burns a retry, but the MAX_RETRIES cap is applied to
+recovery's own count, not retry_count (DEV-558) — retry_count is also
+incremented by human gate rejections, and charging reviews against the
+crash budget killed run 12. Genuine crash loops past the budget still
+fail the spec; that is what this file pins.
 """
 from unittest import mock
 
@@ -46,10 +50,13 @@ def test_crash_recovery_burns_a_retry(db):
 
 def test_crash_recovery_past_budget_fails_the_spec(db):
     spec, task = _running_spec_task(db)
+    # Burn the whole budget with GENUINE recoveries — inflating retry_count
+    # no longer counts, that is DEV-558's point.
     for _ in range(d.MAX_RETRIES):
-        db.increment_task_retry(task.id)
+        d._process_executing(db, db.get_spec(spec.id))
+        db.update_task_status(task.id, TaskStatus.RUNNING)
 
-    d._process_executing(db, spec)
+    d._process_executing(db, db.get_spec(spec.id))
 
     assert db.get_task(task.id).status is TaskStatus.FAILED
     assert db.get_spec(spec.id).status is SpecStatus.FAILED, (
