@@ -39,6 +39,15 @@ echo "=== MCP update started $(date '+%F %T') ==="
 KEY="${ADMIN_API_KEY:-$(grep -m1 '^ADMIN_API_KEY=' "$REPO/.env" 2>/dev/null | cut -d= -f2-)}"
 [ -n "$KEY" ] || { echo "!! no ADMIN_API_KEY; aborting"; exit 2; }
 
+# DEV-485: the vendored MCP must run in documentation mode, never its dormant
+# sandboxed-Python execution mode. The server pins CODE_EXECUTION_MODE off for
+# the MCP child (mcp_service._scrubbed_child_env), and the smoke test below
+# checks the live tool surface — but refuse outright if this environment has it
+# set, so an operator can't half-arm it by exporting the var before an update.
+case "${CODE_EXECUTION_MODE:-}" in
+  [Tt]rue|1|[Yy]es|[Oo]n) echo "!! CODE_EXECUTION_MODE=$CODE_EXECUTION_MODE — refusing to update the agent-reachable MCP into execution mode"; exit 2 ;;
+esac
+
 OLD="$(git -C "$MCP" rev-parse HEAD)"
 git -C "$MCP" fetch --quiet origin || { echo "!! fetch failed"; exit 3; }
 UPSTREAM="$(git -C "$MCP" rev-parse '@{u}' 2>/dev/null || echo "$OLD")"
@@ -91,6 +100,28 @@ done
 # 2. A tool that must return CONTENT, not just start. "it started" is not the test.
 smoke '{"tool":"search_swift_evolution","arguments":{"feature":"actors"}}' 'se_number' \
       'search_swift_evolution returns proposals' || FAILED=1
+
+# 3. The tool surface must not change shape unannounced (DEV-485). This MCP
+#    auto-updates monthly and is reachable by agents via <<<APPLE_DEEP_DOCS>>>;
+#    the 2026-08 upstream release added dormant execution tools (execute_python,
+#    run_code) gated on CODE_EXECUTION_MODE. Any execution tool appearing, or the
+#    documentation-tool COUNT changing, means the third-party surface shifted and
+#    a human must look before we keep the pull — so treat it as a smoke failure
+#    (which rolls back). If the new surface is intended, re-run with
+#    EXPECTED_TOOL_COUNT set to the new number to accept it.
+EXPECTED_TOOL_COUNT="${EXPECTED_TOOL_COUNT:-15}"
+CATALOG="$(curl -s --max-time 60 -H "X-Admin-Key: $KEY" "http://$SERVER:$PORT/v1/tools/apple_deep_docs" 2>/dev/null)"
+if printf '%s' "$CATALOG" | grep -qiE 'execute_python|run_code|code_execution|execute_swift'; then
+  echo "  smoke FAIL: an execution-mode tool is advertised — the code-execution surface is LIVE"
+  FAILED=1
+fi
+TOOL_COUNT="$(printf '%s' "$CATALOG" | sed -n 's/.*— \([0-9][0-9]*\) tools:.*/\1/p' | head -1)"
+if [ -n "$TOOL_COUNT" ] && [ "$TOOL_COUNT" != "$EXPECTED_TOOL_COUNT" ]; then
+  echo "  smoke FAIL: tool count changed ($TOOL_COUNT, expected $EXPECTED_TOOL_COUNT) —"
+  echo "             the vendored MCP's tool surface shifted; a human must review the new"
+  echo "             tools before this pull is kept. If intended: re-run with EXPECTED_TOOL_COUNT=$TOOL_COUNT."
+  FAILED=1
+fi
 
 if [ "$FAILED" -ne 0 ]; then
   echo "!! smoke test failed after update — rolling back to ${OLD:0:9}"
