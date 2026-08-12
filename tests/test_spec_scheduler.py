@@ -166,3 +166,43 @@ def test_inline_tick_without_scheduler_is_synchronous(db, monkeypatch):
     d.tick(db)
 
     assert order == [("review", s1.id), ("execute", s2.id)]
+
+
+# ── DEV-559: drain is bounded — a blocked model call must not hold the stop ──
+
+def test_drain_returns_true_when_passes_finish_inside_the_grace():
+    s = d.SpecScheduler(max_workers=2)
+    s.submit("spec_a", "architect", lambda: time.sleep(0.05))
+    assert s.drain(grace_seconds=5.0) is True
+
+
+def test_drain_gives_up_after_the_grace_and_returns_false():
+    """An 8-minute architect call used to make the graceful stop decorative:
+    TimeoutStopSec=30 SIGKILLed the daemon on every mid-generation restart.
+    The bounded drain exits the wait instead and leaves the pass to crash
+    recovery (one recovery each, per DEV-558)."""
+    import threading
+    release = threading.Event()
+    s = d.SpecScheduler(max_workers=2)
+    s.submit("spec_b", "architect", lambda: release.wait(timeout=30))
+    t0 = time.monotonic()
+    try:
+        assert s.drain(grace_seconds=0.5) is False
+        assert time.monotonic() - t0 < 5.0, "drain must not wait for the call"
+    finally:
+        release.set()
+
+
+def test_drain_cancels_queued_but_unstarted_passes():
+    import threading
+    release = threading.Event()
+    started = []
+    s = d.SpecScheduler(max_workers=1)
+    s.submit("spec_c", "architect", lambda: release.wait(timeout=30))
+    s.submit("spec_d", "planner", lambda: started.append("d"))
+    try:
+        assert s.drain(grace_seconds=0.3) is False
+    finally:
+        release.set()
+    time.sleep(0.2)
+    assert started == [], "a queued pass must be cancelled, not started"
