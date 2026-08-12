@@ -61,13 +61,16 @@ PROTECTED_FILES = [
     'credentials', 'credentials.db',
 ]
 
-# Bare-name entries match any path component.
+# Bare-name entries match any path component. Stored casefolded because
+# _is_protected_path folds case on both sides (see the rationale there); these
+# are all lowercase already, so the fold is a formality that keeps the two
+# sides symmetric.
 _PROTECTED_NAMES = tuple(
-    p.rstrip('/') for p in PROTECTED_PATHS if not p.startswith(('/', '~'))
+    p.rstrip('/').casefold() for p in PROTECTED_PATHS if not p.startswith(('/', '~'))
 )
 
 # Rooted entries are expanded and resolved once, here, and paired with their
-# original label for the message.
+# original (unfolded) label for the message.
 #
 # The candidate is realpath'd before comparison (so a symlink pointing *at* a
 # protected dir is still caught), but the roots used to be compared as written.
@@ -75,8 +78,10 @@ _PROTECTED_NAMES = tuple(
 # "/etc/passwd" became "/private/etc/passwd" and matched no root — /etc was
 # silently unprotected on the very machine the client runs on. Resolving both
 # sides fixes it; on Linux realpath("/etc") is just "/etc", so nothing changes.
+# The resolved root is stored casefolded to match _is_protected_path's
+# case-insensitive comparison.
 _PROTECTED_ROOTS = tuple(
-    (os.path.realpath(os.path.expanduser(p.rstrip('/'))), p)
+    (os.path.realpath(os.path.expanduser(p.rstrip('/'))).casefold(), p)
     for p in PROTECTED_PATHS if p.startswith(('/', '~'))
 )
 
@@ -96,7 +101,17 @@ def _is_protected_path(filepath):
         # Real-world: this happens when WRITE_FILE creates a new file.
         norm = os.path.normpath(expanded)
 
-    parts = norm.split(os.sep)
+    # Compare case-insensitively. macOS's default filesystem (APFS/HFS+) is
+    # case-insensitive and os.path.realpath() does NOT canonicalise case, so
+    # "~/.SSH/id_rsa" resolves to a path that still opens the real
+    # "~/.ssh/id_rsa" while a case-sensitive component check waves it through —
+    # defeating the gate on the platform the client mostly runs on (verified:
+    # ~/.SSH/id_rsa_prod, ~/.AWS/config, ~/Library/COOKIES/x all slipped past).
+    # Folding both sides can only ADD matches — an exact-case match still
+    # matches once folded — so it never weakens protection on a genuinely
+    # case-sensitive filesystem; at worst it costs one extra prompt there.
+    norm_cf = norm.casefold()
+    parts = norm_cf.split(os.sep)
     for name in _PROTECTED_NAMES:
         if name in parts:
             return True, f"inside protected directory '{name}/'"
@@ -104,12 +119,12 @@ def _is_protected_path(filepath):
     for root, label in _PROTECTED_ROOTS:
         # Boundary-aware: a bare startswith(root) also matched "/usrfoo/bar"
         # against "/usr", blocking unrelated paths.
-        if norm == root or norm.startswith(root + os.sep):
+        if norm_cf == root or norm_cf.startswith(root + os.sep):
             return True, f"inside protected directory '{label}'"
 
-    basename = os.path.basename(norm)
+    basename = os.path.basename(norm_cf)
     for pfile in PROTECTED_FILES:
-        if basename == pfile:
+        if basename == pfile.casefold():
             return True, f"matches protected file '{pfile}'"
     return False, ""
 
