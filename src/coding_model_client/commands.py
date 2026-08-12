@@ -4,7 +4,7 @@ import json
 
 from coding_model_client.config import config, COLORS, HISTORY_CHAR_BUDGET, print_colored
 from coding_model_client.display import set_terminal_title
-from coding_model_client.models import AGENT_THEMES
+from coding_model_client.models import AGENT_THEMES, resolve_agent
 from coding_model_client.history import save_chat_history
 from coding_model_client.readline_mgr import READLINE_AVAILABLE
 from coding_model_client.services import (
@@ -143,7 +143,7 @@ def handle_user_command(user_input, history, model, agent_theme):
     # ── Quick agent switch (@mention) ─────────────────────────────────────
     if user_input.startswith('@'):
         parts = user_input.split(' ', 1)
-        potential_agent = parts[0][1:].lower()
+        potential_agent = resolve_agent(parts[0][1:].lower())
         if potential_agent in AGENT_THEMES:
             model = potential_agent
             agent_theme = AGENT_THEMES[model]
@@ -228,7 +228,7 @@ def handle_user_command(user_input, history, model, agent_theme):
             print_colored("Usage: /agent <name>", COLORS['FAIL'])
             print_colored(f"Available agents: {', '.join(AGENT_THEMES.keys())}", COLORS['BLUE'])
             return True, model
-        requested_model = parts[1].strip().lower()
+        requested_model = resolve_agent(parts[1].strip().lower())
         if requested_model in AGENT_THEMES:
             model = requested_model
             agent_theme = AGENT_THEMES[model]
