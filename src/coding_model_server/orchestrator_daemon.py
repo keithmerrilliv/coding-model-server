@@ -1613,10 +1613,11 @@ def _verify_review_citations(review_md: str, spec_dir: Path) -> tuple[str, int, 
     checked = 0
     unverified = 0
     spec_root = spec_dir.resolve()
+    line_counts: dict[Path, int] = {}
 
     def _annotate(match: re.Match[str]) -> str:
         nonlocal checked, unverified
-        path, _line = match.group(1), match.group(2)
+        path, line = match.group(1), match.group(2)
         candidate = (spec_dir / path).resolve()
         # Refuse to validate paths that escape spec_dir (../etc/passwd-style).
         try:
@@ -1624,10 +1625,25 @@ def _verify_review_citations(review_md: str, spec_dir: Path) -> tuple[str, int, 
         except ValueError:
             return match.group(0)
         checked += 1
-        if candidate.is_file():
-            return match.group(0)
-        unverified += 1
-        return f"{match.group(0)} [unverified — file not in spec dir]"
+        if not candidate.is_file():
+            unverified += 1
+            return f"{match.group(0)} [unverified — file not in spec dir]"
+        # DEV-561: a line number past EOF is the cheapest hallucination
+        # signal there is — run 12's fabricated finding cited
+        # World.swift:209 in a 192-line file and both citations "verified".
+        # Count once per file; a review often cites the same file repeatedly.
+        if candidate not in line_counts:
+            try:
+                with candidate.open("rb") as fh:
+                    line_counts[candidate] = sum(1 for _ in fh)
+            except OSError:
+                line_counts[candidate] = -1  # unreadable — don't judge
+        total = line_counts[candidate]
+        if total >= 0 and int(line) > total:
+            unverified += 1
+            return (f"{match.group(0)} [unverified — {path} has only "
+                    f"{total} lines]")
+        return match.group(0)
 
     annotated = _CITE_RE.sub(_annotate, review_md)
     return annotated, checked, unverified
