@@ -3849,6 +3849,38 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
         logger.info("spec %s: reviewer done, tests passed, "
                     "release_approval gate created", spec.id)
     else:
+        # A FAIL verdict over a suite that was required, ran, and passed is a
+        # judgment call, not a test failure — and it can be hallucinated
+        # (DEV-560: run 12's reviewer cited a line past the end of the file
+        # and the rotation discarded a 20/20-green implementation for it).
+        # DEV-405 made red tests override a PASS verdict; this is the other
+        # direction: green tests stop a FAIL verdict from silently burning an
+        # implementer attempt. The verdict is not overridden — the suite can
+        # miss what the reviewer saw — the human on the release gate decides.
+        if tests_passed and tests_required and not tests_skipped_reason:
+            db.update_task_status(task.id, TaskStatus.BLOCKED_ON_REVIEW)
+            db.create_gate(
+                spec_id=spec.id,
+                task_id=task.id,
+                gate_type=GateType.RELEASE_APPROVAL,
+                prompt_md=(
+                    f"## Release approval (adjudication): {spec.title}\n\n"
+                    f"Spec ID: `{spec.id}`\n\n"
+                    f"Tests **PASSED**, but the reviewer's static verdict is "
+                    f"**FAIL**. The findings below are UNCONFIRMED by the "
+                    f"test run (DEV-560) — judge them on their merits before "
+                    f"trusting them.\n\n"
+                    f"### Review Report\n\n{result.review_md}\n\n"
+                    f"### Test Output\n\n```\n{test_output[:3000]}\n```\n\n"
+                    f"Approve to mark this spec as DONE, or reject to send "
+                    f"back to the implementer with your notes.\n"
+                ),
+            )
+            logger.warning(
+                "spec %s: tests passed but reviewer verdict is FAIL — "
+                "opening release_approval for human adjudication instead of "
+                "burning an implementer retry (DEV-560)", spec.id)
+            return
         # A run where the test harness itself is broken proves nothing about
         # the implementation — route it to a free, pointed harness-fix retry
         # instead of burning a logic attempt (DEV-404).
