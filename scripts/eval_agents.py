@@ -72,12 +72,14 @@ def scrub(text):
     return _IDENTITY.sub("I am an AI assistant", text)
 
 
-def ask_agent(server, headers, agent, prompt, max_tokens):
+def ask_agent(server, headers, agent, prompt, max_tokens, system=None):
     """One completion through the real server path (system prompt, budget, RAG)."""
     t0 = time.time()
+    messages = ([{"role": "system", "content": system}] if system else []) \
+        + [{"role": "user", "content": prompt}]
     r = requests.post(
         f"{server}/v1/chat/completions", headers=headers, timeout=1800,
-        json={"model": agent, "messages": [{"role": "user", "content": prompt}],
+        json={"model": agent, "messages": messages,
               "max_tokens": max_tokens, "temperature": 0.0, "stream": False})
     r.raise_for_status()
     body = r.json()
@@ -144,6 +146,13 @@ def main():
                          "no API credit needed) | gemini | any local agent name "
                          "(e.g. deep_reviewer)")
     ap.add_argument("--max-tokens", type=int, default=1400)
+    ap.add_argument("--system", metavar="TEXT_OR_@FILE", default=None,
+                    help="system prompt sent with every generation request, "
+                         "@path reads it from a file. The server honours a "
+                         "client-supplied system message and skips the agent's "
+                         "default — needed when the default (interactive, "
+                         "tool-teaching) prompt would contaminate the "
+                         "measurement (DEV-562).")
     ap.add_argument("--server", default="http://127.0.0.1:5000")
     ap.add_argument("--out", default="/tmp/eval_agents.json")
     ap.add_argument("--reuse-answers", metavar="JSON",
@@ -159,6 +168,9 @@ def main():
     if len(args.agents) != 2:
         ap.error("need exactly two -a/--agent")
     x, y = args.agents
+
+    if args.system and args.system.startswith("@"):
+        args.system = open(args.system[1:]).read()
 
     headers = {"Content-Type": "application/json"}
     if (k := os.getenv("ADMIN_API_KEY")):
@@ -183,7 +195,8 @@ def main():
             print(f"### {agent} answering (first call pays the model load)", flush=True)
             answers[agent] = {}
             for t in tasks:
-                a = ask_agent(args.server, headers, agent, t["prompt"], args.max_tokens)
+                a = ask_agent(args.server, headers, agent, t["prompt"],
+                              args.max_tokens, system=args.system)
                 answers[agent][t["id"]] = a
                 print(f"  {t['id']:16} {a['completion_tokens']:5d} tok  {a['wall']:6.1f}s", flush=True)
             print()

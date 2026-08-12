@@ -952,7 +952,14 @@ Update these after each retrieval step. They help you stay organized and efficie
         # in DEV-101 once DEV-99 made them the same model+prompt. Not listed in
         # /v1/models, but still resolves for @-mentions and --model architect.
         'architect':       'dense_architect',
-        'q36_architect':   'dense_architect',
+        # Autonomous architect handle. Repointed to the thinking-off arm by
+        # DEV-562's clean 6-task eval (nothink 3-2-1, −23% tokens/wall, zero
+        # truncations, no degenerate answers under a tools-free prompt) per
+        # DEV-556's pre-registered wins-or-ties criterion. The INTERACTIVE
+        # 'architect' alias above deliberately keeps thinking on: without the
+        # private channel the model reaches for tools first, which interactive
+        # use services and the autonomous single-call path cannot.
+        'q36_architect':   'dense_architect_nothink',
         'm25_architect':   'moe_architect',
         'm25_implementer': 'moe_implementer',
         'glm':             'native_implementer',
