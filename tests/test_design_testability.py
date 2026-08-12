@@ -271,3 +271,50 @@ class TestFormatting:
 def test_check_never_raises(design):
     """Fail-open: this runs inside the architect path and must not kill a spec."""
     dt.check_design_testability(design)
+
+
+# DEV-564: run 13's architect numbered its seams (`1. **Name** | setup: ...`)
+# and the whole section parsed as empty — no_seams_section fired three times
+# on a section that existed, and every per-seam rule was silently skipped.
+NUMBERED_SEAMS = """\
+# Architecture: Demo
+
+## Data Models
+- `Position`: `{ col: Int, row: Int }` — Equatable, Hashable
+- `Mushroom`: `{ hits: Int }` — Equatable
+- `World`:
+  - `chains: [Chain]` (settable for test injection)
+
+## Acceptance Criteria Checklist
+- [ ] Same seed produces identical mushroom field
+- [ ] No mushrooms seeded in the player zone
+
+## Criterion Seams
+
+1. **Same seed identical field** | setup: `const a = createWorld({seed: 42}); const b = createWorld({seed: 42});` | act: `const s1 = snapshot(a); const s2 = snapshot(b);` | assert: `deepStrictEqual(s1, s2)`
+2. **Player zone empty** | setup: `const w = createWorld({seed: 7});` | act: `const ms = snapshot(w).grid;` | assert: `Object.keys(ms).every(k => Number(k.split(',')[1]) < 25)`
+"""
+
+
+class TestNumberedListSeams:
+    def test_numbered_entries_parse_as_seams(self):
+        seams = dt.parse_seams(NUMBERED_SEAMS)
+        assert len(seams) == 2
+        assert all(s.setup and s.act and s.assert_ for s in seams)
+        assert seams[0].criterion == "Same seed identical field"
+
+    def test_no_seams_section_stays_silent_on_numbered_form(self):
+        kinds = [f.kind for f in dt.check_design_testability(NUMBERED_SEAMS)]
+        assert dt.KIND_NO_SECTION not in kinds
+
+    def test_paren_style_ordered_markers_also_parse(self):
+        design = NUMBERED_SEAMS.replace("1. **", "1) **").replace("2. **", "2) **")
+        assert len(dt.parse_seams(design)) == 2
+
+    def test_a_design_truly_lacking_the_section_still_fires(self):
+        design = NUMBERED_SEAMS.split("## Criterion Seams")[0]
+        kinds = [f.kind for f in dt.check_design_testability(design)]
+        assert dt.KIND_NO_SECTION in kinds
+
+    def test_dash_bullet_form_is_unchanged(self):
+        assert len(dt.parse_seams(CLEAN)) == 2

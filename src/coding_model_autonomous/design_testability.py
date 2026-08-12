@@ -99,11 +99,14 @@ def _section(design_md: str, heading: str) -> str:
 
 
 def _bullets(body: str) -> list[str]:
-    """Top-level `- `/`* ` bullets, each joined with its indented continuations.
+    """Top-level list entries, each joined with its indented continuations.
 
-    The architect may emit a seam as one line or as a bullet with a nested
-    list; both collapse to the same string here so the label scan below does
-    not care which it got.
+    Accepts `- `/`* ` bullets AND ordered markers (`1. ` / `1) `) — run 13's
+    architect numbered its seams and the section parsed as empty, which both
+    burned revision rounds on `no_seams_section` and silently skipped every
+    per-seam rule (DEV-564). The architect may emit a seam as one line or as
+    an entry with a nested list; both collapse to the same string here so the
+    label scan below does not care which it got.
     """
     out: list[str] = []
     for raw in body.splitlines():
@@ -115,18 +118,22 @@ def _bullets(body: str) -> list[str]:
         # and belongs to the entry above it, not beside it — otherwise a seam
         # written as a bullet with three sub-bullets parses as four seams and
         # the count check fires on a design that did nothing wrong.
-        if indent <= 1 and re.match(r"^[-*]\s+", line.lstrip()):
+        if indent <= 1 and re.match(r"^(?:[-*]|\d{1,3}[.)])\s+", line.lstrip()):
             out.append(line.strip())
         elif out:
             out[-1] += " " + line.strip().lstrip("-*").strip()
     return out
 
 
+# Leading list marker of either family, for stripping off a parsed entry.
+_LIST_MARKER_RE = re.compile(r"^(?:[-*]|\d{1,3}[.)])\s*")
+
+
 def parse_checklist(design_md: str) -> list[str]:
     """Checklist items, checkbox markers and emphasis stripped."""
     items = []
     for b in _bullets(_section(design_md, CHECKLIST_HEADING)):
-        text = re.sub(r"^[-*]\s*", "", b)
+        text = _LIST_MARKER_RE.sub("", b)
         text = re.sub(r"^\[[ xX]?\]\s*", "", text)
         if text.strip():
             items.append(text.strip())
@@ -145,7 +152,7 @@ def parse_seams(design_md: str) -> list[Seam]:
         return []
     seams: list[Seam] = []
     for entry in _bullets(body):
-        entry = re.sub(r"^[-*]\s*", "", entry)
+        entry = _LIST_MARKER_RE.sub("", entry)
         # Split on the labels wherever they appear, in any order.
         parts = re.split(r"(?i)\b(" + "|".join(_LABELS) + r")\s*[:=]", entry)
         head = parts[0].strip(" |—-\t")
