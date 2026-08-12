@@ -72,6 +72,18 @@ target membership is determined purely by which directory a file sits in, and
 3. **The app's normal generation path behaves as before** when inputs are
    valid — no behavioral change to hallucination output, particles, or UI.
 
+## Change surface
+
+Ground truth for the DEV-492 read path: the implementer must be shown the
+current contents of every file marked *modified* below before it writes
+anything.
+
+| Path | Action |
+|---|---|
+| `ElectricSheep/ForcingStrategy.swift` | modified — insert one dtype-guard line at the top of each of the eight `corrupt` implementations; every other declaration is preserved byte-for-byte |
+| `ElectricSheep/DtypeValidation.swift` | created — error type, failure router, guard helper |
+| `ElectricSheepTests/DtypeContainmentTests.swift` | created — the A1/A2 tests |
+
 ## Out of scope
 
 - Fixing or changing any pre-existing test.
@@ -88,8 +100,15 @@ includes at minimum:
   strategy **fails that test with a readable message naming the dtype** — and
   every other test in the suite still runs and reports its own result. No
   0.000s cascade.
-- A2: A test that passes a valid float32 array through each of the four
-  conforming strategies still succeeds (behavioral no-change pin).
+- A2: A test that passes a valid float32 array through each of the EIGHT
+  conforming strategies still succeeds (behavioral no-change pin). The
+  conformers all live in `ElectricSheep/ForcingStrategy.swift`:
+  `GaussianNoiseStrategy`, `RankInversionStrategy`, `ConfidenceClampStrategy`,
+  `RepetitionBoostStrategy`, `ContextCorruptionStrategy`,
+  `TemperatureOscillationStrategy`, `RestrictedSamplingStrategy`,
+  `ProgressiveNoiseStrategy` — every one has a zero-argument initializer, and
+  `HallucinationType` is `CaseIterable` with a `makeStrategy()` factory
+  covering all eight.
 - A3: All pre-existing tests pass unchanged — `ElectricSheepTests.swift`,
   `ForcingStrategyTests.swift`, `GenerationCancellationTests.swift` are
   protected paths and are the regression contract.
@@ -133,8 +152,7 @@ therefore wrong.
 - The dtype guard must not itself trap (see requirement 2's note); the exact
   failure plumbing through a non-throwing protocol is the design's central
   decision. Runs 9–13's lesson applies: state it once, as a conclusion.
-- *Runner-unverified:* baseline test counts and layout claims were verified on
-  main at `e2984a1` from the zooshly-side clone; the Mac runner's clone must be
-  pulled to that commit before this spec is submitted, or the worktree will
-  build pre-merge code and the protected ForcingStrategy/GenerationCancellation
-  test files will not exist to protect.
+- Baseline test counts and layout claims were verified on main at `e2984a1`
+  from the zooshly-side clone, and the Mac runner's clone was confirmed at that
+  commit on 2026-08-12 (runner `read_files` returned the post-merge protected
+  test files).
