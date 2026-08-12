@@ -251,6 +251,33 @@ class TestVerifyReviewCitations:
         assert unverified == 0
         assert "unverified" not in annotated
 
+    def test_line_past_eof_is_annotated(self, tmp_path):
+        """DEV-561: run 12's fabricated finding cited World.swift:209 in a
+        192-line file and the check called both citations verified — a line
+        past EOF is the cheapest hallucination signal there is."""
+        (tmp_path / "World.swift").write_text("\n".join(f"// {i}" for i in range(192)) + "\n")
+        md = "major defect at World.swift:209 — iterator invalidation."
+        annotated, checked, unverified = d._verify_review_citations(md, tmp_path)
+        assert checked == 1
+        assert unverified == 1
+        assert "[unverified — World.swift has only 192 lines]" in annotated
+
+    def test_line_at_eof_is_verified(self, tmp_path):
+        (tmp_path / "core.py").write_text("a = 1\nb = 2\nc = 3\n")
+        md = "See core.py:3 for the assignment."
+        annotated, _, unverified = d._verify_review_citations(md, tmp_path)
+        assert unverified == 0
+        assert "unverified" not in annotated
+
+    def test_mixed_cites_to_one_file_count_independently(self, tmp_path):
+        (tmp_path / "core.py").write_text("a = 1\nb = 2\n")
+        md = "Real at core.py:2 but invented at core.py:99."
+        annotated, checked, unverified = d._verify_review_citations(md, tmp_path)
+        assert checked == 2
+        assert unverified == 1
+        assert "core.py:99 [unverified — core.py has only 2 lines]" in annotated
+        assert "core.py:2 [" not in annotated
+
 
 def test_parse_error_persists_raw_and_retries(db, spec_and_task):
     # Guards a latent bug: the parse-error branch referenced result.text, but
