@@ -3518,6 +3518,89 @@ def _run_tests_with_guard(spec_id, spec_dir, framework, test_strategy, *,
     return passed, output
 
 
+def _arbitrate_reviewer_only_failures(spec, spec_dir, framework,
+                                      test_strategy, result, full_output):
+    """The design-derived suite is canonical (DEV-563, Keith's call).
+
+    The reviewer COMPOSES tests from its own reading of the design, and a
+    failure in them is a contract disagreement with the design, not proof the
+    implementation is wrong — run 13's reviewer failed a workspace whose own
+    suite was 16/16 green and the rotation destroyed a verified
+    implementation over it. So when the aggregate run fails, re-run with the
+    reviewer's files set aside: if the suite the implementer shipped passes in
+    isolation, report the reviewer-only failures as ADVISORY on the gate and
+    treat the run as green for routing. Every downstream path then ends at a
+    human gate (release approval on a PASS verdict, DEV-560 adjudication on a
+    FAIL verdict) instead of a silent retry.
+
+    Degrades to today's behavior whenever the base suite is not cleanly
+    separable: no reviewer files on disk, no implementer test files left once
+    they are set aside (reviewer-only suites stay canonical), or a base run
+    that also fails.
+
+    Returns (tests_passed, test_output).
+    """
+    reviewer_files = []
+    for rel_path, _ in result.test_files:
+        normalized = rel_path
+        if "/" not in rel_path and re.match(r"^test_.*\.py$", rel_path):
+            normalized = f"tests/{rel_path}"
+        p = spec_dir / normalized
+        if p.exists():
+            reviewer_files.append((p, normalized))
+    if not reviewer_files:
+        return False, full_output
+
+    reviewer_paths = {p for p, _ in reviewer_files}
+    base_suite_exists = any(
+        f.is_file() and f not in reviewer_paths
+        and _TEST_PATH_RE.search(str(f.relative_to(spec_dir)))
+        for f in spec_dir.rglob("*")
+    )
+    if not base_suite_exists:
+        return False, full_output
+
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="dev563-") as holding:
+        held = []
+        try:
+            for p, rel in reviewer_files:
+                target = Path(holding) / rel.replace("/", "__")
+                shutil.move(str(p), str(target))
+                held.append((p, target))
+            base_passed, base_output = _run_tests_with_guard(
+                spec.id, spec_dir, framework, test_strategy,
+                output_label="Design-suite (base) output:",
+                fail_log="spec %s: base-suite structural guard: %s",
+            )
+        finally:
+            for p, target in held:
+                if target.exists():
+                    p.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(target), str(p))
+
+    if not base_passed:
+        return False, full_output
+
+    names = ", ".join(rel for _, rel in reviewer_files)
+    logger.warning(
+        "spec %s: aggregate suite failed but the implementer's own suite "
+        "passes without the reviewer-composed files (%s) — reviewer-only "
+        "failures are ADVISORY, not grounds for rotation (DEV-563)",
+        spec.id, names)
+    annotated = (
+        "[DEV-563 arbitration] The implementer's design-derived suite PASSED "
+        "in isolation; every failure below comes only from reviewer-composed "
+        f"test files ({names}) and is ADVISORY — a contract disagreement "
+        "with the design, not an implementation failure. Judge the findings "
+        "on their merits.\n\n"
+        f"{base_output}\n\n"
+        "Full-suite output (reviewer files included):\n"
+        f"{full_output}"
+    )
+    return True, annotated
+
+
 def _run_reviewer_tests(db: Database, spec: Spec, task, spec_dir,
                         framework, test_strategy):
     """Run the reviewer's tests, apply the structural guard, and persist.
@@ -3815,6 +3898,10 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
         tests_passed, test_output = _run_reviewer_tests(
             db, spec, task, spec_dir, framework, test_strategy,
         )
+        if not tests_passed and result.test_files:
+            tests_passed, test_output = _arbitrate_reviewer_only_failures(
+                spec, spec_dir, framework, test_strategy, result, test_output,
+            )
 
     # Phase b: adversarial test generation. Gated to retry-0 PASS runs; the
     # heavy lifting (and its fail-open handling) lives in the helper.
