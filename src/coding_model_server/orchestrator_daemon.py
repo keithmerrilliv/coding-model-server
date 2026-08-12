@@ -856,6 +856,11 @@ class SpecScheduler:
             fut, label, started, last_logged = entry
             if fut.done():
                 del self._in_flight[spec_id]
+                if fut.cancelled():
+                    # A queued pass cancelled by the bounded drain (DEV-559)
+                    # never ran; the spec is untouched and re-queues next
+                    # start. fut.exception() would raise CancelledError.
+                    continue
                 exc = fut.exception()
                 if exc is not None:
                     # _run_spec_pass catches processor errors; anything that
@@ -868,11 +873,39 @@ class SpecScheduler:
                             spec_id, label, now - started)
                 entry[3] = now
 
-    def drain(self) -> None:
-        """Wait for in-flight passes — the shutdown contract is unchanged:
-        SIGTERM means 'after the current work', and the long manifest chain
-        still bails early via ShutdownRequested."""
-        self._pool.shutdown(wait=True)
+    def drain(self, grace_seconds: float = 20.0) -> bool:
+        """Bounded wait for in-flight passes (DEV-559).
+
+        SIGTERM used to mean 'after the current work', which against an
+        8–10 minute architect call meant TimeoutStopSec=30 escalated to
+        SIGKILL on every mid-generation restart — the graceful path was
+        decorative for the one role that most needed it, and the unit
+        logged `Failed with result 'timeout'` on ordinary redeploys.
+
+        The grace is NOT for finishing a model call; it is for short work —
+        DB rows, artifact writes — to land so the store stays consistent
+        (the reason the wait must not simply be dropped). Anything still
+        running after the grace is left RUNNING for crash recovery, which
+        since DEV-558 charges its own counter: one requeued generation,
+        never a spec.
+
+        Returns True when everything drained inside the grace.
+        """
+        self._pool.shutdown(wait=False, cancel_futures=True)
+        deadline = time.monotonic() + grace_seconds
+        while time.monotonic() < deadline:
+            self.reap()
+            if not self._in_flight:
+                return True
+            time.sleep(0.25)
+        remaining = [f"{sid} ({entry[1]})"
+                     for sid, entry in self._in_flight.items()]
+        logger.warning(
+            "graceful-stop grace (%.0fs) expired with %d pass(es) still "
+            "running: %s — exiting cleanly anyway; crash recovery requeues "
+            "each at the cost of one recovery (DEV-558/DEV-559)",
+            grace_seconds, len(remaining), ", ".join(remaining))
+        return False
 
 
 def tick(db: Database, scheduler: "SpecScheduler | None" = None) -> None:
@@ -5325,13 +5358,24 @@ def main() -> int:
                 time.sleep(min(0.5, POLL_INTERVAL - slept))
                 slept += 0.5
     finally:
-        logger.info("waiting for in-flight spec passes...")
-        scheduler.drain()
+        logger.info("waiting for in-flight spec passes (bounded grace)...")
+        drained = scheduler.drain()
         logger.info("stopping jira-sync worker...")
         jira_sync.stop()
+        logger.info("orchestrator daemon stopped%s",
+                    "" if drained else
+                    " — in-flight passes left to crash recovery")
+        db.close_all()
+        if not drained:
+            # The pool's non-daemon worker threads are blocked inside model
+            # calls and would hold the interpreter open past TimeoutStopSec,
+            # eating the exact SIGKILL this path exists to avoid. Every DB
+            # write is already committed (SQLite WAL); the abandoned threads
+            # die with the process. Exit 0: this is a clean stop, not a
+            # failure state (DEV-559).
+            logging.shutdown()
+            os._exit(0)
 
-    logger.info("orchestrator daemon stopped")
-    db.close_all()
     return 0
 
 
