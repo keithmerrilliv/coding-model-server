@@ -46,7 +46,7 @@ Jira sync.
   env in `~/.config/coding-model-server/.env` if it should be the autonomous
   default.
 - Sandbox / security → `coding-model-orchestrator.service`,
-  `src/coding_model_autonomous/executor.py::_run_local_tests`,
+  `src/coding_model_autonomous/test_runner.py::_run_local_tests`,
   `src/coding_model_autonomous/seccomp_filter.py`, the shell allow-list in
   `src/coding_model_server/tool_handlers/safety.py`, and
   `~/.claude/.../memory/project_security_actionables.md`.
