@@ -329,8 +329,12 @@ _SPEC_TEST_STRATEGY_RE = re.compile(
 def _spec_declared_test_strategy(spec_md: str) -> dict:
     """The `## test_strategy` block from the spec itself, as a mapping.
 
-    Specs write it as an indented YAML block under the heading. Returns {} when
-    absent or unparseable — this is an advisory source, never a hard failure.
+    Specs write it either as an indented YAML block or inside a ```yaml fence
+    under the heading. The fence form is what every spec in docs/specs/
+    actually uses, and feeding the fence lines to yaml.safe_load raises — so
+    before DEV-573 this returned {} for every real spec and the DEV-426
+    dropped-key rule was vacuously satisfied. Returns {} when absent or
+    unparseable — this is an advisory source, never a hard failure.
     """
     import yaml as _yaml
     if not spec_md:
@@ -338,7 +342,9 @@ def _spec_declared_test_strategy(spec_md: str) -> dict:
     match = _SPEC_TEST_STRATEGY_RE.search(spec_md)
     if not match:
         return {}
-    block = textwrap.dedent(match.group(1)).strip()
+    section = match.group(1)
+    fence = re.search(r"```(?:ya?ml)?[ \t]*\n(.*?)```", section, re.DOTALL)
+    block = textwrap.dedent(fence.group(1) if fence else section).strip()
     if not block:
         return {}
     try:
@@ -346,6 +352,50 @@ def _spec_declared_test_strategy(spec_md: str) -> dict:
     except _yaml.YAMLError:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+# test_strategy keys the operator declares in the spec that must reach the
+# dispatch byte-identical. Everything protective hangs off these; run 14b
+# (DEV-573) lost protected_paths to the planner's rewrite and a fabricated
+# project.pbxproj reached the VM worktree.
+_OPERATOR_STRATEGY_KEYS = ("protected_paths", "base_ref", "filter",
+                           "execution_target")
+
+
+def _overlay_operator_test_strategy(yaml_text: str, spec_md: str,
+                                    spec_id: str) -> str:
+    """Force the spec's operator-authored test_strategy keys onto the plan.
+
+    The plan is an LLM rewrite of the spec, and protection metadata must not
+    depend on a model choosing to copy it (DEV-573). For each operator key the
+    spec declares, the spec's value wins — missing keys are restored and
+    divergent values overwritten, loudly. Returns the (possibly rewritten)
+    plan YAML; the original text is kept whenever no overlay is needed so the
+    gate shows the planner's own formatting.
+    """
+    import yaml as _yaml
+    declared = _spec_declared_test_strategy(spec_md)
+    wanted = {k: declared[k] for k in _OPERATOR_STRATEGY_KEYS if k in declared}
+    if not wanted:
+        return yaml_text
+    try:
+        plan = _yaml.safe_load(yaml_text)
+    except _yaml.YAMLError:
+        return yaml_text  # malformed YAML is rejected downstream, not here
+    if not isinstance(plan, dict):
+        return yaml_text
+    strategy = plan.get("test_strategy")
+    if not isinstance(strategy, dict):
+        return yaml_text  # no strategy at all is a different (non-Apple) shape
+    changed = [k for k, v in wanted.items() if strategy.get(k) != v]
+    if not changed:
+        return yaml_text
+    strategy.update({k: wanted[k] for k in changed})
+    logger.warning(
+        "spec %s: planner dropped or rewrote operator test_strategy key(s) "
+        "%s — restored verbatim from the spec (DEV-573)",
+        spec_id, ", ".join(sorted(changed)))
+    return _yaml.safe_dump(plan, sort_keys=False)
 
 
 def _validate_test_strategy(yaml_text: str, spec_md: str) -> list[str]:
@@ -667,6 +717,10 @@ def _accept_plan(db: Database, spec: Spec, spec_dir, result: PlannerYaml) -> Non
         spec_md = spec_md_path.read_text() if spec_md_path.exists() else ""
     except OSError:
         spec_md = ""
+    # DEV-573: operator-authored protection metadata never rides on the model's
+    # willingness to copy it — restore it mechanically before validating, so a
+    # drop self-heals instead of burning a planner round.
+    yaml_text = _overlay_operator_test_strategy(yaml_text, spec_md, spec.id)
     problems = _validate_test_strategy(yaml_text, spec_md)
     if problems:
         _reject_plan_for_validation(db, spec, problems, yaml_text)
