@@ -121,6 +121,80 @@ def test_fail_verdict_over_red_tests_still_retries_and_no_gate(db, spec_and_task
     assert db.list_open_gates(spec.id) == []
 
 
+def _run_seq(db, spec, task, spec_dir, *, verdict, run_results):
+    """Like _run, but run_tests yields successive results (full run, base run)."""
+    with mock.patch.object(d, "call_agent", return_value="raw"), \
+            mock.patch.object(d, "parse_reviewer_response",
+                              return_value=_reviewer_result(verdict)), \
+            mock.patch.object(d, "build_reviewer_message", return_value=[]), \
+            mock.patch.object(d, "run_tests", side_effect=run_results) as rt, \
+            mock.patch.object(d.adversarial, "ADVERSARIAL_TESTS_ENABLED", False):
+        d._run_reviewer(db, spec, task, spec_dir)
+    return rt
+
+
+def test_reviewer_only_failures_are_advisory_when_base_suite_passes(db, spec_and_task):
+    """DEV-563 policy: the design-derived suite is canonical. Aggregate red +
+    implementer suite green in isolation → no rotation; the reviewer-only
+    failures reach the release gate as ADVISORY."""
+    spec, task, spec_dir = spec_and_task
+    (spec_dir / "tests").mkdir(exist_ok=True)
+    (spec_dir / "tests" / "test_impl.py").write_text("def test_ok():\n    assert True\n")
+    with mock.patch.object(d, "_attempt_retry") as retry:
+        rt = _run_seq(db, spec, task, spec_dir, verdict="PASS",
+                      run_results=[(False, "1 failed in 0.01s"),
+                                   (True, "1 passed in 0.01s")])
+    assert rt.call_count == 2
+    retry.assert_not_called()
+    gates = db.list_open_gates(spec.id)
+    assert len(gates) == 1
+    assert gates[0].gate_type is GateType.RELEASE_APPROVAL
+    assert "ADVISORY" in gates[0].prompt_md
+    assert (spec_dir / "tests" / "test_demo.py").exists(), \
+        "the reviewer's file must be restored after the base run"
+
+
+def test_arbitrated_green_with_fail_verdict_reaches_adjudication(db, spec_and_task):
+    """Arbitration composes with DEV-560: base suite green + reviewer FAIL
+    verdict → the adjudication gate, never a silent retry."""
+    spec, task, spec_dir = spec_and_task
+    (spec_dir / "tests").mkdir(exist_ok=True)
+    (spec_dir / "tests" / "test_impl.py").write_text("def test_ok():\n    assert True\n")
+    with mock.patch.object(d, "_attempt_retry") as retry:
+        _run_seq(db, spec, task, spec_dir, verdict="FAIL",
+                 run_results=[(False, "1 failed in 0.01s"),
+                              (True, "1 passed in 0.01s")])
+    retry.assert_not_called()
+    gates = db.list_open_gates(spec.id)
+    assert len(gates) == 1
+    assert gates[0].gate_type is GateType.RELEASE_APPROVAL
+    assert "UNCONFIRMED" in gates[0].prompt_md
+
+
+def test_base_suite_also_failing_still_retries(db, spec_and_task):
+    """A red base suite is a genuine implementation failure — retry as ever."""
+    spec, task, spec_dir = spec_and_task
+    (spec_dir / "tests").mkdir(exist_ok=True)
+    (spec_dir / "tests" / "test_impl.py").write_text("def test_ok():\n    assert True\n")
+    with mock.patch.object(d, "_attempt_retry") as retry:
+        _run_seq(db, spec, task, spec_dir, verdict="FAIL",
+                 run_results=[(False, "1 failed in 0.01s"),
+                              (False, "1 failed in 0.01s")])
+    retry.assert_called_once()
+    assert db.list_open_gates(spec.id) == []
+
+
+def test_reviewer_only_suite_remains_canonical(db, spec_and_task):
+    """With no implementer test files on disk, the reviewer's suite IS the
+    suite — no arbitration run, failures cost budget as today."""
+    spec, task, spec_dir = spec_and_task
+    with mock.patch.object(d, "_attempt_retry") as retry:
+        rt = _run_seq(db, spec, task, spec_dir, verdict="FAIL",
+                      run_results=[(False, "1 failed in 0.01s")])
+    assert rt.call_count == 1
+    retry.assert_called_once()
+
+
 def test_structural_guard_blocks_hallucinated_pass(db, spec_and_task):
     # Reviewer says PASS and the runner exits "clean" but emits no summary
     # line — the guard must force a retry, not a release gate.
