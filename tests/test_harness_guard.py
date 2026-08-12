@@ -45,6 +45,38 @@ not ok 1 - one_broken
 # fail 2
 """
 
+# DEV-563: run 13's reviewer wrote `await` in a sync context; the file died on
+# SyntaxError before running anything, but sibling passes kept the zero-pass
+# rule from firing and the implementer was charged for the reviewer's typo.
+PARSE_FAILURE_MIXED_TAP = """\
+ok 1 - core seams
+# Subtest: tests/test_renderer_input.test.js
+# file:///work/spec/tests/test_renderer_input.test.js:90
+#     const w = await import('../core.js').then(m => m.createWorld());
+#               ^^^^^
+# SyntaxError: Unexpected reserved word
+not ok 2 - tests/test_renderer_input.test.js
+  error: 'test failed'
+# tests 20
+# pass 18
+# fail 2
+"""
+
+# An implementation syntax error surfaces at the IMPORTED module's path, not a
+# *.test.js path — the parse-failure rule must NOT claim it.
+IMPL_SYNTAX_ERROR_TAP = """\
+# Subtest: tests/core.test.js
+# file:///work/spec/core.js:42
+#     let = broken;
+#         ^
+# SyntaxError: Unexpected token '='
+not ok 1 - tests/core.test.js
+  error: 'test failed'
+# tests 1
+# pass 0
+# fail 1
+"""
+
 
 def test_detects_the_dogfood_signature():
     reason = d._detect_harness_defect(BROKEN_HARNESS_TAP, "node_test")
@@ -60,6 +92,21 @@ def test_any_passing_test_disqualifies():
     """If anything passed, the harness demonstrably works — the failures
     are logic failures and must cost budget as usual."""
     assert d._detect_harness_defect(MIXED_RESULTS_TAP, "node_test") is None
+
+
+def test_a_test_file_parse_failure_is_a_harness_defect_despite_passes():
+    """DEV-563: an unparseable test file exercised nothing — it must not be
+    charged as a logic failure just because sibling files passed."""
+    reason = d._detect_harness_defect(PARSE_FAILURE_MIXED_TAP, "node_test")
+    assert reason is not None
+    assert "test_renderer_input.test.js" in reason
+    assert "SyntaxError: Unexpected reserved word" in reason
+
+
+def test_an_implementation_syntax_error_is_not_claimed_by_the_parse_rule():
+    """The SyntaxError surfaces at core.js's path, not a *.test.js path —
+    this is a genuine implementation failure and must cost budget."""
+    assert d._detect_harness_defect(IMPL_SYNTAX_ERROR_TAP, "node_test") is None
 
 
 def test_pytest_collection_error_is_a_harness_defect():

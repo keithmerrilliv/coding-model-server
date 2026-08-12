@@ -3446,6 +3446,20 @@ def _detect_harness_defect(test_output: str, framework: str) -> "str | None":
     one-line reason, or None.
     """
     if framework in ("node_test", "jest", "vitest"):
+        # A test FILE that fails to PARSE proves nothing about the code under
+        # test, even when sibling files passed — so it fires regardless of the
+        # all-failures rule below (DEV-563: run 13's reviewer wrote `await` in
+        # a sync context and the final implementer attempt was charged for
+        # it). Node attributes a parse failure to the TEST file's own path; an
+        # implementation syntax error surfaces at the imported module's path
+        # instead, so this cannot misroute a genuine core.js defect.
+        parse_fail = re.search(
+            r"^# file://\S*?/([^/\s]+\.test\.[cm]?js):\d+\n(?:#[^\n]*\n)*?"
+            r"# (SyntaxError: [^\n]+)", test_output, re.MULTILINE)
+        if parse_fail:
+            return (f"test file {parse_fail.group(1)} failed to parse "
+                    f"({parse_fail.group(2)}) — it exercised no "
+                    f"implementation at all")
         summary = re.search(r"^# pass (\d+)$", test_output, re.MULTILINE)
         fails = re.search(r"^# fail (\d+)$", test_output, re.MULTILINE)
         if not summary or not fails:
