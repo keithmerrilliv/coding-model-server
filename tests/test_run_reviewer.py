@@ -92,11 +92,31 @@ def test_pass_with_passing_tests_creates_release_gate(db, spec_and_task):
     assert db.get_task(task.id).status is TaskStatus.BLOCKED_ON_REVIEW
 
 
-def test_fail_verdict_attempts_retry_and_no_gate(db, spec_and_task):
+def test_fail_verdict_over_green_tests_goes_to_adjudication_not_retry(db, spec_and_task):
+    """DEV-560: run 12's reviewer FAILed a 20/20-green run on a hallucinated
+    finding and the rotation discarded the implementation. Green tests must
+    stop a FAIL verdict from silently burning an attempt — the human on the
+    release gate adjudicates instead."""
     spec, task, spec_dir = spec_and_task
     with mock.patch.object(d, "_attempt_retry") as retry:
         _run(db, spec, task, spec_dir,
              verdict="FAIL", tests_pass=True, test_output="1 passed in 0.01s")
+    retry.assert_not_called()
+    gates = db.list_open_gates(spec.id)
+    assert len(gates) == 1
+    assert gates[0].gate_type is GateType.RELEASE_APPROVAL
+    assert "UNCONFIRMED" in gates[0].prompt_md, \
+        "the gate must warn that the findings lack test corroboration"
+    assert db.get_task(task.id).status is TaskStatus.BLOCKED_ON_REVIEW
+
+
+def test_fail_verdict_over_red_tests_still_retries_and_no_gate(db, spec_and_task):
+    """The pre-DEV-560 path, unchanged: red tests + FAIL verdict is a real
+    failure and burns a retry as before."""
+    spec, task, spec_dir = spec_and_task
+    with mock.patch.object(d, "_attempt_retry") as retry:
+        _run(db, spec, task, spec_dir,
+             verdict="FAIL", tests_pass=False, test_output="1 failed in 0.01s")
     retry.assert_called_once()
     assert db.list_open_gates(spec.id) == []
 
