@@ -39,6 +39,41 @@ BACKUP="/root/coding-model-unit-backup-${TS}"
 RESTART_ONLY=0
 [[ "${1:-}" == "--restart-only" || "${1:-}" == "-r" ]] && RESTART_ONLY=1
 
+# Rebuild the dashboard's static bundle so serve_dashboard.py serves current
+# code. serve_dashboard ONLY serves dashboard/dist/, and nothing else rebuilds
+# it — so a dashboard source change never reaches the browser without this. A
+# stale bundle is exactly how the HealthCard clock-skew fix sat undeployed and
+# kept rendering "-1s" long after it was committed. Non-fatal by design: a
+# dashboard build failure must not block the server/orchestrator restart, so it
+# warns loudly and leaves the last good dist in place.
+build_dashboard() {
+  local dir="${REPO}/dashboard"
+  [[ -d "${dir}" ]] || return 0
+  # Run as the service account (not root) so dist/ and node_modules/ stay
+  # user-owned, and via a login shell so a user-managed Node (nvm) is on PATH.
+  local as_user="${SVC_USER:-$USER}"
+  local run
+  if [[ "${RESTART_ONLY}" == "1" ]]; then
+    run=(bash -lc)                        # already the invoking (service) user
+  else
+    run=(sudo -u "${as_user}" -H bash -lc)
+  fi
+  echo "==> Building dashboard bundle (dashboard/dist)"
+  if ! "${run[@]}" "command -v npm >/dev/null 2>&1"; then
+    echo "    ! npm not on ${as_user}'s PATH — skipping (install Node, or build dashboard/ by hand)"
+    return 0
+  fi
+  # Install only when node_modules is absent, then build. `npm install` (not
+  # `npm ci`) because the committed lockfile's root name is stale and `npm ci`
+  # refuses on the mismatch; install reconciles it.
+  if "${run[@]}" "cd '${dir}' && { [ -d node_modules ] || npm install --no-audit --no-fund; } && npm run build"; then
+    echo "    + dashboard rebuilt"
+  else
+    echo "    !! dashboard build FAILED — serving the previous dist; fix the build and re-run"
+  fi
+  return 0
+}
+
 if [[ "${RESTART_ONLY}" == "1" ]]; then
   echo "==> restart-only mode (no unit sync / daemon-reload; sudo-free via polkit)"
 else
@@ -150,6 +185,11 @@ else
   echo "==> systemctl daemon-reload"
   systemctl daemon-reload
 fi
+
+# Rebuild the dashboard bundle before restarting it, in BOTH modes (a
+# dashboard-only change ships via `--restart-only` too). serve_dashboard reads
+# dist/ per request, so a fresh build is picked up on the next page load.
+build_dashboard
 
 # Restart in dependency order: server (owns the GPU + inference) -> orchestrator
 # (calls the server) -> dashboard (polls it). Only restart what we manage.
