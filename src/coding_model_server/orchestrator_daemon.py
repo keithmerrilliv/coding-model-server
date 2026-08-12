@@ -90,7 +90,7 @@ from coding_model_autonomous.jira_client import (
 )
 from coding_model_autonomous.jira_sync import JiraSync
 from coding_model_autonomous import (
-    adversarial, design_testability, executor, test_runner,
+    adversarial, delivery, design_testability, executor, test_runner,
 )
 from coding_model_autonomous.test_runner import run_tests
 from coding_model_autonomous.retry_policy import (
@@ -1004,9 +1004,18 @@ def _process_executing(db: Database, spec: Spec) -> None:
 
     current = _find_current_task(tasks)
     if current is None:
-        # All tasks done — mark spec done.
+        # All tasks done — mark spec done, then deliver (DEV-535). Delivery
+        # comes AFTER the terminal transition and fails open: the run's
+        # verification stands whether or not the last hop lands, and a
+        # delivery wedge must never block the state machine.
         logger.info("spec %s: all tasks completed, marking DONE", spec.id)
         db.update_spec_status(spec.id, SpecStatus.DONE)
+        try:
+            _deliver_completed_spec(db, spec)
+        except Exception:
+            logger.exception("spec %s: delivery step crashed (spec stays "
+                             "DONE; artifacts remain in the workspace)",
+                             spec.id)
         return
 
     if current.status == TaskStatus.PENDING:
@@ -1050,6 +1059,40 @@ def _process_executing(db: Database, spec: Spec) -> None:
         db.update_task_status(current.id, TaskStatus.PENDING)
     elif current.status == TaskStatus.BLOCKED_ON_REVIEW:
         _check_execution_gate(db, spec, current)
+
+
+def _deliver_completed_spec(db: Database, spec: Spec) -> None:
+    """Push a DONE spec's code artifacts to a pipeline branch (DEV-535).
+
+    Every outcome — pushed, skipped, failed — is written to
+    delivery_report.md and recorded as an AGENT_RAN event with
+    `model_call: False` (the anomaly-record convention), so an operator can
+    always answer "did the change actually leave the workspace?" from the
+    run itself. The old failure mode was silence.
+    """
+    spec_dir = db.spec_dir(spec.id)
+    strategy = _load_plan(spec).get("test_strategy")
+    if not isinstance(strategy, dict):
+        strategy = {}
+    code_paths = [a.path for a in
+                  db.list_artifacts(spec.id, kind=ArtifactKind.CODE)]
+    result = delivery.deliver_spec(
+        spec.id, spec.title, spec_dir, code_paths,
+        repo_name=strategy.get("repo"),
+        protected_paths=strategy.get("protected_paths") or [],
+    )
+    log = logger.info if result.status == "pushed" else logger.warning
+    log("spec %s: delivery %s — %s", spec.id, result.status, result.detail)
+    try:
+        _write_artifact(spec_dir, "delivery_report.md",
+                        f"# Delivery — {result.status}\n\n{result.detail}\n")
+    except OSError as e:
+        logger.warning("spec %s: could not write delivery_report.md: %s",
+                       spec.id, e)
+    db.record_event(EventKind.AGENT_RAN, spec_id=spec.id,
+                    payload={"role": "delivery", "model_call": False,
+                             "status": result.status, "branch": result.branch,
+                             "detail": result.detail[:500]})
 
 
 def _load_plan(spec: Spec) -> dict:
