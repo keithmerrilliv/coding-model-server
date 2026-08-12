@@ -129,9 +129,9 @@ code changes. The script backs up the installed units before overwriting.
 ### Client (macOS or Linux)
 
 ```bash
-./bin/start-client.sh                    # Default agent (implementer)
-./bin/start-client.sh --model architect  # Specific agent
-./bin/start-client.sh --name my-project  # Named session
+./bin/start-client.sh                          # Default agent (implementer)
+./bin/start-client.sh --model dense_architect  # Specific agent
+./bin/start-client.sh --name my-project        # Named session
 ```
 
 `pip install -e .` also puts `coding-model-client` on your PATH; it takes the
@@ -165,6 +165,11 @@ for method, prefill figures, and the caveat about raw-vs-proxy numbers).
 `decide()` function call) and never gets marker-based shell tools.
 `brainstorm` has no tools at all.
 
+Two eval-only agents are also registered (so they appear in `/v1/models`) but
+are left out of the table above: `devstral_implementer` (Devstral Small 2 24B,
+DEV-414 eval) and `dense_architect_nothink` (`dense_architect` with
+`enable_thinking=False`, the DEV-556 eval arm).
+
 **Expert offload.** `cpu_moe=True` (`--cpu-moe`) keeps *all* MoE expert weights
 on CPU. `n_cpu_moe=N` (`--n-cpu-moe N`) keeps only the first N layers' experts
 on CPU and pushes the rest onto the GPU — faster decode, bounded by VRAM. The
@@ -175,12 +180,13 @@ native context on an RTX 5080. KV-cache preference is Q8_0 wherever it fits —
 KV-quant noise produces diffuse quality degradation that is harder to manage
 than a smaller context.
 
-**Legacy names** still resolve (`Config.AGENT_ALIASES`) so old sessions and
-`.env` defaults keep working, though they aren't listed in `/v1/models`:
-`architect` → `dense_architect` (interactive role, DEV-101),
-`q36_architect` → `dense_architect`, `m25_architect` → `moe_architect`,
-`m25_implementer` → `moe_implementer`, `glm` → `native_implementer`,
-`nemotron` → `brainstorm`.
+**Legacy names** resolve server-side (`Config.AGENT_ALIASES`) — the API's
+`request.model` and the `.env` `AUTONOMOUS_*_AGENT` defaults accept them, though
+they aren't listed in `/v1/models`:
+`architect` → `dense_architect`, `q36_architect` → `dense_architect_nothink`,
+`m25_architect` → `moe_architect`, `m25_implementer` → `moe_implementer`,
+`glm` → `native_implementer`, `nemotron` → `brainstorm`. The interactive client
+(`--model`, `/agent`, `@name`) currently needs the canonical name.
 
 ## Client Commands
 
@@ -219,7 +225,6 @@ than a smaller context.
 | `/review` | Fan the uncommitted git diff out to 4 judges (Claude, Gemini, `reviewer`, `deep_reviewer`) |
 | `/ingest <path>` | Ingest a PDF into RAG memory (`local:` prefix for client-side files) |
 | `/ingest-code <dir>` | Ingest a codebase with AST-aware chunking |
-| `/cupertino <query>` | Search Apple docs (macOS, local MCP) |
 | `/apple <tool> <args>` | Apple Deep Docs MCP (server-side) |
 | `/scrape [framework]` | Run the documentation scraper (default: Metal) |
 
@@ -239,7 +244,6 @@ the model sees is `Config.BASE_TOOLS` in `src/coding_model_server/config.py`.
 | `<<<GREP>>>pattern\|path\|options` | Search file contents |
 | `<<<SAVE_MEMORY>>>fact` | Save to RAG memory |
 | `<<<WEB_SEARCH>>>query` | Web search |
-| `<<<CUPERTINO>>>query` | Apple docs (local MCP) |
 | `<<<APPLE_DEEP_DOCS>>>{"tool":...}` | Apple docs (server MCP) |
 | `<<<INGEST_PDF>>>path` | Ingest a PDF into memory |
 | `<<<SCRATCHPAD>>>` | Update working memory (FACTS, OPEN_QUESTIONS, DEAD_ENDS) |
@@ -413,6 +417,7 @@ header (or `Authorization: Bearer <key>`).
 | `POST /v1/chat/completions` | Chat completion (streaming/non-streaming) |
 | `POST /v1/memory` | Save to RAG memory (200K char limit, content-hash dedup) |
 | `POST /v1/memory/search` | Search RAG memory |
+| `POST /v1/memory/delete` | Delete memories by id and/or metadata filter |
 | `POST /v1/memory/ingest` | Ingest a PDF into memory |
 | `POST /v1/files/upload` | Upload a file to the server |
 | `POST /v1/tools/search` | Web search |
@@ -426,6 +431,7 @@ header (or `Authorization: Bearer <key>`).
 | `POST /v1/autonomous/gates/{id}/respond` | Approve or reject a gate |
 | `GET /v1/admin/metrics` | Request metrics |
 | `GET /v1/admin/gpu_stats` | GPU sampler output |
+| `GET /v1/admin/rag_stats` | RAG retrieval outcomes (skipped/empty/injected/…) for the dashboard |
 | `GET /v1/admin/active_model` | Which model is currently loaded |
 
 ## Project Structure
