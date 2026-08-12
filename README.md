@@ -352,13 +352,14 @@ first attempt, implementer's first attempt compiled, suite green. The second
 earned it the hard way: one design rejection and four code-review rejections,
 each rejection's notes feeding the retry — including one where the reviewer's
 note contained the exact fix. No human edited the code; the review notes are
-where the human steering lives. The operator applies the approved patch — the
-pipeline does not push (DEV-535).
+where the human steering lives. Each approved run now lands on a
+`pipeline/<spec_id>` branch of the target repo, force-pushed and
+pipeline-owned; the operator reviews and merges (DEV-535).
 
-**What does not, yet.** A harder greenfield spec — the logic core of a Centipede
-clone: seeded mushroom field, chain locomotion, split-on-hit, 17 acceptance
-criteria — has failed **nine times**. It is the spec this project has learned
-the most from:
+**The spec that taught the most.** A harder greenfield spec — the logic core of
+a Centipede clone: seeded mushroom field, chain locomotion, split-on-hit, 17
+acceptance criteria — failed **eleven times before run 12 completed it**, and
+its sibling (the complete game, WebGPU) completed the next day:
 
 | Run | How far it got |
 |----|----|
@@ -368,10 +369,26 @@ the most from:
 | 6 | Two words from compiling: a struct reached through `Dictionary` needed `Equatable` |
 | 7–8 | Died on generated files missing `import Foundation`; a repair round then made the build *worse* |
 | 9 | **Compiled.** All 19 tests launched, then the process trapped — one inverted conditional emptied a collection every tick |
+| 10 | Reached the synthesis repair round, which invented a file redeclaring a protected type it was never shown; two independent defences both missed it |
+| 11 | Six designs of fix-what-was-named, break-what-was-adjacent; one design declared the same type three times with its own deliberation left in the document |
+| 12 | **Completed.** Eight designs — the eighth a verbatim transcription of a document the reviewer corrected by hand — then five implementer attempts to 20/20 tests green |
+| 13 | **Completed** — the sibling spec, a full WebGPU Centipede, greenfield: three designs, five attempts, 16 criterion tests green, done in one evening |
 
 Run 9's defect had been flagged by the Swift compiler, on the exact line, as an
 unused-binding warning — in output the pipeline captured, parsed for errors, and
 discarded the warnings from. That is now a blocking check.
+
+The completions were not clean either, and the dirt is the interesting part.
+Run 12's reviewer wrote a suite that passed 20/20 — then its static review
+invented a defect at a line number past the end of the file, and the retry
+machinery destroyed the passing implementation on that phantom's authority.
+Three guards came out of the incident: citations are now verified against the
+file's actual line count, a FAIL verdict over a green run goes to a human
+adjudication gate instead of a silent retry, and a reviewer test file that
+does not even parse is charged to the harness, not the implementation. The
+design phases taught their own lesson: iterating rejection notes rotated
+defects for six rounds; handing the architect a corrected document and
+demanding character-for-character transcription ended it in one.
 
 **The pattern worth stating:** nearly every failure has been a *system* defect,
 not a model-capability one. A gate that claimed a build succeeded when nothing
