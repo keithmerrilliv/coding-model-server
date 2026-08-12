@@ -29,6 +29,37 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+# Environment keys never handed to the vendored third-party MCP child (DEV-485).
+# The MCP is a documentation fetcher reachable by autonomous agents through
+# <<<APPLE_DEEP_DOCS>>>; it needs none of the server's secrets. It inherited the
+# full server environment — including ADMIN_API_KEY — until this scrub. Matched
+# by substring as well as exact name so a newly-added *_API_KEY / *_TOKEN is
+# dropped without another edit here.
+_SENSITIVE_ENV_SUBSTRINGS = ("API_KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD",
+                             "CREDENTIAL", "PRIVATE_KEY")
+_SENSITIVE_ENV_EXACT = frozenset({"ADMIN_API_KEY"})
+
+
+def _scrubbed_child_env() -> "dict[str, str]":
+    """The environment the Apple Deep Docs MCP child is spawned with (DEV-485).
+
+    Two jobs: keep the server's secrets out of a third-party child that agents
+    can reach, and pin its dormant code-execution mode OFF regardless of what
+    the server inherited. The 2026-08 upstream release added a sandboxed-Python
+    execution mode gated on CODE_EXECUTION_MODE; it must never become live via
+    an inherited variable — the agent-reachable surface stays the documentation
+    tools, never the code-execution tools.
+    """
+    env = {
+        k: v for k, v in os.environ.items()
+        if k not in _SENSITIVE_ENV_EXACT
+        and not any(s in k.upper() for s in _SENSITIVE_ENV_SUBSTRINGS)
+    }
+    env["CODE_EXECUTION_MODE"] = "0"
+    return env
+
+
 class AppleDeepDocsService(StdioJsonRpcClient):
     """Service for interacting with the Apple Deep Docs MCP server."""
 
@@ -65,7 +96,9 @@ class AppleDeepDocsService(StdioJsonRpcClient):
         if not os.path.exists(self.venv_python):
             logger.error(f"Apple Deep Docs venv not found at {self.venv_python}")
             return None
-        # DEVNULL for stderr to avoid deadlocks from full buffers
+        # DEVNULL for stderr to avoid deadlocks from full buffers.
+        # env: a scrubbed copy (DEV-485) — no server secrets, execution mode
+        # pinned off — rather than inheriting the server's full environment.
         return subprocess.Popen(
             [self.venv_python, main_py],
             stdin=subprocess.PIPE,
@@ -74,6 +107,7 @@ class AppleDeepDocsService(StdioJsonRpcClient):
             text=True,
             bufsize=1,
             cwd=self.mcp_path,
+            env=_scrubbed_child_env(),
         )
 
     def _handshake(self, proc) -> bool:
