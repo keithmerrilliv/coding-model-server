@@ -90,7 +90,8 @@ from coding_model_autonomous.jira_client import (
 )
 from coding_model_autonomous.jira_sync import JiraSync
 from coding_model_autonomous import (
-    adversarial, delivery, design_testability, executor, test_runner,
+    adversarial, delivery, design_testability, executor, swift_prechecks,
+    test_runner,
 )
 from coding_model_autonomous.test_runner import run_tests
 from coding_model_autonomous.retry_policy import (
@@ -2701,6 +2702,48 @@ def _normalize_generated_files(db: Database, spec: Spec, task, files, role: str,
     return normalized
 
 
+def _local_swift_precheck(db: Database, spec: Spec, task, files,
+                          protected_files) -> "tuple[str | None, str]":
+    """Statically-decidable Swift errors, caught before the ~300s Mac dispatch.
+
+    DEV-512. Two of the pipeline's largest error signatures — `invalid
+    redeclaration of 'X'` and `'mutating' is not valid on instance methods in
+    classes` — need no Swift toolchain to see. We check them locally over the
+    generated files (plus the protected scaffold as read-only collision
+    context) and, on a hit, return `(reason, report)` shaped exactly like a
+    swiftc failure so the caller can route it back to the implementer on the
+    same `build_reason` path a real build failure takes — skipping the dispatch
+    entirely. `(None, "")` means clean: dispatch as usual.
+
+    Runs AFTER `_drop_protected_type_collisions`, which has already removed the
+    pure-duplicate-of-protected files; what remains for the duplicate check is
+    generated-vs-generated clashes and the partial protected collisions that
+    would otherwise only surface 300s later on the Mac.
+
+    Never raises: a static lint must not be able to stall a spec.
+    """
+    try:
+        result = swift_prechecks.run_swift_prechecks(files, protected_files or [])
+    except Exception as e:  # never let the check itself break a generation
+        logger.warning("spec %s: local Swift pre-check errored (%s) — "
+                       "falling through to the Mac build check", spec.id, e)
+        return None, ""
+    if not result.failed():
+        return None, ""
+
+    for v in result.violations:
+        logger.warning("spec %s: local Swift pre-check — %s:%d: %s",
+                       spec.id, v.path, v.line, v.message)
+    db.record_event(EventKind.TEST_RAN, spec_id=spec.id, task_id=task.id,
+                    payload={"phase": "pre_gate_build_check",
+                             "passed": False,
+                             "build_failed": True,
+                             "local_precheck": True,
+                             "precheck_violations": result.event_payload(),
+                             "retry": task.retry_count})
+    return result.summary(), result.report()
+
+
 def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
     # Wipe artifacts from earlier retries so the new implementer starts
     # from a clean slate. No-op on retry-0.
@@ -2828,9 +2871,13 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
     # and a Swift file missing `import Foundation` — so the most mechanical
     # FAILs never depend on the model getting them right. See
     # executor.normalize_boilerplate (#3, DEV-540).
+    # Fetched once and reused: the boilerplate/collision normalization below
+    # and the DEV-512 Swift pre-check both need the protected scaffold, and it
+    # costs a runner-side git read.
+    protected_files = _fetch_protected_files_for_spec(spec)
     result.files = _normalize_generated_files(
         db, spec, task, result.files, "implementer",
-        protected_files=_fetch_protected_files_for_spec(spec))
+        protected_files=protected_files)
 
     # Write all files
     for rel_path, content in result.files:
@@ -2861,45 +2908,62 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
     ts_for_build = _load_plan(spec).get("test_strategy")
     if isinstance(ts_for_build, dict) and ts_for_build.get("framework"):
         fw = build_framework = ts_for_build["framework"]
-        try:
-            build_passed, build_output = _run_tests_with_guard(
-                spec.id, spec_dir, fw, ts_for_build,
-                output_label="Pre-gate build check output:",
-                fail_log=("spec %s: pre-gate build check failed structural "
-                          "validation (%s)"),
-            )
-            build_reason = _detect_build_failure(build_output, fw, build_passed)
-            # DEV-547: warnings are only consulted when nothing failed to
-            # compile. A real diagnostic is strictly better feedback, and
-            # stacking the two would bury it.
-            build_warnings = _parse_build_warnings(
-                build_output, ts_for_build.get("protected_paths"))
-            if build_reason is None and BLOCK_ON_BUILD_WARNINGS:
-                blocking_warnings = [w for w in build_warnings if w.blocking]
-        except Exception as e:  # never let the check itself stall the spec
-            logger.warning("spec %s: pre-gate build check errored (%s) — "
-                           "falling through to the review gate", spec.id, e)
-            build_reason = None
-            blocking_warnings = []
+        # DEV-512: statically-decidable Swift errors are caught here, before the
+        # ~300s Mac dispatch. A hit takes the SAME build_reason path a real
+        # compiler diagnostic would (its report is swiftc-shaped), so the whole
+        # routing/retry machinery below is unchanged — we just skip the runner.
+        # Gated to the Swift frameworks: the checks and the "does not compile"
+        # feedback only make sense for a Swift build.
+        precheck_failed = False
+        if fw.lower() in ("swift_test", "xcodebuild_test"):
+            build_reason, build_output = _local_swift_precheck(
+                db, spec, task, result.files, protected_files)
+            if build_reason is not None:
+                build_passed = False
+                precheck_failed = True  # its own event is recorded in the helper
 
-        db.record_event(EventKind.TEST_RAN, spec_id=spec.id, task_id=task.id,
-                        payload={"phase": "pre_gate_build_check",
-                                 "passed": build_passed if not build_reason else False,
-                                 "build_failed": build_reason is not None,
-                                 # DEV-547/DEV-529: warnings become queryable
-                                 # rather than living only in the raw log.
-                                 "warnings": len(build_warnings),
-                                 "blocking_warnings": [
-                                     {"path": w.path, "line": w.line,
-                                      "diag_id": w.diag_id,
-                                      "message": w.message}
-                                     for w in blocking_warnings],
-                                 # DEV-548: "compiled then crashed" is its own
-                                 # outcome and DEV-529's taxonomy will want it
-                                 # separated from a build failure.
-                                 "test_process_crashed":
-                                     _detect_test_process_crash(build_output),
-                                 "retry": task.retry_count})
+        # Only dispatch — and only record the dispatch's own TEST_RAN event —
+        # when the local pre-check let the code through.
+        if not precheck_failed:
+            try:
+                build_passed, build_output = _run_tests_with_guard(
+                    spec.id, spec_dir, fw, ts_for_build,
+                    output_label="Pre-gate build check output:",
+                    fail_log=("spec %s: pre-gate build check failed structural "
+                              "validation (%s)"),
+                )
+                build_reason = _detect_build_failure(build_output, fw, build_passed)
+                # DEV-547: warnings are only consulted when nothing failed to
+                # compile. A real diagnostic is strictly better feedback, and
+                # stacking the two would bury it.
+                build_warnings = _parse_build_warnings(
+                    build_output, ts_for_build.get("protected_paths"))
+                if build_reason is None and BLOCK_ON_BUILD_WARNINGS:
+                    blocking_warnings = [w for w in build_warnings if w.blocking]
+            except Exception as e:  # never let the check itself stall the spec
+                logger.warning("spec %s: pre-gate build check errored (%s) — "
+                               "falling through to the review gate", spec.id, e)
+                build_reason = None
+                blocking_warnings = []
+
+            db.record_event(EventKind.TEST_RAN, spec_id=spec.id, task_id=task.id,
+                            payload={"phase": "pre_gate_build_check",
+                                     "passed": build_passed if not build_reason else False,
+                                     "build_failed": build_reason is not None,
+                                     # DEV-547/DEV-529: warnings become queryable
+                                     # rather than living only in the raw log.
+                                     "warnings": len(build_warnings),
+                                     "blocking_warnings": [
+                                         {"path": w.path, "line": w.line,
+                                          "diag_id": w.diag_id,
+                                          "message": w.message}
+                                         for w in blocking_warnings],
+                                     # DEV-548: "compiled then crashed" is its own
+                                     # outcome and DEV-529's taxonomy will want it
+                                     # separated from a build failure.
+                                     "test_process_crashed":
+                                         _detect_test_process_crash(build_output),
+                                     "retry": task.retry_count})
 
         # DEV-478: keep the runner's own words whatever the outcome. Previously
         # this was written only on the diagnostic path below, so the one case
