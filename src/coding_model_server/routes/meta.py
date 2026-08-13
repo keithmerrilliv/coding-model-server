@@ -56,7 +56,7 @@ async def list_models():
             "id": agent_id,
             "object": "model",
             "created": int(time.time()),
-            "owned_by": "qwen-multi-agent",
+            "owned_by": "coding-model-server",
             "description": agent_config['description']
         })
 
