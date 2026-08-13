@@ -446,6 +446,9 @@ SWIFT_VALUE_SEMANTICS = textwrap.dedent("""\
       left side of a mutating operator (`+=`, `append`, …).
     - `private(set) var` is readable everywhere but writable ONLY inside the
       declaring type. Writing it from another type does not compile.
+    - A `public`/`open` declaration cannot expose an `internal` type in its
+      signature ("cannot be declared public because ... uses an internal type").
+      In a single module, prefer `internal` (the default) over `public`.
     - You cannot call a `mutating` method through a `let` binding, a computed
       property, or a dictionary subscript. Bind to a `var` first, mutate, then
       write back.
