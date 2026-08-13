@@ -1419,6 +1419,53 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
         )
 
     if isinstance(result, ParseError):
+        # DEV-543: on a REVISION cycle (retry_count > 0) the architect has
+        # already produced a design that parsed — and cleared or gate-annotated
+        # testability/review — on a previous cycle; it is on disk as design.md.
+        # A parse-flaky revision must not discard that shippable design and fail
+        # the whole spec over parse noise. Fall back to the last-good design and
+        # send it to the human gate (the backstop) instead of failing; the
+        # revision that failed to parse is abandoned, and going straight to the
+        # gate avoids re-triggering the automated revision that would loop back
+        # through the same flaky model.
+        prior_design = ""
+        if task.retry_count > 0:
+            try:
+                prior_design = (spec_dir / "design.md").read_text()
+            except OSError:
+                prior_design = ""
+        if prior_design.strip():
+            logger.warning(
+                "spec %s: architect exhausted %d parse-retry attempt(s) on a "
+                "revision — falling back to the last-good design.md and going "
+                "to the gate instead of failing the spec (DEV-543)",
+                spec.id, max_attempts)
+            db.record_event(
+                EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
+                payload={"role": "architect", "model_call": False,
+                         "anomaly": "parse_retry_exhausted_kept_prior_design",
+                         "retry": task.retry_count})
+            db.update_task_status(task.id, TaskStatus.BLOCKED_ON_REVIEW)
+            db.create_gate(
+                spec_id=spec.id,
+                task_id=task.id,
+                gate_type=GateType.DESIGN_APPROVAL,
+                prompt_md=(
+                    f"## Design ready for review: {spec.title}\n\n"
+                    f"Spec ID: `{spec.id}`\n\n"
+                    f"> ⚠ The latest revision attempt failed to parse "
+                    f"({executor.ARCHITECT_PARSE_RETRIES + 1} tries); this is "
+                    f"the last design that parsed cleanly, carried forward "
+                    f"rather than failing the spec (DEV-543). Review it on its "
+                    f"merits.\n\n"
+                    f"The architect has produced the following design. Approve "
+                    f"to begin implementation, or reject with notes.\n\n---\n\n"
+                    f"{prior_design}\n"
+                ),
+            )
+            logger.info("spec %s: design_approval gate created from last-good "
+                        "design after parse-retry exhaustion (DEV-543)", spec.id)
+            return
         logger.error("spec %s: architect exhausted %d parse-retry attempt(s); "
                      "spec FAILED. Raw responses persisted as "
                      "architect_failed_response_attempt*.txt",
