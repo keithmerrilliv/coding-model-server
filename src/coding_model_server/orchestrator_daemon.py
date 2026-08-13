@@ -1219,6 +1219,37 @@ def _load_plan(spec: Spec) -> dict:
     return plan if isinstance(plan, dict) else {}
 
 
+def _planned_implement_outputs(spec: Spec) -> list[str]:
+    """File paths the approved plan's implement phase says it will write.
+
+    DEV-571: the existing-file fetch (and therefore DEV-492 grounding AND
+    DEV-581 anchored edits) keyed ONLY on the spec's optional change-surface
+    table. A spec that declares its changes as prose or a bullet list — which
+    no spec template requires anyone to avoid — silently produced no existing
+    files, so the implementer re-imagined files it was never shown. Manifest
+    mode already treats its own file list as candidates; this is the
+    single-call path's equivalent, and it comes from the plan the operator
+    already approved rather than from prose parsing.
+
+    Paths that do not exist in the repo are simply new files — the fetch's
+    own read-failure branch already handles them — so a wrong guess here
+    costs nothing.
+    """
+    phases = _load_plan(spec).get("phases")
+    if not isinstance(phases, list):
+        return []
+    out: list[str] = []
+    for phase in phases:
+        if not isinstance(phase, dict):
+            continue
+        if str(phase.get("name", "")).strip().lower() != "implement":
+            continue
+        for path in phase.get("outputs") or []:
+            if isinstance(path, str) and path.strip():
+                out.append(path.strip())
+    return list(dict.fromkeys(out))
+
+
 def _bootstrap_tasks(db: Database, spec: Spec) -> None:
     """Parse the planner's YAML into Task rows."""
     import yaml as _yaml
@@ -1820,7 +1851,14 @@ def _generate_implementation(
         )
 
     # Single-call path: one response with every file, budget scaled to the design.
-    existing_files = _fetch_existing_files_for_spec(spec, spec_md)
+    # The approved plan's implement.outputs are candidates alongside the spec's
+    # change-surface table (DEV-571). Without them this path depended entirely
+    # on an optional table: a spec that listed its files as prose or bullets
+    # fetched nothing, so the implementer rewrote existing files from
+    # imagination (Centipede slices 3 and 4 lost their whole existing test
+    # suite this way) and edit_mode below silently stayed off.
+    existing_files = _fetch_existing_files_for_spec(
+        spec, spec_md, extra_paths=_planned_implement_outputs(spec))
     # DEV-581: emit anchored SEARCH/REPLACE edits for existing files instead of
     # re-emitting them whole — but only when the flag is on AND there is at least
     # one existing file to edit. With the flag off this is byte-identical to the
