@@ -6,7 +6,7 @@ import argparse
 
 from coding_model_client.config import config, COLORS, print_colored, setup_logging
 from coding_model_client.display import set_terminal_title
-from coding_model_client.models import AGENT_THEMES, fetch_available_models
+from coding_model_client.models import AGENT_THEMES, fetch_available_models, resolve_agent
 from coding_model_client.history import load_chat_history, migrate_legacy_sessions, session_path
 from coding_model_client.readline_mgr import READLINE_AVAILABLE, setup_readline, add_to_history
 from coding_model_client.temp_manager import _add_temp_file
@@ -96,7 +96,8 @@ def chat(model="implementer", session_name=None):
     if config.SESSION_NAME:
         print_colored(f"Session: {config.SESSION_NAME}", COLORS['CYAN'])
 
-    # Resolve initial agent
+    # Resolve initial agent (aliases -> canonical, e.g. architect -> dense_architect)
+    model = resolve_agent(model)
     if model not in AGENT_THEMES:
         if "implementer" in AGENT_THEMES:
             model = "implementer"
@@ -152,6 +153,7 @@ def chat(model="implementer", session_name=None):
         print_colored("(Install readline for command history support)\n", COLORS['WARNING'])
 
     history, loaded_agent = load_chat_history()
+    loaded_agent = resolve_agent(loaded_agent)
 
     if history and loaded_agent and loaded_agent in AGENT_THEMES:
         model = loaded_agent

@@ -394,6 +394,19 @@ design phases taught their own lesson: iterating rejection notes rotated
 defects for six rounds; handing the architect a corrected document and
 demanding character-for-character transcription ended it in one.
 
+**Run 14 — a different app, and another spec-shaped failure.** A separate spec
+(DEV-566) on the ElectricSheep app: contain an MLX runtime error to the test
+that triggers it, so one bad `float64` fixture call can no longer kill the
+XCTest host and report a dozen unrelated tests as 0.000s failures. Its first
+attempt failed in a way the model never caused — the spec omitted a
+change-surface table, which silently disarmed the guard that hands the
+implementer the files it may modify (DEV-492/DEV-571), so five attempts
+hallucinated rewrites of an unrelated `ForcingStrategy.swift` instead of
+touching the real code. Naming the change surface in the spec, plus a corrected
+type inventory (DEV-534), fixed it: the re-run completed successfully, the
+containment landing against a real `mlx-swift` dependency with the three
+existing test files held as the regression contract.
+
 **The pattern worth stating:** nearly every failure has been a *system* defect,
 not a model-capability one. A gate that claimed a build succeeded when nothing
 had compiled. A repair prompt telling the model its code "passes most tests"
