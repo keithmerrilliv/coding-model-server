@@ -117,6 +117,17 @@ IMPLEMENTER_TOKENS_BASE = int(os.getenv("AUTONOMOUS_IMPLEMENTER_TOKENS_BASE", "4
 
 MAX_RETRIES = int(os.getenv("AUTONOMOUS_MAX_RETRIES", "5"))
 
+# DEV-581: diff-based edits. When ON, the single-call implementer emits anchored
+# SEARCH/REPLACE edit blocks for files that ALREADY EXIST (their current content
+# is shown in the prompt) instead of re-emitting the whole file, which the model
+# corrupts on large files and re-corrupts on every retry. New files keep
+# whole-file emission. Default OFF: with the flag off, the implement path is
+# byte-identical to the pre-DEV-581 whole-file behaviour, so this can be A/B'd
+# before adoption and merged/deployed safely. Mirrors the BLOCK_ON_BUILD_WARNINGS
+# env-flag convention (a single truthy env read at import).
+DIFF_BASED_EDITS = os.getenv(
+    "AUTONOMOUS_DIFF_BASED_EDITS", "0").lower() in ("1", "true", "yes")
+
 # Manifest mode (#4): for large multi-file specs, generate a file MANIFEST first,
 # then one bounded call per file — removing the single-call output ceiling that
 # truncates big repos. (A 29-file design overran even a 47,500-token budget; see
@@ -491,6 +502,52 @@ IMPLEMENTER_SYSTEM_PROMPT = textwrap.dedent("""\
         ranges. The reviewer rejects unpinned dependencies on sight.
     """) + SWIFT_VALUE_SEMANTICS
 
+# DEV-581: appended to the implementer system prompt ONLY when diff-based edits
+# are on. It overrides the "write the ENTIRE file" instruction for files that
+# already exist (shown in the prompt), while leaving new files on whole-file
+# emission. Kept as a separate constant so the flag-off prompt is byte-identical.
+IMPLEMENTER_EDIT_MODE_INSTRUCTIONS = textwrap.dedent("""\
+
+    # Editing existing files — READ THIS (overrides rules 6 and 8 below for existing files)
+
+    Some of the files you must change ALREADY EXIST. Their current content is
+    shown to you under the heading "## Current contents of files you must
+    modify". For every file shown there, do NOT re-emit the whole file. Emit one
+    or more anchored SEARCH/REPLACE edit blocks that change ONLY the lines that
+    must change:
+
+        ### path/to/File.ext
+        <<<<<<< SEARCH
+        <exact contiguous lines copied from the current file content shown to you>
+        =======
+        <the replacement lines>
+        >>>>>>> REPLACE
+
+    Edit-block rules:
+    1. Start each file's edits with a `### path` line (the file's exact path),
+       then one or more SEARCH/REPLACE blocks for that file. Use as many blocks
+       per file as you need.
+    2. The SEARCH text must be copied BYTE-FOR-BYTE from the shown file content:
+       same indentation, same spaces-vs-tabs, same blank lines. It must appear
+       in the current file EXACTLY ONCE. If the lines you want are not unique,
+       include more surrounding lines until the block is unique.
+    3. The REPLACE text is what those searched lines become. An EMPTY replace
+       (nothing between `=======` and `>>>>>>> REPLACE`) deletes the searched
+       lines. Do NOT wrap either side in markdown ``` fences.
+    4. Change ONLY what the design requires. Every line you do not put in a
+       SEARCH block is left exactly as it is — that is the entire point of
+       editing instead of re-emitting.
+    5. Do NOT emit a <<<FILE: ...>>> whole-file block for a file that is shown as
+       existing; use edit blocks for it. If an edit block's SEARCH cannot be
+       found or is not unique, the whole attempt is rejected and returned to you
+       — so copy the anchor exactly.
+
+    NEW files — any path NOT shown under "Current contents of files you must
+    modify" — are unchanged: emit each as a complete
+    <<<FILE: path>>> ... <<<END_FILE>>> whole-file block, exactly as the Output
+    format section describes.
+    """)
+
 REVIEWER_SYSTEM_PROMPT = textwrap.dedent("""\
     You are the REVIEWER for an autonomous software service. You receive the
     spec, the design, and the implementer's source files. You (1) write test
@@ -834,6 +891,11 @@ class ImplementerResult:
     # record a diagnostic event — useful when debugging "why did my file
     # have content I didn't expect" reports.
     duplicate_paths: list[str] = field(default_factory=list)
+    # DEV-581: diagnostics for edit blocks that could not be applied (anchor not
+    # found / ambiguous / no base file). Non-empty means the attempt must NOT be
+    # written — the orchestrator routes it back to the implementer. Always empty
+    # when diff-based edits are off (the whole-file path never populates it).
+    apply_errors: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -1439,22 +1501,43 @@ EXISTING_FILES_MAX_CHARS = int(
     os.getenv("AUTONOMOUS_EXISTING_FILES_MAX_CHARS", "60000"))
 
 
-def _render_existing_files(existing_files: list[tuple[str, str]]) -> str:
+def _render_existing_files(existing_files: list[tuple[str, str]],
+                           *, edit_mode: bool = False) -> str:
     """Current repo contents, framed as ground truth the model must preserve.
 
     Deliberately not wrapped in the <<<FILE:…>>> delimiters the implementer
     emits — those are parsed out of the *response*, and echoing the input
     format invites the model to treat these as already-emitted files.
+
+    With ``edit_mode`` on (DEV-581) the framing tells the model to emit anchored
+    SEARCH/REPLACE edit blocks against this exact text rather than re-emit the
+    whole file. The heading is identical in both modes because the system prompt
+    refers to it by name. With ``edit_mode`` off the output is byte-identical to
+    the pre-DEV-581 wording.
     """
+    if edit_mode:
+        body = (
+            "These are the ACTUAL contents in the repository right now. They are "
+            "ground truth and outrank any description of these files in the spec "
+            "or design. Each file here ALREADY EXISTS, so do NOT re-emit it whole "
+            "— emit anchored SEARCH/REPLACE edit blocks against this exact text "
+            "(see \"Editing existing files\" in your instructions). Copy every "
+            "SEARCH anchor byte-for-byte from the content below, and change only "
+            "the lines the design requires.\n\n"
+        )
+    else:
+        body = (
+            "These are the ACTUAL contents in the repository right now. They are "
+            "ground truth and outrank any description of these files in the spec "
+            "or design. Reproduce every declaration exactly as it appears here "
+            "except for the specific changes the design calls for — do not "
+            "rewrite, reorder, re-indent, modernise or 'improve' anything you "
+            "were not asked to change. Anything you drop is deleted from the "
+            "repository.\n\n"
+        )
     out = [
         "## Current contents of files you must modify\n\n",
-        "These are the ACTUAL contents in the repository right now. They are "
-        "ground truth and outrank any description of these files in the spec "
-        "or design. Reproduce every declaration exactly as it appears here "
-        "except for the specific changes the design calls for — do not "
-        "rewrite, reorder, re-indent, modernise or 'improve' anything you "
-        "were not asked to change. Anything you drop is deleted from the "
-        "repository.\n\n",
+        body,
     ]
     budget = EXISTING_FILES_MAX_CHARS
     omitted: list[str] = []
@@ -1482,7 +1565,12 @@ def build_implementer_message(
     existing_files: list[tuple[str, str]] | None = None,
     reference_files: list[tuple[str, str]] | None = None,
     approval_conditions: str | None = None,
+    edit_mode: bool = False,
 ) -> list[dict[str, str]]:
+    # DEV-581: edit-mode only changes anything when there ARE existing files to
+    # edit. With no existing files the response is all new whole files, so the
+    # message is byte-identical to whole-file mode either way.
+    edit_mode = bool(edit_mode and existing_files)
     user_parts: list[str] = []
     # Clarifications go BEFORE the spec so the implementer reads them as the
     # first operator-authored content. They're hard requirements at the same
@@ -1517,28 +1605,55 @@ def build_implementer_message(
     # salient at the moment of writing (DEV-492).
     if existing_files:
         user_parts.append("\n\n")
-        user_parts.append(_render_existing_files(existing_files))
+        user_parts.append(_render_existing_files(existing_files, edit_mode=edit_mode))
     if reference_files:
         user_parts.append("\n\n")
         user_parts.append(_render_reference_files(reference_files))
     if rejection_notes:
+        if edit_mode:
+            task_line = (
+                "\n\n---\n\n"
+                "Your task: fix the issues identified above. For each file shown "
+                "under \"Current contents of files you must modify\", emit "
+                "anchored SEARCH/REPLACE edit blocks (`### path` then "
+                "`<<<<<<< SEARCH` / `=======` / `>>>>>>> REPLACE`) against its "
+                "shown content — do NOT re-emit those files whole. Emit any NEW "
+                "file as a complete <<<FILE: path>>>…<<<END_FILE>>> block. Leave "
+                "every file you are not changing untouched.")
+        else:
+            task_line = (
+                "\n\n---\n\n"
+                "Your task: fix the issues identified above and re-implement. "
+                "Output <<<FILE: path>>>…<<<END_FILE>>> blocks for EVERY file. "
+                "You must output ALL files again (complete files, not diffs).")
         user_parts.extend([
             "\n\n## Previous Attempt — Review Feedback\n\n",
             rejection_notes,
-            "\n\n---\n\n"
-            "Your task: fix the issues identified above and re-implement. "
-            "Output <<<FILE: path>>>…<<<END_FILE>>> blocks for EVERY file. "
-            "You must output ALL files again (complete files, not diffs).",
+            task_line,
         ])
     else:
-        user_parts.extend([
-            "\n\n---\n\n"
-            "Your task: implement ALL components described in the design. "
-            "Output <<<FILE: path>>>…<<<END_FILE>>> blocks for every file. "
-            "Paths are relative to the project workspace.",
-        ])
+        if edit_mode:
+            task_line = (
+                "\n\n---\n\n"
+                "Your task: implement ALL components described in the design. For "
+                "each file shown under \"Current contents of files you must "
+                "modify\", emit anchored SEARCH/REPLACE edit blocks against its "
+                "shown content — do NOT re-emit those files whole. Emit every NEW "
+                "file as a complete <<<FILE: path>>>…<<<END_FILE>>> block. Paths "
+                "are relative to the project workspace.")
+        else:
+            task_line = (
+                "\n\n---\n\n"
+                "Your task: implement ALL components described in the design. "
+                "Output <<<FILE: path>>>…<<<END_FILE>>> blocks for every file. "
+                "Paths are relative to the project workspace.")
+        user_parts.extend([task_line])
+    system_prompt = (
+        IMPLEMENTER_SYSTEM_PROMPT + IMPLEMENTER_EDIT_MODE_INSTRUCTIONS
+        if edit_mode else IMPLEMENTER_SYSTEM_PROMPT
+    )
     return [
-        {"role": "system", "content": IMPLEMENTER_SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": "".join(user_parts)},
     ]
 
