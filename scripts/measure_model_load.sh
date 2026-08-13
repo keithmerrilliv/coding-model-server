@@ -135,11 +135,32 @@ if [[ "$DO_INFER" == "1" ]]; then
     echo "  llama-server not executable at: $LLAMA_BIN (use --llama-bin PATH)" >&2
     exit 1
   fi
-  # VRAM contention guard: the main service keeps at most one model in VRAM. If it
-  # has one loaded, this second llama-server can OOM. Warn (best-effort check).
-  if curl -sf "http://localhost:5000/v1/admin/active_model" 2>/dev/null | grep -qiE '"(model|active)"\s*:\s*"[^"]'; then
-    echo "  WARNING: the main server appears to have a model loaded — Part B may OOM the GPU."
-    echo "           Run this when the service is idle, or stop it first."
+  # VRAM contention guard (DEV-388): a resident model in the main service means this
+  # second llama-server can OOM the card. The admin endpoint is auth'd, so send the
+  # key (X-Admin-Key, as the bundled client does) — without it the request 401s and
+  # this warning silently never fires. On any inconclusive result (401, unparseable
+  # body, error) warn rather than assume idle: the guard exists to prevent an OOM, so
+  # it must fail safe. Snapshot keys are running/model_path/pid (not "model"/"active").
+  nl=$'\n'
+  am_resp=$(curl -s -w "${nl}%{http_code}" -H "X-Admin-Key: ${ADMIN_API_KEY:-}" \
+    "http://localhost:5000/v1/admin/active_model" 2>/dev/null)
+  am_code=${am_resp##*"$nl"}
+  am_body=${am_resp%"$nl"*}
+  am_state="unknown"
+  if [[ "$am_code" == "200" ]]; then
+    am_state=$(printf '%s' "$am_body" | python3 -c 'import json,sys
+try: s=json.load(sys.stdin)
+except Exception: print("unknown"); sys.exit()
+print("busy" if (s.get("running") or s.get("pid") is not None) else "idle")' 2>/dev/null || echo unknown)
+  elif [[ "$am_code" == "000" ]]; then
+    am_state="idle"   # main server unreachable — it holds no VRAM, so no contention
+  fi
+  if [[ "$am_state" == "busy" ]]; then
+    echo "  WARNING: the main server has a model loaded — Part B may OOM the GPU." >&2
+    echo "           Run this when the service is idle, or stop it first." >&2
+  elif [[ "$am_state" == "unknown" ]]; then
+    echo "  WARNING: could not read the main server's model state (HTTP ${am_code}; is ADMIN_API_KEY set?) —" >&2
+    echo "           assuming it may be busy. Run when the service is idle, or stop it first." >&2
   fi
 
   # Warm the cache once so both runs start from RAM — isolates inference from SSD.
