@@ -252,26 +252,46 @@ class Database:
         return [_row_to_spec(r) for r in rows]
 
     def update_spec_status(self, spec_id: str, status: SpecStatus,
-                           normalized_yaml: Optional[str] = None) -> None:
+                           normalized_yaml: Optional[str] = None,
+                           force: bool = False) -> bool:
+        """Set the spec's status. Returns True when the row actually changed.
+
+        DEV-567: CANCELLED is terminal against concurrent writers. A phase
+        pass that was already in flight when an operator cancelled used to
+        overwrite CANCELLED with its own completion status (last-writer-wins),
+        resurrecting the spec and opening orphan gates. The write is now a
+        compare-and-swap — a cancelled spec keeps its status unless the caller
+        passes force=True (the operator resurrection path, e.g. run 12).
+        """
         now = utc_now()
+        guard = "" if force or status is SpecStatus.CANCELLED \
+            else " AND status != 'cancelled'"
         with self.transaction() as conn:
             if normalized_yaml is not None:
-                conn.execute(
+                cur = conn.execute(
                     "UPDATE specs SET status = ?, normalized_yaml = ?, "
-                    "updated_at = ? WHERE id = ?",
+                    "updated_at = ? WHERE id = ?" + guard,
                     (status.value, normalized_yaml, _iso(now), spec_id),
                 )
             else:
-                conn.execute(
-                    "UPDATE specs SET status = ?, updated_at = ? WHERE id = ?",
+                cur = conn.execute(
+                    "UPDATE specs SET status = ?, updated_at = ? WHERE id = ?"
+                    + guard,
                     (status.value, _iso(now), spec_id),
                 )
+            if cur.rowcount == 0:
+                logger.warning(
+                    "spec %s: status write to %r discarded — spec is "
+                    "cancelled and the write was not forced (DEV-567)",
+                    spec_id, status.value)
+                return False
             self._record_event(
                 conn,
                 EventKind.SPEC_STATUS_CHANGED,
                 spec_id=spec_id,
                 payload={"new_status": status.value},
             )
+            return True
 
     def set_spec_jira_epic(self, spec_id: str, epic_key: str) -> None:
         with self.transaction() as conn:
