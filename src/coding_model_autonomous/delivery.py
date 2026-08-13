@@ -64,6 +64,9 @@ def _delivery_key(repo_name: Optional[str]) -> str:
     its own: AUTONOMOUS_DELIVERY_SSH_KEY_<REPO> (upper-cased, non-alnum → _),
     falling back to AUTONOMOUS_DELIVERY_SSH_KEY. Empty when unconfigured —
     _git then runs with ambient SSH, which works from an interactive shell.
+
+    Keep these paths OUTSIDE the config dir the unit marks Inaccessible, or
+    the daemon cannot read its own credential (DEV-597).
     """
     specific = ""
     if repo_name:
@@ -71,6 +74,40 @@ def _delivery_key(repo_name: Optional[str]) -> str:
             r"[^A-Za-z0-9]", "_", repo_name).upper()
         specific = os.getenv(var, "").strip()
     return specific or os.getenv("AUTONOMOUS_DELIVERY_SSH_KEY", "").strip()
+
+
+def _known_hosts_for(key_path: str) -> str:
+    """The pinned known_hosts that ships beside the deploy key (DEV-597)."""
+    return str(Path(key_path).parent / "known_hosts")
+
+
+def _check_delivery_credentials(key: str) -> Optional[str]:
+    """Validate a *configured* credential before any git command runs.
+
+    DEV-597: the daemon's unit sandbox (InaccessiblePaths) can hide both the
+    deploy key and ~/.ssh, and the old behavior — silently dropping
+    GIT_SSH_COMMAND when the key file "didn't exist" — swapped in the user's
+    ambient identity, which then failed on host-key verification with no hint
+    of the real cause. A configured credential that cannot be read is a
+    delivery failure that names the path; ambient ssh is never a fallback.
+
+    An EMPTY key stays permitted: that is the deliberate interactive-shell
+    path (operator reruns with their own agent).
+    """
+    if not key:
+        return None
+    kp = os.path.expanduser(key)
+    if not (os.path.isfile(kp) and os.access(kp, os.R_OK)):
+        return (f"delivery key {kp} is not readable in this context; if this "
+                f"is the daemon, the unit sandbox (InaccessiblePaths) is "
+                f"probably hiding it — refusing to fall back to ambient ssh "
+                f"(DEV-597)")
+    kh = _known_hosts_for(kp)
+    if not (os.path.isfile(kh) and os.access(kh, os.R_OK)):
+        return (f"pinned known_hosts {kh} is missing or unreadable; it must "
+                f"ship beside the deploy key so ssh never needs ~/.ssh "
+                f"(DEV-597)")
+    return None
 
 
 def _git(cwd, *args, timeout: int = 120, key: str = ""):
@@ -81,10 +118,15 @@ def _git(cwd, *args, timeout: int = 120, key: str = ""):
     # dedicated passphrase-less deploy key (write access scoped to the one
     # delivery remote) restores daemon-context pushes without granting the
     # daemon the user's ambient identity.
-    if key and os.path.isfile(os.path.expanduser(key)):
+    # DEV-597: the pinned known_hosts beside the key keeps host verification
+    # out of ~/.ssh, which the unit sandbox hides. Callers must have passed
+    # the key through _check_delivery_credentials first.
+    if key:
+        kp = os.path.expanduser(key)
         env["GIT_SSH_COMMAND"] = (
-            f"ssh -i {os.path.expanduser(key)} -o IdentitiesOnly=yes "
-            f"-o BatchMode=yes")
+            f"ssh -i {kp} -o IdentitiesOnly=yes -o BatchMode=yes "
+            f"-o UserKnownHostsFile={_known_hosts_for(kp)} "
+            f"-o StrictHostKeyChecking=yes")
     return subprocess.run(["git", *args], cwd=str(cwd), capture_output=True,
                           text=True, timeout=timeout, env=env)
 
@@ -132,6 +174,9 @@ def deliver_spec(spec_id: str, spec_title: str, spec_dir: Path,
 
     branch = f"{BRANCH_PREFIX}{spec_id}"
     key = _delivery_key(repo_name)
+    cred_err = _check_delivery_credentials(key)
+    if cred_err:
+        return DeliveryResult("failed", cred_err)
     tmp = tempfile.mkdtemp(prefix="delivery-")
     try:
         clone = _git(tmp, "clone", "--depth", "1", url, "repo", timeout=300,
