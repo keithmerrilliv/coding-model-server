@@ -329,8 +329,12 @@ _SPEC_TEST_STRATEGY_RE = re.compile(
 def _spec_declared_test_strategy(spec_md: str) -> dict:
     """The `## test_strategy` block from the spec itself, as a mapping.
 
-    Specs write it as an indented YAML block under the heading. Returns {} when
-    absent or unparseable — this is an advisory source, never a hard failure.
+    Specs write it either as an indented YAML block or inside a ```yaml fence
+    under the heading. The fence form is what every spec in docs/specs/
+    actually uses, and feeding the fence lines to yaml.safe_load raises — so
+    before DEV-573 this returned {} for every real spec and the DEV-426
+    dropped-key rule was vacuously satisfied. Returns {} when absent or
+    unparseable — this is an advisory source, never a hard failure.
     """
     import yaml as _yaml
     if not spec_md:
@@ -338,7 +342,9 @@ def _spec_declared_test_strategy(spec_md: str) -> dict:
     match = _SPEC_TEST_STRATEGY_RE.search(spec_md)
     if not match:
         return {}
-    block = textwrap.dedent(match.group(1)).strip()
+    section = match.group(1)
+    fence = re.search(r"```(?:ya?ml)?[ \t]*\n(.*?)```", section, re.DOTALL)
+    block = textwrap.dedent(fence.group(1) if fence else section).strip()
     if not block:
         return {}
     try:
@@ -346,6 +352,50 @@ def _spec_declared_test_strategy(spec_md: str) -> dict:
     except _yaml.YAMLError:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+# test_strategy keys the operator declares in the spec that must reach the
+# dispatch byte-identical. Everything protective hangs off these; run 14b
+# (DEV-573) lost protected_paths to the planner's rewrite and a fabricated
+# project.pbxproj reached the VM worktree.
+_OPERATOR_STRATEGY_KEYS = ("protected_paths", "base_ref", "filter",
+                           "execution_target")
+
+
+def _overlay_operator_test_strategy(yaml_text: str, spec_md: str,
+                                    spec_id: str) -> str:
+    """Force the spec's operator-authored test_strategy keys onto the plan.
+
+    The plan is an LLM rewrite of the spec, and protection metadata must not
+    depend on a model choosing to copy it (DEV-573). For each operator key the
+    spec declares, the spec's value wins — missing keys are restored and
+    divergent values overwritten, loudly. Returns the (possibly rewritten)
+    plan YAML; the original text is kept whenever no overlay is needed so the
+    gate shows the planner's own formatting.
+    """
+    import yaml as _yaml
+    declared = _spec_declared_test_strategy(spec_md)
+    wanted = {k: declared[k] for k in _OPERATOR_STRATEGY_KEYS if k in declared}
+    if not wanted:
+        return yaml_text
+    try:
+        plan = _yaml.safe_load(yaml_text)
+    except _yaml.YAMLError:
+        return yaml_text  # malformed YAML is rejected downstream, not here
+    if not isinstance(plan, dict):
+        return yaml_text
+    strategy = plan.get("test_strategy")
+    if not isinstance(strategy, dict):
+        return yaml_text  # no strategy at all is a different (non-Apple) shape
+    changed = [k for k, v in wanted.items() if strategy.get(k) != v]
+    if not changed:
+        return yaml_text
+    strategy.update({k: wanted[k] for k in changed})
+    logger.warning(
+        "spec %s: planner dropped or rewrote operator test_strategy key(s) "
+        "%s — restored verbatim from the spec (DEV-573)",
+        spec_id, ", ".join(sorted(changed)))
+    return _yaml.safe_dump(plan, sort_keys=False)
 
 
 def _validate_test_strategy(yaml_text: str, spec_md: str) -> list[str]:
@@ -576,16 +626,24 @@ def _fetch_protected_files_for_spec(spec: Spec) -> list[tuple[str, str]]:
     return files
 
 
-def _fetch_existing_files_for_spec(spec: Spec, spec_md: str) -> list[tuple[str, str]]:
-    """Current contents of the files this spec marks as modified (DEV-492).
+def _fetch_existing_files_for_spec(
+    spec: Spec, spec_md: str, extra_paths: "tuple | list" = (),
+) -> list[tuple[str, str]]:
+    """Current contents of the files this spec will overwrite (DEV-492).
 
-    Returns [] for the greenfield case (no change-surface rows), for local
-    frameworks whose repo is not on the Mac, and whenever the read path is
-    unavailable — the implementer then behaves exactly as it did before this
-    existed. Never raises: a spec must not fail because a git read failed.
+    Candidates come from the spec's change-surface table AND from
+    *extra_paths* (the manifest's own file list, DEV-571): the table is
+    optional and its absence used to silently disarm this guard — run 14a's
+    implementer reinvented ForcingStrategy.swift five times because the spec
+    had no table. Any candidate that reads successfully at base_ref already
+    exists in the repo and is therefore a modification, whatever the spec
+    declared. Returns [] for the true greenfield case, for local frameworks
+    whose repo is not on the Mac, and whenever the read path is unavailable.
+    Never raises: a spec must not fail because a git read failed.
     """
-    paths = _declared_file_modifications(spec_md)
-    if not paths:
+    declared = _declared_file_modifications(spec_md)
+    candidates = list(dict.fromkeys([*declared, *extra_paths]))
+    if not candidates:
         return []
     strategy = _load_plan(spec).get("test_strategy")
     if not isinstance(strategy, dict):
@@ -598,21 +656,26 @@ def _fetch_existing_files_for_spec(spec: Spec, spec_md: str) -> list[tuple[str, 
         return []
     base_ref = strategy.get("base_ref") or "HEAD"
     try:
-        files, problems = test_runner.fetch_repo_files(repo, paths, base_ref)
+        files, problems = test_runner.fetch_repo_files(repo, candidates, base_ref)
     except Exception as e:  # never let a read failure kill the spec
         logger.warning("spec %s: existing-file read failed (%s); the "
                        "implementer will not see the files it must modify",
                        spec.id, e)
         return []
     for problem in problems:
-        logger.warning("spec %s: existing-file read problem — %s",
-                       spec.id, problem)
+        # A manifest path missing from the repo is just a file being created;
+        # a DECLARED path missing is the spec naming something that is not
+        # there — only the latter is worth a warning.
+        if any(p in problem for p in declared):
+            logger.warning("spec %s: existing-file read problem — %s",
+                           spec.id, problem)
     if files:
         logger.info("spec %s: supplied %d existing file(s) to the implementer: %s",
                     spec.id, len(files), ", ".join(p for p, _ in files))
-    else:
+    elif declared:
         logger.warning("spec %s: %d file(s) marked modify but none could be "
-                       "read — implementer is working blind", spec.id, len(paths))
+                       "read — implementer is working blind", spec.id,
+                       len(declared))
     return files
 
 
@@ -667,6 +730,10 @@ def _accept_plan(db: Database, spec: Spec, spec_dir, result: PlannerYaml) -> Non
         spec_md = spec_md_path.read_text() if spec_md_path.exists() else ""
     except OSError:
         spec_md = ""
+    # DEV-573: operator-authored protection metadata never rides on the model's
+    # willingness to copy it — restore it mechanically before validating, so a
+    # drop self-heals instead of burning a planner round.
+    yaml_text = _overlay_operator_test_strategy(yaml_text, spec_md, spec.id)
     problems = _validate_test_strategy(yaml_text, spec_md)
     if problems:
         _reject_plan_for_validation(db, spec, problems, yaml_text)
@@ -1527,16 +1594,32 @@ def _latest_architect_feedback(db: Database, spec: Spec, spec_dir: Path) -> "str
       * the supervisor's design-revision directive (#4), from the decision log.
     Returns the combined notes, or None when there's nothing to inject."""
     parts: list[str] = []
+    # DEV-569: the human's design-rejection notes survive the whole round —
+    # read on every pass, never deleted here; cleared on design approval.
+    human = ""
+    human_file = spec_dir / "human_design_feedback.md"
+    if human_file.is_file():
+        try:
+            human = human_file.read_text()
+        except OSError:
+            pass
+        if human.strip():
+            parts.append("## The human reviewer's rejection notes "
+                         "(address every point)\n\n" + human)
     fb_file = spec_dir / "design_review_feedback.md"
     if fb_file.is_file():
         try:
-            parts.append(fb_file.read_text())
+            transient = fb_file.read_text()
         except OSError:
-            pass
+            transient = ""
         try:
             fb_file.unlink()
         except OSError:
             pass
+        # The legacy rejection path may have parked the same human notes in
+        # the transient slot; injecting them twice wastes prompt space.
+        if transient.strip() and transient.strip() != human.strip():
+            parts.append(transient)
     sup = _latest_supervisor_feedback(db, spec.id, target_role="architect")
     if sup:
         parts.append(sup)
@@ -2074,7 +2157,13 @@ def _build_from_manifest(
     generated = 0
     # Fetched once for the whole manifest rather than per file: one runner call
     # instead of N, which matters on a link that drops every ~66s (DEV-518).
-    existing_by_path = dict(_fetch_existing_files_for_spec(spec, spec_md))
+    # The manifest's own paths are candidates too (DEV-571): a manifest path
+    # that already exists in the repo is a modification even when the spec's
+    # change-surface table forgot it.
+    existing_by_path = dict(_fetch_existing_files_for_spec(
+        spec, spec_md,
+        extra_paths=[e.get("path") for e in entries
+                     if isinstance(e, dict) and e.get("path")]))
     # Fetched once for the whole manifest, same as the editable files: each
     # per-file call is isolated and would otherwise be blind to what the
     # protected scaffold already declares (Centipede run 8).
@@ -4560,23 +4649,44 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
                     "against a superseded design — marked in the prompt "
                     "(DEV-553)", spec.id, stale_n, len(attempts))
 
-    messages = build_synthesis_message(spec_md, design_md, attempts,
-                                       review_notes=review_notes,
-                                       reference_files=protected_files,
-                                       current_design_digest=current_design_digest)
-
     # Synthesis merges every attempt's files into one final response — the same
     # single-call emit-everything constraint as the implementer, so it gets the
     # same design-scaled budget instead of the old hardcoded 16000 (which made
     # the merge step the most truncation-prone call in the pipeline).
     synth_max_tokens = executor.implementer_max_tokens_for(design_md)
-    meta: dict = {}
-    try:
-        raw = call_agent("implementer", messages, agent=_SYNTHESIS_AGENT,
-                         max_tokens=synth_max_tokens, meta=meta)
-    except Exception as exc:
-        logger.error("spec %s: synthesis call failed: %s", spec.id, exc)
-        return False, ""
+    # DEV-572: the merge prompt grows linearly with the attempt count and the
+    # server (correctly) refuses an oversized body with a 413 — which used to
+    # fail the spec on a transport error 31 seconds after the last attempt.
+    # A size rejection is a retry-with-less condition: shed attempts (stale-
+    # design ones first per DEV-553, then oldest) until the call fits or a
+    # single attempt is also refused.
+    kept = list(attempts)
+    meta = {}
+    raw = None
+    while True:
+        messages = build_synthesis_message(
+            spec_md, design_md, kept,
+            review_notes=review_notes,
+            reference_files=protected_files,
+            current_design_digest=current_design_digest)
+        meta = {}
+        try:
+            raw = call_agent("implementer", messages, agent=_SYNTHESIS_AGENT,
+                             max_tokens=synth_max_tokens, meta=meta)
+            break
+        except Exception as exc:
+            if "413" in str(exc) and len(kept) > 1:
+                stale = [a for a in kept
+                         if a.get("design_digest")
+                         and a["design_digest"] != current_design_digest]
+                kept.remove(stale[0] if stale else kept[0])
+                logger.warning(
+                    "spec %s: synthesis prompt too large (413) — retrying "
+                    "with %d of %d attempt(s)", spec.id, len(kept),
+                    len(attempts))
+                continue
+            logger.error("spec %s: synthesis call failed: %s", spec.id, exc)
+            return False, ""
     _note_truncation(db, spec, impl_task, "synthesizer", meta, synth_max_tokens)
 
     result = parse_implementer_response(raw)
@@ -4587,7 +4697,8 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
 
     db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=impl_task.id,
                     payload={"role": "synthesizer",
-                             "attempts": len(attempts),
+                             "attempts": len(kept),
+                             "attempts_total": len(attempts),
                              "files": len(result.files),
                              **executor.agent_event_fields(meta)})
 
@@ -5035,6 +5146,15 @@ def _check_execution_gate(db: Database, spec: Spec, task) -> None:
         logger.info("spec %s: task %s (%s) approved, marking done",
                     spec.id, task.id, task.role)
         db.update_task_status(task.id, TaskStatus.DONE)
+        if task.role == "architect":
+            # DEV-569: the design round is over — the human's rejection notes
+            # for it must not leak into a later architect re-run (a build-
+            # failure revision months of context away would re-litigate them).
+            try:
+                (db.spec_dir(spec.id) / "human_design_feedback.md").unlink(
+                    missing_ok=True)
+            except OSError:
+                pass
     elif gate.status == GateStatus.REJECTED:
         _handle_gate_rejection(db, spec, task, gate)
         # If handling left the task parked in BLOCKED_ON_REVIEW (the
@@ -5055,6 +5175,20 @@ def _handle_gate_rejection(db: Database, spec: Spec, task, gate) -> None:
     With SUPERVISOR_ENABLED, asks the supervisor agent; on SupervisorError,
     falls back to the legacy role-keyed branching.
     """
+    # DEV-569: human design-rejection notes get their own persistent file,
+    # written here — the one point both the supervisor and legacy paths pass
+    # through. design_review_feedback.md is a consume-once slot with four
+    # writers, and a testability bounce after the rejection used to overwrite
+    # the human's notes with seam findings, regenerating the design blind
+    # (run 14, spec_e257f925). This file is read WITHOUT deletion on every
+    # architect pass and cleared only when a design gate is approved.
+    if task.role == "architect" and (gate.reviewer_notes or "").strip():
+        try:
+            (db.spec_dir(spec.id) / "human_design_feedback.md").write_text(
+                gate.reviewer_notes)
+        except OSError as e:
+            logger.warning("spec %s: could not persist human design "
+                           "feedback: %s", spec.id, e)
     if not SUPERVISOR_ENABLED:
         _legacy_handle_gate_rejection(db, spec, task, gate)
         return

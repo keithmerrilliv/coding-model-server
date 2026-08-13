@@ -57,9 +57,42 @@ class DeliveryResult:
     branch: Optional[str] = None
 
 
-def _git(cwd, *args, timeout: int = 120):
+def _delivery_key(repo_name: Optional[str]) -> str:
+    """Deploy-key path for *repo_name* (DEV-574).
+
+    GitHub binds a deploy key to exactly one repository, so each remote gets
+    its own: AUTONOMOUS_DELIVERY_SSH_KEY_<REPO> (upper-cased, non-alnum → _),
+    falling back to AUTONOMOUS_DELIVERY_SSH_KEY. Empty when unconfigured —
+    _git then runs with ambient SSH, which works from an interactive shell.
+    """
+    specific = ""
+    if repo_name:
+        var = "AUTONOMOUS_DELIVERY_SSH_KEY_" + re.sub(
+            r"[^A-Za-z0-9]", "_", repo_name).upper()
+        specific = os.getenv(var, "").strip()
+    return specific or os.getenv("AUTONOMOUS_DELIVERY_SSH_KEY", "").strip()
+
+
+def _git(cwd, *args, timeout: int = 120, key: str = ""):
+    env = os.environ.copy()
+    # DEV-574: the daemon's systemd context has no SSH agent, and the user
+    # key is passphrase-protected — so delivery authenticated exactly when a
+    # human's shell ran it and failed exactly when the pipeline did. A
+    # dedicated passphrase-less deploy key (write access scoped to the one
+    # delivery remote) restores daemon-context pushes without granting the
+    # daemon the user's ambient identity.
+    if key and os.path.isfile(os.path.expanduser(key)):
+        env["GIT_SSH_COMMAND"] = (
+            f"ssh -i {os.path.expanduser(key)} -o IdentitiesOnly=yes "
+            f"-o BatchMode=yes")
     return subprocess.run(["git", *args], cwd=str(cwd), capture_output=True,
-                          text=True, timeout=timeout)
+                          text=True, timeout=timeout, env=env)
+
+
+def _err_tail(proc, limit: int = 400) -> str:
+    """The actionable end of git's stderr (DEV-574): the first line is a
+    banner ('Cloning into ...'); the auth/network diagnosis is at the tail."""
+    return (proc.stderr or "").strip()[-limit:]
 
 
 def deliver_spec(spec_id: str, spec_title: str, spec_dir: Path,
@@ -98,12 +131,14 @@ def deliver_spec(spec_id: str, spec_title: str, spec_dir: Path,
                        "(all protected, or paths missing from the workspace)")
 
     branch = f"{BRANCH_PREFIX}{spec_id}"
+    key = _delivery_key(repo_name)
     tmp = tempfile.mkdtemp(prefix="delivery-")
     try:
-        clone = _git(tmp, "clone", "--depth", "1", url, "repo", timeout=300)
+        clone = _git(tmp, "clone", "--depth", "1", url, "repo", timeout=300,
+                     key=key)
         if clone.returncode != 0:
             return DeliveryResult(
-                "failed", f"clone of {url} failed: {clone.stderr.strip()[:400]}")
+                "failed", f"clone of {url} failed: {_err_tail(clone)}")
         repo = Path(tmp) / "repo"
         _git(repo, "checkout", "-b", branch)
         for rel in deliverable:
@@ -125,11 +160,12 @@ def deliver_spec(spec_id: str, spec_title: str, spec_dir: Path,
                       "commit", "-m", msg)
         if commit.returncode != 0:
             return DeliveryResult(
-                "failed", f"commit failed: {commit.stderr.strip()[:400]}")
-        push = _git(repo, "push", "--force", "origin", branch, timeout=300)
+                "failed", f"commit failed: {_err_tail(commit)}")
+        push = _git(repo, "push", "--force", "origin", branch, timeout=300,
+                    key=key)
         if push.returncode != 0:
             return DeliveryResult(
-                "failed", f"push to {url} failed: {push.stderr.strip()[:400]}")
+                "failed", f"push to {url} failed: {_err_tail(push)}")
         return DeliveryResult(
             "pushed",
             f"{len(deliverable)} file(s) committed to {branch} of {url}",
