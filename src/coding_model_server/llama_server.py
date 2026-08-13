@@ -130,6 +130,12 @@ class LlamaServerManager:
     # Idle timeout — only counts when no requests are active. The watchdog
     # also checks _active_requests below and never kills mid-stream.
     IDLE_TIMEOUT = 1800  # 30 minutes
+    # DEV-582: how long a reservation may sit with no proxy executing behind it
+    # before the swap guard treats it as leaked and reaps it. Must comfortably
+    # exceed the legitimate gap between ensure_running(reserve_slot=True) and
+    # the proxy starting (RAG retrieval + /tokenize budget round-trips — seconds),
+    # while staying far below "a human notices the pipeline is wedged".
+    ORPHAN_SLOT_REAP_S = float(os.getenv("LLAMA_ORPHAN_SLOT_REAP_S", "120"))
     HEALTH_POLL_INTERVAL = 0.5
     HEALTH_TIMEOUT = 120  # seconds to wait for /health
     # Safety margin on top of the recorded footprint when pre-flighting a
@@ -203,6 +209,19 @@ class LlamaServerManager:
         # Number of in-flight requests. Watchdog skips the kill while >0.
         # Race-free under CPython's GIL for ±1 increments.
         self._active_requests: int = 0
+        # DEV-582: number of proxy_* calls actually executing. A reserved slot
+        # (ensure_running(reserve_slot=True)) is counted in _active_requests by
+        # the route, which then owns the release; if that release never runs —
+        # the request was abandoned mid-flight, e.g. its spec was cancelled —
+        # the count leaks and the swap guard defers EVERY later swap forever.
+        # _live_proxies is the discriminator: a genuinely in-flight request
+        # always has a proxy executing behind its reservation, an orphaned one
+        # never does. Time alone cannot tell them apart, because the idle
+        # watchdog refreshes last_request_time while _active_requests > 0.
+        self._live_proxies: int = 0
+        # When the swap guard first saw "reserved but no proxy behind it".
+        # None whenever that condition does not hold.
+        self._orphan_slot_since: "float | None" = None
         self._watchdog_thread: Optional[Thread] = None
         # Generation token, not a boolean. Each _start_watchdog bumps it and
         # binds the new thread to the new value; each shutdown bumps it to
@@ -1037,10 +1056,18 @@ class LlamaServerManager:
                 #     a dead child, so child_alive is False and there is no live
                 #     stream left to protect.
                 if child_alive and self.has_active_requests():
-                    raise ModelBusyError(
-                        f"model swap for {agent_id or '?'} deferred: another "
-                        f"request is in flight against the current model — retry shortly"
-                    )
+                    # DEV-582: distinguish a real in-flight request from a
+                    # LEAKED reservation. A live request always has a proxy_*
+                    # executing behind it; an abandoned one (its spec was
+                    # cancelled, the route's release hook never ran) has none,
+                    # and nothing else ever clears the count — the swap guard
+                    # then defers every subsequent swap forever and the whole
+                    # pipeline stalls until the server is restarted.
+                    if not self._reap_orphaned_slots(agent_id):
+                        raise ModelBusyError(
+                            f"model swap for {agent_id or '?'} deferred: another "
+                            f"request is in flight against the current model — retry shortly"
+                        )
                 # Runtime drift — even if the GGUF file is the same, n_ctx
                 # / sampler bias / server flags can differ between agents
                 # that share a path. Shut down and reload to honor the new
@@ -1125,6 +1152,52 @@ class LlamaServerManager:
                 with self.lock:
                     self._active_requests += 1
 
+    def _reap_orphaned_slots(self, agent_id: "str | None") -> bool:
+        """Clear ``_active_requests`` when it is leaked, not busy (DEV-582).
+
+        Returns True when a leak was reaped and the caller may proceed with the
+        swap; False when the count reflects genuine in-flight work and the
+        caller must still refuse.
+
+        A reservation with a proxy executing behind it is real work of any
+        duration — a 45-minute architect generation must never be reaped — so
+        ``_live_proxies > 0`` refuses immediately and resets the clock. Only a
+        reservation with NO proxy behind it is a leak candidate, and only after
+        it has persisted for ORPHAN_SLOT_REAP_S: there is a legitimate window
+        (RAG + tokenize, seconds) between reserving the slot and the proxy
+        starting, and reaping inside that window would swap the model out from
+        under a request that is about to POST to it.
+
+        Called with ``_swap_lock`` held and ``self.lock`` NOT held.
+        """
+        now = time.time()
+        with self.lock:
+            live = self._live_proxies
+            active = self._active_requests
+            if live > 0:
+                # Genuine work in flight — not a leak, however long it runs.
+                self._orphan_slot_since = None
+                return False
+            if self._orphan_slot_since is None:
+                self._orphan_slot_since = now
+                waited = 0.0
+            else:
+                waited = now - self._orphan_slot_since
+            if waited < self.ORPHAN_SLOT_REAP_S:
+                return False
+            self._active_requests = 0
+            self._orphan_slot_since = None
+        logger.error(
+            "[orphan-slot] reaped %d leaked in-flight reservation(s) for the "
+            "swap to %s: no proxy has been executing behind them for %.0fs "
+            "(threshold %.0fs). A request was abandoned without releasing its "
+            "slot — most likely its spec was cancelled mid-call (DEV-582). "
+            "Proceeding with the swap; without this the guard would defer "
+            "every swap until the server was restarted.",
+            active, agent_id or "?", waited, self.ORPHAN_SLOT_REAP_S,
+        )
+        return True
+
     def release_slot(self):
         """Release a slot reserved by ``ensure_running(reserve_slot=True)``.
 
@@ -1134,6 +1207,8 @@ class LlamaServerManager:
         """
         with self.lock:
             self.last_request_time = time.time()
+            # A real release means whatever the guard was watching is gone.
+            self._orphan_slot_since = None
             if self._active_requests > 0:
                 self._active_requests -= 1
 
@@ -1443,6 +1518,10 @@ class LlamaServerManager:
         rid = req_id or "req_unknown"
         with self.lock:
             self.last_request_time = time.time()
+            # DEV-582: counted for every proxy, reserved or not — this is what
+            # proves a reservation has real work behind it.
+            self._live_proxies += 1
+            self._orphan_slot_since = None
             if not reserved:
                 self._active_requests += 1
         try:
@@ -1571,6 +1650,8 @@ class LlamaServerManager:
         finally:
             with self.lock:
                 self.last_request_time = time.time()
+                if self._live_proxies > 0:
+                    self._live_proxies -= 1
                 if not reserved:
                     self._active_requests -= 1
 
@@ -1601,6 +1682,9 @@ class LlamaServerManager:
         )
 
         with self.lock:
+            # DEV-582: see proxy_stream — proves the reservation has real work.
+            self._live_proxies += 1
+            self._orphan_slot_since = None
             if not reserved:
                 self._active_requests += 1
         try:
@@ -1646,6 +1730,8 @@ class LlamaServerManager:
                                              tool_calls=tool_calls)
         finally:
             with self.lock:
+                if self._live_proxies > 0:
+                    self._live_proxies -= 1
                 if not reserved:
                     self._active_requests -= 1
 
