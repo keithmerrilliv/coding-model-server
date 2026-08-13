@@ -90,7 +90,7 @@ from coding_model_autonomous.jira_client import (
 )
 from coding_model_autonomous.jira_sync import JiraSync
 from coding_model_autonomous import (
-    adversarial, delivery, design_testability, executor, test_runner,
+    adversarial, apply_edits, delivery, design_testability, executor, test_runner,
 )
 from coding_model_autonomous.test_runner import run_tests
 from coding_model_autonomous.retry_policy import (
@@ -1773,22 +1773,58 @@ def _generate_implementation(
 
     # Single-call path: one response with every file, budget scaled to the design.
     existing_files = _fetch_existing_files_for_spec(spec, spec_md)
+    # DEV-581: emit anchored SEARCH/REPLACE edits for existing files instead of
+    # re-emitting them whole — but only when the flag is on AND there is at least
+    # one existing file to edit. With the flag off this is byte-identical to the
+    # legacy whole-file path (build_implementer_message + parse_implementer_response).
+    edit_mode = executor.DIFF_BASED_EDITS and bool(existing_files)
     messages = build_implementer_message(
         spec_md, design_md, rejection_notes=rejection_notes,
         clarifications=clarifications, existing_files=existing_files,
         reference_files=_fetch_protected_files_for_spec(spec),
         approval_conditions=approval_conditions,
+        edit_mode=edit_mode,
     )
     impl_max_tokens = executor.implementer_max_tokens_for(design_md)
-    logger.info("spec %s: single-call implementer budget=%d tokens (~%d files)",
-                spec.id, impl_max_tokens, n_files)
+    logger.info("spec %s: single-call implementer budget=%d tokens (~%d files)%s",
+                spec.id, impl_max_tokens, n_files,
+                " [diff-based edits]" if edit_mode else "")
     meta: dict = {}
     raw = call_agent("implementer", messages, agent=chosen_agent,
                      max_tokens=impl_max_tokens, meta=meta)
     _note_truncation(db, spec, task, "implementer", meta, impl_max_tokens)
     if tally is not None:
         executor.accumulate_agent_fields(tally, meta)
-    return parse_implementer_response(raw)
+    if not edit_mode:
+        return parse_implementer_response(raw)
+    return _resolve_edit_mode_response(raw, existing_files)
+
+
+def _resolve_edit_mode_response(
+    raw: str, existing_files: "list[tuple[str, str]]"
+) -> "ImplementerResult | ParseError":
+    """Turn a diff-based-edit response into write-ready files (DEV-581).
+
+    New files arrive as whole-file <<<FILE>>> blocks (parsed the normal way) and
+    pass through. Existing files arrive as `### path` + SEARCH/REPLACE edit
+    blocks and are applied mechanically against the current repo content in
+    ``existing_files``. The apply is pure (apply_edits.resolve_edits) — an anchor
+    that is missing or ambiguous never overwrites, drops or partially applies a
+    file; it becomes an ``apply_errors`` entry that the caller routes back to the
+    implementer.
+    """
+    parsed = parse_implementer_response(raw)
+    whole = parsed.files if isinstance(parsed, ImplementerResult) else []
+    dup = parsed.duplicate_paths if isinstance(parsed, ImplementerResult) else []
+    resolved = apply_edits.resolve_edits(whole, raw, dict(existing_files))
+    if not resolved.files and not resolved.errors:
+        # No whole-file blocks and no edit blocks: genuinely unparseable, same as
+        # the whole-file path's "no blocks" ParseError (drives rotation-retry).
+        return ParseError(
+            "No <<<FILE: path>>>…<<<END_FILE>>> blocks and no SEARCH/REPLACE "
+            "edit blocks found", raw)
+    return ImplementerResult(files=resolved.files, raw=raw,
+                             duplicate_paths=dup, apply_errors=resolved.errors)
 
 
 def _persist_manifest(spec_dir, entries) -> None:
@@ -2023,6 +2059,22 @@ def _format_build_warnings(warnings: "list[BuildWarning]") -> str:
         for w in warnings)
 
 
+def _reemit_instruction(whole_file_text: str) -> str:
+    """How the retry feedback should tell the implementer to resubmit (DEV-581).
+
+    With diff-based edits on, "re-emit ALL files" is exactly the whole-file
+    behaviour we are trying to avoid, and it contradicts the edit-mode task
+    instruction the implementer message carries — so point it at edits instead.
+    With the flag OFF this returns ``whole_file_text`` verbatim, keeping the
+    pre-DEV-581 feedback byte-identical.
+    """
+    if executor.DIFF_BASED_EDITS:
+        return ("Fix the problem above, then re-emit anchored SEARCH/REPLACE "
+                "edit blocks for the existing files you change (whole-file "
+                "blocks for new files). Leave every other file untouched.")
+    return whole_file_text
+
+
 def _build_warning_feedback(warnings: "list[BuildWarning]") -> str:
     """Implementer-facing note for a build that compiled but is not trustworthy.
 
@@ -2042,7 +2094,7 @@ def _build_warning_feedback(warnings: "list[BuildWarning]") -> str:
         "means the condition is not testing what it appears to test; "
         "unreachable code and always-true comparisons mean a branch cannot "
         "run. Each one is a defect that compiles.\n\n"
-        "Fix every warning above and re-emit ALL files.\n"
+        f"{_reemit_instruction('Fix every warning above and re-emit ALL files.')}\n"
     )
 
 
@@ -2824,6 +2876,15 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
                                  "paths": result.duplicate_paths,
                                  "retry": task.retry_count})
 
+    # DEV-581: a diff-based-edit response whose SEARCH anchor could not be
+    # applied (not found / ambiguous / no base file). NOTHING was written yet —
+    # route the whole attempt back to the implementer with a precise diagnostic,
+    # exactly like a build failure, rather than silently overwriting, dropping or
+    # partially applying a file. Empty on every whole-file (flag-off) attempt.
+    if getattr(result, "apply_errors", None):
+        _route_unappliable_edits(db, spec, task, result.apply_errors)
+        return
+
     # Deterministically fix boilerplate the reviewer checks — unpinned deps,
     # and a Swift file missing `import Foundation` — so the most mechanical
     # FAILs never depend on the model getting them right. See
@@ -2956,7 +3017,7 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
                 f"to review yet. First compiler diagnostic:\n\n"
                 f"    {build_reason}\n\n"
                 f"{_diagnostic_completeness_note(build_output)}"
-                f"Fix every diagnostic below and re-emit ALL files.\n\n"
+                f"{_reemit_instruction('Fix every diagnostic below and re-emit ALL files.')}\n\n"
                 f"```\n{actionable}\n```\n"
             )
         else:
@@ -3293,6 +3354,67 @@ def _detect_build_failure(output: str, framework: str, passed: bool) -> str | No
 # identical build failure goes to the architect.
 BUILD_FAILURE_ARCHITECT_THRESHOLD = int(
     os.getenv("AUTONOMOUS_BUILD_FAILURE_ARCHITECT_THRESHOLD", "1"))
+
+
+def _edit_apply_feedback(errors: "list[str]") -> str:
+    """Implementer-facing note for edit blocks that would not apply (DEV-581)."""
+    listed = "\n".join(f"- {e}" for e in errors)
+    return (
+        "## Your edits could not be applied\n\n"
+        "Nothing was written. Each anchored edit is applied only when its SEARCH "
+        "block matches the CURRENT file content EXACTLY ONCE — byte-for-byte, "
+        "including indentation and blank lines. These did not:\n\n"
+        f"{listed}\n\n"
+        "Re-copy the exact lines from the file shown under \"Current contents of "
+        "files you must modify\" into each SEARCH block, or widen the block with "
+        "more surrounding lines until it is unique. Re-emit the corrected "
+        "SEARCH/REPLACE edit blocks for these files; leave every other file "
+        "exactly as it is."
+    )
+
+
+def _route_unappliable_edits(db: Database, spec: Spec, task,
+                             errors: "list[str]") -> None:
+    """Route unappliable diff-based edits back to the implementer (DEV-581).
+
+    Uses the same channel a build failure does: a synthetic REJECTED code_review
+    gate carrying the diagnostic, then the task is requeued for another
+    implementer attempt with the retry budget applied unchanged. No files were
+    written, so there is nothing to overwrite or partially apply. At budget
+    exhaustion it hands off to synthesis exactly like the build-failure path.
+    """
+    feedback = _edit_apply_feedback(errors)
+    logger.warning("spec %s: %d edit block(s) did not apply — rotating "
+                   "implementer without a human gate: %s", spec.id, len(errors),
+                   "; ".join(e.splitlines()[0] for e in errors[:3]))
+    db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
+                    payload={"role": "implementer", "model_call": False,
+                             "anomaly": "unappliable_edits",
+                             "errors": [e.splitlines()[0] for e in errors[:8]],
+                             "retry": task.retry_count})
+    if task.retry_count >= MAX_RETRIES:
+        logger.error("spec %s: unappliable-edit retry budget exhausted (%d/%d) "
+                     "— handing to synthesis", spec.id, task.retry_count,
+                     MAX_RETRIES)
+        reviewer_tasks = db.list_tasks_for_spec_by_role(spec.id, "reviewer")
+        reviewer_task = reviewer_tasks[0] if reviewer_tasks else None
+        if reviewer_task is None:
+            db.update_task_status(task.id, TaskStatus.FAILED)
+            db.update_spec_status(spec.id, SpecStatus.FAILED)
+        else:
+            _legacy_attempt_retry(db, spec, reviewer_task, feedback)
+        return
+    synth_gate = db.create_gate(
+        spec_id=spec.id,
+        task_id=task.id,
+        gate_type=GateType.CODE_REVIEW,
+        prompt_md="## Automated unappliable-edit retry (DEV-581)",
+    )
+    db.respond_to_gate(synth_gate.id, "rejected", notes=feedback)
+    db.increment_task_retry(task.id)
+    db.update_task_status(task.id, TaskStatus.PENDING)
+    logger.info("spec %s: unappliable edits, rotating implementer "
+                "(attempt %d/%d)", spec.id, task.retry_count + 1, MAX_RETRIES)
 
 
 def _route_build_failure_to_architect(db: Database, spec: Spec, task, spec_dir,
