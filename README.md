@@ -456,6 +456,9 @@ them into the venv.
 ```
 coding-model-server/
 ├── pyproject.toml              # Package metadata, deps, console scripts
+├── requirements.txt            # Thin `-e .` pointer (pyproject is the source of truth)
+├── requirements-client.txt     # Thin `-e .[client]` pointer
+├── QWEN.md                     # Agent context / project notes (CLAUDE.md-style)
 ├── src/
 │   ├── coding_model_server/     # FastAPI server + orchestrator daemon + shared modules
 │   │   ├── server.py           #   FastAPI app assembly, CORS, router wiring
@@ -496,19 +499,23 @@ coding-model-server/
 │       ├── planner.py          #   Planner agent (spec → YAML or clarifications)
 │       ├── executor.py         #   Execution agents (architect/implementer/reviewer)
 │       ├── supervisor.py       #   Meta-orchestrator (retry / fail / replan)
+│       ├── test_runner.py      #   Sandboxed test dispatch (bwrap+seccomp; swift/node/pytest)
 │       ├── seccomp_filter.py   #   seccomp-BPF filter for sandboxed test runs
 │       ├── jira_client.py      #   Jira interface (FakeJiraClient + real Atlassian)
 │       └── jira_sync.py        #   Bidirectional sync (SQLite ↔ Jira)
-├── tests/                      # pytest suite (~30 modules; `pytest` from the repo root)
+├── tests/                      # pytest suite (~115 modules; `pytest` from the repo root)
 ├── bin/                        # Entry-point scripts: setup.sh, start*.sh
 ├── scripts/                    # Operational scripts (redeploy, benchmarks, sweeps, stats)
 ├── systemd/                    # Service units (use `python -m coding_model_server.X` ExecStart)
+├── polkit/                     # polkit rule: sudo-free restart of the units (redeploy.sh)
+├── git-server/                 # git-shell wrapper + pre-receive hook for pipeline attempt branches
 ├── tools/                      # llama-server binary + shared libs, appledeepdoc-mcp
 ├── scraping/                   # Apple documentation scraper
 ├── dashboard/                  # TypeScript React dashboard
 ├── mac_runner/                 # Separate Swift/Xcode test runner service
 ├── docs/
 │   ├── TUTORIAL.md             #   End-to-end pipeline tutorial
+│   ├── PIPELINE.md             #   Pipeline state machine + failure routing (the map)
 │   ├── CONFIGURATION.md        #   Env vars, agent-config knobs, systemd
 │   └── RAG_UPDATES.md          #   RAG database + agentic query layer
 ├── var/                        # Runtime state, git-ignored: tasks_db/, memory_db/, server_stats.csv
