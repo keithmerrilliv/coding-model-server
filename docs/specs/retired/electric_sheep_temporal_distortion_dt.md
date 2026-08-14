@@ -1,4 +1,32 @@
-# Make temporalDistortion velocity warp frame-rate independent
+# RETIRED — Make temporalDistortion velocity warp frame-rate independent
+
+> **WITHDRAWN FROM THE DOGFOOD ROTATION 2026-08-13. Do not submit this spec.**
+> Fixed by hand instead: ElectricSheep `main` @ a0f9318, verified on hardware
+> (33 tests, 0 failures). DEV-596 is closed.
+>
+> Why it was withdrawn rather than re-run: the acceptance criteria below are
+> mutually unsatisfiable, including by this document's own reference formula.
+> Run 16 (spec_b3b3fe6e) produced a correct one-line implementation and honest
+> tests, and the tests failed on the mathematics.
+>
+> * "Net velocity scale returns to ~1 over a full cycle" is impossible for
+>   `pow(1 + 0.3*sin, dt*90)`: `ln(1 + 0.3*sin)` has a negative mean, so the
+>   scale decays to 0.0014 per cycle, not 1.0. An `exp(k*sin*dt)` form does
+>   integrate to 1 (measured 0.9994) — but then it no longer reproduces the
+>   90 Hz behaviour this document also demands be preserved.
+> * "Final speeds agree within 5% at 30 Hz vs 90 Hz" is unreachable at any
+>   window with either form (5.7% at 0.1 s, 22% at 2 s), because velocity grows
+>   ~1e8 over two seconds and any sampling difference is amplified exponentially.
+>   Preserving pathological 90 Hz behaviour and matching it at other rates are
+>   contradictory goals when the pathology *is* the exponential runaway.
+>
+> The shipped fix resolves this by adding what the spec never specified: a speed
+> clamp (`maxTemporalSpeed`, mirroring DEV-205's `maxGenesisSize`). Bounding the
+> warp is what makes frame-rate correctness meaningful.
+>
+> Lesson for spec authors: an acceptance criterion asserting a mathematical
+> property ("symmetric", "no secular growth", "returns to ~1") needs to be
+> checked numerically before the spec is written, not discovered by a run.
 
 Jira: DEV-596 (high). Same bug class as DEV-204/DEV-205 (fixed for demo spawn and
 genesis growth in commit 1ea928e); this site was missed.
