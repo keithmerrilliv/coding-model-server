@@ -12,7 +12,7 @@ from unittest import mock
 import pytest
 
 import coding_model_server.orchestrator_daemon as d
-from coding_model_autonomous import apply_edits, executor
+from coding_model_autonomous import executor
 from coding_model_autonomous.db import Database
 from coding_model_autonomous.apply_edits import parse_edit_blocks
 from coding_model_autonomous.executor import (

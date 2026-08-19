@@ -5,7 +5,6 @@ model text into per-file blocks, apply blocks to current content, and combine
 new (whole) files with applied edits. The apply must be whitespace-exact, must
 require a unique anchor, and must never partially apply.
 """
-from coding_model_autonomous import apply_edits
 from coding_model_autonomous.apply_edits import (
     EditBlock,
     apply_search_replace,
