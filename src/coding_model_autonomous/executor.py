@@ -2657,6 +2657,7 @@ def build_synthesis_repair_message(
     for relpath, content in files:
         parts.append(f"### {relpath}\n\n```\n{content}\n```\n\n")
     if warning_only:
+        assert warning_diagnostic is not None  # implied by warning_only
         parts.append(
             "## Compiler warnings on generated code\n\n```\n"
             + warning_diagnostic + "\n```\n\n"
