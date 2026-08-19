@@ -3,7 +3,7 @@
 # setup_coding_auto.sh — DEV-419 (phase 0 of DEV-400): create the coding-auto
 # SSH principal on gitserver and wire the pilot repo (JSONParser.git) for it.
 #
-#   sudo bash gitserver/setup_coding_auto.sh
+#   sudo bash git-server/setup_coding_auto.sh
 #
 # Root is needed for: useradd, writing another user's authorized_keys, and
 # group surgery. Everything else about phase 0 (the pre-receive hook, the
