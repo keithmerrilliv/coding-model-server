@@ -1,7 +1,7 @@
 # Security Hardening — Manual Migration Steps
 
 Companion to the hardening patches applied to `src/coding_model_server/server.py`,
-the start scripts, the four `.service` units, and
+the start scripts, the `.service` units, and
 `src/coding_model_autonomous/executor.py`. The code changes alone are not
 enough — the steps below must be run on every host that runs the server, the
 client, or the orchestrator.
@@ -145,23 +145,18 @@ The service units changed (new EnvironmentFile path, hardening directives,
 `coding-model-monitor` no longer running as root).
 
 ```sh
-# User-scoped units (coding-model-server, coding-model-orchestrator)
-systemctl --user daemon-reload
-systemctl --user restart coding-model-server coding-model-orchestrator
-systemctl --user status  coding-model-server coding-model-orchestrator
-
-# coding-model-monitor — adjust command below based on whether it's a user or
-# system unit on your host. It's shown as a system unit in the repo copy.
+# All units are system units, installed under /etc/systemd/system (see the
+# README's install snippet for the youruser substitution).
 sudo systemctl daemon-reload
-sudo systemctl restart coding-model-monitor
-sudo systemctl status  coding-model-monitor
+sudo systemctl restart coding-model-server coding-model-orchestrator coding-model-monitor
+sudo systemctl status  coding-model-server coding-model-orchestrator coding-model-monitor
 ```
 
 Check logs for either service if startup fails:
 
 ```sh
-journalctl --user -u coding-model-server -n 100 --no-pager
-journalctl --user -u coding-model-orchestrator -n 100 --no-pager
+sudo journalctl -u coding-model-server -n 100 --no-pager
+sudo journalctl -u coding-model-orchestrator -n 100 --no-pager
 sudo journalctl -u coding-model-monitor -n 100 --no-pager
 ```
 
@@ -213,7 +208,7 @@ curl -s -o /dev/null -w '%{http_code}\n' \
 
 # Orchestrator can invoke the sandbox — run a trivial spec through the
 # executing state and check the log for `running tests via bwrap`.
-journalctl --user -u coding-model-orchestrator -n 200 --no-pager | grep 'running tests via'
+sudo journalctl -u coding-model-orchestrator -n 200 --no-pager | grep 'running tests via'
 ```
 
 On the Mac dev machine:
@@ -237,8 +232,8 @@ A clean start prints `Connected to <your server IP>` and no
 | Auth enforcement | `src/coding_model_server/runtime.py` | Lifespan-enforced on every launch path (DEV-127): refuses empty or placeholder `ADMIN_API_KEY`; `CODING_MODEL_ALLOW_UNAUTH=1` is loopback-only and key-less requests reject non-loopback clients |
 | Shell auto-run | `src/coding_model_client/config.py` | `ALLOW_SHELL_MODE` default → `false` |
 | Env loading | `bin/start.sh`, `bin/start-client.sh` | Prefer `~/.config/coding-model-server/.env`; repo `.env` is a fallback with warning |
-| Systemd env path | `coding-model-server.service`, `coding-model-orchestrator.service` | `EnvironmentFile=-%h/.config/coding-model-server/.env` added |
-| Systemd hardening | all four `.service` files | `PrivateTmp`, `ProtectKernel*`, `LockPersonality`, `ProtectSystem=strict`, `ReadWritePaths` |
+| Systemd env path | `coding-model-server.service`, `coding-model-orchestrator.service` | `EnvironmentFile=-/home/youruser/.config/coding-model-server/.env` added (`youruser` substituted at install) |
+| Systemd hardening | all `.service` files | `PrivateTmp`, `ProtectKernel*`, `LockPersonality`, `ProtectSystem=strict`, `ReadWritePaths` |
 | Monitor privileges | `coding-model-monitor.service` | `User=root` → `User=youruser` |
 | Test sandbox | `src/coding_model_autonomous/executor.py` | LLM-generated pytest/jest wrapped in `bwrap` (no network, no `/home`, no env inheritance); opt-out via `CODING_MODEL_ALLOW_UNSANDBOXED_TESTS=1` |
 | Docs | `.env.example`, `docs/CONFIGURATION.md`, `docs/TUTORIAL.md` | Updated defaults, documented new flags and env path |
@@ -351,7 +346,7 @@ MAC_RUNNER_API_KEY=<same value as CODING_MODEL_RUNNER_API_KEY on the Mac>
 Restart:
 
 ```sh
-systemctl --user restart coding-model-orchestrator
+sudo systemctl restart coding-model-orchestrator
 ```
 
 ### Transport: SSH reverse tunnel (recommended)

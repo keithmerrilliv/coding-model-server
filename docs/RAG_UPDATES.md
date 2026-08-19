@@ -205,7 +205,7 @@ The chat route (`_maybe_inject_rag_context` in `src/coding_model_server/routes/c
 1. Extract the last user message from the conversation
 2. Embed it via `SentenceTransformer('all-MiniLM-L6-v2')` (384-dim, CPU-bound)
 3. Query ChromaDB with cosine similarity, top-5 results
-4. Filter by relevance threshold (cosine distance <= 0.35)
+4. Filter by relevance threshold (cosine distance <= 0.6)
 5. Format as a numbered list under `## RELEVANT MEMORIES (FACTS & DECISIONS):`
 6. Wrap that in an **untrusted-data fence** and append to the system prompt
 
@@ -248,7 +248,7 @@ The `POST /v1/memory` endpoint enforces a `max_length=200_000` character limit o
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CODING_MODEL_MEMORY_DB` | `<repo>/var/memory_db` | ChromaDB persistence directory |
-| `MEMORY_RELEVANCE_THRESHOLD` | 0.35 | Max cosine distance for inclusion |
+| `MEMORY_RELEVANCE_THRESHOLD` | 0.6 | Max cosine distance for inclusion |
 | `PDF_CHUNK_SIZE` | 1000 | Character chunk size for PDF ingestion |
 | `PDF_CHUNK_OVERLAP` | 200 | Overlap between PDF chunks |
 | `ADMIN_API_KEY` | *(required)* | API key for `X-Admin-Key` / `Bearer` authentication |

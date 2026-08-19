@@ -72,7 +72,7 @@ will not start without them.
 | **VRAM** | Whatever you have. Most agents run with expert offload (`--cpu-moe`), keeping attention on the GPU and MoE experts on CPU, so a 16 GB card runs models far larger than it could hold. |
 
 ```bash
-git clone git@github.com:keithmerrilliv/coding-model-server.git
+git clone https://github.com/keithmerrilliv/coding-model-server.git
 cd coding-model-server
 ./bin/setup.sh              # venv + `pip install -e .` + seeds .env
 ```
@@ -226,7 +226,7 @@ they aren't listed in `/v1/models`:
 | `/ingest <path>` | Ingest a PDF into RAG memory (`local:` prefix for client-side files) |
 | `/ingest-code <dir>` | Ingest a codebase with AST-aware chunking |
 | `/apple <tool> <args>` | Apple Deep Docs MCP (server-side) |
-| `/scrape [framework]` | Run the documentation scraper (default: Metal) |
+| `/scrape [framework]` | Run the documentation scraper. No argument = ALL frameworks (~30k pages — takes hours) |
 
 ## Tool System
 
@@ -503,7 +503,7 @@ coding-model-server/
 │       ├── seccomp_filter.py   #   seccomp-BPF filter for sandboxed test runs
 │       ├── jira_client.py      #   Jira interface (FakeJiraClient + real Atlassian)
 │       └── jira_sync.py        #   Bidirectional sync (SQLite ↔ Jira)
-├── tests/                      # pytest suite (~115 modules; `pytest` from the repo root)
+├── tests/                      # pytest suite (127 modules; `pytest` from the repo root)
 ├── bin/                        # Entry-point scripts: setup.sh, start*.sh
 ├── scripts/                    # Operational scripts (redeploy, benchmarks, sweeps, stats)
 ├── systemd/                    # Service units (use `python -m coding_model_server.X` ExecStart)

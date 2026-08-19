@@ -6,7 +6,7 @@ This guide walks through setting up a local LLM inference server with a multi-ag
 
 **Server machine (Linux):**
 - NVIDIA GPU with at least 8 GB VRAM (16 GB recommended)
-- 64 GB+ system RAM (192 GB for large models like 397B/480B)
+- 64 GB+ system RAM (192 GB for the largest MoE models, e.g. the 230B MiniMax)
 - NVIDIA drivers + CUDA 12.8 toolkit (CUDA 13.x has MMQ kernel bugs on Blackwell GPUs)
 - Python 3.10+
 
@@ -19,7 +19,7 @@ This guide walks through setting up a local LLM inference server with a multi-ag
 ### 1.1 Clone and Install
 
 ```bash
-git clone <repo-url> coding-model-server
+git clone https://github.com/keithmerrilliv/coding-model-server.git
 cd coding-model-server
 ./bin/setup.sh
 ```
@@ -108,7 +108,8 @@ chmod 600 ~/.config/coding-model-server/.env
 
 ### 1.6 Start as a Service (Recommended)
 
-Don't hand-write a unit — the repo ships four, in `systemd/`:
+Don't hand-write a unit — the repo ships six (plus two timers), in `systemd/`.
+The four you'll want first:
 
 | Unit | What it runs |
 |------|--------------|
@@ -118,7 +119,10 @@ Don't hand-write a unit — the repo ships four, in `systemd/`:
 | `coding-model-monitor.service` | Resource sampler → `var/server_stats.csv` |
 
 ```bash
-sudo cp systemd/coding-model-server.service /etc/systemd/system/
+# The units ship with /home/youruser placeholders — substitute before installing:
+sed -e "s|/home/youruser|$HOME|g" -e "s|^User=youruser|User=$USER|" \
+    -e "s|^Group=youruser|Group=$USER|" systemd/coding-model-server.service \
+  | sudo tee /etc/systemd/system/coding-model-server.service
 sudo systemctl daemon-reload
 sudo systemctl enable coding-model-server
 sudo systemctl start coding-model-server
@@ -204,7 +208,6 @@ on day one:
 /review              # Fan the uncommitted git diff out to 4 judges
 /ingest <path>       # Ingest a PDF into RAG memory (local: prefix = client-side file)
 /ingest-code <dir>   # Ingest a codebase with AST-aware chunking
-/cupertino <query>   # Search Apple docs (local MCP, macOS)
 /apple <tool> <args> # Apple Deep Docs MCP (server-side)
 /scrape [framework]  # Run the documentation scraper
 /resume              # Resume interrupted multi-agent tasks
@@ -624,10 +627,11 @@ curl -s http://localhost:5000/v1/admin/gpu_stats -H "X-Admin-Key: $ADMIN_API_KEY
 
 ### 5.3 Updating the llama-server Binary
 
-`tools/llama-server` is a llama.cpp build committed alongside its shared libraries
-(`libggml*.so`, `libllama*.so`, …). Upgrading means dropping in a new build and
-its libs; there is no pip package to update. Keep the previous build (the repo
-has kept them under `.archive/`) — a new binary can change VRAM behavior, and the
+`tools/llama-server` is a llama.cpp build **you supply**, dropped into `tools/`
+alongside its shared libraries (`libggml*.so`, `libllama*.so`, …). The directory
+is gitignored, so your build is not in the repo and survives pulls. Upgrading
+means dropping in a new build and its libs; there is no pip package to update.
+Keep the previous build — a new binary can change VRAM behavior, and the
 June 2026 upgrade shifted footprints by ~2.7 GB, which invalidated every
 `n_cpu_moe` tuning at once. **Re-sweep after upgrading** (§4.7).
 
