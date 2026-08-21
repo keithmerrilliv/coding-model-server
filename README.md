@@ -20,20 +20,21 @@ model its code failed to compile when it did not.
 ## Architecture
 
 ```
-Client (macOS/Linux)                     Server (Linux + GPU)
-┌──────────────────────────┐            ┌───────────────────────────────────────┐
-│ src/coding_model_client/ │  HTTP/SSE  │ coding_model_server.server (FastAPI    │
-│  main.py                 │◄──────────►│   :5000)                              │
-│  orchestrator.py         │  /v1/chat/ │  ├─ routes/ (chat, memory, autonomous,│
-│  completion.py           │  completions│  │    admin, meta)                    │
-│  compaction.py           │            │  ├─ llama_server backend              │
-│  commands.py             │            │  │    (one llama-server subprocess)    │
-│  history.py              │            │  ├─ memory_service (ChromaDB + RAG)    │
-│                          │            │  ├─ web_search_service                 │
-│  imports coding_model_   │            │  ├─ mcp_service (Apple Deep Docs)      │
-│  server.tool_handlers    │            │  └─ orchestrator_daemon (autonomous)   │
-│  and runs tools LOCALLY  │            └───────────────────────────────────────┘
-└──────────────────────────┘
+┌───────────────────────────────────┐                        ┌─────────────────────────────────────┐
+│ Client (macOS/Linux)              │                        │ Server (Linux + GPU)                │
+├───────────────────────────────────┤                        ├─────────────────────────────────────┤
+│ src/coding_model_client/          │                        │ coding_model_server.server          │
+│   main.py                         │                        │   (FastAPI :5000)                   │
+│   orchestrator.py                 │                        │                                     │
+│   completion.py                   │        HTTP/SSE        │ ├─ routes/ (chat, memory,           │
+│   compaction.py                   │◄──────────────────────►│ │    autonomous, admin, meta)       │
+│   commands.py                     │  /v1/chat/completions  │ ├─ llama_server backend             │
+│   history.py                      │                        │ │    (one llama-server subprocess)  │
+│                                   │                        │ ├─ memory_service (ChromaDB + RAG)  │
+│ imports                           │                        │ ├─ web_search_service               │
+│ coding_model_server.tool_handlers │                        │ ├─ mcp_service (Apple Deep Docs)    │
+│ and runs tools LOCALLY            │                        │ └─ orchestrator_daemon (autonomous) │
+└───────────────────────────────────┘                        └─────────────────────────────────────┘
 ```
 
 **Tools run on the client.** `tool_handlers/` ships inside the `coding_model_server`
