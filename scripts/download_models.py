@@ -89,6 +89,15 @@ MODELS = [
         "local_dir": os.path.join(MODELS_ROOT, "deepreinforce-ai", "Ornith-1.0-35B-GGUF"),
         "size": "~21.2 GB",
     },
+    # MTP head embedded (nextn_predict_layers=1) — no separate draft file needed.
+    {
+        "id": 9,
+        "name": "Qwen3.8-27B UD-Q4_K_M (dense + embedded MTP, DEV-614 eval)",
+        "repo": "unsloth/Qwen3.8-27B-GGUF",
+        "files": ["Qwen3.8-27B-UD-Q4_K_M.gguf"],
+        "local_dir": os.path.join(BASE_DIR, "Qwen3.8-27B-GGUF"),
+        "size": "~16.5 GB",
+    },
 ]
 
 

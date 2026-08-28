@@ -166,10 +166,11 @@ for method, prefill figures, and the caveat about raw-vs-proxy numbers).
 `decide()` function call) and never gets marker-based shell tools.
 `brainstorm` has no tools at all.
 
-Two eval-only agents are also registered (so they appear in `/v1/models`) but
+Three eval-only agents are also registered (so they appear in `/v1/models`) but
 are left out of the table above: `devstral_implementer` (Devstral Small 2 24B,
-DEV-414 eval) and `dense_architect_nothink` (`dense_architect` with
-`enable_thinking=False`, the DEV-556 eval arm).
+DEV-414 eval), `dense_architect_nothink` (`dense_architect` with
+`enable_thinking=False`, the DEV-556 eval arm), and `qwen38_architect`
+(Qwen3.8-27B with embedded MTP, the DEV-615 architect-eval candidate).
 
 **Expert offload.** `cpu_moe=True` (`--cpu-moe`) keeps *all* MoE expert weights
 on CPU. `n_cpu_moe=N` (`--n-cpu-moe N`) keeps only the first N layers' experts

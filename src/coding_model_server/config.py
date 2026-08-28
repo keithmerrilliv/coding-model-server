@@ -659,6 +659,29 @@ Update these after each retrieval step. They help you stay organized and efficie
         n_ubatch=2048,
     )
 
+    # QWEN3.8-27B (DEV-614): successor lineage to _DENSE_27B. GGUF arch is
+    # qwen35, which build a94d563 already speaks — no llama-server upgrade
+    # needed. 65 layers, native 256K ctx, and the MTP head is EMBEDDED in the
+    # unsloth UD-Q4_K_M (nextn_predict_layers=1), so the same --spec-type
+    # draft-mtp wiring as _DENSE_27B applies. Sweep 2026-08-27 at 128K Q4_0 KV
+    # (decode / prefill tok/s @ MiB free):
+    #   ngl=36          7.8 / 1,116  @ 4,006     ngl=40   8.7 / 1,172 @ 2,964
+    #   ngl=44         10.1 / 1,255  @ 1,864
+    #   ngl=40 + MTP   14.5 / 1,168  @   692  <- rejected: below the ~1.4 GB
+    #     reload floor; the 3.6 crashed production at 714 free (spec_b956e1c9).
+    #   ngl=36 + MTP   13.3 / 1,092  @ 1,810  <- chosen. MTP ~1.7x, same ratio
+    #     as the 3.6; the embedded head costs ~2.2 GB VRAM at load.
+    # Eval-only — DEV-615 (pairwise vs dense_architect) decides any repoint.
+    _DENSE_27B_38 = _create_model_config(
+        'MODEL_PATH_27B_38',
+        f'{_MODELS_ROOT}/unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q4_K_M.gguf',
+        36, 131072, 2048,
+        server_extra_args=['--jinja', '--reasoning-format', 'none', '--swa-full',
+                           '--spec-type', 'draft-mtp', '--spec-draft-n-max', '2'],
+        type_k=2, type_v=2,
+        n_ubatch=2048,
+    )
+
     # ── Non-Coding Model models ──
 
     # Nemotron-3-Nano-30B-A3B Q4_K_M — NVIDIA hybrid Mamba-Transformer MoE
@@ -912,6 +935,15 @@ Update these after each retrieval step. They help you stay organized and efficie
             _DENSE_27B,
             executor=True,
             chat_template_kwargs={'enable_thinking': False},
+        ),
+        # Third eval arm (DEV-614): the Qwen3.8-27B candidate for the
+        # architect/supervisor slots. Same prompt as dense_architect so the
+        # DEV-615 pairwise eval isolates the model variable.
+        'qwen38_architect': _create_agent_config(
+            'Architect — Qwen3.8-27B UD-Q4_K_M (dense + MTP, 128K Q4_0 ctx, ngl=36, DEV-614 eval; DEV-615 candidate)',
+            _ARCHITECT_SYSTEM_PROMPT,
+            _DENSE_27B_38,
+            executor=True
         ),
         # Supervisor — meta-orchestrator. Always invoked with native tools
         # (decide()), never with marker-based shell tools, so executor=False.
