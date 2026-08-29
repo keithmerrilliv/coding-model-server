@@ -672,12 +672,23 @@ Update these after each retrieval step. They help you stay organized and efficie
     #   ngl=36 + MTP   13.3 / 1,092  @ 1,810  <- chosen. MTP ~1.7x, same ratio
     #     as the 3.6; the embedded head costs ~2.2 GB VRAM at load.
     # Eval-only — DEV-615 (pairwise vs dense_architect) decides any repoint.
+    #
+    # --reasoning-budget 4096 (DEV-616): without it the 3.8 can ruminate
+    # UNBOUNDEDLY — on design_offline_sync it never closed its think block
+    # (10K tokens, finish_reason=length, zero visible content; the DEV-615
+    # eval hit the same class at 4,677 via EOS-inside-think). The budget
+    # forces the close and content always follows. enable_thinking=False was
+    # rejected: it produces degenerate short answers (313 tok of tool markers),
+    # matching the DEV-556 nothink findings. Post-close the model sometimes
+    # opens with (malformed) tool calls instead of prose — a 3.8 behavior
+    # under the architect prompt, documented on DEV-616, not masked here.
     _DENSE_27B_38 = _create_model_config(
         'MODEL_PATH_27B_38',
         f'{_MODELS_ROOT}/unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q4_K_M.gguf',
         36, 131072, 2048,
         server_extra_args=['--jinja', '--reasoning-format', 'none', '--swa-full',
-                           '--spec-type', 'draft-mtp', '--spec-draft-n-max', '2'],
+                           '--spec-type', 'draft-mtp', '--spec-draft-n-max', '2',
+                           '--reasoning-budget', '4096'],
         type_k=2, type_v=2,
         n_ubatch=2048,
     )
