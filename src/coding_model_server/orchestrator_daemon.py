@@ -592,6 +592,43 @@ def _drop_undeliverable_manifest_entries(spec: Spec, entries: list) -> list:
     return kept
 
 
+def _drop_undeclared_manifest_entries(spec: Spec, entries: list) -> list:
+    """Remove manifest entries the approved plan never declared (DEV-604).
+
+    The plan's implement.outputs are operator-approved; a manifest that adds
+    paths beyond them is inventing scope. Run 18's manifest added
+    DtypeValidation.swift — a file the design designates read-only — at a bare
+    path that could never compile, and spent a generation call producing junk
+    that would have ridden into the delivered branch (DEV-499's signature).
+
+    Two deliberate outs: a plan that declares no implement outputs gives
+    nothing to constrain against, and a manifest with NO declared match at all
+    is more likely path drift (DEV-601) than pure invention — emptying it
+    would turn one path-shape mismatch into a no-file build, so both cases
+    keep every entry.
+    """
+    declared = set(_planned_implement_outputs(spec))
+    if not declared:
+        return entries
+    kept, dropped = [], []
+    for e in entries:
+        (kept if e.path.strip() in declared else dropped).append(e)
+    if not kept:
+        logger.warning(
+            "spec %s: no manifest entry matches any of the plan's %d "
+            "implement output(s) — path drift (DEV-601)? keeping all %d "
+            "entries rather than emptying the manifest",
+            spec.id, len(declared), len(entries))
+        return entries
+    if dropped:
+        logger.warning(
+            "spec %s: dropped %d manifest entr%s the plan never declared "
+            "(implement.outputs constrain the manifest, DEV-604): %s",
+            spec.id, len(dropped), "y" if len(dropped) == 1 else "ies",
+            ", ".join(e.path for e in dropped))
+    return kept
+
+
 def _fetch_protected_files_for_spec(spec: Spec) -> list[tuple[str, str]]:
     """Read-only contents of the spec's `protected_paths` (DEV-492 / DEV-427).
 
@@ -2297,11 +2334,22 @@ def _build_from_manifest(
     # instead of N, which matters on a link that drops every ~66s (DEV-518).
     # The manifest's own paths are candidates too (DEV-571): a manifest path
     # that already exists in the repo is a modification even when the spec's
-    # change-surface table forgot it.
+    # change-surface table forgot it. Entries are ManifestEntry dataclasses —
+    # the old isinstance(e, dict) filter silently emptied this list, which is
+    # how manifest mode ran blind and regenerated existing files from priors
+    # (DEV-604, runs 18 and 19).
     existing_by_path = dict(_fetch_existing_files_for_spec(
         spec, spec_md,
-        extra_paths=[e.get("path") for e in entries
-                     if isinstance(e, dict) and e.get("path")]))
+        extra_paths=[e.path for e in entries if getattr(e, "path", None)]))
+    if existing_by_path:
+        editable = [e.path for e in entries if e.path in existing_by_path]
+        if editable:
+            logger.info(
+                "spec %s: manifest: %d of %d entries already exist and will "
+                "be %s: %s", spec.id, len(editable), len(entries),
+                "edited via SEARCH/REPLACE blocks (DEV-581)"
+                if executor.DIFF_BASED_EDITS else "regenerated whole",
+                ", ".join(editable))
     # Fetched once for the whole manifest, same as the editable files: each
     # per-file call is isolated and would otherwise be blind to what the
     # protected scaffold already declares (Centipede run 8).
@@ -2389,6 +2437,10 @@ def _generate_via_manifest(
             # asserting. Repair before computing the cited set so the citation
             # matches the corrected path.
             _repair_manifest_dirs(db, spec, task, entries, design_md)
+            # A prior manifest persisted before the DEV-604 constraint can
+            # still carry undeclared junk; filter it here too so a targeted
+            # retry does not keep regenerating an invented file.
+            entries = _drop_undeclared_manifest_entries(spec, entries)
             cited = _parse_cited_paths(rejection_notes, {e.path for e in entries})
             widened = False
 
@@ -2479,6 +2531,9 @@ def _generate_via_manifest(
                 len(manifest.entries), ", ".join(e.path for e in manifest.entries))
 
     _repair_manifest_dirs(db, spec, task, manifest.entries, design_md)
+    # After repair, so a typo'd directory on a DECLARED path is fixed rather
+    # than dropped as undeclared.
+    manifest.entries = _drop_undeclared_manifest_entries(spec, manifest.entries)
 
     result = _build_from_manifest(
         db, spec, task, spec_md, design_md, manifest.entries, chosen_agent,
@@ -2670,9 +2725,48 @@ def _generate_one_file(
     approval_conditions: "str | None" = None,
 ) -> "str | None":
     """Generate a single file's content, with bounded parse-retries. Returns the
-    content (associated with the manifest's canonical path) or None on failure."""
+    content (associated with the manifest's canonical path) or None on failure.
+
+    When the target already exists and diff-based edits are on (DEV-581), the
+    model is asked for SEARCH/REPLACE edit blocks and the content returned is
+    the current file with those edits applied (DEV-604) — an anchor that does
+    not apply never overwrites, it retries with the diagnostics threaded into
+    the next attempt's prompt."""
     written_summary = summarize_written_files(written)
     existing_content = (existing_by_path or {}).get(entry.path)
+    edit_mode = executor.DIFF_BASED_EDITS and existing_content is not None
+    oversized = (existing_content is not None
+                 and executor.MANIFEST_WHOLE_FILE_MAX_CHARS
+                 and len(existing_content) > executor.MANIFEST_WHOLE_FILE_MAX_CHARS)
+    if oversized and not edit_mode:
+        # Whole-file re-emission at this size ships fragments — run 18 gutted a
+        # 117-line class to 33 lines, run 19 emitted 43 lines of a 5,804-line
+        # file (DEV-604). A loud refusal costs a manifest entry; a silent
+        # fragment costs the file.
+        logger.error(
+            "spec %s: per-file:%s refused — file already exists with %d chars "
+            "and diff-based edits are off, so regeneration would re-emit it "
+            "whole and lose content (DEV-604); enable "
+            "AUTONOMOUS_DIFF_BASED_EDITS or raise "
+            "AUTONOMOUS_MANIFEST_WHOLE_FILE_MAX_CHARS",
+            spec.id, entry.path, len(existing_content))
+        db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
+                        payload={"role": "implementer", "model_call": False,
+                                 "anomaly": "oversized_whole_file_refused",
+                                 "path": entry.path,
+                                 "existing_chars": len(existing_content)})
+        return None
+    target_base = os.path.basename(entry.path)
+
+    def _target_content(files):
+        """The block matching the manifest path (full path or basename)."""
+        for p, c in files:
+            pp = p.strip().lstrip("/")
+            if pp == entry.path or os.path.basename(pp) == target_base:
+                return c
+        return None
+
+    edit_errors = None
     for attempt in range(executor.PER_FILE_PARSE_RETRIES + 1):
         meta: dict = {}
         raw = call_agent(
@@ -2681,7 +2775,8 @@ def _generate_one_file(
                                    written_summary, clarifications, rejection_notes,
                                    existing_content=existing_content,
                                    reference_files=reference_files,
-                                   approval_conditions=approval_conditions),
+                                   approval_conditions=approval_conditions,
+                                   edit_mode=edit_mode, edit_errors=edit_errors),
             agent=chosen_agent, max_tokens=executor.PER_FILE_MAX_TOKENS, meta=meta,
             memory_query=executor.file_memory_query(entry),
         )
@@ -2703,15 +2798,41 @@ def _generate_one_file(
                            spec.id, entry.path, meta.get("agent"))
             return None
         parsed = parse_implementer_response(raw)
+        if edit_mode:
+            whole = parsed.files if isinstance(parsed, ImplementerResult) else []
+            if oversized and _target_content(whole) is not None:
+                # The model ignored rule 5 and re-emitted the file whole. At a
+                # size no output budget can carry, passing that through is the
+                # fragment factory this mode exists to close.
+                edit_errors = (
+                    f"- you re-emitted `{entry.path}` as a whole <<<FILE:>>> "
+                    "block; at its size that loses content. Emit SEARCH/REPLACE "
+                    "edit blocks against the shown content instead.")
+                logger.warning(
+                    "spec %s: per-file:%s re-emitted whole in edit mode "
+                    "(attempt %d) — rejected, retrying with feedback",
+                    spec.id, entry.path, attempt + 1)
+                continue
+            resolved = apply_edits.resolve_edits(
+                whole, raw, {entry.path: existing_content})
+            if resolved.errors:
+                edit_errors = "\n".join(f"- {err}" for err in resolved.errors)
+                logger.warning(
+                    "spec %s: per-file:%s edit blocks failed to apply "
+                    "(attempt %d): %s", spec.id, entry.path, attempt + 1,
+                    "; ".join(resolved.errors))
+                continue
+            content = _target_content(resolved.files)
+            if content is not None:
+                return content
+            continue
         if isinstance(parsed, ParseError) or not parsed.files:
             continue
         # Enforce the manifest path: take the block whose path matches (by full
         # path or basename), else the first block the model emitted.
-        target_base = os.path.basename(entry.path)
-        for p, c in parsed.files:
-            pp = p.strip().lstrip("/")
-            if pp == entry.path or os.path.basename(pp) == target_base:
-                return c
+        content = _target_content(parsed.files)
+        if content is not None:
+            return content
         return parsed.files[0][1]
     return None
 

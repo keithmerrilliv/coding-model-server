@@ -144,6 +144,15 @@ MANIFEST_MAX_TOKENS = int(os.getenv("AUTONOMOUS_MANIFEST_MAX_TOKENS", "8000"))
 PER_FILE_MAX_TOKENS = int(os.getenv("AUTONOMOUS_PER_FILE_MAX_TOKENS", "16000"))
 PER_FILE_PARSE_RETRIES = int(os.getenv("AUTONOMOUS_PER_FILE_PARSE_RETRIES", "2"))
 
+# DEV-604: a large existing file cannot be faithfully re-emitted whole inside
+# PER_FILE_MAX_TOKENS — runs 18 and 19 shipped fragments (33 of 117 lines;
+# 43 of 5,804) exactly this way. When a manifest entry already exists, edit
+# mode is unavailable, and its current content exceeds this many chars, the
+# entry is refused loudly instead of generated blind. 40000 chars ≈ 10k
+# tokens, comfortably inside the 16k-token per-file output budget. 0 disables.
+MANIFEST_WHOLE_FILE_MAX_CHARS = int(
+    os.getenv("AUTONOMOUS_MANIFEST_WHOLE_FILE_MAX_CHARS", "40000"))
+
 # Architect parse-retry: how many times to re-call the architect when its
 # response can't be parsed for the <<<DESIGN>>> / <<<COMPLEXITY>>> blocks.
 # Total attempts = ARCHITECT_PARSE_RETRIES + 1. Default 2 retries
@@ -549,6 +558,46 @@ IMPLEMENTER_EDIT_MODE_INSTRUCTIONS = textwrap.dedent("""\
     modify" — are unchanged: emit each as a complete
     <<<FILE: path>>> ... <<<END_FILE>>> whole-file block, exactly as the Output
     format section describes.
+    """)
+
+# DEV-604: the per-file (manifest-mode) variant of the edit-mode instructions
+# above. Kept separate because the per-file prompt shows exactly one file under
+# a different heading than the single-call prompt, and the instructions must
+# name the heading the model actually sees. Appended to PER_FILE_SYSTEM_PROMPT
+# only when diff-based edits are on AND the target file already exists, so the
+# flag-off prompt stays byte-identical.
+PER_FILE_EDIT_MODE_INSTRUCTIONS = textwrap.dedent("""\
+
+    # Editing an existing file — READ THIS (overrides the whole-file output format)
+
+    The file you are producing ALREADY EXISTS. Its current content is shown in
+    the message under "## Current content of <path> — this file ALREADY
+    EXISTS". Do NOT re-emit the whole file. Emit one or more anchored
+    SEARCH/REPLACE edit blocks that change ONLY the lines that must change:
+
+        ### path/to/File.ext
+        <<<<<<< SEARCH
+        <exact contiguous lines copied from the current file content shown to you>
+        =======
+        <the replacement lines>
+        >>>>>>> REPLACE
+
+    Edit-block rules:
+    1. Start with a `### path` line carrying the target file's exact path, then
+       one or more SEARCH/REPLACE blocks. Use as many blocks as you need.
+    2. The SEARCH text must be copied BYTE-FOR-BYTE from the shown content:
+       same indentation, same spaces-vs-tabs, same blank lines. It must appear
+       in the current file EXACTLY ONCE — if it is not unique, include more
+       surrounding lines until it is.
+    3. The REPLACE text is what the searched lines become. An EMPTY replace
+       (nothing between `=======` and `>>>>>>> REPLACE`) deletes the searched
+       lines. Do NOT wrap either side in markdown ``` fences.
+    4. Change ONLY what the design requires. Every line you do not put in a
+       SEARCH block is left exactly as it is — that is the entire point of
+       editing instead of re-emitting.
+    5. Do NOT emit a <<<FILE: ...>>> whole-file block for this file. If an edit
+       block's SEARCH cannot be found or is not unique, the attempt is rejected
+       and returned to you — so copy the anchor exactly.
     """)
 
 REVIEWER_SYSTEM_PROMPT = textwrap.dedent("""\
@@ -1983,7 +2032,13 @@ def build_per_file_message(
     existing_content: str | None = None,
     reference_files: list[tuple[str, str]] | None = None,
     approval_conditions: str | None = None,
+    edit_mode: bool = False,
+    edit_errors: str | None = None,
 ) -> list[dict[str, str]]:
+    # DEV-604: edit mode only means anything when the target already exists.
+    # With no existing content the file is new, whole-file emission is correct,
+    # and the message is byte-identical to the pre-DEV-604 prompt either way.
+    edit_mode = bool(edit_mode and existing_content is not None)
     manifest_block = "\n".join(
         f"- {e.path} — {e.purpose}" + (f"  [exports: {e.exports}]" if e.exports else "")
         for e in manifest
@@ -2022,12 +2077,25 @@ def build_per_file_message(
     # needs only the target's own current content — which is exactly the file at
     # risk of being reconstructed (DEV-492).
     if existing_content is not None:
+        if edit_mode:
+            preamble = (
+                "You are EDITING this file, not writing it from scratch. What "
+                "follows is its actual content in the repository. Do NOT "
+                "re-emit the file — emit anchored SEARCH/REPLACE edit blocks "
+                "against this exact text (see the edit-block rules in your "
+                "instructions), changing only what the design requires.\n\n"
+            )
+        else:
+            preamble = (
+                "You are EDITING this file, not writing it from scratch. What "
+                "follows is its actual content in the repository. Reproduce "
+                "every declaration exactly except for the specific changes "
+                "asked of you above; anything you omit is deleted from the "
+                "repository.\n\n"
+            )
         parts.extend([
             f"\n## Current content of {target.path} — this file ALREADY EXISTS\n\n",
-            "You are EDITING this file, not writing it from scratch. What "
-            "follows is its actual content in the repository. Reproduce every "
-            "declaration exactly except for the specific changes asked of you "
-            "above; anything you omit is deleted from the repository.\n\n",
+            preamble,
             f"````\n{existing_content}\n````\n",
         ])
     if rejection_notes:
@@ -2035,11 +2103,27 @@ def build_per_file_message(
             "\n## Reviewer feedback to address in this file\n\n",
             rejection_notes, "\n",
         ])
-    parts.append(
-        f"\nOutput exactly one <<<FILE: {target.path}>>> … <<<END_FILE>>> block."
-    )
+    if edit_mode and edit_errors:
+        parts.extend([
+            "\n## Your previous edit blocks failed to apply\n\n",
+            edit_errors,
+            "\n\nRe-emit ALL edit blocks for this file, copying each SEARCH "
+            "anchor byte-for-byte from the current content shown above.\n",
+        ])
+    if edit_mode:
+        parts.append(
+            f"\nOutput one or more SEARCH/REPLACE edit blocks for "
+            f"{target.path}, introduced by a `### {target.path}` line. Do NOT "
+            f"emit a <<<FILE: ...>>> whole-file block."
+        )
+        system_prompt = PER_FILE_SYSTEM_PROMPT + PER_FILE_EDIT_MODE_INSTRUCTIONS
+    else:
+        parts.append(
+            f"\nOutput exactly one <<<FILE: {target.path}>>> … <<<END_FILE>>> block."
+        )
+        system_prompt = PER_FILE_SYSTEM_PROMPT
     return [
-        {"role": "system", "content": PER_FILE_SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": "".join(parts)},
     ]
 
