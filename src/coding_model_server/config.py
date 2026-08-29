@@ -677,11 +677,16 @@ Update these after each retrieval step. They help you stay organized and efficie
     # UNBOUNDEDLY — on design_offline_sync it never closed its think block
     # (10K tokens, finish_reason=length, zero visible content; the DEV-615
     # eval hit the same class at 4,677 via EOS-inside-think). The budget
-    # forces the close and content always follows. enable_thinking=False was
-    # rejected: it produces degenerate short answers (313 tok of tool markers),
-    # matching the DEV-556 nothink findings. Post-close the model sometimes
-    # opens with (malformed) tool calls instead of prose — a 3.8 behavior
-    # under the architect prompt, documented on DEV-616, not masked here.
+    # guarantees the close and VISIBLE output — but on tasks whose thinking
+    # would exceed the cap, the model then pivots to tool-call stubs
+    # (~50-140 chars) instead of writing the document. Both steering-message
+    # variants failed to stop the pivot, including an injected explicit
+    # "I will not use tools" self-commitment the model contradicted two
+    # tokens later. enable_thinking=False also rejected (degenerate 313-tok
+    # answers, matching DEV-556's nothink findings). Net (full record on
+    # DEV-616): the 3.8 is UNFIT for the architect slot as served — the
+    # budget stays so failures are at least visible, and this agent stays
+    # eval-only. DEV-615 verdict (no repoint) stands.
     _DENSE_27B_38 = _create_model_config(
         'MODEL_PATH_27B_38',
         f'{_MODELS_ROOT}/unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q4_K_M.gguf',
