@@ -19,11 +19,22 @@ GOOD_YAML = (
 
 # The EXACT failure from the live smoke run: an unquoted value containing a
 # `: ` (colon-space), which YAML parses as a nested mapping → "mapping values
-# are not allowed here". This is what killed spec_8df49fb3.
+# are not allowed here". This is what killed spec_8df49fb3 — and what the
+# DEV-619 salvage pass now repairs instead of rejecting.
 BAD_YAML = (
     "<<<YAML>>>\n"
     "title: Roman Numeral Converter\n"
     "notes: Out-of-scope: CLI wrapper, packaging, type stubs\n"
+    "<<<END>>>\n"
+)
+
+# Structurally broken YAML the salvage pass cannot quote-fix (the error line
+# is not a `key: value` scalar) — exercises the parse-retry machinery, which
+# BAD_YAML no longer reaches now that DEV-619 salvages it.
+UNSALVAGEABLE_YAML = (
+    "<<<YAML>>>\n"
+    'title: "x\n'
+    "  : : {{{{\n"
     "<<<END>>>\n"
 )
 
@@ -63,22 +74,23 @@ def _seq_completion(monkeypatch, contents, capture=None):
     return state
 
 
-def test_parse_rejects_unquoted_colon_value():
-    """Regression: the smoke-test YAML must be detected as unparseable."""
+def test_parse_salvages_unquoted_colon_value():
+    """The smoke-test YAML is now SALVAGED, not rejected (DEV-619): the
+    offending scalar gets quoted and the plan proceeds."""
     result = planner.parse_planner_response(BAD_YAML)
-    assert isinstance(result, planner.PlannerError)
-    assert "not valid YAML" in result.reason
+    assert isinstance(result, planner.PlannerYaml)
+    assert '"Out-of-scope: CLI wrapper, packaging, type stubs"' in result.yaml_text
 
 
 def test_call_planner_retries_bad_yaml_then_succeeds(monkeypatch):
-    state = _seq_completion(monkeypatch, [BAD_YAML, GOOD_YAML])
+    state = _seq_completion(monkeypatch, [UNSALVAGEABLE_YAML, GOOD_YAML])
     result = planner.call_planner("# Spec", parse_retries=1)
     assert isinstance(result, planner.PlannerYaml)
     assert state["n"] == 2  # bad → re-roll → good
 
 
 def test_call_planner_error_after_exhausting_retries(monkeypatch):
-    state = _seq_completion(monkeypatch, [BAD_YAML])  # always bad
+    state = _seq_completion(monkeypatch, [UNSALVAGEABLE_YAML])  # always bad
     result = planner.call_planner("# Spec", parse_retries=2)
     assert isinstance(result, planner.PlannerError)
     assert "not valid YAML" in result.reason
@@ -109,7 +121,7 @@ def test_call_planner_passes_retry_5xx(monkeypatch):
 def test_call_planner_uses_module_default_retries(monkeypatch):
     """parse_retries=None falls back to PLANNER_PARSE_RETRIES."""
     monkeypatch.setattr(planner, "PLANNER_PARSE_RETRIES", 1)
-    state = _seq_completion(monkeypatch, [BAD_YAML])
+    state = _seq_completion(monkeypatch, [UNSALVAGEABLE_YAML])
     result = planner.call_planner("# Spec")  # no parse_retries → default 1
     assert isinstance(result, planner.PlannerError)
     assert state["n"] == 2  # 1 initial + 1 default retry
