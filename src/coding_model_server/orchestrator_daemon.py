@@ -697,9 +697,14 @@ def _fetch_existing_files_for_spec(
     implementer reinvented ForcingStrategy.swift five times because the spec
     had no table. Any candidate that reads successfully at base_ref already
     exists in the repo and is therefore a modification, whatever the spec
-    declared. Returns [] for the true greenfield case, for local frameworks
-    whose repo is not on the Mac, and whenever the read path is unavailable.
-    Never raises: a spec must not fail because a git read failed.
+    declared. Returns [] for the true greenfield case and for local frameworks
+    whose repo is not on the Mac.
+
+    Raises RunnerOutageAtImplement when the fetch fails TRANSPORT-level with
+    candidates pending (DEV-620) — before that, "never raises" meant a dead
+    runner silently degraded a modification spec to greenfield regeneration,
+    which is how run 19's retry started rewriting an 8.5K-line surface from
+    priors. Every other failure still degrades soft.
     """
     declared = _declared_file_modifications(spec_md)
     # DEV-621: descriptive tables (no "modify" keyword) still name their
@@ -726,13 +731,17 @@ def _fetch_existing_files_for_spec(
                        "implementer will not see the files it must modify",
                        spec.id, e)
         return []
+    if not files and test_runner.problems_indicate_runner_outage(
+            problems, candidates):
+        # DEV-620: the runner did not answer at all. Nothing has been spent
+        # yet, so park rather than letting the implementer work blind.
+        raise RunnerOutageAtImplement(problems[0])
     for problem in problems:
-        # A manifest path missing from the repo is just a file being created;
-        # a DECLARED path missing is the spec naming something that is not
-        # there — only the latter is worth a warning.
-        if any(p in problem for p in declared):
-            logger.warning("spec %s: existing-file read problem — %s",
-                           spec.id, problem)
+        # DEV-620: log every problem — the old declared-paths filter is what
+        # made run 19's fully-failed fetch silent. A creation's "not found"
+        # costs one benign line; a swallowed outage costs a blind rewrite.
+        logger.warning("spec %s: existing-file read problem — %s",
+                       spec.id, problem)
     if files:
         logger.info("spec %s: supplied %d existing file(s) to the implementer: %s",
                     spec.id, len(files), ", ".join(p for p, _ in files))
@@ -940,6 +949,13 @@ _shutdown_flag = _ShutdownFlag()
 class ShutdownRequested(RuntimeError):
     """Raised between per-file manifest calls when SIGTERM arrived; the
     task is reset to PENDING so the next daemon start re-runs it."""
+
+
+class RunnerOutageAtImplement(RuntimeError):
+    """The existing-file fetch failed transport-level while modification
+    candidates were pending (DEV-620). Raised BEFORE any model call, so the
+    catcher can park the task at zero cost instead of letting the implementer
+    regenerate an existing surface from priors — run 19's blind retry."""
 
 
 class SpecScheduler:
@@ -1927,6 +1943,15 @@ def _generate_implementation(
     # one existing file to edit. With the flag off this is byte-identical to the
     # legacy whole-file path (build_implementer_message + parse_implementer_response).
     edit_mode = executor.DIFF_BASED_EDITS and bool(existing_files)
+    if executor.DIFF_BASED_EDITS and not existing_files and (
+            _declared_file_modifications(spec_md)
+            or _change_surface_path_rows(spec_md)):
+        # DEV-620: the silent version of this was run 19's only trace — a log
+        # line missing its "[diff-based edits]" suffix.
+        logger.warning(
+            "spec %s: diff-based edits configured and the spec names existing "
+            "files, but none were supplied — edit mode DISARMED, implementer "
+            "will re-emit whole files", spec.id)
     messages = build_implementer_message(
         spec_md, design_md, rejection_notes=rejection_notes,
         clarifications=clarifications, existing_files=existing_files,
@@ -2915,6 +2940,39 @@ def _requeue_for_unreachable_runner(db: Database, spec: Spec, task) -> bool:
     return True
 
 
+def _requeue_implement_for_runner_outage(
+    db: Database, spec: Spec, task, detail: str,
+) -> None:
+    """Park an implement task whose existing-file fetch hit a dead runner
+    (DEV-620), mirroring the DEV-538 build-check requeue — but PATIENT: a
+    build-check requeue caps at _MAX_UNREACHABLE_REQUEUES because it ages an
+    already-generated attempt, while here nothing has been spent and this
+    outage class lasts hours (a powered-off Mac), so there is no cap. The
+    stale-phase watchdog keeps a parked spec visible; the event stream gets
+    the first park and every 20th thereafter to stay legible without spam.
+    """
+    prior = sum(
+        1 for e in db.list_events_by_kind(
+            spec_id=spec.id, kind=EventKind.TEST_RAN, limit=200)
+        if (e.payload or {}).get("phase") == "implement_existing_fetch"
+        and (e.payload or {}).get("runner_unreachable")
+    )
+    if prior == 0 or (prior + 1) % 20 == 0:
+        db.record_event(EventKind.TEST_RAN, spec_id=spec.id, task_id=task.id,
+                        payload={"phase": "implement_existing_fetch",
+                                 "passed": False,
+                                 "runner_unreachable": True,
+                                 "requeue": prior + 1,
+                                 "detail": detail[:300],
+                                 "retry": task.retry_count})
+    db.update_task_status(task.id, TaskStatus.PENDING)
+    logger.warning(
+        "spec %s: runner unreachable at implement time (%s) — task parked "
+        "for requeue %d without a model call; retry stays %d/%d and the next "
+        "tick re-probes", spec.id, detail, prior + 1,
+        task.retry_count, MAX_RETRIES)
+
+
 def _drop_protected_type_collisions(db: Database, spec: Spec, task, files,
                                     role: str, protected_files):
     """Discard generated files that redeclare a type a protected file owns.
@@ -3079,10 +3137,16 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
     # the tally sums them so this event answers "what did this attempt cost"
     # with a single number per axis (DEV-528).
     tally: dict = {}
-    result = _generate_implementation(
-        db, spec, task, spec_dir, spec_md, design_md,
-        chosen_agent, clarifications, rejection_notes, tally=tally,
-    )
+    try:
+        result = _generate_implementation(
+            db, spec, task, spec_dir, spec_md, design_md,
+            chosen_agent, clarifications, rejection_notes, tally=tally,
+        )
+    except RunnerOutageAtImplement as e:
+        # DEV-620: fetch failed transport-level before any model call —
+        # park at zero cost instead of implementing blind.
+        _requeue_implement_for_runner_outage(db, spec, task, str(e))
+        return
 
     db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
                     payload={"role": "implementer",

@@ -4,6 +4,7 @@ Used by both the server endpoints and the orchestrator daemon. Keep these
 in lockstep with schema.sql — every column has a field, and the enum values
 match the strings stored in TEXT columns.
 """
+import json
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
@@ -152,6 +153,23 @@ class Event(_Base):
     kind: EventKind
     payload_json: Optional[str] = None
     created_at: datetime = Field(default_factory=utc_now)
+
+    @property
+    def payload(self) -> Optional[dict]:
+        """payload_json parsed to a dict; None when absent or unparseable.
+
+        The read-side twin of record_event(payload=...). The daemon's requeue
+        counters had read `e.payload` since DEV-538 with no accessor behind
+        it — the second unreachable-runner requeue on one spec would have
+        died on AttributeError mid-tick (DEV-622).
+        """
+        if not self.payload_json:
+            return None
+        try:
+            data = json.loads(self.payload_json)
+        except ValueError:
+            return None
+        return data if isinstance(data, dict) else None
 
 
 # ── Request/response DTOs (used by the public HTTP API) ──────────────────────
