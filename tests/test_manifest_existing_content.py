@@ -25,7 +25,6 @@ import coding_model_server.orchestrator_daemon as d
 from coding_model_autonomous import executor
 from coding_model_autonomous.db import Database
 from coding_model_autonomous.executor import (
-    ImplementerResult,
     ManifestEntry,
     build_per_file_message,
 )

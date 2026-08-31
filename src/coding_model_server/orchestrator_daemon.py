@@ -520,6 +520,28 @@ def _declared_file_modifications(spec_md: str) -> list[str]:
     ]
 
 
+# DEV-621: run 19's hand-written table used a descriptive second column
+# ("What changes here"), so every row failed the keyword match above and the
+# existing-file fetch lost the table entirely. Backticked-path rows are a
+# WEAKER tier of declaration: they become fetch candidates (existence at
+# base_ref is the real test — a candidate that reads is a modification, one
+# that doesn't is a creation), but they never carry the DEV-492 hard-stop,
+# which stays keyword-only so greenfield tables keep planning.
+_TABLE_PATH_ROW = re.compile(r"^\|\s*`([^`|]+?)`\s*\|", re.MULTILINE)
+
+
+def _change_surface_path_rows(spec_md: str) -> list[str]:
+    """Backticked first-column paths of any table row (DEV-621)."""
+    if not spec_md:
+        return []
+    seen: dict[str, None] = {}
+    for m in _TABLE_PATH_ROW.finditer(spec_md):
+        p = m.group(1).strip()
+        if p and p.lower() != "path" and ("/" in p or "." in p):
+            seen.setdefault(p)
+    return list(seen)
+
+
 def _unreadable_declared_modifications(
     spec: Spec, yaml_text: str, spec_md: str
 ) -> list[str]:
@@ -680,7 +702,11 @@ def _fetch_existing_files_for_spec(
     Never raises: a spec must not fail because a git read failed.
     """
     declared = _declared_file_modifications(spec_md)
-    candidates = list(dict.fromkeys([*declared, *extra_paths]))
+    # DEV-621: descriptive tables (no "modify" keyword) still name their
+    # files in backticked path rows — those are candidates too. Existence at
+    # base_ref sorts modifications from creations, not the keyword.
+    path_rows = _change_surface_path_rows(spec_md)
+    candidates = list(dict.fromkeys([*declared, *path_rows, *extra_paths]))
     if not candidates:
         return []
     strategy = _load_plan(spec).get("test_strategy")
