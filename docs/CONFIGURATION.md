@@ -18,6 +18,7 @@ whatever `.env.example` happens to ship.
 | `CODING_MODEL_ENV_FILE` | *(unset)* | Override the .env path loaded by `bin/start.sh` / `bin/start-client.sh`. |
 | `CODING_MODEL_ALLOW_UNSANDBOXED_TESTS` | *(unset)* | Set to `1` to run LLM-generated tests without the bubblewrap+seccomp sandbox. Not recommended — tests then execute with the orchestrator's own privileges. Install `bubblewrap` (`apt install bubblewrap`) instead. |
 | `CODING_MODEL_CHAT_MAX_INFLIGHT` | `5` | Concurrent in-flight chat requests allowed against the single llama-server child. |
+| `CODING_MODEL_ALLOW_EMPTY_COMPLETIONS` | *(unset)* | Set to `1` to restore the pre-DEV-617 behavior: a completion that spent tokens but has no visible content (reasoning-only response) returns an empty 200 instead of a distinguishable 502. |
 | `CODING_MODEL_INTERNAL_HOST` | `127.0.0.1` | Host the orchestrator's internal calls bind to. Loopback by design. |
 | `LLAMA_SERVER_REQUEST_TIMEOUT` | `2700` | Max seconds for a single llama-server inference call. Must be ≥ the longest `AUTONOMOUS_*_TIMEOUT` so the inner request doesn't fail before the outer role budget. |
 | `ALLOW_REMOTE_EXEC_YOLO` | *(unset)* | Defense-in-depth: even in `PERMISSION_MODE=yolo`, `<<<REMOTE_EXEC>>>` shell commands still prompt unless this is set to `1`. Two opt-ins must compromise (yolo flag + this env) before LLM-emitted shell runs silently. |

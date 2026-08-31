@@ -99,6 +99,36 @@ from coding_model_server.streaming import (
 
 logger = logging.getLogger(__name__)
 
+# DEV-617 escape hatch: return reasoning-only completions as empty 200s the
+# way the server always used to, instead of the 502 below.
+ALLOW_EMPTY_COMPLETIONS = os.getenv("CODING_MODEL_ALLOW_EMPTY_COMPLETIONS") == "1"
+
+
+def _reject_reasoning_only_completion(text, tool_calls, usage, raw_text, rid):
+    """502 for a completion that spent tokens but shows nothing (DEV-617).
+
+    A reasoning model can burn thousands of tokens inside an unclosed think
+    block (EOS or length mid-thought) — post-strip that is an empty 200, the
+    same silent-success shape as the DEV-543 production incident, and the
+    caller records an empty artifact as if it were an answer. Native
+    tool-call responses are legitimately content-empty (the supervisor's
+    decide()) and pass through untouched.
+    """
+    if ALLOW_EMPTY_COMPLETIONS or (text or "").strip() or tool_calls:
+        return
+    spent = int((usage or {}).get("completion_tokens") or 0)
+    if spent <= 0:
+        return
+    logger.error(
+        "[%s] model spent %d completion tokens with no visible content "
+        "(reasoning-only response, DEV-617); raw tail: %r",
+        rid, spent, (raw_text or "")[-200:])
+    raise HTTPException(
+        status_code=502,
+        detail=(f"model produced no visible content after {spent} completion "
+                f"tokens (reasoning-only response; request_id={rid})"),
+    )
+
 
 # ============================================================================
 # Llama-Server Subprocess Manager
@@ -1722,6 +1752,8 @@ class LlamaServerManager:
                 text = strip_thinking(text)
             tool_calls = message.get("tool_calls")
             usage = result.get("usage", {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
+            _reject_reasoning_only_completion(
+                text, tool_calls, usage, message.get("content") or "", rid)
 
             with self.lock:
                 self.last_request_time = time.time()
