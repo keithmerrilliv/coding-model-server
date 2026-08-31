@@ -67,6 +67,11 @@ PLANNER_SYSTEM_PROMPT = textwrap.dedent("""\
     Respond with EXACTLY ONE of these two formats. No preamble. No commentary.
     No text outside the markers. The downstream parser is strict.
 
+    YAML quoting rule: any free text you copy into a YAML value — function
+    signatures, error messages, path:line references, URLs — must be inside
+    double quotes or a | block literal. A bare colon inside an unquoted
+    value is invalid YAML and the whole plan is rejected.
+
     Format A — when critical information is missing:
 
     <<<CLARIFY>>>
@@ -282,6 +287,45 @@ def _strip_thinking(text: str) -> str:
     return _server_strip_thinking(text).strip()
 
 
+# A plain `key: value` (or `- key: value`) line whose value is an unquoted
+# flow scalar — the only shape the salvage pass will requote. Block literals,
+# quoted strings, anchors, and flow collections are deliberately excluded:
+# quoting those would change semantics, and they are not the failure mode.
+_QUOTABLE_VALUE_RE = re.compile(
+    r"^(\s*(?:- )?[\w][\w .\-]*:)\s+(?![|>\"'&*\[{])(.*\S)\s*$")
+
+
+def _salvage_yaml(yaml_text: str) -> "str | None":
+    """Requote the scalar the parser choked on, mark-guided (DEV-619).
+
+    Surgical by design: each pass quotes only the line PyYAML's problem_mark
+    names, then re-parses — never a blanket rewrite, so lines that already
+    parse keep their exact semantics. Up to 10 passes; None when the error
+    is not the quotable shape (the caller keeps its PlannerError).
+    """
+    lines = yaml_text.split("\n")
+    for _ in range(10):
+        try:
+            parsed = yaml.safe_load("\n".join(lines))
+        except yaml.YAMLError as exc:
+            mark = (getattr(exc, "problem_mark", None)
+                    or getattr(exc, "context_mark", None))
+            if mark is None or not (0 <= mark.line < len(lines)):
+                return None
+            m = _QUOTABLE_VALUE_RE.match(lines[mark.line])
+            if not m:
+                return None
+            key, value = m.groups()
+            escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+            fixed = f'{key} "{escaped}"'
+            if fixed == lines[mark.line]:
+                return None
+            lines[mark.line] = fixed
+            continue
+        return "\n".join(lines) if isinstance(parsed, dict) else None
+    return None
+
+
 def parse_planner_response(text: str) -> PlannerResult:
     """Parse the model's raw output into one of the typed result variants."""
     cleaned = _strip_thinking(text)
@@ -316,6 +360,16 @@ def parse_planner_response(text: str) -> PlannerResult:
         try:
             parsed = yaml.safe_load(yaml_text)
         except yaml.YAMLError as exc:
+            # DEV-619: a colon-rich scalar copied verbatim (a signature, a
+            # path:line ref) is the dominant failure here — run 19's spec
+            # died on `spec_dir: Path` inside an unquoted value. Quote the
+            # offending line(s) before giving up.
+            salvaged = _salvage_yaml(yaml_text)
+            if salvaged is not None:
+                logger.warning(
+                    "planner: YAML salvaged by quoting colon-bearing scalar "
+                    "line(s) (DEV-619); original error: %s", exc)
+                return PlannerYaml(yaml_text=salvaged, raw_response=text)
             return PlannerError(
                 reason=f"<<<YAML>>> block is not valid YAML: {exc}",
                 raw_response=text,
@@ -456,6 +510,7 @@ def call_planner(
                 len(clarifications) if clarifications else 0)
 
     result: PlannerResult = PlannerError(reason="planner not called", raw_response="")
+    base_user_msg = user_msg
     for attempt in range(parse_retries + 1):
         result = _call_planner_once(user_msg, agent=agent, timeout=timeout)
         if not isinstance(result, PlannerError):
@@ -464,6 +519,19 @@ def call_planner(
             logger.warning(
                 "planner: unparseable output (%s) — re-rolling (attempt %d/%d)",
                 result.reason, attempt + 2, parse_retries + 1)
+            # DEV-619: an identical re-roll at low temperature reproduces the
+            # same invalid structure — run 19's first spec died on two
+            # byte-similar unparseable plans. Tell the model what broke and
+            # restate the quoting rule so the retry actually diverges.
+            user_msg = (
+                base_user_msg
+                + "\n\n# PREVIOUS ATTEMPT REJECTED — fix and re-emit\n\n"
+                + f"Your previous response was rejected: {result.reason}\n"
+                + "Re-emit the COMPLETE response. Any free text inside a "
+                + "YAML value — signatures, error text, paths with line "
+                + "numbers, URLs — must be double-quoted or in a | block "
+                + "literal; a bare colon inside an unquoted value is "
+                + "invalid YAML.\n")
 
     if isinstance(result, PlannerYaml):
         logger.info("planner: produced YAML (%d bytes)", len(result.yaml_text))
