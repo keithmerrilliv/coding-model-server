@@ -845,6 +845,19 @@ def fetch_repo_files(
     return files, problems
 
 
+def problems_indicate_runner_outage(
+    problems: list[str], requested_paths: list[str],
+) -> bool:
+    """True when a fetch_repo_files problem list means the WHOLE fetch failed
+    (DEV-620): the transport-class early returns above each produce exactly one
+    problem that is not prefixed by any requested path. Per-path problems
+    ("<path>: not found") mean the runner answered — those files are simply
+    being created, which is not an outage."""
+    if len(problems) != 1:
+        return False
+    return not any(problems[0].startswith(f"{p}:") for p in requested_paths)
+
+
 def run_tests(
     spec_dir: Path,
     framework: str = "pytest",
