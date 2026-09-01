@@ -61,8 +61,16 @@ read as a clean pushed run). Failures never raise out of the daemon loop.
   logic must be testable without a reachable git remote — factor it so tests
   exercise the compare-and-report step directly.
 
-## Test strategy (planner: carry these keys)
+## test_strategy
 
-- `repo`: coding-model-server
-- `framework`: pytest
-- `protected_paths`: as listed above
+```yaml
+repo: coding-model-server
+framework: pytest
+required: true
+protected_paths:
+  - src/coding_model_server/
+  - src/coding_model_autonomous/executor.py
+  - src/coding_model_autonomous/db.py
+  - src/coding_model_autonomous/schema.sql
+  - src/coding_model_client/
+```
