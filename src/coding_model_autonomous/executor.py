@@ -220,9 +220,68 @@ def artifact_path(spec_dir: Path, rel_path: str) -> Path:
     return abs_path
 
 
-def _write_artifact(spec_dir: Path, rel_path: str, content: str) -> Path:
-    """Write a file to the spec workspace with path-traversal protection."""
+# Keywords for declaration detection (line-start scan)
+_DECLARATION_KEYWORDS = ("async def", "def", "class", "func", "struct", "@Test")
+
+
+def _count_declarations(content: str) -> int:
+    """Count code declarations in *content* using line-start keyword scan."""
+    count = 0
+    for line in content.splitlines():
+        stripped = line.lstrip()
+        if not stripped:
+            continue
+        for kw in sorted(_DECLARATION_KEYWORDS, key=len, reverse=True):
+            if stripped.startswith(kw):
+                # Ensure whole-word match (not followed by alphanumeric or underscore)
+                end_idx = len(kw)
+                if end_idx < len(stripped):
+                    nxt = stripped[end_idx]
+                    if nxt.isalnum() or nxt == "_":
+                        continue
+                count += 1
+                break
+    return count
+
+
+def _write_artifact(
+    spec_dir: Path,
+    rel_path: str,
+    content: str,
+    *,
+    prior_writes: list[tuple[str, str]] | None = None,
+    role: str | None = None,
+) -> Path | None:
+    """Write a file to the spec workspace with path-traversal protection.
+
+    When *prior_writes* and *role* are both provided, enforces collision and
+    emptying guards before writing to disk.
+    """
     abs_path = artifact_path(spec_dir, rel_path)
+
+    # Guard activation: both must be present
+    if prior_writes is not None and role is not None:
+        # 1. Collision check
+        for pw_path, pw_role in prior_writes:
+            if pw_path == rel_path and pw_role != role:
+                logger.warning(
+                    "collision_refused: path=%s existing_role=%s attempted_role=%s",
+                    rel_path, pw_role, role,
+                )
+                return None
+
+        # 2. Emptying check
+        if abs_path.exists():
+            old_content = abs_path.read_text()
+            old_decl_count = _count_declarations(old_content)
+            new_decl_count = _count_declarations(content)
+            if old_decl_count > 0 and new_decl_count == 0:
+                logger.warning(
+                    "emptying_refused: path=%s role=%s (had %d declarations, new has 0)",
+                    rel_path, role, old_decl_count,
+                )
+                return None
+
     abs_path.parent.mkdir(parents=True, exist_ok=True)
     abs_path.write_text(content)
     return abs_path
