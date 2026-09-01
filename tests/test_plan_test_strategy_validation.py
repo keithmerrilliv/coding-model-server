@@ -148,15 +148,34 @@ def _accept(db, yaml_text, spec_md=SPEC_MD):
     return db.get_spec(spec.id)
 
 
-def test_invalid_plan_never_opens_a_plan_approval_gate(db):
+# DEV-625 widened _OPERATOR_STRATEGY_KEYS to include repo, so every key
+# SPEC_MD declares now self-heals via the DEV-573 overlay instead of costing
+# a planner round. The bounce path still exists for spec-declared keys the
+# overlay does not carry — this variant declares one.
+SPEC_MD_WITH_CUSTOM_KEY = SPEC_MD.replace(
+    "    base_ref: main\n",
+    "    base_ref: main\n    xcode_scheme: CentipedeCI\n")
+
+
+def test_operator_keys_self_heal_instead_of_bouncing(db):
+    """Post-DEV-625: a plan that lost only operator-restorable keys is healed
+    by the overlay and opens the gate — no planner round burned."""
     spec = _accept(db, PROSE_ONLY)
+    gates = [g for g in db.list_gates_for_spec(spec.id)
+             if g.gate_type is GateType.PLAN_APPROVAL]
+    assert len(gates) == 1
+    assert spec.status is SpecStatus.PLAN_REVIEW
+
+
+def test_invalid_plan_never_opens_a_plan_approval_gate(db):
+    spec = _accept(db, PROSE_ONLY, spec_md=SPEC_MD_WITH_CUSTOM_KEY)
     assert not [g for g in db.list_gates_for_spec(spec.id)
                 if g.gate_type is GateType.PLAN_APPROVAL]
     # Bounced back to the planner via the same channel a human rejection uses.
     clar = [g for g in db.list_gates_for_spec(spec.id, GateType.CLARIFICATION)]
     assert len(clar) == 1
     assert "Plan rejection feedback" in clar[0].reviewer_notes
-    assert "`repo`" in clar[0].reviewer_notes
+    assert "`xcode_scheme`" in clar[0].reviewer_notes
     assert spec.status is SpecStatus.PENDING_PLAN
 
 
@@ -173,7 +192,7 @@ def test_validation_rounds_are_capped(db):
     spec = db.create_spec(title="demo", source_md_path="spec.md")
     spec_dir = db.spec_dir(spec.id)
     spec_dir.mkdir(parents=True, exist_ok=True)
-    (spec_dir / "spec.md").write_text(SPEC_MD)
+    (spec_dir / "spec.md").write_text(SPEC_MD_WITH_CUSTOM_KEY)
     result = mock.Mock(yaml_text=PROSE_ONLY)
 
     for _ in range(d.PLAN_VALIDATION_MAX_ROUNDS):

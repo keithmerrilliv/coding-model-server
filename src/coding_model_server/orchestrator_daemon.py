@@ -1501,8 +1501,19 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
         logger.info("spec %s: carrying %d chars of plan-approval conditions "
                     "into the architect prompt (DEV-546)",
                     spec.id, len(plan_conditions))
+    # DEV-599: the architect gets the same existing-file context DEV-571
+    # gave the implementer — a modify-spec designed blind invents APIs
+    # (run 16) or refuses to design and asks to examine files (run 20).
+    try:
+        design_existing = _fetch_existing_files_for_spec(
+            spec, spec_md, extra_paths=_planned_implement_outputs(spec))
+    except RunnerOutageAtImplement as e:
+        _requeue_implement_for_runner_outage(
+            db, spec, task, str(e), phase="design_existing_fetch")
+        return
     messages = build_architect_message(
         spec_md, rejection_notes=rejection_notes, plan_yaml=plan_yaml,
+        existing_files=design_existing,
         reference_files=_fetch_protected_files_for_spec(spec),
         approval_conditions=plan_conditions)
 
@@ -2957,6 +2968,7 @@ def _requeue_for_unreachable_runner(db: Database, spec: Spec, task) -> bool:
 
 def _requeue_implement_for_runner_outage(
     db: Database, spec: Spec, task, detail: str,
+    phase: str = "implement_existing_fetch",
 ) -> None:
     """Park an implement task whose existing-file fetch hit a dead runner
     (DEV-620), mirroring the DEV-538 build-check requeue — but PATIENT: a
@@ -2969,12 +2981,12 @@ def _requeue_implement_for_runner_outage(
     prior = sum(
         1 for e in db.list_events_by_kind(
             spec_id=spec.id, kind=EventKind.TEST_RAN, limit=200)
-        if (e.payload or {}).get("phase") == "implement_existing_fetch"
+        if (e.payload or {}).get("phase") == phase
         and (e.payload or {}).get("runner_unreachable")
     )
     if prior == 0 or (prior + 1) % 20 == 0:
         db.record_event(EventKind.TEST_RAN, spec_id=spec.id, task_id=task.id,
-                        payload={"phase": "implement_existing_fetch",
+                        payload={"phase": phase,
                                  "passed": False,
                                  "runner_unreachable": True,
                                  "requeue": prior + 1,

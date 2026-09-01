@@ -1411,6 +1411,7 @@ def build_architect_message(spec_md: str,
                             plan_yaml: str | None = None,
                             reference_files: list[tuple[str, str]] | None = None,
                             approval_conditions: str | None = None,
+                            existing_files: list[tuple[str, str]] | None = None,
                             ) -> list[dict[str, str]]:
     user_parts: list[str] = []
     # On a re-run (design-review rejection or supervisor design-revision), the
@@ -1437,6 +1438,20 @@ def build_architect_message(spec_md: str,
             _render_approval_conditions(approval_conditions, approved="plan",
                                         author="operator")
             + "\n---\n\n")
+    # DEV-599: the implementer has received the real contents of the files it
+    # must modify since DEV-571; the architect designed blind against the same
+    # files and invented APIs (run 16) or refused to design at all and asked
+    # to "examine the module" (run 20). Editable-existing is distinct from
+    # read-only-protected: the architect needs both, for different reasons.
+    if existing_files:
+        blocks = "\n\n".join(
+            f"### {path}\n\n```\n{content}\n```" for path, content in existing_files)
+        user_parts.append(
+            "## Current contents of files the plan will MODIFY\n\n"
+            "Design against THIS code — its real names, signatures, and "
+            "structure. Do not assume or invent an API, and do not ask to "
+            "examine anything: every file you may modify is shown here in "
+            "full.\n\n" + blocks + "\n\n---\n\n")
     if reference_files:
         user_parts.append(_render_reference_files(reference_files) + "---\n\n")
     user_parts.append(
