@@ -359,7 +359,7 @@ def _spec_declared_test_strategy(spec_md: str) -> dict:
 # dispatch byte-identical. Everything protective hangs off these; run 14b
 # (DEV-573) lost protected_paths to the planner's rewrite and a fabricated
 # project.pbxproj reached the VM worktree.
-_OPERATOR_STRATEGY_KEYS = ("protected_paths", "base_ref", "filter",
+_OPERATOR_STRATEGY_KEYS = ("repo", "protected_paths", "base_ref", "filter",
                            "execution_target")
 
 
@@ -440,6 +440,21 @@ def _validate_test_strategy(yaml_text: str, spec_md: str) -> list[str]:
             f"`{key}` is declared in the spec's own test_strategy block and is "
             f"absent from the plan. Copy it through as a real YAML key — "
             f"prose inside `notes` is never parsed.")
+
+    # DEV-625: a spec that modifies existing files needs a repo to read them
+    # from. Without this rule the DEV-492 acceptance probe treats a missing
+    # repo key as "every declared file is unreadable" and terminally fails
+    # the spec before any gate opens — though a planner round fixes a dropped
+    # key (run 19's plan gate proved it in one note; run 20 died on it).
+    if (not strategy.get("repo")
+            and not any("`repo`" in p for p in problems)
+            and (_declared_file_modifications(spec_md)
+                 or _change_surface_path_rows(spec_md))):
+        problems.append(
+            "the spec declares modifications to existing files but the plan's "
+            "`test_strategy` has no `repo` key naming the repository to read "
+            "them from. Copy the `repo` value from the spec's test_strategy "
+            "block through as a real YAML key.")
     return problems
 
 
