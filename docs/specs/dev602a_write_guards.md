@@ -69,8 +69,16 @@ raise exceptions that could kill the daemon loop.
 - No new dependencies. No DB schema changes. Follow the
   `tests/test_diff_based_edits.py` fixture pattern.
 
-## Test strategy (planner: carry these keys)
+## test_strategy
 
-- `repo`: coding-model-server
-- `framework`: pytest
-- `protected_paths`: as listed above
+```yaml
+repo: coding-model-server
+framework: pytest
+required: true
+protected_paths:
+  - src/coding_model_server/
+  - src/coding_model_autonomous/delivery.py
+  - src/coding_model_autonomous/db.py
+  - src/coding_model_autonomous/schema.sql
+  - src/coding_model_client/
+```

@@ -58,8 +58,16 @@ file are logged loudly but never raise out of the daemon loop.
 - No new dependencies (`hashlib` only). No DB schema changes. Follow the
   `tests/test_diff_based_edits.py` fixture pattern.
 
-## Test strategy (planner: carry these keys)
+## test_strategy
 
-- `repo`: coding-model-server
-- `framework`: pytest
-- `protected_paths`: as listed above
+```yaml
+repo: coding-model-server
+framework: pytest
+required: true
+protected_paths:
+  - src/coding_model_autonomous/
+  - src/coding_model_server/config.py
+  - src/coding_model_server/llama_server.py
+  - src/coding_model_server/routes/
+  - src/coding_model_client/
+```
