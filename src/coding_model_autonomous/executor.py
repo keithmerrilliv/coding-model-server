@@ -601,7 +601,13 @@ IMPLEMENTER_EDIT_MODE_INSTRUCTIONS = textwrap.dedent("""\
     2. The SEARCH text must be copied BYTE-FOR-BYTE from the shown file content:
        same indentation, same spaces-vs-tabs, same blank lines. It must appear
        in the current file EXACTLY ONCE. If the lines you want are not unique,
-       include more surrounding lines until the block is unique.
+       include more surrounding lines until the block is unique — but keep each
+       SEARCH as SHORT as uniqueness allows (aim for 3-8 lines). Every extra
+       line is another chance to mistype the anchor and have the whole attempt
+       rejected. Prefer a short unique interior line plus minimal context over
+       a whole statement or literal; to INSERT lines, anchor on the 2-3
+       adjacent lines at the insertion point and re-emit them plus the new
+       lines, rather than searching for a large enclosing block.
     3. The REPLACE text is what those searched lines become. An EMPTY replace
        (nothing between `=======` and `>>>>>>> REPLACE`) deletes the searched
        lines. Do NOT wrap either side in markdown ``` fences.
@@ -647,7 +653,12 @@ PER_FILE_EDIT_MODE_INSTRUCTIONS = textwrap.dedent("""\
     2. The SEARCH text must be copied BYTE-FOR-BYTE from the shown content:
        same indentation, same spaces-vs-tabs, same blank lines. It must appear
        in the current file EXACTLY ONCE — if it is not unique, include more
-       surrounding lines until it is.
+       surrounding lines until it is, but keep each SEARCH as SHORT as
+       uniqueness allows (aim for 3-8 lines): every extra line is another
+       chance to mistype the anchor. Prefer a short unique interior line plus
+       minimal context over a whole statement or literal; to INSERT lines,
+       anchor on the 2-3 adjacent lines at the insertion point and re-emit
+       them plus the new lines.
     3. The REPLACE text is what the searched lines become. An EMPTY replace
        (nothing between `=======` and `>>>>>>> REPLACE`) deletes the searched
        lines. Do NOT wrap either side in markdown ``` fences.
