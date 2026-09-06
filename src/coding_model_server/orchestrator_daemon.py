@@ -103,6 +103,7 @@ from coding_model_autonomous.retry_policy import (
     _rotation_pick,
     _select_implementer_agent,
     _snapshot_retry,
+    _IMPLEMENTER_ROTATION,
 )
 from coding_model_autonomous.executor import (
     ImplementerResult,
@@ -1924,6 +1925,58 @@ def _verify_review_citations(review_md: str, spec_dir: Path) -> tuple[str, int, 
 
 # ── Implementation generation: single-call vs manifest/per-file (#4) ──────────
 
+def _agent_ctx_limit(agent: "str | None") -> "int | None":
+    """Context window (n_ctx) for *agent*, or None when unknown."""
+    if not agent:
+        return None
+    try:
+        from coding_model_server.config import Config
+        name = Config.AGENT_ALIASES.get(agent, agent)
+        return int(Config.AGENTS[name]["model_config"]["n_ctx"])
+    except Exception:
+        return None
+
+
+# Conservative for code-heavy prompts: real tokenizers average ~3.3-3.8
+# chars/token on this repo's source, so dividing by 3 overestimates the
+# prompt — the safe direction for a fit check.
+_PROMPT_CHARS_PER_TOKEN = 3
+
+
+def _ctx_capable_agent(spec_id: str, agent: "str | None", messages: list,
+                       completion_tokens: int) -> "str | None":
+    """Never dispatch a prompt to an agent whose window cannot hold it (DEV-624).
+
+    The architect's complexity recommendation and the retry rotation are both
+    context-blind: run 19 rotated a 152K-token prompt onto moe_implementer's
+    116K window, and run 21 v2's architect recommended fast_implementer (64K)
+    for a 75K-token prompt — each a guaranteed-wasted dispatch that the
+    admission layer refuses with a 413. Estimate the fit up front and escalate
+    to the first rotation agent that can hold prompt + completion; when none
+    can, dispatch to the largest and let the server answer definitively.
+    """
+    est_prompt = sum(len(m.get("content") or "") for m in messages
+                     if isinstance(m, dict)) // _PROMPT_CHARS_PER_TOKEN
+    needed = est_prompt + completion_tokens
+    limit = _agent_ctx_limit(agent)
+    if limit is None or needed <= limit:
+        return agent
+    for cand in _IMPLEMENTER_ROTATION:
+        cand_limit = _agent_ctx_limit(cand)
+        if cand_limit is not None and needed <= cand_limit:
+            logger.warning(
+                "spec %s: prompt needs ~%d tokens but %r holds %d — "
+                "escalating dispatch to %r (%d ctx) (DEV-624)",
+                spec_id, needed, agent, limit, cand, cand_limit)
+            return cand
+    biggest = max(_IMPLEMENTER_ROTATION, key=lambda a: _agent_ctx_limit(a) or 0)
+    logger.warning(
+        "spec %s: prompt needs ~%d tokens and no implementer window holds it "
+        "(largest is %r) — dispatching there for a definitive answer (DEV-624)",
+        spec_id, needed, biggest)
+    return biggest
+
+
 def _generate_implementation(
     db: Database, spec: Spec, task, spec_dir,
     spec_md: str, design_md: str, chosen_agent: "str | None",
@@ -1986,6 +2039,8 @@ def _generate_implementation(
         edit_mode=edit_mode,
     )
     impl_max_tokens = executor.implementer_max_tokens_for(design_md)
+    chosen_agent = _ctx_capable_agent(spec.id, chosen_agent, messages,
+                                      impl_max_tokens)
     logger.info("spec %s: single-call implementer budget=%d tokens (~%d files)%s",
                 spec.id, impl_max_tokens, n_files,
                 " [diff-based edits]" if edit_mode else "")
@@ -3173,6 +3228,39 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
         # DEV-620: fetch failed transport-level before any model call —
         # park at zero cost instead of implementing blind.
         _requeue_implement_for_runner_outage(db, spec, task, str(e))
+        return
+    except requests.HTTPError as e:
+        # DEV-624 (terminal half): the server refusing the request — a 413
+        # for a prompt the agent's window can't hold, a 5xx mid-crash — is
+        # transport shaping, never a verdict on code that was never
+        # generated. Runs 19 and 21 each died terminally in under a minute
+        # this way. Rotate exactly like a parse failure instead: the next
+        # attempt gets a different agent, and the ctx-fit guard above keeps
+        # it from re-dispatching to another too-small window.
+        if task.retry_count >= MAX_RETRIES:
+            logger.error(
+                "spec %s: dispatch-refusal retry budget exhausted (%d/%d), "
+                "failing", spec.id, task.retry_count, MAX_RETRIES)
+            db.update_task_status(task.id, TaskStatus.FAILED)
+            db.update_spec_status(spec.id, SpecStatus.FAILED)
+            return
+        synth_gate = db.create_gate(
+            spec_id=spec.id,
+            task_id=task.id,
+            gate_type=GateType.CODE_REVIEW,
+            prompt_md="## Automated dispatch-refusal retry",
+        )
+        db.respond_to_gate(synth_gate.id, "rejected", notes=(
+            f"The previous attempt never reached the model — the server "
+            f"refused the request ({e}). Nothing about any implementation "
+            f"was judged. Produce the implementation exactly as the design "
+            f"specifies."))
+        db.increment_task_retry(task.id)
+        db.update_task_status(task.id, TaskStatus.PENDING)
+        logger.warning(
+            "spec %s: implementer dispatch refused (%s) — rotating "
+            "(attempt %d/%d) (DEV-624)",
+            spec.id, e, task.retry_count + 1, MAX_RETRIES)
         return
 
     db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
