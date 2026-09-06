@@ -287,8 +287,13 @@ MAC_RUNNER_API_KEY = os.getenv("MAC_RUNNER_API_KEY", "")
 # linearly with retries and materialized N stale copies of every source
 # file in the git worktree — duplicate-source compilation in glob-based
 # SPM targets (DEV-196).
+# Merged repo+workspace tree for self-target pytest specs (DEV-626). Lives
+# inside spec_dir so the existing RW bind covers it; must never ride along in
+# a delivery patch set or a retry snapshot — hence its place in the skips.
+_REPO_OVERLAY_DIR = ".repo_overlay"
+
 _SPEC_SKIP_PATTERNS = (".pytest_cache", "__pycache__", ".DS_Store",
-                       "test_output.txt", "retry_history")
+                       "test_output.txt", "retry_history", _REPO_OVERLAY_DIR)
 
 
 # Cap on captured output. Without this, a runaway test that prints a
@@ -316,6 +321,7 @@ def _run_confined(
     what: str,
     share_net: bool = False,
     extra_binds: Optional[list[str]] = None,
+    extra_env: Optional[dict[str, str]] = None,
 ) -> tuple[bool, str]:
     """Run *raw_cmd* under bwrap+seccomp; return (exited_zero, combined_output).
 
@@ -326,6 +332,10 @@ def _run_confined(
 
     *share_net* is forwarded to _wrap_in_sandbox; only the install phase sets
     it. *what* names the activity for logs and the bwrap-missing diagnostic.
+
+    *extra_env* vars reach the child in BOTH confinement modes: as `--setenv`
+    bwrap args under the sandbox (which `--clearenv`s everything else), and
+    merged over os.environ on the unsandboxed opt-out path (DEV-626).
     """
     allow_unsandboxed = os.getenv("CODING_MODEL_ALLOW_UNSANDBOXED_TESTS", "").lower() in ("1", "true", "yes")
 
@@ -344,8 +354,12 @@ def _run_confined(
         )
     elif _sandbox_available():
         bpf_fd = seccomp_filter.build_seccomp_bpf_fd()
+        sandbox_extra = list(extra_binds or [])
+        for key, value in (extra_env or {}).items():
+            sandbox_extra += ["--setenv", key, value]
         cmd = _wrap_in_sandbox(raw_cmd, spec_dir, seccomp_fd=bpf_fd,
-                               share_net=share_net, extra_binds=extra_binds)
+                               share_net=share_net,
+                               extra_binds=sandbox_extra or None)
         if bpf_fd is None:
             sandbox_mode = "bwrap (no seccomp — libseccomp unavailable)"
             logger.warning(
@@ -383,6 +397,7 @@ def _run_confined(
             cmd, cwd=spec_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, start_new_session=True,
             pass_fds=(bpf_fd,) if bpf_fd is not None else (),
+            env={**os.environ, **extra_env} if allow_unsandboxed and extra_env else None,
         )
         try:
             out, err = proc.communicate(timeout=timeout)
@@ -503,7 +518,54 @@ def _provision_node_modules(spec_dir: Path) -> tuple[bool, str]:
     return True, output
 
 
-def _run_local_tests(spec_dir: Path, framework: str, timeout: int) -> tuple[bool, str]:
+_SERVER_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _materialize_local_repo_overlay(spec_dir: Path, repo: Optional[str]) -> Optional[Path]:
+    """Make a self-target repo's package importable inside the sandbox (DEV-626).
+
+    The sandbox binds only the venv and the spec workspace, so a pytest spec
+    whose test_strategy.repo names this repo itself collects straight to
+    `ModuleNotFoundError: No module named 'coding_model_autonomous'` — every
+    attempt, however good, reds the same way (run 20 burned its whole retry
+    rotation against that wall).
+
+    Pure PYTHONPATH layering cannot fix it: the workspace holds only the
+    EDITED files, and the first regular package dir found shadows the whole
+    package. So build a merged tree — copy the repo's src/ packages, then
+    overlay the workspace's own src/ files on top. The ordering is the point:
+    the workspace copy must shadow the repo copy, or the pre-gate check tests
+    shipped code instead of the candidate (the DEV-602 tested-vs-shipped
+    concern in miniature). The tree lives inside spec_dir, which is already
+    RW-bound into the sandbox; callers put the returned path on PYTHONPATH.
+
+    Returns None when the spec doesn't target this repo, or when the repo
+    layout is unrecognisable.
+    """
+    if not repo or repo != _SERVER_REPO_ROOT.name:
+        return None
+    repo_src = _SERVER_REPO_ROOT / "src"
+    if not repo_src.is_dir():
+        return None
+    overlay_src = spec_dir / _REPO_OVERLAY_DIR / "src"
+    if overlay_src.exists():
+        shutil.rmtree(overlay_src)  # rebuilt fresh each run — never stale
+    shutil.copytree(repo_src, overlay_src,
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    workspace_src = spec_dir / "src"
+    if workspace_src.is_dir():
+        for src_file in sorted(workspace_src.rglob("*")):
+            if not src_file.is_file():
+                continue
+            dest = overlay_src / src_file.relative_to(workspace_src)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src_file, dest)
+    logger.info("repo overlay materialized for self-target spec: %s", overlay_src)
+    return overlay_src
+
+
+def _run_local_tests(spec_dir: Path, framework: str, timeout: int,
+                     repo: Optional[str] = None) -> tuple[bool, str]:
     """Run pytest/jest/vitest/node_test locally (bwrap sandbox on Linux).
 
     LLM-generated test code runs inside a bubblewrap sandbox by default. If
@@ -518,6 +580,7 @@ def _run_local_tests(spec_dir: Path, framework: str, timeout: int) -> tuple[bool
         if not ok:
             return False, install_output
 
+    extra_env: Optional[dict[str, str]] = None
     if framework == "jest":
         # The local binary, not `npx jest`: npx would try to FETCH jest when
         # it isn't installed, and the test sandbox has no network, so that
@@ -586,16 +649,23 @@ def _run_local_tests(spec_dir: Path, framework: str, timeout: int) -> tuple[bool
         # `_snapshot_retry` dirs so a retry's tests aren't double-collected
         # against the live ones (the snapshots feed the synthesis pass, not
         # a re-run).
+        # `--ignore .repo_overlay` keeps pytest from double-collecting any
+        # test modules that ship inside the copied repo tree (DEV-626).
         raw_cmd = [
             sys.executable, "-m", "pytest", "-v", "--tb=short",
             "--import-mode=importlib",
             "--ignore", str(spec_dir / "retry_history"),
+            "--ignore", str(spec_dir / _REPO_OVERLAY_DIR),
             str(spec_dir),
         ]
+        overlay_src = _materialize_local_repo_overlay(spec_dir, repo)
+        if overlay_src is not None:
+            extra_env = {"PYTHONPATH": str(overlay_src)}
 
     # No share_net: the test run itself is always offline, for every
     # framework. Only _provision_node_modules above opens the network.
-    return _run_confined(raw_cmd, spec_dir, timeout, what="tests")
+    return _run_confined(raw_cmd, spec_dir, timeout, what="tests",
+                         extra_env=extra_env)
 
 
 def _collect_patch_files(spec_dir: Path) -> tuple[list[dict], Optional[str]]:
@@ -915,7 +985,8 @@ def run_tests(
             protected_paths=framework_opts.get("protected_paths"),
         )
     else:
-        passed, output = _run_local_tests(spec_dir, framework, effective_timeout)
+        passed, output = _run_local_tests(spec_dir, framework, effective_timeout,
+                                          repo=framework_opts.get("repo"))
 
     logger.info("test result: %s (%d chars output)",
                 "PASS" if passed else "FAIL", len(output))
