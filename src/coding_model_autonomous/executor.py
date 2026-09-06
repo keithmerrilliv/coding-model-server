@@ -1426,7 +1426,7 @@ def _render_reference_files(reference_files: list[tuple[str, str]]) -> str:
         "new feature; reference the existing declaration instead, or extend "
         "it in a file you are allowed to write.\n\n",
     ]
-    budget = EXISTING_FILES_MAX_CHARS
+    budget = PROTECTED_FILES_MAX_CHARS
     omitted: list[str] = []
     for path, content in reference_files:
         if len(content) > budget:
@@ -1625,6 +1625,18 @@ def parse_design_review(raw: str) -> tuple[str, str]:
 # dropped: "you were not shown X" is actionable, a missing section is not.
 EXISTING_FILES_MAX_CHARS = int(
     os.getenv("AUTONOMOUS_EXISTING_FILES_MAX_CHARS", "60000"))
+
+# The read-only protected context gets its OWN budget (DEV-627). It used to
+# share EXISTING_FILES_MAX_CHARS, so an operator raising that override for a
+# large modification target silently raised this ceiling too — run 21's
+# implementer prompt picked up a 420K-char protected tree on top of a 293K
+# existing file and the model server refused the body with a 413. The two
+# sections serve different needs: existing files must be complete enough to
+# anchor edits against; protected files only need to show what they declare,
+# and the "Not shown" listing preserves the off-limits instruction for
+# anything past the ceiling.
+PROTECTED_FILES_MAX_CHARS = int(
+    os.getenv("AUTONOMOUS_PROTECTED_FILES_MAX_CHARS", "60000"))
 
 
 def _render_existing_files(existing_files: list[tuple[str, str]],
