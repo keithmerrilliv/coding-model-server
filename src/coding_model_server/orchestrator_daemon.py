@@ -3321,9 +3321,13 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
                              **_edit_apply_event_fields(result)})
 
     # DEV-637: keep the raw response and its apply outcome for EVERY attempt,
-    # before any routing decision below can discard it.
-    _persist_implementer_response(spec_dir, task, chosen_agent or task.agent,
-                                  result, tally)
+    # before any routing decision below can discard it. Name the agent the
+    # call actually went to (run 23's header said fast_implementer after the
+    # DEV-624 fit check had escalated the dispatch to deep_implementer).
+    _persist_implementer_response(
+        spec_dir, task,
+        executor.agent_event_fields(tally).get("agent") or chosen_agent or task.agent,
+        result, tally)
 
     if isinstance(result, ParseError):
         logger.error("spec %s: implementer response unparseable: %s",

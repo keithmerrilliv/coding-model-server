@@ -222,3 +222,20 @@ def test_synthesis_corpus_ignores_the_retained_response(tmp_path):
     attempts = _read_retry_attempts(spec_dir)
 
     assert [set(a["files"]) for a in attempts] == [{"src/app.py"}, {"src/app.py"}]
+
+
+def test_persisted_header_names_the_agent_the_call_went_to(db):
+    """DEV-624 can escalate dispatch past the rotation pick; the retained
+    header must say where the call actually went, as the event does."""
+    spec, task, spec_dir = _spec_with_task(db)
+
+    def generate(db_, spec_, task_, spec_dir_, *a, tally=None, **k):
+        tally["agent"] = "deep_implementer"          # what the call reported
+        return _failed_result()
+
+    with mock.patch.object(d, "_generate_implementation", side_effect=generate), \
+            mock.patch.object(d, "_rotation_pick", return_value="fast_implementer"):
+        d._run_implementer(db, spec, task, spec_dir)
+
+    text = (spec_dir / "implementer_response.md").read_text()
+    assert "- agent: deep_implementer" in text
