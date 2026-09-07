@@ -23,6 +23,8 @@ artifact paths instead — the DEV-535 failure mode was silence, not the skip.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 import re
@@ -36,6 +38,60 @@ from typing import Optional
 logger = logging.getLogger("orchestrator")
 
 BRANCH_PREFIX = "pipeline/"
+
+TESTED_MANIFEST = "tested_manifest.json"
+
+
+def verify_tested_manifest(spec_dir: Path,
+                           deliverable: "list[str]") -> "tuple[bool, str]":
+    """Refuse to ship bytes the build check never verified (DEV-602 split C).
+
+    Split B records `tested_manifest.json` (workspace-relative path → sha256
+    of on-disk bytes) at the passing pre-gate build check. Run 17 shipped
+    files that were not the files the check had tested; delivery compared
+    nothing. This is the compare step, factored out so tests exercise it
+    without a git remote.
+
+    Returns (ok, detail). An ABSENT manifest is (True, "") — pre-split-B
+    workspaces deliver exactly as before. A present manifest is compared
+    against the shipping set: any hash mismatch, manifest path missing from
+    the shipping set, or shipped file absent from the manifest is a
+    divergence, and the detail lists every divergent path with its tested
+    and shipped hashes (or "missing"). An unreadable manifest also refuses —
+    it is corruption of exactly the record this check depends on.
+    """
+    manifest_path = spec_dir / TESTED_MANIFEST
+    if not manifest_path.is_file():
+        return True, ""
+    try:
+        tested = json.loads(manifest_path.read_text())
+        if not isinstance(tested, dict):
+            raise ValueError(f"manifest is {type(tested).__name__}, not a dict")
+    except Exception as e:
+        return False, (
+            f"REFUSED — {TESTED_MANIFEST} exists but cannot be read "
+            f"({e}); it is the record of what the build check verified, "
+            f"so nothing was pushed (DEV-602)")
+
+    shipped: dict[str, str] = {}
+    for rel in deliverable:
+        f = spec_dir / rel
+        if f.is_file():
+            shipped[rel] = hashlib.sha256(f.read_bytes()).hexdigest()
+
+    divergent: list[str] = []
+    for rel in sorted(set(tested) | set(shipped)):
+        t, s = tested.get(rel), shipped.get(rel)
+        if t != s:
+            divergent.append(f"  {rel}: tested {t or 'missing'} "
+                             f"shipped {s or 'missing'}")
+    if divergent:
+        return False, (
+            "REFUSED — tested-manifest divergence; nothing was pushed.\n"
+            "The build check verified different bytes than this delivery "
+            "would ship (DEV-602):\n" + "\n".join(divergent))
+    return True, (f"{len(shipped)} file(s) verified against "
+                  f"{TESTED_MANIFEST}")
 
 
 def delivery_remotes() -> dict[str, str]:
@@ -172,6 +228,14 @@ def deliver_spec(spec_id: str, spec_title: str, spec_dir: Path,
             "skipped", "no deliverable code artifact exists on disk "
                        "(all protected, or paths missing from the workspace)")
 
+    # DEV-602 split C: verify BEFORE credentials or clone — the refusal
+    # needs no network, and a divergent set must never get as far as a
+    # remote. verified_note is empty when no manifest exists (pre-split-B
+    # workspaces keep today's behavior and today's report, byte-identical).
+    verified_ok, verified_note = verify_tested_manifest(spec_dir, deliverable)
+    if not verified_ok:
+        return DeliveryResult("failed", verified_note)
+
     branch = f"{BRANCH_PREFIX}{spec_id}"
     key = _delivery_key(repo_name)
     cred_err = _check_delivery_credentials(key)
@@ -211,10 +275,10 @@ def deliver_spec(spec_id: str, spec_title: str, spec_dir: Path,
         if push.returncode != 0:
             return DeliveryResult(
                 "failed", f"push to {url} failed: {_err_tail(push)}")
-        return DeliveryResult(
-            "pushed",
-            f"{len(deliverable)} file(s) committed to {branch} of {url}",
-            branch=branch)
+        detail = f"{len(deliverable)} file(s) committed to {branch} of {url}"
+        if verified_note:
+            detail += f" — {verified_note}"
+        return DeliveryResult("pushed", detail, branch=branch)
     except Exception as e:  # never let delivery take down the tick
         return DeliveryResult("failed", f"{type(e).__name__}: {e}")
     finally:
