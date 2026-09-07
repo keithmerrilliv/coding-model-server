@@ -73,10 +73,37 @@ class ParsedEdits:
 
 @dataclass
 class ApplyResult:
-    """Outcome of applying a file's edit blocks to its current content."""
+    """Outcome of applying a file's edit blocks to its current content.
+
+    On failure the block that stopped the apply is carried whole
+    (``failed_block``, 1-based ``failed_index``, machine-readable ``reason``)
+    so a caller can keep the COMPLETE SEARCH body for diagnosis; ``error`` is
+    the human-readable text, which previews only the first few lines
+    (DEV-637: the preview alone left run 21's six anchor misses
+    unclassifiable).
+    """
     ok: bool
     content: str | None = None      # new full-file content when ok
     error: str | None = None        # precise diagnostic when not ok
+    failed_index: int | None = None  # 1-based index of the block that failed
+    failed_block: EditBlock | None = None
+    reason: str | None = None       # "empty_search" | "not_found" | "ambiguous"
+
+
+@dataclass(frozen=True)
+class EditFailure:
+    """One edit block (or file) that could not be applied, kept in full.
+
+    ``search`` is the complete SEARCH text as the model emitted it — never the
+    4-line preview ``_snippet`` puts in the prose diagnostic. ``block`` is the
+    1-based index within the file's blocks, or 0 for a file-level failure
+    (no base content to edit against, malformed block structure).
+    """
+    path: str
+    block: int
+    reason: str      # "not_found" | "ambiguous" | "empty_search" | "no_base" | "malformed"
+    search: str
+    detail: str      # the same human-readable text that appears in ``errors``
 
 
 @dataclass
@@ -86,9 +113,13 @@ class ResolveResult:
     ``files`` is the write-ready ``(path, full_content)`` list. When ``errors``
     is non-empty the caller MUST NOT write anything — an unappliable edit routes
     the whole attempt back to the implementer rather than partially applying.
+    ``failures`` is parallel to ``errors`` (same order, same length) and carries
+    the structured record — path, block index, reason and the COMPLETE SEARCH
+    body — for the retained diagnostics (DEV-637).
     """
     files: list[tuple[str, str]] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    failures: list[EditFailure] = field(default_factory=list)
 
 
 def _snippet(text: str, max_lines: int = 4) -> str:
@@ -196,19 +227,22 @@ def apply_search_replace(current: str, blocks: list[EditBlock]) -> ApplyResult:
             return ApplyResult(
                 ok=False,
                 error=(f"edit block #{idx} has an empty SEARCH — a SEARCH must "
-                       "quote the exact lines to replace"))
+                       "quote the exact lines to replace"),
+                failed_index=idx, failed_block=block, reason="empty_search")
         count = content.count(block.search)
         if count == 0:
             return ApplyResult(
                 ok=False,
                 error=(f"edit block #{idx}: SEARCH text not found in the current "
-                       f"file. The SEARCH was:\n{_snippet(block.search)}"))
+                       f"file. The SEARCH was:\n{_snippet(block.search)}"),
+                failed_index=idx, failed_block=block, reason="not_found")
         if count > 1:
             return ApplyResult(
                 ok=False,
                 error=(f"edit block #{idx}: SEARCH text matches {count} places "
                        "(ambiguous) — add surrounding lines until it is unique. "
-                       f"The SEARCH was:\n{_snippet(block.search)}"))
+                       f"The SEARCH was:\n{_snippet(block.search)}"),
+                failed_index=idx, failed_block=block, reason="ambiguous")
         content = content.replace(block.search, block.replace, 1)
     return ApplyResult(ok=True, content=content)
 
@@ -248,26 +282,42 @@ def resolve_edits(
         put(path, content)
 
     errors: list[str] = []
+    failures: list[EditFailure] = []
     parsed = parse_edit_blocks(edit_text)
     for note in parsed.malformed:
         errors.append(note)
+        failures.append(EditFailure(path="", block=0, reason="malformed",
+                                    search="", detail=note))
 
     for fe in parsed.files:
         current = existing.get(fe.path)
         if current is None:
             # The model emitted edit blocks for a file we never showed it — we
             # have no base content to apply against. Never invent one.
-            errors.append(
+            detail = (
                 f"`{fe.path}`: edit blocks were emitted but this file is not "
                 "among the existing files shown to you, so there is no content "
                 "to edit. Emit it as a whole new file, or edit a file that was "
                 "shown.")
+            errors.append(detail)
+            # Keep the first block's SEARCH: a new-path block set with an empty
+            # SEARCH is the "meant to emit whole" signature DEV-638 wants to
+            # recognise, and only the retained text can show it.
+            failures.append(EditFailure(
+                path=fe.path, block=0, reason="no_base",
+                search=fe.blocks[0].search if fe.blocks else "", detail=detail))
             continue
         outcome = apply_search_replace(current, fe.blocks)
         if not outcome.ok:
-            errors.append(f"`{fe.path}`: {outcome.error}")
+            detail = f"`{fe.path}`: {outcome.error}"
+            errors.append(detail)
+            failures.append(EditFailure(
+                path=fe.path, block=outcome.failed_index or 0,
+                reason=outcome.reason or "not_found",
+                search=outcome.failed_block.search if outcome.failed_block else "",
+                detail=detail))
             continue
         put(fe.path, outcome.content or "")
 
     files = [(p, resolved[p]) for p in order]
-    return ResolveResult(files=files, errors=errors)
+    return ResolveResult(files=files, errors=errors, failures=failures)

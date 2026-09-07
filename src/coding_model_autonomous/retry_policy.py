@@ -235,8 +235,11 @@ def _read_retry_attempts(spec_dir: Path) -> list[dict]:
                 continue
             name = rel.name
             # Drop pipeline metadata; keep only deliverable code + tests.
+            # implementer_response.md is the attempt's retained raw model
+            # response (DEV-637) — evidence for a human, never merge input.
             if name in {"spec.md", "plan.yaml", "design.md", "complexity.json",
-                        "review_report.md", "failure_report.md"}:
+                        "review_report.md", "failure_report.md",
+                        "implementer_response.md"}:
                 continue
             # Only the spec_dir-level test_output.txt counts (not any
             # snapshot copy, which we already filtered above).
