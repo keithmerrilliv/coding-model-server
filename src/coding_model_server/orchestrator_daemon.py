@@ -30,6 +30,7 @@ calling each agent. It must NOT serve HTTP itself.
 """
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import logging
 import json
@@ -2078,8 +2079,11 @@ def _resolve_edit_mode_response(
         return ParseError(
             "No <<<FILE: path>>>…<<<END_FILE>>> blocks and no SEARCH/REPLACE "
             "edit blocks found", raw)
-    return ImplementerResult(files=resolved.files, raw=raw,
-                             duplicate_paths=dup, apply_errors=resolved.errors)
+    return ImplementerResult(
+        files=resolved.files, raw=raw, duplicate_paths=dup,
+        apply_errors=resolved.errors,
+        # DEV-637: parallel to apply_errors, with the COMPLETE SEARCH text.
+        apply_failures=[dataclasses.asdict(f) for f in resolved.failures])
 
 
 def _persist_manifest(spec_dir, entries) -> None:
@@ -3307,6 +3311,11 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
                              "agent": chosen_agent or task.agent,
                              **executor.agent_event_fields(tally)})
 
+    # DEV-637: keep the raw response and its apply outcome for EVERY attempt,
+    # before any routing decision below can discard it.
+    _persist_implementer_response(spec_dir, task, chosen_agent or task.agent,
+                                  result, tally)
+
     if isinstance(result, ParseError):
         logger.error("spec %s: implementer response unparseable: %s",
                      spec.id, result.reason)
@@ -3370,7 +3379,8 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
     # exactly like a build failure, rather than silently overwriting, dropping or
     # partially applying a file. Empty on every whole-file (flag-off) attempt.
     if getattr(result, "apply_errors", None):
-        _route_unappliable_edits(db, spec, task, result.apply_errors)
+        _route_unappliable_edits(db, spec, task, result.apply_errors,
+                                 failures=getattr(result, "apply_failures", None))
         return
 
     # Deterministically fix boilerplate the reviewer checks — unpinned deps,
@@ -3888,8 +3898,69 @@ def _edit_apply_feedback(errors: "list[str]") -> str:
     )
 
 
+_IMPLEMENTER_RESPONSE_FILE = "implementer_response.md"
+_RAW_RESPONSE_DELIMITER = "----- BEGIN RAW RESPONSE (verbatim) -----"
+
+
+def _persist_implementer_response(spec_dir: Path, task, agent: str, result,
+                                  tally: "dict | None" = None) -> None:
+    """Keep the implementer's raw response and its apply outcome on disk (DEV-637).
+
+    Written to ``implementer_response.md`` in the spec workspace for EVERY
+    attempt — parsed, unparseable, applied or refused — before any routing
+    decision. The next attempt's ``_clean_spec_dir_for_retry`` snapshots it
+    into ``retry_history/retry_<N>/`` alongside that attempt's artifacts and
+    wipes the live copy, so each attempt's response lands next to its own
+    output; the final attempt's stays at the workspace root. Synthesis skips
+    the file by name (retry_policy._read_retry_attempts) — it is evidence,
+    not merge input — and delivery ships only CODE artifacts, so it can
+    never reach a branch.
+
+    Why: run 21 spent six rotations on SEARCH anchors that did not match, and
+    nothing retained the text — the event kept one line per error and the
+    snapshot kept no code — so the misses could not be classified after the
+    fact. Never raises out of the daemon loop.
+    """
+    try:
+        lines = [f"# Implementer response — attempt {task.retry_count}", "",
+                 f"- agent: {agent}",
+                 f"- result: {type(result).__name__}"]
+        for key in ("prompt_tokens", "completion_tokens", "truncated"):
+            if tally and key in tally:
+                lines.append(f"- {key}: {tally[key]}")
+        if isinstance(result, ParseError):
+            lines.append(f"- parse_error: {result.reason}")
+        else:
+            paths = [p for p, _ in (getattr(result, "files", None) or [])]
+            lines.append(f"- files: {len(paths)}"
+                         + (" — " + ", ".join(paths) if paths else ""))
+            errors = list(getattr(result, "apply_errors", None) or [])
+            failures = list(getattr(result, "apply_failures", None) or [])
+            lines.append(f"- apply_errors: {len(errors)}")
+            if errors:
+                lines += ["", "## Apply failures", ""]
+                for i, err in enumerate(errors):
+                    f = failures[i] if i < len(failures) else {}
+                    lines += [f"### {i + 1}. `{f.get('path') or '?'}` "
+                              f"block #{f.get('block', 0)} — "
+                              f"{f.get('reason') or 'unknown'}", "", err, ""]
+                    search = f.get("search") or ""
+                    if search:
+                        lines += [f"SEARCH (complete, "
+                                  f"{len(search.splitlines())} line(s)):",
+                                  "", search.rstrip("\n"), ""]
+        raw = getattr(result, "raw", None) or ""
+        lines += ["", f"## Raw response ({len(raw)} chars)", "",
+                  _RAW_RESPONSE_DELIMITER, raw]
+        (spec_dir / _IMPLEMENTER_RESPONSE_FILE).write_text("\n".join(lines))
+    except Exception:
+        logger.warning("spec dir %s: could not persist the implementer "
+                       "response", spec_dir, exc_info=True)
+
+
 def _route_unappliable_edits(db: Database, spec: Spec, task,
-                             errors: "list[str]") -> None:
+                             errors: "list[str]",
+                             failures: "list[dict] | None" = None) -> None:
     """Route unappliable diff-based edits back to the implementer (DEV-581).
 
     Uses the same channel a build failure does: a synthetic REJECTED code_review
@@ -3897,16 +3968,27 @@ def _route_unappliable_edits(db: Database, spec: Spec, task,
     implementer attempt with the retry budget applied unchanged. No files were
     written, so there is nothing to overwrite or partially apply. At budget
     exhaustion it hands off to synthesis exactly like the build-failure path.
+
+    DEV-637: ``failures`` (ImplementerResult.apply_failures, parallel to
+    ``errors``) is recorded on the event as ``errors_full`` — path, block,
+    reason and the COMPLETE SEARCH text — while ``errors`` and the journal
+    line keep their one-line summaries.
     """
     feedback = _edit_apply_feedback(errors)
     logger.warning("spec %s: %d edit block(s) did not apply — rotating "
                    "implementer without a human gate: %s", spec.id, len(errors),
                    "; ".join(e.splitlines()[0] for e in errors[:3]))
+    payload = {"role": "implementer", "model_call": False,
+               "anomaly": "unappliable_edits",
+               "errors": [e.splitlines()[0] for e in errors[:8]],
+               "retry": task.retry_count}
+    if failures:
+        payload["errors_full"] = [
+            {"path": f.get("path", ""), "block": f.get("block", 0),
+             "reason": f.get("reason", ""), "search": f.get("search", "")}
+            for f in failures[:8]]
     db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
-                    payload={"role": "implementer", "model_call": False,
-                             "anomaly": "unappliable_edits",
-                             "errors": [e.splitlines()[0] for e in errors[:8]],
-                             "retry": task.retry_count})
+                    payload=payload)
     if task.retry_count >= MAX_RETRIES:
         logger.error("spec %s: unappliable-edit retry budget exhausted (%d/%d) "
                      "— handing to synthesis", spec.id, task.retry_count,

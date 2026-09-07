@@ -1018,6 +1018,11 @@ class ImplementerResult:
     # written — the orchestrator routes it back to the implementer. Always empty
     # when diff-based edits are off (the whole-file path never populates it).
     apply_errors: list[str] = field(default_factory=list)
+    # DEV-637: the structured twin of apply_errors, parallel and same order —
+    # one dict per failure with ``path``, ``block`` (1-based, 0 = file-level),
+    # ``reason`` and the COMPLETE ``search`` text (apply_errors previews only
+    # its first lines). Plain dicts so this module stays free of apply_edits.
+    apply_failures: list[dict] = field(default_factory=list)
 
 
 @dataclass
