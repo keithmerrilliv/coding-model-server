@@ -704,7 +704,7 @@ def _fetch_protected_files_for_spec(spec: Spec) -> list[tuple[str, str]]:
 
 
 def _fetch_existing_files_for_spec(
-    spec: Spec, spec_md: str, extra_paths: "tuple | list" = (),
+    spec: Spec, spec_md: str, extra_paths: "tuple | list" = (), *, role: str = "implementer",
 ) -> list[tuple[str, str]]:
     """Current contents of the files this spec will overwrite (DEV-492).
 
@@ -744,9 +744,7 @@ def _fetch_existing_files_for_spec(
     try:
         files, problems = test_runner.fetch_repo_files(repo, candidates, base_ref)
     except Exception as e:  # never let a read failure kill the spec
-        logger.warning("spec %s: existing-file read failed (%s); the "
-                       "implementer will not see the files it must modify",
-                       spec.id, e)
+        logger.warning("spec %s: existing-file read failed (%s); the %s will not see the files it must modify", spec.id, e, role)
         return []
     if not files and test_runner.problems_indicate_runner_outage(
             problems, candidates):
@@ -760,12 +758,12 @@ def _fetch_existing_files_for_spec(
         logger.warning("spec %s: existing-file read problem — %s",
                        spec.id, problem)
     if files:
-        logger.info("spec %s: supplied %d existing file(s) to the implementer: %s",
-                    spec.id, len(files), ", ".join(p for p, _ in files))
+        logger.info("spec %s: supplied %d existing file(s) to the %s: %s",
+                    spec.id, len(files), role, ", ".join(p for p, _ in files))
     elif declared:
         logger.warning("spec %s: %d file(s) marked modify but none could be "
-                       "read — implementer is working blind", spec.id,
-                       len(declared))
+                       "read — %s is working blind", spec.id,
+                       len(declared), role)
     return files
 
 
@@ -1508,7 +1506,8 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
     # (run 16) or refuses to design and asks to examine files (run 20).
     try:
         design_existing = _fetch_existing_files_for_spec(
-            spec, spec_md, extra_paths=_planned_implement_outputs(spec))
+            spec, spec_md, extra_paths=_planned_implement_outputs(spec),
+            role="architect")
     except RunnerOutageAtImplement as e:
         _requeue_implement_for_runner_outage(
             db, spec, task, str(e), phase="design_existing_fetch")
