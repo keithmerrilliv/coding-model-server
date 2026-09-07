@@ -622,7 +622,10 @@ IMPLEMENTER_EDIT_MODE_INSTRUCTIONS = textwrap.dedent("""\
     NEW files — any path NOT shown under "Current contents of files you must
     modify" — are unchanged: emit each as a complete
     <<<FILE: path>>> ... <<<END_FILE>>> whole-file block, exactly as the Output
-    format section describes.
+    format section describes. The message's "## File modes — MANDATORY"
+    section names every planned path with the ONE form it may take; a
+    SEARCH/REPLACE block for a NEW path is rejected outright — there is no
+    content for it to search.
     """)
 
 # DEV-604: the per-file (manifest-mode) variant of the edit-mode instructions
@@ -1023,6 +1026,10 @@ class ImplementerResult:
     # ``reason`` and the COMPLETE ``search`` text (apply_errors previews only
     # its first lines). Plain dicts so this module stays free of apply_edits.
     apply_failures: list[dict] = field(default_factory=list)
+    # DEV-638: how every edit block landed — ``path``, ``block``, ``tier``
+    # (exact / trailing_ws / indent / fuzzy / whole_from_empty_search),
+    # ``ratio``, ``line``. Empty on the whole-file path.
+    edit_applies: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -1655,6 +1662,31 @@ PROTECTED_FILES_MAX_CHARS = int(
     os.getenv("AUTONOMOUS_PROTECTED_FILES_MAX_CHARS", "60000"))
 
 
+def _render_file_modes(existing_paths: list[str],
+                       new_paths: list[str]) -> str:
+    """Per-path MANDATORY output mode for edit-mode prompts (DEV-638 item 2).
+
+    Run 21 spent five of eleven rotations on SEARCH/REPLACE blocks aimed at a
+    test file that did not exist yet; run 17 had hit the same class. The
+    split between existing and new paths is known before dispatch, so the
+    prompt states it per path instead of leaving the model to infer it from
+    which heading a file appeared under.
+    """
+    out = ["## File modes — MANDATORY\n\n",
+           "Each planned path has exactly ONE permitted output form:\n\n"]
+    for p in existing_paths:
+        out.append(f"- EDIT ONLY — existing: `{p}` — SEARCH/REPLACE edit blocks "
+                   "against its shown content; never a <<<FILE:>>> block.\n")
+    for p in new_paths:
+        out.append(f"- EMIT WHOLE — new file: `{p}` — one complete "
+                   f"<<<FILE: {p}>>> ... <<<END_FILE>>> block; never "
+                   "SEARCH/REPLACE blocks.\n")
+    out.append("\nAny other path you create is NEW: emit it whole. An edit "
+               "block aimed at a NEW path is rejected — there is no content "
+               "for it to search.\n\n")
+    return "".join(out)
+
+
 def _render_existing_files(existing_files: list[tuple[str, str]],
                            *, edit_mode: bool = False) -> str:
     """Current repo contents, framed as ground truth the model must preserve.
@@ -1720,6 +1752,7 @@ def build_implementer_message(
     reference_files: list[tuple[str, str]] | None = None,
     approval_conditions: str | None = None,
     edit_mode: bool = False,
+    new_files: list[str] | None = None,
 ) -> list[dict[str, str]]:
     # DEV-581: edit-mode only changes anything when there ARE existing files to
     # edit. With no existing files the response is all new whole files, so the
@@ -1760,6 +1793,14 @@ def build_implementer_message(
     if existing_files:
         user_parts.append("\n\n")
         user_parts.append(_render_existing_files(existing_files, edit_mode=edit_mode))
+        if edit_mode:
+            # DEV-638: only in edit mode, so the flag-off prompt stays
+            # byte-identical. ``new_files`` is the plan's implement outputs
+            # minus the existing set; absent, only the EDIT ONLY rows render.
+            existing_paths = [p for p, _ in existing_files]
+            user_parts.append(_render_file_modes(
+                existing_paths,
+                [p for p in (new_files or []) if p not in existing_paths]))
     if reference_files:
         user_parts.append("\n\n")
         user_parts.append(_render_reference_files(reference_files))

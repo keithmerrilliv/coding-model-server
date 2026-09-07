@@ -2032,12 +2032,18 @@ def _generate_implementation(
             "spec %s: diff-based edits configured and the spec names existing "
             "files, but none were supplied — edit mode DISARMED, implementer "
             "will re-emit whole files", spec.id)
+    # DEV-638: the plan's implement outputs that are NOT existing files are the
+    # new ones — the prompt names each path's mandatory form so a NEW path
+    # never draws SEARCH/REPLACE blocks (five of run 21's eleven rotations).
+    existing_paths = {p for p, _ in existing_files}
+    new_files = [p for p in _planned_implement_outputs(spec)
+                 if p not in existing_paths]
     messages = build_implementer_message(
         spec_md, design_md, rejection_notes=rejection_notes,
         clarifications=clarifications, existing_files=existing_files,
         reference_files=_fetch_protected_files_for_spec(spec),
         approval_conditions=approval_conditions,
-        edit_mode=edit_mode,
+        edit_mode=edit_mode, new_files=new_files,
     )
     impl_max_tokens = executor.implementer_max_tokens_for(design_md)
     chosen_agent = _ctx_capable_agent(spec.id, chosen_agent, messages,
@@ -2083,7 +2089,9 @@ def _resolve_edit_mode_response(
         files=resolved.files, raw=raw, duplicate_paths=dup,
         apply_errors=resolved.errors,
         # DEV-637: parallel to apply_errors, with the COMPLETE SEARCH text.
-        apply_failures=[dataclasses.asdict(f) for f in resolved.failures])
+        apply_failures=[dataclasses.asdict(f) for f in resolved.failures],
+        # DEV-638: which ladder tier landed each block.
+        edit_applies=[dataclasses.asdict(a) for a in resolved.applied])
 
 
 def _persist_manifest(spec_dir, entries) -> None:
@@ -3309,7 +3317,9 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
                              # went to; fall back to the rotation pick when no
                              # call reported one (every call raised).
                              "agent": chosen_agent or task.agent,
-                             **executor.agent_event_fields(tally)})
+                             **executor.agent_event_fields(tally),
+                             # DEV-638: per-tier counts + the non-exact applies.
+                             **_edit_apply_event_fields(result)})
 
     # DEV-637: keep the raw response and its apply outcome for EVERY attempt,
     # before any routing decision below can discard it.
@@ -3661,6 +3671,10 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
             f"```\n{_extract_actionable_test_output(build_output, build_framework)}\n```\n"
             "\n</details>\n"
         )
+    # DEV-638: a fuzzy or indent-relative apply landed an edit the model did
+    # not transcribe exactly — right far more often than wrong, but the human
+    # should look at exactly those spots.
+    tolerant_block = _tolerant_apply_block(getattr(result, "edit_applies", None))
     db.update_task_status(task.id, TaskStatus.BLOCKED_ON_REVIEW)
     db.create_gate(
         spec_id=spec.id,
@@ -3672,7 +3686,7 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
             f"Retry: {task.retry_count}\n"
             f"{_build_check_line(build_passed, build_output, build_framework)}\n"
             f"The implementer produced the following files:\n\n{file_list}\n"
-            f"{missing_block}{protected_block}{build_excerpt}\n"
+            f"{missing_block}{protected_block}{tolerant_block}{build_excerpt}\n"
             f"Approve to proceed to testing, or reject with notes.\n"
         ),
     )
@@ -3894,8 +3908,70 @@ def _edit_apply_feedback(errors: "list[str]") -> str:
         "files you must modify\" into each SEARCH block, or widen the block with "
         "more surrounding lines until it is unique. Re-emit the corrected "
         "SEARCH/REPLACE edit blocks for these files; leave every other file "
-        "exactly as it is."
+        "exactly as it is. A path marked NEW above (see \"## File modes — "
+        "MANDATORY\" in your task) must be emitted as ONE complete "
+        "<<<FILE: path>>> ... <<<END_FILE>>> block — never as edit blocks."
     )
+
+
+def _tolerant_apply_block(applies: "list[dict] | None") -> str:
+    """Gate-prompt block naming edits that landed on a non-exact ladder tier
+    (DEV-638), or "" when every block matched byte-for-byte."""
+    nonexact = [a for a in (applies or [])
+                if a.get("tier") not in (None, apply_edits.TIER_EXACT)]
+    if not nonexact:
+        return ""
+    rows = []
+    for a in nonexact:
+        row = f"- `{a.get('path')}` block #{a.get('block')}: {a.get('tier')}"
+        if a.get("tier") == apply_edits.TIER_FUZZY:
+            row += f" (similarity {float(a.get('ratio') or 0):.2f})"
+        if a.get("line"):
+            row += f" at line {a['line']}"
+        rows.append(row)
+    return (
+        "\n\n⚠ **EDITS APPLIED WITH TOLERANT MATCHING** (DEV-638) — these "
+        "SEARCH anchors did not match byte-for-byte; the applier matched them "
+        "ignoring trailing whitespace or indentation, by similarity, or took "
+        "an empty-SEARCH block as a whole new file. Check the diff at each:\n\n"
+        + "\n".join(rows) + "\n"
+    )
+
+
+def _edit_apply_event_fields(result) -> dict:
+    """Event-payload fields for how an attempt's edit blocks landed (DEV-638):
+    ``edit_tiers`` counts per tier, ``edit_applies_nonexact`` lists the rest.
+    Empty on whole-file attempts, so their payloads are unchanged."""
+    applies = getattr(result, "edit_applies", None) or []
+    if not applies:
+        return {}
+    tiers: dict[str, int] = {}
+    for a in applies:
+        tier = str(a.get("tier") or "?")
+        tiers[tier] = tiers.get(tier, 0) + 1
+    return {"edit_tiers": tiers,
+            "edit_applies_nonexact": [a for a in applies
+                                      if a.get("tier") != apply_edits.TIER_EXACT]}
+
+
+def _tolerant_apply_summary_from_events(db: Database, spec_id: str) -> str:
+    """The latest implementer attempt's non-exact applies, as a gate block.
+
+    Reads the most recent implementer generation event (the one carrying
+    ``result_kind``); an attempt that applied no edit blocks yields "".
+    Never raises — a gate must open even if the event log is odd."""
+    try:
+        for ev in db.list_events_by_kind(spec_id=spec_id,
+                                         kind=EventKind.AGENT_RAN, limit=50):
+            payload = getattr(ev, "payload", None) or json.loads(
+                getattr(ev, "payload_json", None) or "{}")
+            if payload.get("role") != "implementer" or "result_kind" not in payload:
+                continue
+            return _tolerant_apply_block(payload.get("edit_applies_nonexact"))
+    except Exception:
+        logger.debug("spec %s: could not summarise edit applies", spec_id,
+                     exc_info=True)
+    return ""
 
 
 _IMPLEMENTER_RESPONSE_FILE = "implementer_response.md"
@@ -3937,6 +4013,17 @@ def _persist_implementer_response(spec_dir: Path, task, agent: str, result,
             errors = list(getattr(result, "apply_errors", None) or [])
             failures = list(getattr(result, "apply_failures", None) or [])
             lines.append(f"- apply_errors: {len(errors)}")
+            applies = list(getattr(result, "edit_applies", None) or [])
+            if applies:
+                lines += ["", "## Applied edits", ""]
+                for a in applies:
+                    row = (f"- `{a.get('path')}` block #{a.get('block')}: "
+                           f"{a.get('tier')}")
+                    if a.get("tier") == apply_edits.TIER_FUZZY:
+                        row += f" (similarity {float(a.get('ratio') or 0):.2f})"
+                    if a.get("line"):
+                        row += f" at line {a['line']}"
+                    lines.append(row)
             if errors:
                 lines += ["", "## Apply failures", ""]
                 for i, err in enumerate(errors):
@@ -4830,6 +4917,9 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
             "PASS, but the test run failed — test results are canonical "
             "(DEV-405).**\n\n" + result.review_md)
 
+    # DEV-638: the implementer's non-exact edit applies, if any, belong on the
+    # gate that ships the result as much as on the one that reviewed it.
+    tolerant_block = _tolerant_apply_summary_from_events(db, spec.id)
     if tests_passed and result.verdict == "PASS":
         # Everything looks good — create release_approval gate
         db.update_task_status(task.id, TaskStatus.BLOCKED_ON_REVIEW)
@@ -4840,7 +4930,7 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
             prompt_md=(
                 f"## Release approval: {spec.title}\n\n"
                 f"Spec ID: `{spec.id}`\n\n"
-                f"Tests **PASSED**. Reviewer verdict: **PASS**.\n\n"
+                f"Tests **PASSED**. Reviewer verdict: **PASS**.{tolerant_block}\n\n"
                 f"### Review Report\n\n{result.review_md}\n\n"
                 f"### Test Output\n\n```\n{test_output[:3000]}\n```\n\n"
                 f"Approve to mark this spec as DONE, or reject to send "
@@ -4870,7 +4960,7 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
                     f"Tests **PASSED**, but the reviewer's static verdict is "
                     f"**FAIL**. The findings below are UNCONFIRMED by the "
                     f"test run (DEV-560) — judge them on their merits before "
-                    f"trusting them.\n\n"
+                    f"trusting them.{tolerant_block}\n\n"
                     f"### Review Report\n\n{result.review_md}\n\n"
                     f"### Test Output\n\n```\n{test_output[:3000]}\n```\n\n"
                     f"Approve to mark this spec as DONE, or reject to send "
