@@ -3168,6 +3168,40 @@ def _local_swift_precheck(db: Database, spec: Spec, task, files,
     return result.summary(), result.report()
 
 
+def _record_tested_manifest(spec_dir: Path, files: "list[tuple[str, str]]",
+                            payload: dict) -> None:
+    """Record SHA-256 hashes of the artifacts a passing build check verified.
+
+    DEV-602 split B: run 17 delivered files that were not the files the build
+    check had tested, and nothing recorded what WAS tested. On a passing
+    pre-gate check this writes `tested_manifest.json` (flat map of
+    workspace-relative path → sha256 hex) into the spec workspace as the
+    operative copy a delivery verifier reads, and mirrors the same map into
+    the pre_gate_build_check event payload under ``artifact_hashes``.
+
+    Hashes are computed from the bytes ON DISK — the manifest must describe
+    what the check actually verified, not the strings the implementer
+    intended to write. Files listed but absent on disk are skipped. Never
+    raises out of the daemon loop; failures are logged loudly.
+
+    Authored by run 21 (spec_04658e97, synthesis from deep_implementer
+    attempts); hand-landed after the run failed on unappliable edits.
+    """
+    try:
+        artifact_hashes: dict = {}
+        for rel_path, _ in files:
+            file_path = spec_dir / rel_path
+            if file_path.exists():
+                artifact_hashes[rel_path] = hashlib.sha256(
+                    file_path.read_bytes()).hexdigest()
+        manifest_path = spec_dir / "tested_manifest.json"
+        manifest_path.write_text(json.dumps(artifact_hashes, indent=2))
+        payload["artifact_hashes"] = artifact_hashes
+    except Exception:
+        logger.error("spec dir %s: tested-manifest recording failed",
+                     spec_dir, exc_info=True)
+
+
 def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
     # Wipe artifacts from earlier retries so the new implementer starts
     # from a clean slate. No-op on retry-0.
@@ -3418,24 +3452,30 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
                 build_reason = None
                 blocking_warnings = []
 
+            build_payload = {"phase": "pre_gate_build_check",
+                             "passed": build_passed if not build_reason else False,
+                             "build_failed": build_reason is not None,
+                             # DEV-547/DEV-529: warnings become queryable
+                             # rather than living only in the raw log.
+                             "warnings": len(build_warnings),
+                             "blocking_warnings": [
+                                 {"path": w.path, "line": w.line,
+                                  "diag_id": w.diag_id,
+                                  "message": w.message}
+                                 for w in blocking_warnings],
+                             # DEV-548: "compiled then crashed" is its own
+                             # outcome and DEV-529's taxonomy will want it
+                             # separated from a build failure.
+                             "test_process_crashed":
+                                 _detect_test_process_crash(build_output),
+                             "retry": task.retry_count}
+            # DEV-602 split B: a passing check records exactly what it
+            # verified, into the same payload this event carries. A failing
+            # check records nothing and leaves any prior manifest untouched.
+            if build_passed and not build_reason:
+                _record_tested_manifest(spec_dir, result.files, build_payload)
             db.record_event(EventKind.TEST_RAN, spec_id=spec.id, task_id=task.id,
-                            payload={"phase": "pre_gate_build_check",
-                                     "passed": build_passed if not build_reason else False,
-                                     "build_failed": build_reason is not None,
-                                     # DEV-547/DEV-529: warnings become queryable
-                                     # rather than living only in the raw log.
-                                     "warnings": len(build_warnings),
-                                     "blocking_warnings": [
-                                         {"path": w.path, "line": w.line,
-                                          "diag_id": w.diag_id,
-                                          "message": w.message}
-                                         for w in blocking_warnings],
-                                     # DEV-548: "compiled then crashed" is its own
-                                     # outcome and DEV-529's taxonomy will want it
-                                     # separated from a build failure.
-                                     "test_process_crashed":
-                                         _detect_test_process_crash(build_output),
-                                     "retry": task.retry_count})
+                            payload=build_payload)
 
         # DEV-478: keep the runner's own words whatever the outcome. Previously
         # this was written only on the diagnostic path below, so the one case
