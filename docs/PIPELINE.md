@@ -217,7 +217,9 @@ run before the bytes land:
 
 Every refusal and rename is one `AGENT_RAN` anomaly event (`artifact_ledger`)
 and a block on the next gate; the synthesis release gate also lists each
-synthesized file's line count against the repository version. Diagnostics
+synthesized file's line count against the repository version. Every landed
+write ends with a newline — the whole-file parser strips the final one and
+the ledger restores it (DEV-641). Diagnostics
 (test output, failure reports, build logs) bypass the guards through
 `ledger.note` and are never artifacts. The synthesis corpus is built from the
 ledger — the files each attempt actually wrote — with a filtered directory

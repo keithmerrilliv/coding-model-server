@@ -93,6 +93,13 @@ REFUSALS = (REFUSED_COLLISION, REFUSED_EMPTYING, REFUSED_SHRINK)
 _LANDED = (ACTION_WRITTEN, ACTION_RENAMED, ACTION_RESTORED)
 
 
+def _with_trailing_newline(content: str) -> str:
+    """Ensure content ends with a newline, unless it's empty."""
+    if not content or content.endswith('\n'):
+        return content
+    return content + '\n'
+
+
 def sha256_text(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8", errors="replace")).hexdigest()
 
@@ -300,6 +307,9 @@ class ArtifactLedger:
               task_id: "str | None" = None, retry: int = 0) -> WriteOutcome:
         """Write one artifact, subject to the guards. Never raises on a guard;
         a traversal path raises ValueError like artifact_path always did."""
+        # Apply trailing newline normalization as the first step.
+        content = _with_trailing_newline(content)
+
         target = rel_path
         prior = self.producer(rel_path)
         prior_role = prior.role if prior else None
@@ -384,6 +394,9 @@ class ArtifactLedger:
                 task_id: "str | None" = None, retry: int = 0) -> WriteOutcome:
         """Put back bytes the ledger already vouched for (snapshot restore,
         repair rollback). No guards: the content was a landed write."""
+        # Apply trailing newline normalization as the first step.
+        content = _with_trailing_newline(content)
+
         abs_path = artifact_path(self.spec_dir, rel_path)
         abs_path.parent.mkdir(parents=True, exist_ok=True)
         abs_path.write_text(content)
@@ -496,7 +509,7 @@ class ArtifactLedger:
         """Per-file line counts against the repository version (DEV-636):
         61 vs 6,130 must read as a red flag on the gate."""
         rows = []
-        for rel in paths:
+        for rel in dict.fromkeys(paths):  # artifact rows repeat across retries
             content = self._read(rel)
             if content is None:
                 continue

@@ -482,10 +482,10 @@ class TestSpecShapeFaults:
         assert fetched == []
         prompt = model.calls[0].messages[-1]["content"]
         assert "## File modes" not in prompt
-        # Whole-file blocks are written as parsed: the parser strips the
-        # trailing newline, and nothing puts it back (DEV-641).
+        # The parser strips the trailing newline; the ledger restores it
+        # (DEV-641, written by run 24).
         from seam_harness import DAEMON_STUB_IMPLEMENTED
-        assert workspace_files(db, spec.id)[DAEMON_PATH] == DAEMON_STUB_IMPLEMENTED.rstrip("\n")
+        assert workspace_files(db, spec.id)[DAEMON_PATH] == DAEMON_STUB_IMPLEMENTED
 
     def test_reviewer_same_path_write_is_renamed(self, db, model, runner):
         """DEV-602 / DEV-642: the reviewer's file at the implementer's path
@@ -502,7 +502,7 @@ class TestSpecShapeFaults:
 
         assert out.reason == "waiting"
         files = workspace_files(db, spec.id)
-        assert files[TEST_PATH] == TEST_FILE.rstrip("\n")
+        assert files[TEST_PATH] == TEST_FILE
         renamed = "tests/test_reviewer_existing_fetch_role_log.py"
         assert "reviewer rewrote this" in files[renamed]
         manifest = json.loads(files["tested_manifest.json"])
@@ -528,7 +528,7 @@ class TestSpecShapeFaults:
 
         assert out.reason == "waiting"
         files = workspace_files(db, spec.id)
-        assert files[TEST_PATH] == TEST_FILE.rstrip("\n")
+        assert files[TEST_PATH] == TEST_FILE
         assert not any("reviewer rewrote this" in c for c in files.values())
         assert "REFUSED (collision policy: refuse)" in out.waiting_on[0].prompt_md
 

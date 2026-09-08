@@ -151,9 +151,10 @@ class TestShrink:
         (ledger.spec_dir / "src").mkdir(parents=True)
         (ledger.spec_dir / "src/big.py").write_text(STUB)
         (ledger.spec_dir / "src/new.py").write_text(CODE)
-        block = ledger.size_block(["src/big.py", "src/new.py"], "Sizes")
+        block = ledger.size_block(["src/big.py", "src/new.py", "src/big.py"], "Sizes")
         assert "2 line(s) vs 180" in block and "far smaller" in block
         assert "6 line(s) vs 6" in block
+        assert block.count("`src/big.py`") == 1  # rows repeat across retries; the table must not
 
 
 class TestRestoreAndReads:
