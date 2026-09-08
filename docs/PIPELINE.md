@@ -278,6 +278,23 @@ Why each branch exists, since every one of them is a scar:
 
 ## 6. Where a failure goes, and who pays
 
+### First question: was there a verdict?
+
+Before any routing below, every failed attempt goes through one classifier
+(`outcome.classify_*`) and one disposition (`outcome.dispose`, DEV-629). The
+question it asks is whether the model's output was ever evaluated:
+
+| Outcome | Classes | What happens |
+|---|---|---|
+| **no-verdict** | `transport`, `http_refusal`, `server_malformed`, `empty_completion`, `truncated`, `runner_outage`, `sandbox_provisioning`, `shutdown`, `unknown_exception` | The task goes back to PENDING with `retry_count` untouched. A 4xx, a truncation or an empty completion also advances the rotation (the next dispatch reaches a different agent) without spending the budget. After `AUTONOMOUS_NO_VERDICT_CAP` (5) consecutive no-verdicts on one attempt the task is parked behind a task-bound clarification gate that names the infrastructure; approve to re-run, reject to abort. Fetch-time runner outages are uncapped (DEV-620); the build-check outage keeps DEV-538's cap of three. |
+| **verdict** | `parse_failure`, `unappliable_edits`, `build_failure`, `tests_failed`, `review_rejected` | Charged against `MAX_RETRIES` with a synthetic rejected `code_review` gate carrying the feedback (the diagram below); at exhaustion every verdict class reaches synthesis. A reviewer parse failure is charged to the reviewer's own re-run budget first, then to the implementer. |
+| **terminal** | `synthesis_failed`, `design_exhausted`, `aborted` | The only branch that fails a spec. It closes every task row with it, so a terminal spec never leaves a task claiming to be RUNNING (DEV-532). |
+
+Each disposition is one `failure_classified` event (`cls`, `outcome`,
+`disposition`, `retry`, `consecutive`, `signature`) — the queryable taxonomy.
+The supervisor, when enabled, is consulted inside `dispose` for rejected
+gates and failed test runs only, and only its own decisions bypass the table.
+
 Same failure, three destinations, decided by evidence rather than by state.
 
 ```mermaid
@@ -334,6 +351,7 @@ table to read first when a run ends somewhere surprising.
 | Warning blocking | on | `AUTONOMOUS_BLOCK_ON_BUILD_WARNINGS` | The whole WARNING BLOCK intercept in diagram 5. `0` disables it. |
 | Targeted-retry repeats | 1 | `AUTONOMOUS_TARGETED_RETRY_MAX_REPEATS` | Identical targeted failures before the retry widens to a full regeneration. |
 | Manifest threshold | 8 | `AUTONOMOUS_MANIFEST_FILE_THRESHOLD` | Files (or declared units) a design enumerates before the implementer forks to manifest mode (diagram 4). |
+| No-verdict cap | 5 | `AUTONOMOUS_NO_VERDICT_CAP` | Consecutive no-verdict failures on one attempt (section 6) before a task is parked behind an infrastructure gate. |
 | Collision policy | rename | `AUTONOMOUS_COLLISION_POLICY` | What the artifact ledger does with a cross-role write at a produced path (section 4): `rename` or `refuse`. |
 | Shrink refusal | 0.25 / 40 | `AUTONOMOUS_SHRINK_REFUSE_RATIO`, `AUTONOMOUS_SHRINK_MIN_BASELINE_LINES` | A write under this fraction of the repository file's lines and declarations is refused; baselines smaller than the line floor are never checked. |
 | Supervisor transitions | 8 | `AUTONOMOUS_MAX_SUPERVISOR_TRANSITIONS` | Budget for the supervisor, which is **off by default** (`AUTONOMOUS_SUPERVISOR=0`). When enabled, it replaces the fixed rejection edges in diagram 3 with an agent decision; nothing else in this document changes. |

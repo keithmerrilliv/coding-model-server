@@ -94,7 +94,10 @@ def _boom(*a, **k):
         "413 Client Error: Request Entity Too Large for url: x")
 
 
-def test_http_refusal_rotates_instead_of_failing(db, monkeypatch):
+def test_http_refusal_is_no_verdict(db, monkeypatch):
+    """DEV-624 → DEV-629: a refused request judged nothing. The task goes back
+    to PENDING with its budget untouched; a 4xx also advances the rotation
+    so the next dispatch reaches an agent with a bigger window."""
     spec, task, spec_dir = _spec_with_task(db)
     monkeypatch.setattr(d, "_generate_implementation", _boom)
 
@@ -102,15 +105,18 @@ def test_http_refusal_rotates_instead_of_failing(db, monkeypatch):
 
     after = db.get_task(task.id)
     assert after.status == TaskStatus.PENDING
-    assert after.retry_count == 1
+    assert after.retry_count == 0
     assert db.get_spec(spec.id).status != SpecStatus.FAILED
-    gates = [g for g in db.list_gates_for_spec(spec.id)
-             if g.gate_type is GateType.CODE_REVIEW]
-    assert len(gates) == 1
-    assert "never reached the model" in gates[0].reviewer_notes
+    assert not [g for g in db.list_gates_for_spec(spec.id)
+                if g.gate_type is GateType.CODE_REVIEW]
+    ev = db.list_events_by_kind(spec_id=spec.id, kind=d.EventKind.FAILURE_CLASSIFIED)
+    payload = ev[0].payload
+    assert payload["cls"] == "http_refusal" and payload["outcome"] == "no_verdict"
 
 
-def test_refusal_with_exhausted_budget_fails_the_spec(db, monkeypatch):
+def test_refusal_with_exhausted_budget_still_does_not_fail(db, monkeypatch):
+    """The budget is for verdicts; a refusal at retry 5/5 is still nothing
+    judged and must not end the spec (DEV-629)."""
     spec, task, spec_dir = _spec_with_task(db)
     for _ in range(d.MAX_RETRIES):
         db.increment_task_retry(task.id)
@@ -118,5 +124,6 @@ def test_refusal_with_exhausted_budget_fails_the_spec(db, monkeypatch):
 
     d._run_implementer(db, db.get_spec(spec.id), db.get_task(task.id), spec_dir)
 
-    assert db.get_task(task.id).status == TaskStatus.FAILED
-    assert db.get_spec(spec.id).status is SpecStatus.FAILED
+    assert db.get_task(task.id).status == TaskStatus.PENDING
+    assert db.get_task(task.id).retry_count == d.MAX_RETRIES
+    assert db.get_spec(spec.id).status is not SpecStatus.FAILED

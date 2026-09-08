@@ -281,7 +281,12 @@ def _fingerprint(db: Database, spec_id: str, model: FakeModelServer,
     tasks = tuple((t.id, t.status, t.retry_count)
                   for t in db.list_tasks_for_spec(spec_id))
     gates = tuple((g.id, g.status) for g in db.list_gates_for_spec(spec_id))
-    return (spec.status, tasks, gates, len(model.calls),
+    # A no-verdict disposition that made no model call and no dispatch is
+    # still progress (DEV-629): count its events, or a daemon fault that
+    # requeues on every tick reads as a stall.
+    classified = len(db.list_events_by_kind(
+        spec_id=spec_id, kind=EventKind.FAILURE_CLASSIFIED, limit=500))
+    return (spec.status, tasks, gates, len(model.calls), classified,
             len(runner.test_calls) if runner else 0,
             len(runner.fetch_calls) if runner else 0)
 

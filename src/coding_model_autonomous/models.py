@@ -84,6 +84,11 @@ class EventKind(str, Enum):
     TEST_RAN = "test_ran"                # subprocess test execution completed
     DAEMON_TICK = "daemon_tick"          # heartbeat for liveness checks
     SUPERVISOR_DECISION = "supervisor_decision"  # meta-orchestrator transition
+    # DEV-629: one record per failed attempt, written by outcome.dispose —
+    # the class (transport, truncation, parse failure, ...), the outcome
+    # (no_verdict / verdict / terminal) and what was done about it. This is
+    # the queryable failure taxonomy DEV-529 asked for.
+    FAILURE_CLASSIFIED = "failure_classified"
 
 
 # ── Records ──────────────────────────────────────────────────────────────────

@@ -193,7 +193,7 @@ def test_build_failure_respects_the_retry_budget(db, impl_spec):
     task = db.get_task(task.id)
     assert task.retry_count == d.MAX_RETRIES
 
-    with mock.patch.object(d, "_legacy_attempt_retry") as exhausted:
+    with mock.patch.object(d, "_synthesize_or_fail", return_value=None) as exhausted:
         _run(db, spec, task, spec_dir, build_passed=False,
              build_output=SWIFT_BUILD_FAILURE)
 

@@ -53,25 +53,33 @@ def test_start_task_read_timeout_is_also_recoverable(db):
     assert db.get_spec(spec.id).status is SpecStatus.EXECUTING
 
 
-def test_start_task_genuine_error_still_fails_spec(db):
-    """A non-transport exception is a real failure — still FAILs, as before."""
+def test_start_task_genuine_error_is_no_verdict(db):
+    """DEV-629: an exception the daemon itself raises is a daemon fault, not a
+    judgement on the code — the task is requeued with its budget untouched
+    (a run of them parks it behind a gate; see the seam tier)."""
     spec, task = _executing_spec_with_task(db)
     with mock.patch.object(d, "_run_implementer",
                            side_effect=ValueError("unparseable model output")):
         d._start_task(db, spec, task)
-    assert db.get_task(task.id).status is TaskStatus.FAILED
-    assert db.get_spec(spec.id).status is SpecStatus.FAILED
+    after = db.get_task(task.id)
+    assert after.status is TaskStatus.PENDING and after.retry_count == 0
+    assert db.get_spec(spec.id).status is SpecStatus.EXECUTING
+    ev = db.list_events_by_kind(spec_id=spec.id, kind=d.EventKind.FAILURE_CLASSIFIED)
+    assert ev[0].payload["cls"] == "unknown_exception"
 
 
-def test_start_task_http_error_still_fails_spec(db):
-    """A real HTTP error the server returned (not a transport failure) is not
-    in the recoverable set — it still FAILs."""
+def test_start_task_http_error_is_no_verdict(db):
+    """A 4xx/5xx the server returned is transport shaping — nothing was
+    judged (DEV-624 → DEV-629): requeued, never terminal."""
     spec, task = _executing_spec_with_task(db)
     with mock.patch.object(d, "_run_implementer",
                            side_effect=requests.HTTPError("500 persisted")):
         d._start_task(db, spec, task)
-    assert db.get_task(task.id).status is TaskStatus.FAILED
-    assert db.get_spec(spec.id).status is SpecStatus.FAILED
+    after = db.get_task(task.id)
+    assert after.status is TaskStatus.PENDING and after.retry_count == 0
+    assert db.get_spec(spec.id).status is SpecStatus.EXECUTING
+    ev = db.list_events_by_kind(spec_id=spec.id, kind=d.EventKind.FAILURE_CLASSIFIED)
+    assert ev[0].payload["cls"] == "http_refusal"
 
 
 # ── _process_pending_plan ────────────────────────────────────────────────────
@@ -94,9 +102,28 @@ def test_pending_plan_transport_error_stays_pending_plan(db):
     assert db.get_spec(spec.id).status is SpecStatus.PENDING_PLAN
 
 
-def test_pending_plan_genuine_error_fails_spec(db):
+def test_pending_plan_genuine_error_is_no_verdict(db):
+    """DEV-629: a planner call that raised produced no plan to judge — the
+    spec stays PENDING_PLAN (the next tick re-runs the planner) and the
+    fault is classified."""
     spec = _pending_plan_spec(db)
     with mock.patch.object(d, "call_planner",
                            side_effect=RuntimeError("planner blew up")):
         d._process_pending_plan(db, spec)
-    assert db.get_spec(spec.id).status is SpecStatus.FAILED
+    assert db.get_spec(spec.id).status is SpecStatus.PENDING_PLAN
+    ev = db.list_events_by_kind(spec_id=spec.id, kind=d.EventKind.FAILURE_CLASSIFIED)
+    assert ev[0].payload["cls"] == "unknown_exception"
+    assert ev[0].payload["phase"] == "planner"
+
+
+def test_pending_plan_no_verdicts_park_behind_a_gate_at_the_cap(db):
+    spec = _pending_plan_spec(db)
+    with mock.patch.object(d, "call_planner",
+                           side_effect=RuntimeError("planner blew up")):
+        for _ in range(6):
+            d._process_pending_plan(db, db.get_spec(spec.id))
+            if db.get_spec(spec.id).status is not SpecStatus.PENDING_PLAN:
+                break
+    assert db.get_spec(spec.id).status is SpecStatus.NEEDS_CLARIFICATION
+    gates = db.list_gates_for_spec(spec.id)
+    assert len(gates) == 1 and "Infrastructure gate" in gates[0].prompt_md

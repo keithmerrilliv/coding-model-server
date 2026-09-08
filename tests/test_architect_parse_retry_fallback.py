@@ -85,9 +85,10 @@ def test_parse_exhaustion_on_a_revision_falls_back_to_the_prior_design(db):
 
 # ── the fix must not become a catch-all ─────────────────────────────────────
 
-def test_parse_exhaustion_on_the_first_cycle_still_fails(db):
-    """No prior design (retry_count 0) means nothing to fall back to — the spec
-    must still FAIL rather than gate an absent design."""
+def test_parse_exhaustion_on_the_first_cycle_charges_a_revision(db):
+    """No prior design (retry_count 0) means nothing to fall back to. DEV-629:
+    real output that does not parse is a verdict — the architect is charged a
+    design revision with the parse reason as feedback, not the spec failed."""
     spec, task, spec_dir = _spec(db, retry_count=0)
     assert not (spec_dir / "design.md").exists()
 
@@ -95,12 +96,16 @@ def test_parse_exhaustion_on_the_first_cycle_still_fails(db):
             _all_parse_errors():
         d._run_architect(db, spec, task, spec_dir)
 
-    assert db.get_spec(spec.id).status is SpecStatus.FAILED
+    assert db.get_spec(spec.id).status is SpecStatus.EXECUTING
+    after = db.get_task(task.id)
+    assert after.status is TaskStatus.PENDING and after.retry_count == 1
+    assert "unparseable" in (spec_dir / "design_review_feedback.md").read_text()
 
 
-def test_parse_exhaustion_on_a_revision_with_no_prior_design_still_fails(db):
+def test_parse_exhaustion_on_a_revision_with_no_prior_design_charges_again(db):
     """A revision cycle but design.md is missing: genuinely nothing to carry
-    forward, so the original fail behavior is preserved."""
+    forward, so the verdict is charged like the first cycle; the budget, not
+    a single unparseable response, ends the spec."""
     spec, task, spec_dir = _spec(db, retry_count=1)
     assert not (spec_dir / "design.md").exists()
 
@@ -108,4 +113,14 @@ def test_parse_exhaustion_on_a_revision_with_no_prior_design_still_fails(db):
             _all_parse_errors():
         d._run_architect(db, spec, task, spec_dir)
 
+    assert db.get_spec(spec.id).status is SpecStatus.EXECUTING
+    assert db.get_task(task.id).retry_count == 2
+
+
+def test_parse_exhaustion_past_the_budget_is_terminal(db):
+    spec, task, spec_dir = _spec(db, retry_count=d.MAX_RETRIES)
+    with mock.patch.object(d, "call_agent", return_value="prose"), \
+            _all_parse_errors():
+        d._run_architect(db, spec, task, spec_dir)
     assert db.get_spec(spec.id).status is SpecStatus.FAILED
+    assert db.get_task(task.id).status is TaskStatus.FAILED
