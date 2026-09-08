@@ -187,6 +187,12 @@ class Database:
         sql = _SCHEMA_PATH.read_text()
         conn = self._conn()
         conn.executescript(sql)
+        # DEV-642: the artifact ledger records the writing role. Older
+        # databases predate the column; CREATE TABLE IF NOT EXISTS never
+        # adds it, so add it here, idempotently.
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(artifacts)")}
+        if "role" not in cols:
+            conn.execute("ALTER TABLE artifacts ADD COLUMN role TEXT")
         # Migration (DEV-144): idx_events_id duplicated the INTEGER PRIMARY
         # KEY rowid btree — pure insert overhead. Removed from schema.sql;
         # drop it from DBs created before the removal.
@@ -470,28 +476,35 @@ class Database:
 
     def create_artifact(self, *, spec_id: str, kind: ArtifactKind, path: str,
                         task_id: Optional[str] = None,
-                        sha256: Optional[str] = None) -> Artifact:
+                        sha256: Optional[str] = None,
+                        role: Optional[str] = None) -> Artifact:
         art_id = _new_id("artifact")
         now = utc_now()
         with self.transaction() as conn:
             conn.execute(
                 """
                 INSERT INTO artifacts (id, spec_id, task_id, kind, path,
-                                       sha256, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                                       sha256, role, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (art_id, spec_id, task_id, kind.value, path, sha256, _iso(now)),
+                (art_id, spec_id, task_id, kind.value, path, sha256, role,
+                 _iso(now)),
             )
+            payload: dict = {"kind": kind.value, "path": path}
+            if role:
+                payload["role"] = role
+            if sha256:
+                payload["sha256"] = sha256
             self._record_event(
                 conn,
                 EventKind.ARTIFACT_CREATED,
                 spec_id=spec_id,
                 task_id=task_id,
-                payload={"kind": kind.value, "path": path},
+                payload=payload,
             )
         return Artifact(
             id=art_id, spec_id=spec_id, task_id=task_id, kind=kind,
-            path=path, sha256=sha256, created_at=now,
+            path=path, sha256=sha256, role=role, created_at=now,
         )
 
     def list_artifacts(self, spec_id: str,
@@ -788,6 +801,7 @@ def _row_to_artifact(row: sqlite3.Row) -> Artifact:
         kind=ArtifactKind(row["kind"]),
         path=row["path"],
         sha256=row["sha256"],
+        role=row["role"] if "role" in row.keys() else None,
         created_at=_parse_iso_required(row["created_at"]),
     )
 

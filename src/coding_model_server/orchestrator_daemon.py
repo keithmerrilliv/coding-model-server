@@ -110,7 +110,6 @@ from coding_model_autonomous.executor import (
     ImplementerResult,
     MAX_RETRIES,
     ParseError,
-    _write_artifact,
     build_architect_message,
     build_implementer_message,
     build_manifest_message,
@@ -125,6 +124,9 @@ from coding_model_autonomous.executor import (
     summarize_written_files,
 )
 from coding_model_autonomous import supervisor as _supervisor
+from coding_model_autonomous.workspace import (
+    ACTION_RENAMED, ATTEMPT_ROLES, REFUSALS, ArtifactLedger,
+)
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
@@ -1140,6 +1142,61 @@ _ROLE_TO_GATE_TYPE = {
 _ROLE_ORDER = {"architect": 0, "implementer": 1, "reviewer": 2}
 
 
+def _note_baseline(db: Database, spec: Spec, files, role: str) -> None:
+    """DEV-642: remember the repository version of every file a role was
+    shown, so a later write (any role, including synthesis after every
+    attempt failed) is judged against the real file, not the prior write."""
+    if not files:
+        return
+    try:
+        n = ArtifactLedger.open(db, spec).record_baseline(files)
+    except Exception:
+        logger.warning("spec %s: could not record repository baselines from "
+                       "the %s fetch", spec.id, role, exc_info=True)
+        return
+    logger.info("spec %s: ledger recorded %d repository baseline(s) from the "
+                "%s fetch", spec.id, n, role)
+
+
+def _write_role_files(db: Database, spec: Spec, task, spec_dir, files,
+                      *, role: str, kind: ArtifactKind = ArtifactKind.CODE,
+                      retry: "int | None" = None):
+    """Write a role's files through the artifact ledger (DEV-642).
+
+    Returns ``(landed, outcomes)``: *landed* is the (path, content) list of
+    what actually reached the workspace, with FINAL paths (a collision under
+    the rename policy lands at a sibling path), so the tested manifest, the
+    reviewer's file list and delivery all describe what is on disk. Every
+    refusal and rename is recorded on one AGENT_RAN anomaly event.
+    """
+    ledger = ArtifactLedger.open(db, spec, spec_dir)
+    retry = task.retry_count if retry is None else retry
+    landed, outcomes = [], []
+    for rel_path, content in files:
+        out = ledger.write(rel_path, content, role=role, kind=kind,
+                           task_id=task.id, retry=retry)
+        outcomes.append(out)
+        if out.ok:
+            landed.append((out.path, content))
+    refused = [o for o in outcomes if o.refused]
+    renamed = [o for o in outcomes if o.action == ACTION_RENAMED]
+    if refused or renamed:
+        db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
+                        payload={"role": role, "model_call": False,
+                                 "anomaly": "artifact_ledger",
+                                 "refused": [{"path": o.requested,
+                                              "action": o.action,
+                                              "prior_role": o.prior_role,
+                                              "detail": o.detail}
+                                             for o in refused],
+                                 "renamed": [{"path": o.requested,
+                                              "written_as": o.path,
+                                              "prior_role": o.prior_role}
+                                             for o in renamed],
+                                 "retry": retry})
+    return landed, outcomes
+
+
 def _crash_recoveries_used(db: Database, spec_id: str, task_id: str) -> int:
     """How many times THIS task has actually been recovered from RUNNING.
 
@@ -1279,8 +1336,11 @@ def _deliver_completed_spec(db: Database, spec: Spec) -> None:
     log = logger.info if result.status == "pushed" else logger.warning
     log("spec %s: delivery %s — %s", spec.id, result.status, result.detail)
     try:
-        _write_artifact(spec_dir, "delivery_report.md",
-                        f"# Delivery — {result.status}\n\n{result.detail}\n")
+        ledger = ArtifactLedger.open(db, spec, spec_dir)
+        sizes = ledger.size_block(code_paths,
+                                  "Delivered files vs the repository version")
+        ledger.note("delivery_report.md",
+                    f"# Delivery — {result.status}\n\n{result.detail}\n{sizes}")
     except OSError as e:
         logger.warning("spec %s: could not write delivery_report.md: %s",
                        spec.id, e)
@@ -1508,6 +1568,7 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
         design_existing = _fetch_existing_files_for_spec(
             spec, spec_md, extra_paths=_planned_implement_outputs(spec),
             role="architect")
+        _note_baseline(db, spec, design_existing, "architect")
     except RunnerOutageAtImplement as e:
         _requeue_implement_for_runner_outage(
             db, spec, task, str(e), phase="design_existing_fetch")
@@ -1612,17 +1673,18 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
         return
 
     # Write design.md
-    _write_artifact(spec_dir, "design.md", result.design_md)
-    db.create_artifact(spec_id=spec.id, task_id=task.id,
-                       kind=ArtifactKind.DESIGN, path="design.md")
+    ledger = ArtifactLedger.open(db, spec, spec_dir)
+    ledger.write("design.md", result.design_md, role="architect",
+                 kind=ArtifactKind.DESIGN, task_id=task.id,
+                 retry=task.retry_count)
 
     # Persist complexity assessment as a workspace artifact. None when the
     # architect skipped or malformed the COMPLEXITY block — _run_implementer
     # falls back to the env-default agent in that case.
     if result.complexity:
         import json as _json
-        _write_artifact(spec_dir, "complexity.json",
-                        _json.dumps(result.complexity, indent=2) + "\n")
+        ledger.note("complexity.json",
+                    _json.dumps(result.complexity, indent=2) + "\n")
         logger.info("spec %s: architect complexity assessment: tier=%r agent=%r",
                     spec.id, result.complexity.get("tier"),
                     result.complexity.get("recommended_agent"))
@@ -2017,6 +2079,7 @@ def _generate_implementation(
     # suite this way) and edit_mode below silently stayed off.
     existing_files = _fetch_existing_files_for_spec(
         spec, spec_md, extra_paths=_planned_implement_outputs(spec))
+    _note_baseline(db, spec, existing_files, "implementer")
     # DEV-581: emit anchored SEARCH/REPLACE edits for existing files instead of
     # re-emitting them whole — but only when the flag is on AND there is at least
     # one existing file to edit. With the flag off this is byte-identical to the
@@ -2484,6 +2547,7 @@ def _build_from_manifest(
     existing_by_path = dict(_fetch_existing_files_for_spec(
         spec, spec_md,
         extra_paths=[e.path for e in entries if getattr(e, "path", None)]))
+    _note_baseline(db, spec, list(existing_by_path.items()), "implementer")
     if existing_by_path:
         editable = [e.path for e in entries if e.path in existing_by_path]
         if editable:
@@ -2836,9 +2900,9 @@ def _verify_manifest_workspace(db, spec, task, spec_dir) -> "tuple[list, list]":
         if content is None:
             still_missing.append(rel)
             continue
-        _write_artifact(spec_dir, rel, content)
-        db.create_artifact(spec_id=spec.id, task_id=task.id,
-                           kind=ArtifactKind.CODE, path=rel)
+        ArtifactLedger.open(db, spec, spec_dir).restore(
+            rel, content, role="implementer", task_id=task.id,
+            retry=task.retry_count)
         restored.append(rel)
     if restored:
         logger.warning("spec %s: restored %d manifest-declared file(s) missing "
@@ -3408,11 +3472,10 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
         db, spec, task, result.files, "implementer",
         protected_files=protected_files)
 
-    # Write all files
-    for rel_path, content in result.files:
-        _write_artifact(spec_dir, rel_path, content)
-        db.create_artifact(spec_id=spec.id, task_id=task.id,
-                           kind=ArtifactKind.CODE, path=rel_path)
+    # Write all files through the ledger (DEV-642): what comes back is what
+    # landed, at its final path — the set the build check will certify.
+    result.files, write_outcomes = _write_role_files(
+        db, spec, task, spec_dir, result.files, role="implementer")
 
     # Every manifest-declared file must actually be in the workspace now — a
     # dropped one dooms the test loop to ERR_MODULE_NOT_FOUND forever
@@ -3507,7 +3570,8 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
         # reviewer's own test_output.txt is written by _run_reviewer_tests,
         # which sits *behind* this gate and has not run.
         if build_output:
-            _write_artifact(spec_dir, "build_check_output.txt", build_output)
+            ArtifactLedger.open(db, spec, spec_dir).note(
+                "build_check_output.txt", build_output)
             db.create_artifact(spec_id=spec.id, task_id=task.id,
                                kind=ArtifactKind.TEST_REPORT,
                                path="build_check_output.txt")
@@ -3546,7 +3610,8 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
         # Straight back to the implementer with the compiler's own words. No
         # human gate: there is nothing here for a reviewer to decide.
         if build_reason is not None:
-            _write_artifact(spec_dir, "build_failure.txt", build_output)
+            ArtifactLedger.open(db, spec, spec_dir).note(
+                "build_failure.txt", build_output)
             actionable = _extract_actionable_test_output(
                 build_output, ts_for_build["framework"])
             feedback = (
@@ -3560,7 +3625,8 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
             )
         else:
             # DEV-547: compiled, but on proof the code contradicts itself.
-            _write_artifact(spec_dir, "build_warnings.txt", build_output)
+            ArtifactLedger.open(db, spec, spec_dir).note(
+                "build_warnings.txt", build_output)
             feedback = _build_warning_feedback(blocking_warnings)
             logger.warning(
                 "spec %s: build compiled but %d blocking warning(s) on "
@@ -3678,6 +3744,10 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
     # not transcribe exactly — right far more often than wrong, but the human
     # should look at exactly those spots.
     tolerant_block = _tolerant_apply_block(getattr(result, "edit_applies", None))
+    # DEV-642: a write the ledger refused or redirected is exactly what the
+    # human must look at — the file list above only shows what landed.
+    ledger_block = ArtifactLedger.outcomes_block(
+        write_outcomes, "ARTIFACT WRITES REFUSED OR REDIRECTED")
     db.update_task_status(task.id, TaskStatus.BLOCKED_ON_REVIEW)
     db.create_gate(
         spec_id=spec.id,
@@ -3689,7 +3759,7 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
             f"Retry: {task.retry_count}\n"
             f"{_build_check_line(build_passed, build_output, build_framework)}\n"
             f"The implementer produced the following files:\n\n{file_list}\n"
-            f"{missing_block}{protected_block}{tolerant_block}{build_excerpt}\n"
+            f"{missing_block}{protected_block}{tolerant_block}{ledger_block}{build_excerpt}\n"
             f"Approve to proceed to testing, or reject with notes.\n"
         ),
     )
@@ -4604,7 +4674,7 @@ def _run_reviewer_tests(db: Database, spec: Spec, task, spec_dir,
         fail_log=("spec %s: test_output failed structural validation (%s); "
                   "forcing tests_passed=False to block hallucinated PASS"),
     )
-    _write_artifact(spec_dir, "test_output.txt", test_output)
+    ArtifactLedger.open(db, spec, spec_dir).note("test_output.txt", test_output)
     db.record_event(EventKind.TEST_RAN, spec_id=spec.id, task_id=task.id,
                     payload={"passed": tests_passed,
                              "output_chars": len(test_output)})
@@ -4689,7 +4759,7 @@ def _run_reviewer_adversarial(db: Database, spec: Spec, task, spec_dir,
         # truth, not the Coding Model-only first pass.
         test_output = adv_output
         tests_passed = adv_passed
-        _write_artifact(spec_dir, "test_output.txt", test_output)
+        ArtifactLedger.open(db, spec, spec_dir).note("test_output.txt", test_output)
         db.record_event(EventKind.TEST_RAN, spec_id=spec.id, task_id=task.id,
                         payload={"passed": tests_passed,
                                  "output_chars": len(test_output),
@@ -4819,6 +4889,7 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
     # the belt-and-braces against the same training-prior bypass that
     # has been observed dropping explicit prompt rules across today's
     # autonomous runs.
+    normalized_tests = []
     for rel_path, content in result.test_files:
         normalized = rel_path
         if "/" not in rel_path and re.match(r"^test_.*\.py$", rel_path):
@@ -4827,9 +4898,15 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
                 "spec %s: normalizing reviewer test path %r -> %r",
                 spec.id, rel_path, normalized,
             )
-        _write_artifact(spec_dir, normalized, content)
-        db.create_artifact(spec_id=spec.id, task_id=task.id,
-                           kind=ArtifactKind.TEST_REPORT, path=normalized)
+        normalized_tests.append((normalized, content))
+    # DEV-602 / DEV-642: the ledger is what stops a reviewer file at an
+    # implementer path from replacing the artifact the build check certified
+    # (run 17's 6-line stub over a 419-line suite). result.test_files becomes
+    # the FINAL paths so the arbitration and the vacuous-suite check see what
+    # is actually on disk.
+    result.test_files, review_outcomes = _write_role_files(
+        db, spec, task, spec_dir, normalized_tests, role="reviewer",
+        kind=ArtifactKind.TEST_REPORT)
 
     # Anti-hallucination cite-check: verify each `path:line` reference in
     # the review body against the actual spec dir. Bogus cites are
@@ -4849,9 +4926,12 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
         result.review_md = annotated_md
 
     # Write review report
-    _write_artifact(spec_dir, "review_report.md", result.review_md)
-    db.create_artifact(spec_id=spec.id, task_id=task.id,
-                       kind=ArtifactKind.REVIEW_REPORT, path="review_report.md")
+    ArtifactLedger.open(db, spec, spec_dir).write(
+        "review_report.md", result.review_md, role="reviewer",
+        kind=ArtifactKind.REVIEW_REPORT, task_id=task.id,
+        retry=task.retry_count)
+    ledger_block = ArtifactLedger.outcomes_block(
+        review_outcomes, "REVIEWER WRITES REDIRECTED OR REFUSED")
 
     # Run tests if required.
     #
@@ -4933,7 +5013,8 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
             prompt_md=(
                 f"## Release approval: {spec.title}\n\n"
                 f"Spec ID: `{spec.id}`\n\n"
-                f"Tests **PASSED**. Reviewer verdict: **PASS**.{tolerant_block}\n\n"
+                f"Tests **PASSED**. Reviewer verdict: **PASS**.{tolerant_block}"
+                f"{ledger_block}\n\n"
                 f"### Review Report\n\n{result.review_md}\n\n"
                 f"### Test Output\n\n```\n{test_output[:3000]}\n```\n\n"
                 f"Approve to mark this spec as DONE, or reject to send "
@@ -4963,7 +5044,7 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
                     f"Tests **PASSED**, but the reviewer's static verdict is "
                     f"**FAIL**. The findings below are UNCONFIRMED by the "
                     f"test run (DEV-560) — judge them on their merits before "
-                    f"trusting them.{tolerant_block}\n\n"
+                    f"trusting them.{tolerant_block}{ledger_block}\n\n"
                     f"### Review Report\n\n{result.review_md}\n\n"
                     f"### Test Output\n\n```\n{test_output[:3000]}\n```\n\n"
                     f"Approve to mark this spec as DONE, or reject to send "
@@ -5009,7 +5090,8 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
                 f"```\n{actionable}\n```\n\n"
                 f"Review:\n{result.review_md}\n"
             )
-        _write_artifact(spec_dir, "failure_report.md", failure_detail)
+        ArtifactLedger.open(db, spec, spec_dir).note(
+            "failure_report.md", failure_detail)
         _attempt_retry(db, spec, task, failure_detail)
 
 
@@ -5261,7 +5343,8 @@ def _harness_retry(db: Database, spec: Spec, task, spec_dir: Path,
         f"Test output (failures + summary):\n"
         f"```\n{_extract_actionable_test_output(test_output, framework)}\n```\n"
     )
-    _write_artifact(spec_dir, "failure_report.md", failure_detail)
+    ArtifactLedger.open(db, spec, spec_dir).note(
+        "failure_report.md", failure_detail)
     try:
         counter_path.write_text(json.dumps({"used": used + 1}))
     except OSError as e:
@@ -5533,10 +5616,12 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
     result.files = _normalize_generated_files(
         db, spec, impl_task, result.files, "synthesizer",
         protected_files=protected_files)
-    for rel_path, content in result.files:
-        _write_artifact(spec_dir, rel_path, content)
-        db.create_artifact(spec_id=spec.id, task_id=impl_task.id,
-                           kind=ArtifactKind.CODE, path=rel_path)
+    # DEV-636 / DEV-642: judged against the repository baselines the ledger
+    # kept through every wiped attempt — a 61-line daemon in place of 6,130
+    # lines is refused here, before any test can call it green.
+    result.files, _synth_outcomes = _write_role_files(
+        db, spec, impl_task, spec_dir, result.files, role="synthesizer",
+        retry=impl_task.retry_count)
     logger.info("spec %s: synthesis wrote %d files", spec.id, len(result.files))
 
     tests_passed, test_output = _run_tests_with_guard(
@@ -5661,10 +5746,9 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
     repair.files = _normalize_generated_files(
         db, spec, impl_task, repair.files, "synthesis_repair",
         protected_files=protected_files)
-    for rel_path, content in repair.files:
-        _write_artifact(spec_dir, rel_path, content)
-        db.create_artifact(spec_id=spec.id, task_id=impl_task.id,
-                           kind=ArtifactKind.CODE, path=rel_path)
+    repair.files, _repair_outcomes = _write_role_files(
+        db, spec, impl_task, spec_dir, repair.files, role="synthesis_repair",
+        retry=impl_task.retry_count)
     db.record_event(EventKind.AGENT_RAN, spec_id=spec.id,
                     task_id=impl_task.id,
                     payload={"role": "synthesis_repair",
@@ -5744,7 +5828,9 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
             if previous is None:
                 target.unlink(missing_ok=True)  # the repair invented this file
             else:
-                target.write_text(previous)
+                ArtifactLedger.open(db, spec, spec_dir).restore(
+                    rel_path, previous, role="synthesis_repair",
+                    task_id=impl_task.id, retry=impl_task.retry_count)
         repair_passed, repair_output = False, test_output
 
     db.record_event(EventKind.TEST_RAN, spec_id=spec.id, task_id=impl_task.id,
@@ -5834,6 +5920,23 @@ def _legacy_attempt_retry(db: Database, spec: Spec, task, failure_detail: str) -
         if synth_passed:
             db.update_task_status(impl_task.id, TaskStatus.DONE)
             db.update_task_status(task.id, TaskStatus.BLOCKED_ON_REVIEW)
+            # DEV-636: 61 lines vs 6,130 must read as a red flag here, and a
+            # write the ledger refused must be named — the suite may be green
+            # only because the repository's own file filled the gap.
+            ledger = ArtifactLedger.open(db, spec)
+            synth_paths = ledger.landed_paths(roles=ATTEMPT_ROLES)
+            size_block = ledger.size_block(
+                synth_paths, "Synthesized files vs the repository version")
+            refused = ledger.recent(roles=("synthesizer", "synthesis_repair"),
+                                    actions=REFUSALS)
+            refused_block = ""
+            if refused:
+                refused_block = (
+                    "\n\n⚠ **SYNTHESIS WRITES REFUSED** (DEV-642 artifact "
+                    "ledger) — these files were NOT written; the tests ran "
+                    "against whatever the repository already holds:\n\n"
+                    + "\n".join(f"- `{e.requested or e.path}`: {e.action} — "
+                                 f"{e.detail}" for e in refused) + "\n")
             db.create_gate(
                 spec_id=spec.id,
                 task_id=task.id,
@@ -5844,7 +5947,7 @@ def _legacy_attempt_retry(db: Database, spec: Spec, task, failure_detail: str) -
                     f"**Synthesized after {MAX_RETRIES} failed retries.** This "
                     f"output merges the passing behaviors of every rotation "
                     f"attempt; tests **PASSED** on it, but it has no reviewer "
-                    f"verdict.\n\n"
+                    f"verdict.{size_block}{refused_block}\n\n"
                     f"### Test Output\n\n```\n{synth_output[:3000]}\n```\n\n"
                     f"Approve to mark this spec as DONE, or reject to fail "
                     f"the spec (implementer retries are exhausted).\n"

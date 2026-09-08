@@ -24,6 +24,7 @@ from . import supervisor as _supervisor
 from .db import Database
 from .executor import ALLOWED_IMPLEMENTER_AGENTS, TIER_TO_IMPLEMENTER
 from .models import EventKind
+from .workspace import LEDGER_FILE, attempt_files_from_ledger, read_entries
 
 logger = logging.getLogger("orchestrator.retry_policy")
 
@@ -35,6 +36,21 @@ _PRESERVE_ON_RETRY: frozenset[str] = frozenset({
     # Diagnostic artifacts from prior runs. Not used as inputs (rejection
     # notes come from the gate, not these files), but useful for postmortem.
     "failure_report.md", "review_report.md", "test_output.txt",
+    # DEV-642: the artifact ledger is the record of every attempt's writes
+    # and of the repository baselines; the synthesis corpus is built from it.
+    LEDGER_FILE,
+})
+
+# Run diagnostics that live beside the code in a workspace and must never be
+# offered to synthesis as "attempt code" (DEV-639). Dotted top-level
+# directories (.repo_overlay, .pytest_cache) are excluded by shape.
+_CORPUS_DENYLIST: frozenset[str] = frozenset({
+    "spec.md", "plan.yaml", "design.md", "complexity.json",
+    "review_report.md", "failure_report.md", "implementer_response.md",
+    "build_check_output.txt", "build_failure.txt", "build_warnings.txt",
+    "design_review.md", "design_review_feedback.md", "human_design_feedback.md",
+    "tested_manifest.json", "manifest.json", "delivery_report.md",
+    "reviewer_failed_response.txt", LEDGER_FILE,
 })
 
 
@@ -222,39 +238,53 @@ def _read_retry_attempts(spec_dir: Path) -> list[dict]:
     history = spec_dir / "retry_history"
     attempts: list[dict] = []
 
-    def _gather(root: Path, retry_index: int) -> dict:
+    def _walk(root: Path) -> dict[str, str]:
+        """Fallback for a workspace with no ledger: deliverable code only.
+
+        DEV-639: the old walk kept everything not on a six-name denylist,
+        which after DEV-626 meant `.repo_overlay/**` — 79 files and 1.35M
+        characters of the repository's own source presented to the merge
+        model as attempt code. Dotted directories and run diagnostics are
+        out by shape and by name.
+        """
         files: dict[str, str] = {}
-        test_output = ""
         for path in root.rglob("*"):
             if not path.is_file():
                 continue
             rel = path.relative_to(root)
-            # Skip anything under retry_history — the snapshots from prior
-            # retries are surfaced as separate entries already.
-            if rel.parts and rel.parts[0] == "retry_history":
+            if rel.parts and (rel.parts[0] == "retry_history"
+                              or rel.parts[0].startswith(".")):
                 continue
-            name = rel.name
-            # Drop pipeline metadata; keep only deliverable code + tests.
-            # implementer_response.md is the attempt's retained raw model
-            # response (DEV-637) — evidence for a human, never merge input.
-            if name in {"spec.md", "plan.yaml", "design.md", "complexity.json",
-                        "review_report.md", "failure_report.md",
-                        "implementer_response.md"}:
+            if rel.name in _CORPUS_DENYLIST or rel.name == "test_output.txt":
                 continue
-            # Only the spec_dir-level test_output.txt counts (not any
-            # snapshot copy, which we already filtered above).
-            if name == "test_output.txt" and rel.parent == Path():
-                test_output = path.read_text(errors="replace")
+            if rel.name.startswith("architect_failed_response_attempt"):
                 continue
             try:
                 files[str(rel)] = path.read_text(errors="replace")
             except OSError:
                 continue
-        # DEV-553: the snapshot already contains the design.md that was
-        # current when this attempt ran, because _snapshot_retry copies the
-        # whole spec_dir. Digest it so synthesis can tell which attempts were
-        # written against a design the architect has since revised. No new
-        # state to thread — the evidence was already on disk.
+        return files
+
+    def _gather(root: Path, retry_index: int) -> dict:
+        test_output = ""
+        try:
+            test_output = (root / "test_output.txt").read_text(errors="replace")
+        except OSError:
+            pass
+        # DEV-642: the ledger names exactly what the attempt wrote. A
+        # workspace without one (pre-ledger snapshots) falls back to the
+        # filtered walk.
+        entries = read_entries(root)
+        files = None
+        source = "walk"
+        if entries is not None:
+            files = attempt_files_from_ledger(root, entries, retry_index)
+            source = "ledger" if files else "ledger-empty"
+        if files is None:
+            files = _walk(root)
+        chars = sum(len(c) for c in files.values())
+        logger.info("synthesis corpus: attempt %d from %s — %d file(s), %d chars",
+                    retry_index, source, len(files), chars)
         design = root / "design.md"
         digest = ""
         if design.is_file():

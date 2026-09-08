@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS artifacts (
     kind        TEXT NOT NULL,                -- ArtifactKind enum value
     path        TEXT NOT NULL,                -- relative to the spec's workspace dir (workspace_root/<spec_id>/)
     sha256      TEXT,
+    role        TEXT,                         -- DEV-642: writing role (ledger)
     created_at  TEXT NOT NULL
 );
 

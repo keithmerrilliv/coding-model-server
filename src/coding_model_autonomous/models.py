@@ -128,6 +128,7 @@ class Artifact(_Base):
     kind: ArtifactKind
     path: str
     sha256: Optional[str] = None
+    role: Optional[str] = None        # DEV-642: the role that wrote it
     created_at: datetime
 
 
