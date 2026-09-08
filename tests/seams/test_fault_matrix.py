@@ -1,0 +1,545 @@
+"""One test per fault the live runs have produced (DEV-634).
+
+Each case injects exactly one fault at a seam and asserts what the daemon
+does about it. Plain tests pin today's handling — the fixes DEV-538, 581,
+620, 622, 624, 637 and 638 shipped. ``xfail(strict=True)`` marks a behaviour
+the DEV-628 epic still owes: the test is written against the intended
+outcome and its ticket, and it starts passing (and therefore failing the
+xfail) the day the fix lands, so the mark has to be lifted with the fix.
+"""
+from __future__ import annotations
+
+import pytest
+
+from coding_model_autonomous import (
+    EventKind, GateType, SpecStatus, TaskStatus,
+)
+
+from seam_fakes import (
+    CollectionError, Down, Empty, Hang, Inconclusive, MissingChoices,
+    PytestPass, Refuse, Reply, Truncated, UnclosedThink, Unreachable,
+)
+from seam_harness import (
+    BAD_EDITS, DAEMON_PATH, GOOD_EDITS, PLAN_YAML, SPEC_MD, TEST_FILE, TEST_PATH,
+    approve_all, approve_design, architect_reply, design_review_reply, drive,
+    events, implementer_edit_reply, implementer_reply,
+    make_executing_spec, make_pending_plan_spec, planner_reply, rejected_gates,
+    reviewer_reply, wait_at, workspace_files,
+)
+
+
+def _impl_ready(db, model, runner):
+    spec = make_executing_spec(db)
+    approve_design(db, spec)
+    return spec
+
+
+# ── the edit ladder ──────────────────────────────────────────────────────────
+
+class TestUnappliableEdits:
+    def test_rotates_without_a_human_gate(self, db, model, runner, edit_mode):
+        """DEV-581/637: a SEARCH that does not match writes nothing, records
+        the complete anchor, and hands the next attempt to the next agent."""
+        spec = _impl_ready(db, model, runner)
+        model.script("implementer",
+                     Reply(implementer_edit_reply(BAD_EDITS, {TEST_PATH: TEST_FILE})),
+                     Reply(implementer_edit_reply(GOOD_EDITS, {TEST_PATH: TEST_FILE})))
+
+        out = drive(db, spec.id, model, wait_at(GateType.CODE_REVIEW), runner=runner)
+
+        assert out.reason == "waiting"
+        assert out.task("implementer").retry_count == 1
+        assert [c.model for c in model.calls_for("implementer")] == [
+            "implementer", "deep_implementer"]
+        rej = rejected_gates(db, spec.id)
+        assert len(rej) == 1 and "DEV-581" in rej[0].prompt_md
+        assert "not found" in rej[0].reviewer_notes.lower() \
+            or "no match" in rej[0].reviewer_notes.lower()
+        anomaly = events(db, spec.id, EventKind.AGENT_RAN, anomaly="unappliable_edits")
+        assert len(anomaly) == 1
+        full = anomaly[0]["errors_full"][0]
+        assert full["path"] == DAEMON_PATH and full["search"] == BAD_EDITS[DAEMON_PATH][0][0]
+        # Nothing was written by attempt 0; attempt 1's apply is what's on disk.
+        assert 'role="implementer"' in workspace_files(db, spec.id)[DAEMON_PATH]
+        hist = db.spec_dir(spec.id) / "retry_history" / "retry_0"
+        assert "apply_errors: 1" in (hist / "implementer_response.md").read_text()
+        # The retry prompt carries the diagnostic.
+        assert "SEARCH" in model.calls[1].messages[-1]["content"]
+
+    def test_exhaustion_hands_to_synthesis(self, db, model, runner, edit_mode):
+        """Six unappliable attempts walk the rotation, then synthesis merges
+        them and the result goes to a release gate, never a silent FAIL."""
+        spec = _impl_ready(db, model, runner)
+        model.always("implementer",
+                     Reply(implementer_edit_reply(BAD_EDITS, {TEST_PATH: TEST_FILE})))
+        model.script("synthesis", Reply(implementer_reply()))
+
+        out = drive(db, spec.id, model, wait_at(GateType.RELEASE_APPROVAL), runner=runner)
+
+        assert out.reason == "waiting"
+        gate = out.waiting_on[0]
+        assert gate.gate_type == GateType.RELEASE_APPROVAL
+        assert "Synthesized after 5 failed retries" in gate.prompt_md
+        assert [c.model for c in model.calls_for("implementer")] == [
+            "implementer", "deep_implementer", "moe_implementer",
+            "fast_implementer", "implementer", "deep_implementer"]
+        assert [c.model for c in model.calls_for("synthesis")] == ["deep_reviewer"]
+        assert out.task("implementer").status == TaskStatus.DONE
+        assert len(rejected_gates(db, spec.id)) == 5
+
+
+class TestRotation:
+    def test_anchor_is_stable_with_complexity_json(self, db, model, runner):
+        spec = _impl_ready(db, model, runner)
+        model.always("implementer", Reply("not a file block"))
+        model.script("synthesis", Reply(implementer_reply()))
+
+        drive(db, spec.id, model, wait_at(GateType.RELEASE_APPROVAL), runner=runner)
+
+        assert [c.model for c in model.calls_for("implementer")] == [
+            "implementer", "deep_implementer", "moe_implementer",
+            "fast_implementer", "implementer", "deep_implementer"]
+
+    def test_anchor_drifts_without_complexity_json(self, db, model, runner):
+        """Without complexity.json the pick anchors on task.agent, which the
+        previous pick overwrote — so the chain re-bases every retry and
+        retries 3 and 4 both land on fast_implementer. Pinned as today's
+        behaviour (DEV-640); the rotation's own contract says consecutive
+        retries never repeat a model."""
+        spec = make_executing_spec(db)
+        approve_design(db, spec, complexity=False)
+        model.always("implementer", Reply("not a file block"))
+        model.script("synthesis", Reply(implementer_reply()))
+
+        drive(db, spec.id, model, wait_at(GateType.RELEASE_APPROVAL), runner=runner)
+
+        assert [c.model for c in model.calls_for("implementer")] == [
+            "implementer", "deep_implementer", "moe_implementer",
+            "fast_implementer", "fast_implementer", "implementer"]
+
+
+# ── model-server faults ──────────────────────────────────────────────────────
+
+class TestModelServerFaults:
+    def test_parse_failure_rotates(self, db, model, runner):
+        spec = _impl_ready(db, model, runner)
+        model.script("implementer", Reply("Here is the code:\n```python\nprint(1)\n```"),
+                     Reply(implementer_reply()))
+
+        out = drive(db, spec.id, model, wait_at(GateType.CODE_REVIEW), runner=runner)
+
+        assert out.reason == "waiting" and out.task("implementer").retry_count == 1
+        rej = rejected_gates(db, spec.id)
+        assert rej[0].prompt_md == "## Automated parse-failure retry"
+        assert "unparseable" in rej[0].reviewer_notes
+        ran = events(db, spec.id, EventKind.AGENT_RAN, role="implementer")
+        assert ran[0]["result_kind"] == "ParseError"
+        hist = db.spec_dir(spec.id) / "retry_history" / "retry_0"
+        assert "- parse_error:" in (hist / "implementer_response.md").read_text()
+
+    @pytest.mark.parametrize("status", [413, 502])
+    def test_http_refusal_rotates_like_a_parse_failure(self, db, model, runner, status):
+        """DEV-624: a refused request judged nothing; rotate, don't fail."""
+        spec = _impl_ready(db, model, runner)
+        model.script("implementer", Refuse(status), Reply(implementer_reply()))
+
+        out = drive(db, spec.id, model, wait_at(GateType.CODE_REVIEW), runner=runner)
+
+        assert out.reason == "waiting" and out.status == SpecStatus.EXECUTING
+        assert out.task("implementer").retry_count == 1
+        rej = rejected_gates(db, spec.id)
+        assert rej[0].prompt_md == "## Automated dispatch-refusal retry"
+        assert "refused the request" in rej[0].reviewer_notes
+        assert [c.model for c in model.calls_for("implementer")] == [
+            "implementer", "deep_implementer"]
+
+    @pytest.mark.parametrize("fault", [Down(), Hang()])
+    def test_transport_failure_parks_without_a_retry(self, db, model, runner, fault):
+        spec = _impl_ready(db, model, runner)
+        model.script("implementer", fault, Reply(implementer_reply()))
+
+        out = drive(db, spec.id, model, wait_at(GateType.CODE_REVIEW), runner=runner)
+
+        assert out.reason == "waiting" and out.status == SpecStatus.EXECUTING
+        assert out.task("implementer").retry_count == 0
+        assert rejected_gates(db, spec.id) == []
+        assert [c.model for c in model.calls_for("implementer")] == [
+            "implementer", "implementer"]
+
+    def test_planner_transport_failure_stays_pending(self, db, model, runner):
+        spec = make_pending_plan_spec(db)
+        model.script("planner", Down(), Reply(planner_reply()))
+
+        out = drive(db, spec.id, model, wait_at(GateType.PLAN_APPROVAL), runner=runner)
+
+        assert out.status == SpecStatus.PLAN_REVIEW
+        ran = events(db, spec.id, EventKind.PLANNER_RAN)
+        assert "transient_error" in ran[0] and ran[0]["transient_error"].startswith("ConnectionError")
+
+    def test_empty_architect_output_fails_spec_after_parse_retries(self, db, model, runner):
+        """DEV-616/617 shape: three empty completions, spec FAILED, raw kept."""
+        spec = make_executing_spec(db)
+        model.always("architect", Empty())
+
+        out = drive(db, spec.id, model, approve_all, runner=runner)
+
+        assert out.status == SpecStatus.FAILED
+        assert out.task("architect").status == TaskStatus.FAILED
+        assert len(model.calls_for("architect")) == 3
+        files = workspace_files(db, spec.id)
+        assert {f"architect_failed_response_attempt{i}.txt" for i in (1, 2, 3)} <= set(files)
+        ran = events(db, spec.id, EventKind.AGENT_RAN, role="architect")
+        assert [r["result_kind"] for r in ran] == ["ParseError"] * 3
+
+    def test_unclosed_think_reads_as_parse_failure(self, db, model, runner):
+        spec = make_executing_spec(db)
+        model.script("architect", UnclosedThink(), Reply(architect_reply()))
+        model.script("design_review", Reply(design_review_reply("PASS")))
+
+        out = drive(db, spec.id, model, wait_at(GateType.DESIGN_APPROVAL), runner=runner)
+
+        assert out.reason == "waiting"
+        ran = events(db, spec.id, EventKind.AGENT_RAN, role="architect")
+        assert [r["result_kind"] for r in ran] == ["ParseError", "ArchitectResult"]
+        assert (db.spec_dir(spec.id) / "architect_failed_response_attempt1.txt").is_file()
+
+    def test_truncated_implementer_is_recorded_and_still_gated(self, db, model, runner):
+        spec = _impl_ready(db, model, runner)
+        model.script("implementer", Truncated(implementer_reply()))
+
+        out = drive(db, spec.id, model, wait_at(GateType.CODE_REVIEW), runner=runner)
+
+        assert out.reason == "waiting"
+        trunc = events(db, spec.id, EventKind.OUTPUT_TRUNCATED)
+        assert len(trunc) == 1 and trunc[0]["role"] == "implementer"
+        assert trunc[0]["agent"] == "implementer" and trunc[0]["max_tokens"] == 16000
+
+    def test_truncated_reviewer_reruns_once_then_soft_fails(self, db, model, runner):
+        spec = _impl_ready(db, model, runner)
+        model.script("implementer", Reply(implementer_reply()), Reply(implementer_reply()))
+        model.script("reviewer", Truncated("<<<REVIEW>>>\n## partial"),
+                     Truncated("<<<REVIEW>>>\n## partial again"),
+                     Reply(reviewer_reply("PASS")))
+
+        out = drive(db, spec.id, model, approve_all, runner=runner)
+
+        assert out.status == SpecStatus.DONE
+        assert len(model.calls_for("reviewer")) == 3
+        assert out.task("implementer").retry_count == 1
+        rej = rejected_gates(db, spec.id)
+        assert "could not produce a parseable review" in rej[0].reviewer_notes
+        assert (db.spec_dir(spec.id) / "reviewer_failed_response.txt").is_file() or \
+            (db.spec_dir(spec.id) / "retry_history" / "retry_0" / "reviewer_failed_response.txt").is_file()
+
+    def test_design_review_fail_forces_one_revision(self, db, model, runner):
+        spec = make_executing_spec(db)
+        model.always("architect", Reply(architect_reply()))
+        model.script("design_review", Reply(design_review_reply("FAIL", "Missing seam for AC2.")))
+
+        out = drive(db, spec.id, model, wait_at(GateType.DESIGN_APPROVAL), runner=runner)
+
+        assert out.reason == "waiting"
+        assert len(model.calls_for("architect")) == 2
+        assert len(model.calls_for("design_review")) == 1
+        assert "Missing seam for AC2." in model.calls_for("architect")[1].messages[-1]["content"]
+        assert out.task("architect").retry_count == 1
+
+    @pytest.mark.xfail(strict=True, reason=(
+        "DEV-629: a 200 whose body has no choices is a server fault of the "
+        "same class as a 502 — it should park or rotate, not FAIL the spec"))
+    def test_missing_choices_does_not_fail_the_spec(self, db, model, runner):
+        spec = _impl_ready(db, model, runner)
+        model.script("implementer", MissingChoices(), Reply(implementer_reply()))
+
+        out = drive(db, spec.id, model, wait_at(GateType.CODE_REVIEW), runner=runner)
+
+        assert out.status == SpecStatus.EXECUTING
+        assert out.task("implementer").status != TaskStatus.FAILED
+
+    def test_missing_choices_today_fails_the_spec(self, db, model, runner):
+        """The behaviour the xfail above documents, pinned so a change is seen."""
+        spec = _impl_ready(db, model, runner)
+        model.script("implementer", MissingChoices())
+
+        out = drive(db, spec.id, model, approve_all, runner=runner)
+
+        assert out.status == SpecStatus.FAILED
+        assert out.task("implementer").status == TaskStatus.FAILED
+        assert out.task("implementer").retry_count == 0
+
+
+# ── runner and sandbox faults ────────────────────────────────────────────────
+
+class TestRunnerFaults:
+    def test_dead_runner_at_existing_fetch_parks(self, db, model, runner):
+        """DEV-620: no model call, no retry burned, resumes when it answers."""
+        spec = _impl_ready(db, model, runner)
+        runner.fetch_mode = lambda n: "down" if n <= 4 else "ok"
+        model.script("implementer", Reply(implementer_reply()))
+
+        out = drive(db, spec.id, model, wait_at(GateType.CODE_REVIEW), runner=runner)
+
+        assert out.reason == "waiting"
+        assert out.task("implementer").retry_count == 0
+        parks = events(db, spec.id, EventKind.TEST_RAN, phase="implement_existing_fetch")
+        assert len(parks) == 1 and parks[0]["runner_unreachable"] is True
+        assert len(model.calls_for("implementer")) == 1
+
+    def test_dead_runner_at_design_fetch_parks_architect(self, db, model, runner):
+        spec = make_executing_spec(db)
+        runner.fetch_mode = lambda n: "down" if n <= 2 else "ok"
+        model.script("architect", Reply(architect_reply()))
+        model.script("design_review", Reply(design_review_reply("PASS")))
+
+        out = drive(db, spec.id, model, wait_at(GateType.DESIGN_APPROVAL), runner=runner)
+
+        assert out.reason == "waiting"
+        parks = events(db, spec.id, EventKind.TEST_RAN, phase="design_existing_fetch")
+        assert len(parks) == 1
+        assert out.task("architect").retry_count == 0
+
+    def test_runner_raising_at_fetch_degrades_soft(self, db, model, runner):
+        """A ConnectionError out of the fetch is swallowed: the implementer
+        works blind with a warning (the pre-DEV-620 degradation is still the
+        behaviour for an exception, as opposed to a problem list)."""
+        spec = _impl_ready(db, model, runner)
+        runner.fetch_mode = "raise"
+        model.script("implementer", Reply(implementer_reply()))
+
+        out = drive(db, spec.id, model, wait_at(GateType.CODE_REVIEW), runner=runner)
+
+        assert out.reason == "waiting"
+        assert events(db, spec.id, EventKind.TEST_RAN, phase="implement_existing_fetch") == []
+        prompt = model.calls[0].messages[-1]["content"]
+        assert "fixture stand-in for the daemon" not in prompt  # no existing file shown
+
+    def test_unreachable_build_check_requeues_then_escalates(self, db, model, runner):
+        """DEV-538/622: three requeues without burning a retry; the fourth
+        opens a gate that says the build is unverified."""
+        spec = _impl_ready(db, model, runner)
+        model.always("implementer", Reply(implementer_reply()))
+        runner.then(Unreachable(), Unreachable(), Unreachable(), Unreachable())
+
+        out = drive(db, spec.id, model, wait_at(GateType.CODE_REVIEW), runner=runner)
+
+        assert out.reason == "waiting"
+        assert out.task("implementer").retry_count == 0
+        requeues = events(db, spec.id, EventKind.TEST_RAN,
+                          phase="pre_gate_build_check", runner_unreachable=True)
+        assert [r["requeue"] for r in requeues] == [1, 2, 3]
+        assert len(model.calls_for("implementer")) == 4
+        gate = out.waiting_on[0]
+        assert "Build check: **could not run" in gate.prompt_md
+        assert "mac-runner unreachable" in gate.prompt_md
+
+    def test_unreachable_build_check_recovers(self, db, model, runner):
+        spec = _impl_ready(db, model, runner)
+        model.always("implementer", Reply(implementer_reply()))
+        runner.then(Unreachable(), Unreachable(), PytestPass())
+
+        out = drive(db, spec.id, model, wait_at(GateType.CODE_REVIEW), runner=runner)
+
+        assert out.reason == "waiting" and out.task("implementer").retry_count == 0
+        # Each unreachable dispatch leaves two events: the check's own record
+        # and the requeue's. The passing one leaves only the check.
+        checks = events(db, spec.id, EventKind.TEST_RAN, phase="pre_gate_build_check")
+        assert [c.get("runner_unreachable", False) for c in checks] == [
+            False, True, False, True, False]
+        assert [c["passed"] for c in checks] == [False] * 4 + [True]
+        assert (db.spec_dir(spec.id) / "tested_manifest.json").is_file()
+
+    def test_inconclusive_output_is_not_a_pass(self, db, model, runner):
+        """Exit 0 with no summary line: the structural guard refuses PASS and
+        the gate says so instead of claiming a green build."""
+        spec = _impl_ready(db, model, runner)
+        model.script("implementer", Reply(implementer_reply()))
+        runner.then(Inconclusive())
+
+        out = drive(db, spec.id, model, wait_at(GateType.CODE_REVIEW), runner=runner)
+
+        assert out.reason == "waiting"
+        check = events(db, spec.id, EventKind.TEST_RAN, phase="pre_gate_build_check")[0]
+        assert check["passed"] is False and check["build_failed"] is False
+        assert not (db.spec_dir(spec.id) / "tested_manifest.json").exists()
+        assert "passed" not in out.waiting_on[0].prompt_md.split("\n")[3].lower()
+
+    def test_collection_error_today_rotates_the_implementer(self, db, model, runner):
+        """DEV-626 shape: the sandbox cannot import the package. Today it is
+        read as a build failure the implementer caused."""
+        spec = _impl_ready(db, model, runner)
+        model.always("implementer", Reply(implementer_reply()))
+        runner.then(CollectionError(), PytestPass())
+
+        out = drive(db, spec.id, model, wait_at(GateType.CODE_REVIEW), runner=runner)
+
+        assert out.reason == "waiting"
+        assert out.task("implementer").retry_count == 1
+        rej = rejected_gates(db, spec.id)
+        assert "DEV-429" in rej[0].prompt_md and "ModuleNotFoundError" in rej[0].reviewer_notes
+        assert (db.spec_dir(spec.id) / "retry_history" / "retry_0" / "build_failure.txt").is_file()
+
+    @pytest.mark.xfail(strict=True, reason=(
+        "DEV-629 (via DEV-626): a collection error naming the repo's own "
+        "package is a sandbox fault, not an implementer failure — it must not "
+        "burn a retry or rotate the agent"))
+    def test_collection_error_does_not_burn_a_retry(self, db, model, runner):
+        spec = _impl_ready(db, model, runner)
+        model.always("implementer", Reply(implementer_reply()))
+        runner.then(CollectionError("coding_model_server"), PytestPass())
+
+        out = drive(db, spec.id, model, wait_at(GateType.CODE_REVIEW), runner=runner)
+
+        assert out.task("implementer").retry_count == 0
+
+
+# ── planner-side and spec-shape faults ───────────────────────────────────────
+
+SWIFT_SPEC = """# Centipede: field forcing
+
+## Summary
+Add a forcing strategy.
+
+## test_strategy
+
+```yaml
+framework: swift_test
+required: true
+```
+"""
+
+SWIFT_PLAN_NO_REPO = """\
+title: Centipede forcing
+test_strategy:
+  framework: swift_test
+  required: true
+phases:
+  - name: design
+    role: architect
+  - name: implement
+    role: implementer
+  - name: test
+    role: reviewer
+"""
+
+
+class TestPlannerFaults:
+    def test_missing_repo_key_is_bounced_then_accepted(self, db, model, runner):
+        """DEV-426: the framework's required keys are checked before review."""
+        spec = make_pending_plan_spec(db, spec_md=SWIFT_SPEC)
+        fixed = SWIFT_PLAN_NO_REPO.replace("  framework: swift_test",
+                                           "  repo: centipede\n  framework: swift_test")
+        model.script("planner", Reply(planner_reply(SWIFT_PLAN_NO_REPO)),
+                     Reply(planner_reply(fixed)))
+
+        out = drive(db, spec.id, model, wait_at(GateType.PLAN_APPROVAL), runner=runner)
+
+        assert out.reason == "waiting" and out.status == SpecStatus.PLAN_REVIEW
+        clar = out.gates_of(GateType.CLARIFICATION)
+        assert len(clar) == 1 and clar[0].prompt_md.startswith("## Plan validation failure")
+        assert "`repo` is required" in clar[0].reviewer_notes
+        assert "`repo` is required" in model.calls[1].messages[-1]["content"]
+
+    def test_missing_repo_key_fails_after_two_rounds(self, db, model, runner):
+        spec = make_pending_plan_spec(db, spec_md=SWIFT_SPEC)
+        model.always("planner", Reply(planner_reply(SWIFT_PLAN_NO_REPO)))
+
+        out = drive(db, spec.id, model, approve_all, runner=runner)
+
+        assert out.status == SpecStatus.FAILED
+        assert len(model.calls_for("planner")) == 3
+        assert len(out.gates_of(GateType.CLARIFICATION)) == 2
+
+    def test_planner_parse_failure_rerolls_then_fails(self, db, model, runner):
+        spec = make_pending_plan_spec(db)
+        model.always("planner", Reply("I think the plan should have three phases."))
+
+        out = drive(db, spec.id, model, approve_all, runner=runner)
+
+        assert out.status == SpecStatus.FAILED
+        assert len(model.calls_for("planner")) == 2
+        ran = events(db, spec.id, EventKind.PLANNER_RAN)
+        assert any("error" in r for r in ran)
+
+
+NO_TABLE_SPEC = SPEC_MD.split("| Path | Action |")[0] + "\n(no change-surface table)\n"
+NO_OUTPUTS_PLAN = PLAN_YAML.replace("    outputs:\n", "    outputs_omitted:\n")
+
+
+class TestSpecShapeFaults:
+    def test_zero_candidates_skip_the_fetch_and_disarm_edit_mode(self, db, model, runner, edit_mode):
+        """No table rows and no plan outputs: nothing to fetch, so the
+        implementer is prompted for whole files and its whole-file rewrite of
+        an existing path is written as-is (DEV-492's hazard, still open when
+        the spec names nothing)."""
+        spec = make_executing_spec(db, spec_md=NO_TABLE_SPEC, plan_yaml=NO_OUTPUTS_PLAN)
+        approve_design(db, spec)
+        model.script("implementer", Reply(implementer_reply()))
+
+        out = drive(db, spec.id, model, wait_at(GateType.CODE_REVIEW), runner=runner)
+
+        assert out.reason == "waiting"
+        fetched = [paths for repo, paths, _ in runner.fetch_calls if DAEMON_PATH in paths]
+        assert fetched == []
+        prompt = model.calls[0].messages[-1]["content"]
+        assert "## File modes" not in prompt
+        # Whole-file blocks are written as parsed: the parser strips the
+        # trailing newline, and nothing puts it back (DEV-641).
+        from seam_harness import DAEMON_STUB_IMPLEMENTED
+        assert workspace_files(db, spec.id)[DAEMON_PATH] == DAEMON_STUB_IMPLEMENTED.rstrip("\n")
+
+    def test_reviewer_overwrites_implementer_test_today(self, db, model, runner):
+        """DEV-602 residual: the write guards are dormant at the daemon's call
+        sites, so a reviewer file at an implementer path replaces the tested
+        artifact and the manifest no longer matches the disk."""
+        import hashlib
+        spec = _impl_ready(db, model, runner)
+        model.script("implementer", Reply(implementer_reply()))
+        model.script("reviewer", Reply(reviewer_reply(
+            "PASS", tests={TEST_PATH: TEST_FILE + "\n# reviewer rewrote this\n"})))
+
+        out = drive(db, spec.id, model, wait_at(GateType.RELEASE_APPROVAL), runner=runner)
+
+        assert out.reason == "waiting"
+        files = workspace_files(db, spec.id)
+        import json
+        manifest = json.loads(files["tested_manifest.json"])
+        on_disk = hashlib.sha256(files[TEST_PATH].encode()).hexdigest()
+        assert manifest[TEST_PATH] != on_disk
+        assert "reviewer rewrote this" in files[TEST_PATH]
+
+    @pytest.mark.xfail(strict=True, reason=(
+        "DEV-602 residual: the reviewer must not overwrite an implementer "
+        "artifact the pre-gate check certified (guard call-site wiring)"))
+    def test_reviewer_cannot_overwrite_certified_artifact(self, db, model, runner):
+        spec = _impl_ready(db, model, runner)
+        model.script("implementer", Reply(implementer_reply()))
+        model.script("reviewer", Reply(reviewer_reply(
+            "PASS", tests={TEST_PATH: TEST_FILE + "\n# reviewer rewrote this\n"})))
+
+        drive(db, spec.id, model, wait_at(GateType.RELEASE_APPROVAL), runner=runner)
+
+        assert "reviewer rewrote this" not in workspace_files(db, spec.id)[TEST_PATH]
+
+
+# ── daemon lifecycle ─────────────────────────────────────────────────────────
+
+class TestCrashRecovery:
+    def test_running_task_is_reset_and_capped(self, db, model, runner):
+        """DEV-193/558: a task left RUNNING by a crash is reset up to
+        MAX_RETRIES times on recovery's own count, then the spec fails."""
+        spec = _impl_ready(db, model, runner)
+        impl = db.list_tasks_for_spec_by_role(spec.id, "implementer")[0]
+        for n in range(1, 7):
+            db.update_task_status(impl.id, TaskStatus.RUNNING)
+            import coding_model_server.orchestrator_daemon as d
+            d.tick(db)
+            fresh = db.get_task(impl.id)
+            if n <= 5:
+                assert fresh.status == TaskStatus.PENDING, n
+                assert fresh.retry_count == n
+            else:
+                assert fresh.status == TaskStatus.FAILED
+        assert db.get_spec(spec.id).status == SpecStatus.FAILED
+        recov = events(db, spec.id, EventKind.AGENT_RAN, role="crash_recovery")
+        assert [r["recovery"] for r in recov] == [1, 2, 3, 4, 5]
+        assert model.calls == []

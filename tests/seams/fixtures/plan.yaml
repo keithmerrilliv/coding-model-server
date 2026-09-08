@@ -1,0 +1,53 @@
+title: "Fetch helper names served role in logs"
+goal: |
+  Add keyword-only `role` parameter (default `"implementer"`) to `_fetch_existing_files_for_spec`
+  in `src/coding_model_server/orchestrator_daemon.py`. Replace every hardcoded mention of
+  "the implementer" inside that function's log messages with the dynamic `role` value so
+  journal entries identify whether the architect or implementer fetched context. The architect
+  call site (`_run_architect`) passes `role="architect"`; all other callers rely on the default.
+language: python
+target_runtime: "Python 3.x (existing coding-model-server runtime)"
+output_location:
+  repo: "coding-model-server"
+  directory: null
+acceptance_criteria:
+  - "R1: fetch returning one file + role='architect' → log contains 'supplied 1 existing file(s) to the architect:' and NOT 'to the implementer'"
+  - "R2: same call without role argument → log retains original wording 'to the implementer:'"
+  - "R3: fetch raising + role='architect' → warning includes 'the architect will not see the files it must modify'; helper returns empty list, never raises"
+  - "R4: inspect.signature confirms role is keyword-only with default 'implementer'"
+test_strategy:
+  framework: pytest
+  required: true
+  notes: "hermetic tests using tmp workspace, no model calls, no runner; monkeypatch test_runner.fetch_repo_files on daemon module; caplog at INFO level"
+  repo: coding-model-server
+  protected_paths:
+    - src/coding_model_autonomous/
+    - src/coding_model_client/
+constraints:
+  dependencies_allowed: false
+  notes: |
+    No new dependencies. No DB schema changes. No change to helper's return value, exception behaviour, or DEV-620 outage handling. All existing tests remain untouched.
+phases:
+  - name: design
+    role: architect
+    inputs: ["spec.md"]
+    outputs: ["design.md"]
+    success: "Design document reproducing authoritative design (role param, three log message updates, _run_architect call site)"
+  - name: implement
+    role: implementer
+    inputs: ["design.md", "spec.md"]
+    outputs:
+      - "src/coding_model_server/orchestrator_daemon.py"
+      - "tests/test_existing_fetch_role_log.py"
+    success: "orchestrator_daemon.py modified per spec; new test file covers R1–R4; protected paths unmodified"
+    execution_target: server
+  - name: test
+    role: reviewer
+    inputs:
+      - "src/coding_model_server/orchestrator_daemon.py"
+      - "tests/test_existing_fetch_role_log.py"
+    outputs: ["test_report.md"]
+    success: "All four acceptance criteria pass under pytest with caplog at INFO level"
+risks:
+  - "If the fetch helper's internal structure differs from what the spec describes (e.g., different number of log lines), the implementer must adapt while preserving existing journal grep patterns."
+  - "Protected path enforcement relies on discipline — no automated guard in this change surface."
