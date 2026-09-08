@@ -203,6 +203,18 @@ class TestDisposeVerdict:
         assert db.get_task(impl.id).status == TaskStatus.PENDING
         assert db.get_task(rev.id).status == TaskStatus.PENDING
 
+    def test_reviewer_reset_uses_the_row_not_the_stale_object(self, db, spec_tasks):
+        """A runner's task object predates claim_task's PENDING → RUNNING; the
+        reset must read the row, or the reviewer stays RUNNING (run 25)."""
+        spec, impl, rev = spec_tasks
+        db.update_task_status(impl.id, TaskStatus.DONE)
+        stale = db.get_task(rev.id)            # status PENDING in this object
+        db.update_task_status(rev.id, TaskStatus.RUNNING)   # the row moved on
+        f = Failure(FailureClass.TESTS_FAILED, "reviewer", "tests", "red",
+                    charge_role="implementer")
+        dispose(db, spec, stale, f, hooks())
+        assert db.get_task(rev.id).status == TaskStatus.PENDING
+
     def test_exhaustion_goes_to_synthesis_for_every_class(self, db, spec_tasks):
         spec, impl, rev = spec_tasks
         for _ in range(5):

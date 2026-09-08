@@ -514,9 +514,13 @@ def dispose(db: Any, spec: Any, task: Any, failure: Failure, hooks: Hooks,
                        notes=failure.feedback or failure.detail or heading)
     db.increment_task_retry(impl_task.id)
     db.update_task_status(impl_task.id, TaskStatus.PENDING)
-    if reviewer_task is not None and reviewer_task.id != impl_task.id \
-            and reviewer_task.status not in (TaskStatus.PENDING, TaskStatus.SKIPPED):
-        db.update_task_status(reviewer_task.id, TaskStatus.PENDING)
+    if reviewer_task is not None and reviewer_task.id != impl_task.id:
+        # Re-read the row: the object a runner hands us was fetched before
+        # claim_task moved it to RUNNING, so its status is stale, and a
+        # reviewer left RUNNING here trips a spurious crash recovery later.
+        fresh = db.get_task(reviewer_task.id) or reviewer_task
+        if fresh.status not in (TaskStatus.PENDING, TaskStatus.SKIPPED):
+            db.update_task_status(reviewer_task.id, TaskStatus.PENDING)
     _record(db, spec, impl_task, failure, "charge", 0)
     logger.info("spec %s: implementer charged for %s (%s) — rotating "
                 "(attempt %d/%d)", spec.id, failure.cls.value, failure.source,
