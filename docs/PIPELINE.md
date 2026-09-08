@@ -200,6 +200,29 @@ it; the default (`auto`) takes manifest mode when the design enumerates
 `AUTONOMOUS_MANIFEST_FILE_THRESHOLD` (8) or more files — or 8 or more declared
 units, the guard for designs whose file list understates their size.
 
+### The artifact ledger
+
+Whatever mode produced them, every role's files reach the workspace through
+one door: `workspace.ArtifactLedger.write` (DEV-642). Each write records the
+role, kind, retry, sha256, size and the design digest it was written against —
+in the `artifacts` table and in `ledger.json` beside the code, which survives
+retry cleanup and is copied into every `retry_history` snapshot. Three guards
+run before the bytes land:
+
+| Guard | Trigger | Outcome |
+|---|---|---|
+| collision | a role writes at a path whose current bytes another role produced (synthesis and its repair may replace implementer output) | `AUTONOMOUS_COLLISION_POLICY=rename` (default) lands the write at a sibling path — `tests/test_x.py` → `tests/test_reviewer_x.py`, `Foo.swift` → `reviewer_Foo.swift` — so both suites run; `refuse` drops it |
+| emptying | the file on disk has declarations and the new content has none | refused, every role |
+| shrink | the repository version (recorded whenever a role's existing-file fetch returned it) has ≥ `AUTONOMOUS_SHRINK_MIN_BASELINE_LINES` (40) lines and the new content has under `AUTONOMOUS_SHRINK_REFUSE_RATIO` (0.25) of its lines **and** declarations | refused, every role — the DEV-636 stub never reaches a test |
+
+Every refusal and rename is one `AGENT_RAN` anomaly event (`artifact_ledger`)
+and a block on the next gate; the synthesis release gate also lists each
+synthesized file's line count against the repository version. Diagnostics
+(test output, failure reports, build logs) bypass the guards through
+`ledger.note` and are never artifacts. The synthesis corpus is built from the
+ledger — the files each attempt actually wrote — with a filtered directory
+walk only for workspaces that predate it (DEV-639).
+
 ---
 
 ## 5. Classifying one test dispatch
@@ -309,6 +332,8 @@ table to read first when a run ends somewhere surprising.
 | Warning blocking | on | `AUTONOMOUS_BLOCK_ON_BUILD_WARNINGS` | The whole WARNING BLOCK intercept in diagram 5. `0` disables it. |
 | Targeted-retry repeats | 1 | `AUTONOMOUS_TARGETED_RETRY_MAX_REPEATS` | Identical targeted failures before the retry widens to a full regeneration. |
 | Manifest threshold | 8 | `AUTONOMOUS_MANIFEST_FILE_THRESHOLD` | Files (or declared units) a design enumerates before the implementer forks to manifest mode (diagram 4). |
+| Collision policy | rename | `AUTONOMOUS_COLLISION_POLICY` | What the artifact ledger does with a cross-role write at a produced path (section 4): `rename` or `refuse`. |
+| Shrink refusal | 0.25 / 40 | `AUTONOMOUS_SHRINK_REFUSE_RATIO`, `AUTONOMOUS_SHRINK_MIN_BASELINE_LINES` | A write under this fraction of the repository file's lines and declarations is refused; baselines smaller than the line floor are never checked. |
 | Supervisor transitions | 8 | `AUTONOMOUS_MAX_SUPERVISOR_TRANSITIONS` | Budget for the supervisor, which is **off by default** (`AUTONOMOUS_SUPERVISOR=0`). When enabled, it replaces the fixed rejection edges in diagram 3 with an agent decision; nothing else in this document changes. |
 
 **Three traps in the accounting**, each of which has cost a real run:

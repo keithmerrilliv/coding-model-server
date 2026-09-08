@@ -21,7 +21,7 @@ from seam_fakes import (
 )
 from seam_harness import (
     BAD_EDITS, DAEMON_PATH, GOOD_EDITS, PLAN_YAML, SPEC_MD, TEST_FILE, TEST_PATH,
-    approve_all, approve_design, architect_reply, design_review_reply, drive,
+    approve_all, approve_design, architect_reply, design_review_reply, drive, file_blocks,
     events, implementer_edit_reply, implementer_reply,
     make_executing_spec, make_pending_plan_spec, planner_reply, rejected_gates,
     reviewer_reply, wait_at, workspace_files,
@@ -487,11 +487,12 @@ class TestSpecShapeFaults:
         from seam_harness import DAEMON_STUB_IMPLEMENTED
         assert workspace_files(db, spec.id)[DAEMON_PATH] == DAEMON_STUB_IMPLEMENTED.rstrip("\n")
 
-    def test_reviewer_overwrites_implementer_test_today(self, db, model, runner):
-        """DEV-602 residual: the write guards are dormant at the daemon's call
-        sites, so a reviewer file at an implementer path replaces the tested
-        artifact and the manifest no longer matches the disk."""
+    def test_reviewer_same_path_write_is_renamed(self, db, model, runner):
+        """DEV-602 / DEV-642: the reviewer's file at the implementer's path
+        lands at a sibling path; the certified artifact and its manifest
+        hash are untouched, both suites run, and the gate says so."""
         import hashlib
+        import json
         spec = _impl_ready(db, model, runner)
         model.script("implementer", Reply(implementer_reply()))
         model.script("reviewer", Reply(reviewer_reply(
@@ -501,24 +502,99 @@ class TestSpecShapeFaults:
 
         assert out.reason == "waiting"
         files = workspace_files(db, spec.id)
-        import json
+        assert files[TEST_PATH] == TEST_FILE.rstrip("\n")
+        renamed = "tests/test_reviewer_existing_fetch_role_log.py"
+        assert "reviewer rewrote this" in files[renamed]
         manifest = json.loads(files["tested_manifest.json"])
-        on_disk = hashlib.sha256(files[TEST_PATH].encode()).hexdigest()
-        assert manifest[TEST_PATH] != on_disk
-        assert "reviewer rewrote this" in files[TEST_PATH]
+        assert manifest[TEST_PATH] == hashlib.sha256(files[TEST_PATH].encode()).hexdigest()
+        gate = out.waiting_on[0]
+        assert "REVIEWER WRITES REDIRECTED" in gate.prompt_md and renamed in gate.prompt_md
+        anomaly = events(db, spec.id, EventKind.AGENT_RAN, anomaly="artifact_ledger")
+        assert anomaly[0]["renamed"] == [{"path": TEST_PATH, "written_as": renamed,
+                                          "prior_role": "implementer"}]
+        rows = {a.path: a.role for a in db.list_artifacts(spec.id)}
+        assert rows[TEST_PATH] == "implementer" and rows[renamed] == "reviewer"
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "DEV-602 residual: the reviewer must not overwrite an implementer "
-        "artifact the pre-gate check certified (guard call-site wiring)"))
-    def test_reviewer_cannot_overwrite_certified_artifact(self, db, model, runner):
+    def test_reviewer_same_path_write_is_refused_under_refuse_policy(
+            self, db, model, runner, monkeypatch):
+        from coding_model_autonomous import workspace
+        monkeypatch.setattr(workspace, "COLLISION_POLICY", workspace.CollisionPolicy.REFUSE)
         spec = _impl_ready(db, model, runner)
         model.script("implementer", Reply(implementer_reply()))
         model.script("reviewer", Reply(reviewer_reply(
             "PASS", tests={TEST_PATH: TEST_FILE + "\n# reviewer rewrote this\n"})))
 
-        drive(db, spec.id, model, wait_at(GateType.RELEASE_APPROVAL), runner=runner)
+        out = drive(db, spec.id, model, wait_at(GateType.RELEASE_APPROVAL), runner=runner)
 
-        assert "reviewer rewrote this" not in workspace_files(db, spec.id)[TEST_PATH]
+        assert out.reason == "waiting"
+        files = workspace_files(db, spec.id)
+        assert files[TEST_PATH] == TEST_FILE.rstrip("\n")
+        assert not any("reviewer rewrote this" in c for c in files.values())
+        assert "REFUSED (collision policy: refuse)" in out.waiting_on[0].prompt_md
+
+
+BIG_DAEMON = "".join(f"def helper_{i}(x):\n    return x + {i}\n\n\n" for i in range(50))
+STUB_DAEMON = "def _record_tested_manifest(spec_dir, files, payload):\n    return None\n"
+
+
+class TestSynthesisLedger:
+    def test_synthesis_stub_over_repo_file_is_refused(self, db, model, runner, edit_mode):
+        """DEV-636: run 21 v4's 61-line daemon in place of 6,130 lines, after
+        five unappliable attempts. The baseline the implementer fetch recorded
+        outlives every wiped attempt, so the synthesis write is refused and the
+        release gate names it. (A parse-failure exhaustion has no synthesis
+        escape hatch today — that inconsistency is DEV-629's.)"""
+        runner.repo_files[DAEMON_PATH] = BIG_DAEMON
+        spec = _impl_ready(db, model, runner)
+        model.always("implementer",
+                     Reply(implementer_edit_reply(BAD_EDITS, {TEST_PATH: TEST_FILE})))
+        model.script("synthesis", Reply(file_blocks({DAEMON_PATH: STUB_DAEMON,
+                                                     TEST_PATH: TEST_FILE})))
+
+        out = drive(db, spec.id, model, wait_at(GateType.RELEASE_APPROVAL), runner=runner)
+
+        assert out.reason == "waiting"
+        files = workspace_files(db, spec.id)
+        assert DAEMON_PATH not in files and TEST_PATH in files
+        gate = out.waiting_on[0]
+        assert "SYNTHESIS WRITES REFUSED" in gate.prompt_md
+        assert "refused_shrink" in gate.prompt_md and "against 200 / 50" in gate.prompt_md
+        anomaly = events(db, spec.id, EventKind.AGENT_RAN, anomaly="artifact_ledger")
+        assert anomaly[-1]["role"] == "synthesizer"
+        assert anomaly[-1]["refused"][0]["action"] == "refused_shrink"
+
+    def test_synthesis_corpus_is_only_the_attempts(self, db, model, runner):
+        """DEV-639: a sandbox overlay and a pytest cache left in the workspace
+        are snapshotted with the attempt but never reach the merge prompt."""
+        from seam_fakes import PytestFail, PytestPass
+        spec = _impl_ready(db, model, runner)
+        spec_dir = db.spec_dir(spec.id)
+        overlay_marker = "OVERLAY_MARKER_SHOULD_NOT_BE_IN_PROMPT"
+
+        def plant_then_reply(messages):
+            (spec_dir / ".repo_overlay" / "src").mkdir(parents=True, exist_ok=True)
+            (spec_dir / ".repo_overlay" / "src" / "x.py").write_text(f"{overlay_marker} = 1\n")
+            (spec_dir / ".pytest_cache" / "v").mkdir(parents=True, exist_ok=True)
+            (spec_dir / ".pytest_cache" / "v" / "cache").write_text("{}")
+            return Reply(implementer_reply())
+
+        model.always("implementer", plant_then_reply)
+        model.always("reviewer", Reply(reviewer_reply("FAIL", review="still red")))
+        model.script("synthesis", Reply(implementer_reply()))
+        runner.default_test = PytestFail()
+        # 6 attempts × (build check + reviewer + DEV-563 base run) fail; then
+        # synthesis' own run passes.
+        runner.tests.extend([PytestFail()] * 18 + [PytestPass()])
+
+        out = drive(db, spec.id, model, approve_all, runner=runner, max_ticks=120)
+
+        synth = model.calls_for("synthesis")
+        assert len(synth) == 1, out.reason
+        prompt = synth[0].messages[-1]["content"]
+        assert overlay_marker not in prompt and ".pytest_cache" not in prompt
+        assert "fixture stand-in for the daemon" in prompt  # the attempts' real file
+        snaps = sorted((spec_dir / "retry_history").glob("retry_*"))
+        assert snaps and (snaps[0] / ".repo_overlay" / "src" / "x.py").is_file()
 
 
 # ── daemon lifecycle ─────────────────────────────────────────────────────────
