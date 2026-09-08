@@ -299,6 +299,35 @@ _DESIGN_FILE_PATH_RE = re.compile(
 )
 
 
+def _file_structure_section(design_md: str) -> str | None:
+    """Extract the ## File Structure section from a design document.
+
+    Returns the text of the '## File Structure' section - from a line starting
+    with ## File Structure (case-insensitive, 2-4 # symbols) up to the next
+    line that starts with ## (level 2 or shallower heading) or end of doc.
+    Returns None when no such section exists.
+    """
+    if not design_md:
+        return None
+
+    SECTION_START_RE = re.compile(r"^(#{2,4})\s+File\s+Structure", re.IGNORECASE | re.MULTILINE)
+    SECTION_BOUNDARY_RE = re.compile(r"^#{1,2}\s+", re.MULTILINE)
+
+    start_match = SECTION_START_RE.search(design_md)
+    if not start_match:
+        return None
+
+    start_pos = start_match.end()
+
+    boundary_match = SECTION_BOUNDARY_RE.search(design_md[start_pos:])
+    if boundary_match:
+        end_pos = start_pos + boundary_match.start()
+    else:
+        end_pos = len(design_md)
+
+    return design_md[start_match.start():end_pos]
+
+
 def estimate_design_file_count(design_md: str) -> int:
     """Count the distinct file paths a design document enumerates.
 
@@ -307,9 +336,31 @@ def estimate_design_file_count(design_md: str) -> int:
     Structure tree, the outputs list, or prose — and de-dupes them. Used only
     to size the implementer's output budget (see implementer_max_tokens_for),
     so an over- or under-count just nudges the clamp, never breaks correctness.
+
+    When a '## File Structure' section exists and contains at least one matching
+    path, counts are scoped to that section only. Otherwise falls back to
+    whole-document scanning as before.
     """
+    if not design_md:
+        return 0
+
+    # Try to extract File Structure section
+    fs_section = _file_structure_section(design_md)
+
+    # If we have a section and it contains matches, use it; otherwise fallback
+    if fs_section is not None:
+        paths_from_section = set()
+        for m in _DESIGN_FILE_PATH_RE.finditer(fs_section):
+            p = m.group(0).strip("./")
+            if p:
+                paths_from_section.add(p)
+
+        if paths_from_section:  # Only use scoped count if we found matches
+            return len(paths_from_section)
+
+    # Fallback to whole-document scan
     paths = set()
-    for m in _DESIGN_FILE_PATH_RE.finditer(design_md or ""):
+    for m in _DESIGN_FILE_PATH_RE.finditer(design_md):
         p = m.group(0).strip("./")
         if p:
             paths.add(p)
@@ -2073,9 +2124,19 @@ def estimate_design_unit_count(design_md: str) -> int:
     tree of .ts files isn't double-counted. NOT used for budget sizing.
     """
     text = design_md or ""
-    named = {m.group(0).strip("./").lower() for m in _DESIGN_UNIT_PATH_RE.finditer(text)}
-    named |= {m.group(1).lower() for m in _BARE_FILENAME_RE.finditer(text)}
-    tree_nodes = len(_TREE_NODE_RE.findall(text))
+    # DEV-643: the structural signals read the File Structure section when
+    # it names anything, for the same reason estimate_design_file_count does
+    # — Criterion Seams quote fixture paths that are not build units. The
+    # prose count ("ten modules") keeps the whole document.
+    scope = text
+    section = _file_structure_section(text)
+    if section and (_DESIGN_UNIT_PATH_RE.search(section)
+                    or _BARE_FILENAME_RE.search(section)
+                    or _TREE_NODE_RE.search(section)):
+        scope = section
+    named = {m.group(0).strip("./").lower() for m in _DESIGN_UNIT_PATH_RE.finditer(scope)}
+    named |= {m.group(1).lower() for m in _BARE_FILENAME_RE.finditer(scope)}
+    tree_nodes = len(_TREE_NODE_RE.findall(scope))
     structural = max(len(named), tree_nodes)
     return max(structural, _prose_unit_count(text))
 
