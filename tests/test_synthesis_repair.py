@@ -90,8 +90,8 @@ def test_near_miss_gets_one_repair_and_can_convert(env):
         guard_results=[(False, NEAR_MISS_TAP), (True, ALL_PASS)])
     assert passed is True, "a converted repair is a synthesis pass"
     assert agent_calls == 2, "exactly one extra agent call"
-    assert (spec_dir / "impl.py").read_text() == "v3", "repair overlaid"
-    assert (spec_dir / "t.test.js").read_text() == "t", (
+    assert (spec_dir / "impl.py").read_text() == "v3\n", "repair overlaid (DEV-641: the ledger adds the newline)"
+    assert (spec_dir / "t.test.js").read_text() == "t\n", (
         "files the repair didn't emit stay from synthesis")
 
 
