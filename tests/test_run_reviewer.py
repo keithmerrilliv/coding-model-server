@@ -307,16 +307,21 @@ def test_parse_error_soft_fails_to_retry_when_exhausted(db, spec_and_task):
     # FAIL routed through _attempt_retry (supervisor → implementer/design) — NOT
     # a direct spec failure (the old behavior that killed specs on one truncation).
     spec, task, spec_dir = spec_and_task
-    perr = ParseError(reason="truncated", raw="...")
+    if not db.list_tasks_for_spec_by_role(spec.id, "implementer"):
+        db.create_task(spec_id=spec.id, agent="implementer", role="implementer",
+                       title="implement")
+    perr = ParseError(reason="no REVIEW block", raw="prose")
     with mock.patch.object(d.executor, "REVIEWER_PARSE_RETRIES", 0), \
-            mock.patch.object(d, "call_agent", return_value="raw"), \
+            mock.patch.object(d, "call_agent", return_value="prose"), \
             mock.patch.object(d, "build_reviewer_message", return_value=[]), \
-            mock.patch.object(d, "parse_reviewer_response", return_value=perr), \
-            mock.patch.object(d, "_attempt_retry") as attempt:
+            mock.patch.object(d, "parse_reviewer_response", return_value=perr):
         d._run_reviewer(db, spec, task, spec_dir)
 
-    attempt.assert_called_once()
-    # _run_reviewer itself must not have hard-failed the spec.
+    # DEV-629: real output that does not parse, past the reviewer's own
+    # re-runs, is charged to the implementer as a soft FAIL — never a direct
+    # spec failure (the old behavior that killed specs on one truncation).
+    impl = db.list_tasks_for_spec_by_role(spec.id, "implementer")[0]
+    assert impl.retry_count == 1 and impl.status is TaskStatus.PENDING
     assert db.get_spec(spec.id).status is SpecStatus.EXECUTING
 
 

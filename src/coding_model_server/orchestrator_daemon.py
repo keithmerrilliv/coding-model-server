@@ -127,6 +127,11 @@ from coding_model_autonomous import supervisor as _supervisor
 from coding_model_autonomous.workspace import (
     ACTION_RENAMED, ATTEMPT_ROLES, REFUSALS, ArtifactLedger,
 )
+from coding_model_autonomous import outcome as _outcome
+from coding_model_autonomous.outcome import (
+    Failure, FailureClass, Hooks, classify_exception, classify_model_output,
+    classify_test_run, repo_packages, rotation_offset,
+)
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
@@ -277,13 +282,19 @@ def _process_pending_plan(db: Database, spec: Spec) -> None:
         )
         return
     except Exception as e:
-        logger.exception("spec %s: planner call failed", spec.id)
+        # DEV-629: a refusal, a malformed body or a daemon fault produced no
+        # plan to judge — leave the spec in PENDING_PLAN and count it; a run
+        # of them asks a human whether the infrastructure is back.
+        failure = classify_exception(e, role="planner", phase="planner")
+        if failure.cls is FailureClass.UNKNOWN_EXCEPTION:
+            logger.exception("spec %s: planner call raised %s", spec.id,
+                             type(e).__name__)
         db.record_event(
             EventKind.PLANNER_RAN,
             spec_id=spec.id,
-            payload={"error": f"{type(e).__name__}: {e}"},
+            payload={"error": f"{type(e).__name__}: {e}", "no_verdict": True},
         )
-        db.update_spec_status(spec.id, SpecStatus.FAILED)
+        _planner_no_verdict(db, spec, failure)
         return
 
     db.record_event(
@@ -311,7 +322,60 @@ def _process_pending_plan(db: Database, spec: Spec) -> None:
                 "raw_excerpt": result.raw_response[:500],
             },
         )
-        db.update_spec_status(spec.id, SpecStatus.FAILED)
+        if not executor._strip_thinking(result.raw_response or "").strip():
+            # An empty completion is no plan at all — not a verdict on one.
+            _planner_no_verdict(db, spec, Failure(
+                FailureClass.EMPTY_COMPLETION, "planner", "model_call",
+                result.reason, phase="planner"))
+            return
+        _outcome.terminate(db, spec, None, Failure(
+            FailureClass.DESIGN_EXHAUSTED, "planner", "parse",
+            f"planner output unparseable after its re-rolls: {result.reason}"))
+
+
+def _planner_no_verdict(db: Database, spec: Spec, failure: Failure) -> None:
+    """A planner-stage no-verdict: stay in PENDING_PLAN (the next tick
+    re-runs the planner) up to the cap, then ask a human via a
+    clarification gate — the same channel a planner question uses."""
+    prior = 0
+    try:
+        for ev in db.list_events_by_kind(spec_id=spec.id,
+                                         kind=EventKind.FAILURE_CLASSIFIED,
+                                         limit=100):
+            payload = json.loads(ev.payload_json or "{}")
+            if payload.get("phase") == "planner" and \
+                    payload.get("outcome") == _outcome.Outcome.NO_VERDICT.value:
+                prior += 1
+    except Exception:
+        prior = 0
+    consecutive = prior + 1
+    cap = failure.cap
+    base = {"role": "planner", "outcome": failure.outcome.value,
+            "cls": failure.cls.value, "source": failure.source,
+            "detail": failure.detail[:600], "signature": failure.signature,
+            "phase": "planner", "consecutive": consecutive, "cap": cap}
+    if cap is not None and consecutive > cap:
+        db.record_event(EventKind.FAILURE_CLASSIFIED, spec_id=spec.id,
+                        payload={**base, "disposition": "park"})
+        db.create_gate(
+            spec_id=spec.id, gate_type=GateType.CLARIFICATION,
+            prompt_md=(f"## Infrastructure gate: {failure.cls.value} ×{consecutive} "
+                       f"on the planner (DEV-629)\n\nSpec ID: `{spec.id}`\n\n"
+                       f"The planner has not produced a plan to judge in "
+                       f"{consecutive} consecutive tries:\n\n```\n"
+                       f"{failure.detail[:1500]}\n```\n\nApprove (with any "
+                       f"notes) once the model server is back to plan again, "
+                       f"or reject to abort."))
+        db.update_spec_status(spec.id, SpecStatus.NEEDS_CLARIFICATION)
+        logger.error("spec %s: planner %s ×%d — parked behind an infrastructure "
+                     "gate", spec.id, failure.cls.value, consecutive)
+        return
+    db.record_event(EventKind.FAILURE_CLASSIFIED, spec_id=spec.id,
+                    payload={**base, "disposition": "requeue"})
+    logger.warning("spec %s: planner %s (%s) — leaving PENDING_PLAN for retry "
+                   "(%d/%s consecutive)", spec.id, failure.cls.value,
+                   failure.detail.splitlines()[0] if failure.detail else "",
+                   consecutive, cap if cap is not None else "∞")
 
 
 # DEV-426: keys each Apple framework needs before a dispatch can even be built.
@@ -1197,6 +1261,61 @@ def _write_role_files(db: Database, spec: Spec, task, spec_dir, files,
     return landed, outcomes
 
 
+class SynthesisNoVerdict(Exception):
+    """The synthesis call itself produced no verdict (transport, refusal,
+    empty or truncated completion). Carries the Failure so the caller can
+    dispose of it without failing the spec."""
+    def __init__(self, failure: Failure) -> None:
+        super().__init__(failure.detail)
+        self.failure = failure
+
+
+def _hooks(*, supervisor: bool = True) -> Hooks:
+    """What outcome.dispose needs from the daemon (DEV-629)."""
+    return Hooks(
+        max_retries=lambda: MAX_RETRIES,
+        synthesize=_synthesize_or_fail,
+        supervisor=_supervisor_strategy if supervisor else None,
+        reviewer_parse_retries=lambda: executor.REVIEWER_PARSE_RETRIES,
+    )
+
+
+def _dispose(db: Database, spec: Spec, task, failure: Failure, *,
+             reviewer_task=None, supervisor: bool = True) -> "_outcome.Disposition":
+    return _outcome.dispose(db, spec, task, failure, _hooks(supervisor=supervisor),
+                            reviewer_task=reviewer_task)
+
+
+def _supervisor_strategy(db: Database, spec: Spec, task, failure: Failure) -> bool:
+    """The supervisor as a Strategy inside dispose: consulted for the two
+    verdicts it always was (a rejected gate, a failed test run), only when
+    enabled. False means "use the default disposition"."""
+    if not SUPERVISOR_ENABLED:
+        return False
+    if failure.source == "gate":
+        ctx = _build_supervisor_context(db, spec, task, outcome="review_reject",
+                                        reviewer_notes=failure.feedback)
+    else:
+        ctx = _build_supervisor_context(db, spec, task, outcome="test_fail",
+                                        test_output_excerpt=failure.feedback)
+    try:
+        decision = _supervisor.decide(ctx)
+    except _supervisor.SupervisorError as e:
+        logger.warning("spec %s: supervisor failed (%s); falling back to the "
+                       "default disposition", spec.id, e)
+        return False
+    _apply_supervisor_decision(db, spec, task, decision,
+                               legacy_feedback=failure.feedback)
+    return True
+
+
+def _repo_packages_for_spec(spec: Spec) -> set[str]:
+    """Top-level packages the target repo owns, for telling a sandbox that
+    cannot import them (no verdict) from an implementer that imported the
+    wrong thing (a verdict)."""
+    return repo_packages(_planned_implement_outputs(spec))
+
+
 def _crash_recoveries_used(db: Database, spec_id: str, task_id: str) -> int:
     """How many times THIS task has actually been recovered from RUNNING.
 
@@ -1291,8 +1410,9 @@ def _process_executing(db: Database, spec: Spec) -> None:
                          "(MAX_RETRIES=%d) — failing the spec instead of "
                          "looping", spec.id, current.id, recoveries,
                          MAX_RETRIES)
-            db.update_task_status(current.id, TaskStatus.FAILED)
-            db.update_spec_status(spec.id, SpecStatus.FAILED)
+            _outcome.terminate(db, spec, current, Failure(
+                FailureClass.ABORTED, current.role, "daemon",
+                f"crash-recovered {recoveries} times (MAX_RETRIES={MAX_RETRIES})"))
             return
         # retry_count still advances: it is the general "this task was sent
         # back" counter that rotation and the parse-failure path read. Only
@@ -1487,27 +1607,20 @@ def _start_task(db: Database, spec: Spec, task) -> None:
             logger.error("spec %s: unknown role %r for task %s",
                          spec.id, task.role, task.id)
             db.update_task_status(task.id, TaskStatus.FAILED)
-    except ShutdownRequested as e:
-        # SIGTERM mid-manifest (DEV-141): stop cleanly, keep the work
-        # re-runnable. Deliberately does NOT burn a retry — shutting the
-        # daemon down is an operator action, not a task failure.
-        logger.info("spec %s: task %s (%s) interrupted by shutdown (%s) — "
-                    "resetting to PENDING", spec.id, task.id, task.role, e)
-        db.update_task_status(task.id, TaskStatus.PENDING)
-    except _TRANSPORT_ERRORS as e:
-        # Couldn't reach the server mid-inference (redeploy race / read timeout).
-        # Mirror the RUNNING crash-recovery path: reset the task to PENDING and
-        # leave the spec EXECUTING so the next tick re-runs it, instead of
-        # failing an approved spec on a network hiccup.
-        logger.warning("spec %s: task %s (%s) hit transport error (%s) — "
-                       "resetting to PENDING for retry",
-                       spec.id, task.id, task.role, type(e).__name__)
-        db.update_task_status(task.id, TaskStatus.PENDING)
-    except Exception:
-        logger.exception("spec %s: task %s (%s) failed with exception",
-                         spec.id, task.id, task.role)
-        db.update_task_status(task.id, TaskStatus.FAILED)
-        db.update_spec_status(spec.id, SpecStatus.FAILED)
+    except Exception as e:
+        # DEV-629: one catch site, one classifier. A shutdown, a dead
+        # transport, a 4xx/5xx, a choices-less 200 and a daemon bug are all
+        # "nothing was judged" — the task goes back to PENDING with its
+        # budget untouched, and only a run of them parks it behind a gate.
+        failure = classify_exception(e, role=task.role)
+        if failure.cls is FailureClass.UNKNOWN_EXCEPTION:
+            logger.exception("spec %s: task %s (%s) raised %s — classified as a "
+                             "daemon fault, not a verdict", spec.id, task.id,
+                             task.role, type(e).__name__)
+        elif failure.cls is FailureClass.SHUTDOWN:
+            logger.info("spec %s: task %s (%s) interrupted by shutdown (%s) — "
+                        "resetting to PENDING", spec.id, task.id, task.role, e)
+        _dispose(db, spec, db.get_task(task.id) or task, failure)
 
 
 def _testability_rounds_used(db: Database, spec_id: str) -> int:
@@ -1617,6 +1730,14 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
         )
 
     if isinstance(result, ParseError):
+        # DEV-629: an empty or length-cut completion is no verdict on the
+        # architect — requeue without charging instead of failing the spec.
+        no_verdict = classify_model_output(
+            raw, meta, role="architect", parse_reason=result.reason,
+            strip_thinking=executor._strip_thinking)
+        if no_verdict is not None and no_verdict.outcome is _outcome.Outcome.NO_VERDICT:
+            _dispose(db, spec, task, no_verdict)
+            return
         # DEV-543: on a REVISION cycle (retry_count > 0) the architect has
         # already produced a design that parsed — and cleared or gate-annotated
         # testability/review — on a previous cycle; it is on disk as design.md.
@@ -1664,12 +1785,16 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
             logger.info("spec %s: design_approval gate created from last-good "
                         "design after parse-retry exhaustion (DEV-543)", spec.id)
             return
-        logger.error("spec %s: architect exhausted %d parse-retry attempt(s); "
-                     "spec FAILED. Raw responses persisted as "
-                     "architect_failed_response_attempt*.txt",
+        logger.error("spec %s: architect exhausted %d parse-retry attempt(s) on "
+                     "real output — charging a design revision. Raw responses "
+                     "persisted as architect_failed_response_attempt*.txt",
                      spec.id, max_attempts)
-        db.update_task_status(task.id, TaskStatus.FAILED)
-        db.update_spec_status(spec.id, SpecStatus.FAILED)
+        _dispose(db, spec, task, Failure(
+            FailureClass.PARSE_FAILURE, "architect", "parse", result.reason,
+            feedback=(f"The previous design response was unparseable: "
+                      f"{result.reason}. Emit the complete design inside "
+                      f"<<<DESIGN>>> ... <<<END>>> markers, followed by the "
+                      f"<<<COMPLEXITY>>> block.")))
         return
 
     # Write design.md
@@ -2119,6 +2244,9 @@ def _generate_implementation(
     _note_truncation(db, spec, task, "implementer", meta, impl_max_tokens)
     if tally is not None:
         executor.accumulate_agent_fields(tally, meta)
+        if meta.get("truncated"):
+            tally["truncated"] = True
+            tally["max_tokens"] = impl_max_tokens
     if not edit_mode:
         return parse_implementer_response(raw)
     return _resolve_edit_mode_response(raw, existing_files)
@@ -2723,11 +2851,21 @@ def _generate_via_manifest(
     # the case a cost-per-attempt query wants to see.
     if tally is not None:
         executor.accumulate_agent_fields(tally, meta)
+        if meta.get("truncated"):
+            tally["truncated"] = True
+            tally["max_tokens"] = executor.MANIFEST_MAX_TOKENS
     manifest = parse_manifest_response(manifest_raw)
     if isinstance(manifest, ParseError):
-        logger.warning("spec %s: manifest parse failed (%s) — rotating",
-                       spec.id, manifest.reason)
-        return manifest  # propagate → caller's rotation retry
+        # DEV-507: keep the evidence, as the architect path always has.
+        try:
+            (spec_dir / f"manifest_failed_response_attempt{task.retry_count}.txt"
+             ).write_text(f"# parse error: {manifest.reason}\n\n{manifest_raw}")
+        except OSError as e:
+            logger.warning("spec %s: could not persist failed manifest "
+                           "response: %s", spec.id, e)
+        logger.warning("spec %s: manifest parse failed (%s)", spec.id,
+                       manifest.reason)
+        return manifest  # the caller classifies it
     manifest.entries = _drop_undeliverable_manifest_entries(spec, manifest.entries)
     db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
                     payload={"role": "manifest",
@@ -3311,7 +3449,11 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
     # Falling back to task.agent (env-default) when complexity.json is absent
     # so retries still rotate from a sensible anchor.
     initial_agent = _select_implementer_agent(spec_dir) or task.agent
-    chosen_agent = _rotation_pick(initial_agent, task.retry_count)
+    # DEV-629: a no-verdict that asked for a different agent (a 413, a
+    # truncation, an empty completion) advances the pick without spending
+    # the budget.
+    chosen_agent = _rotation_pick(
+        initial_agent, task.retry_count + rotation_offset(db, spec.id, task))
     if chosen_agent and chosen_agent != task.agent:
         if task.retry_count == 0:
             logger.info("spec %s: architect recommendation overrides implementer agent: %r → %r",
@@ -3339,37 +3481,10 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
         _requeue_implement_for_runner_outage(db, spec, task, str(e))
         return
     except requests.HTTPError as e:
-        # DEV-624 (terminal half): the server refusing the request — a 413
-        # for a prompt the agent's window can't hold, a 5xx mid-crash — is
-        # transport shaping, never a verdict on code that was never
-        # generated. Runs 19 and 21 each died terminally in under a minute
-        # this way. Rotate exactly like a parse failure instead: the next
-        # attempt gets a different agent, and the ctx-fit guard above keeps
-        # it from re-dispatching to another too-small window.
-        if task.retry_count >= MAX_RETRIES:
-            logger.error(
-                "spec %s: dispatch-refusal retry budget exhausted (%d/%d), "
-                "failing", spec.id, task.retry_count, MAX_RETRIES)
-            db.update_task_status(task.id, TaskStatus.FAILED)
-            db.update_spec_status(spec.id, SpecStatus.FAILED)
-            return
-        synth_gate = db.create_gate(
-            spec_id=spec.id,
-            task_id=task.id,
-            gate_type=GateType.CODE_REVIEW,
-            prompt_md="## Automated dispatch-refusal retry",
-        )
-        db.respond_to_gate(synth_gate.id, "rejected", notes=(
-            f"The previous attempt never reached the model — the server "
-            f"refused the request ({e}). Nothing about any implementation "
-            f"was judged. Produce the implementation exactly as the design "
-            f"specifies."))
-        db.increment_task_retry(task.id)
-        db.update_task_status(task.id, TaskStatus.PENDING)
-        logger.warning(
-            "spec %s: implementer dispatch refused (%s) — rotating "
-            "(attempt %d/%d) (DEV-624)",
-            spec.id, e, task.retry_count + 1, MAX_RETRIES)
+        # DEV-624 / DEV-629: the server refusing the request is transport
+        # shaping, never a verdict on code that was never generated. A 413
+        # rotates to a larger window; a 5xx re-dispatches. No charge.
+        _dispose(db, spec, task, classify_exception(e, role="implementer"))
         return
 
     db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
@@ -3396,30 +3511,15 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
     if isinstance(result, ParseError):
         logger.error("spec %s: implementer response unparseable: %s",
                      spec.id, result.reason)
-        if task.retry_count >= MAX_RETRIES:
-            logger.error(
-                "spec %s: parse-failure retry budget exhausted (%d/%d), failing",
-                spec.id, task.retry_count, MAX_RETRIES,
-            )
-            db.update_task_status(task.id, TaskStatus.FAILED)
-            db.update_spec_status(spec.id, SpecStatus.FAILED)
-            return
-        # Engage rotation just like `_legacy_attempt_retry` does on test
-        # failure: create a synthetic rejected code_review gate so the next
-        # tick re-runs `_run_implementer` with a different model from the
-        # rotation chain. Without this, a single unparseable response from
-        # one agent (e.g. native_implementer wrapping its output in markdown headings
-        # instead of <<<FILE:>>> markers) immediately fails the spec — even
-        # though moe_implementer / fast_implementer / etc. would happily
-        # produce the right output. Observed in spec_51b1baee retry-2 on
-        # 2026-05-02; the orchestrator now rotates instead of giving up.
-        synth_gate = db.create_gate(
-            spec_id=spec.id,
-            task_id=task.id,
-            gate_type=GateType.CODE_REVIEW,
-            prompt_md="## Automated parse-failure retry",
-        )
-        feedback = (
+        # DEV-629 / DEV-623 / DEV-507: a truncated or empty completion was
+        # never an answer — requeue on a different agent without charging.
+        # Real output that does not parse is a verdict against the budget,
+        # and at exhaustion it reaches synthesis like every other verdict.
+        failure = classify_model_output(
+            result.raw, tally, role="implementer", parse_reason=result.reason,
+            strip_thinking=executor._strip_thinking)
+        assert failure is not None
+        failure.feedback = (
             f"Previous implementer response was unparseable: {result.reason}. "
             f"Re-emit ALL files. Each one must be wrapped in a complete "
             f"<<<FILE: path>>> ... <<<END_FILE>>> block — exactly three "
@@ -3428,14 +3528,7 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
             f"file contents; the daemon parses ONLY the marker-delimited "
             f"blocks."
         )
-        db.respond_to_gate(synth_gate.id, "rejected", notes=feedback)
-        db.increment_task_retry(task.id)
-        db.update_task_status(task.id, TaskStatus.PENDING)
-        logger.info(
-            "spec %s: implementer parse failed, rotating implementer "
-            "(attempt %d/%d)",
-            spec.id, task.retry_count + 1, MAX_RETRIES,
-        )
+        _dispose(db, spec, task, failure)
         return
 
     # Surface duplicate-path collisions as a diagnostic event so the
@@ -3456,6 +3549,17 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
     # exactly like a build failure, rather than silently overwriting, dropping or
     # partially applying a file. Empty on every whole-file (flag-off) attempt.
     if getattr(result, "apply_errors", None):
+        if tally.get("truncated"):
+            # DEV-623: a length-cut edit response degenerates into garbage
+            # anchors; that is a harness budget failure, not a verdict.
+            _dispose(db, spec, task, Failure(
+                FailureClass.TRUNCATED, "implementer", "model_call",
+                f"finish_reason=length at max_tokens={tally.get('max_tokens', '?')} "
+                f"(agent={tally.get('agent', '?')}); {len(result.apply_errors)} "
+                f"edit block(s) then failed to apply", rotate=True,
+                extra={"agent": tally.get("agent"),
+                       "max_tokens": tally.get("max_tokens")}))
+            return
         _route_unappliable_edits(db, spec, task, result.apply_errors,
                                  failures=getattr(result, "apply_failures", None))
         return
@@ -3607,6 +3711,17 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
                     return
 
     if build_reason is not None or blocking_warnings:
+        # DEV-629 / DEV-626: a sandbox that cannot import the repository's
+        # own package judged nothing — requeue without charging.
+        if build_reason is not None:
+            provisioning = classify_test_run(
+                build_output, role="implementer", passed=False,
+                build_reason=build_reason, unreachable=False,
+                packages=_repo_packages_for_spec(spec))
+            if provisioning is not None and \
+                    provisioning.cls is FailureClass.SANDBOX_PROVISIONING:
+                _dispose(db, spec, task, provisioning)
+                return
         # Straight back to the implementer with the compiler's own words. No
         # human gate: there is nothing here for a reviewer to decide.
         if build_reason is not None:
@@ -3660,39 +3775,12 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
         # MAX_RETRIES forever — each pass costs a full generation plus a runner
         # dispatch, and the spec can never reach the synthesis escape hatch
         # that exists precisely for "every attempt failed differently".
-        if task.retry_count >= MAX_RETRIES:
-            logger.error("spec %s: build-failure retry budget exhausted "
-                         "(%d/%d) — handing to synthesis",
-                         spec.id, task.retry_count, MAX_RETRIES)
-            reviewer_tasks = db.list_tasks_for_spec_by_role(spec.id, "reviewer")
-            reviewer_task = reviewer_tasks[0] if reviewer_tasks else None
-            if reviewer_task is None:
-                db.update_task_status(task.id, TaskStatus.FAILED)
-                db.update_spec_status(spec.id, SpecStatus.FAILED)
-            else:
-                # Same escape hatch the other two exhaustion paths use
-                # (DEV-433): the attempts on disk may still merge into
-                # something that builds.
-                _legacy_attempt_retry(db, spec, reviewer_task, feedback)
-            return
-
-        synth_gate = db.create_gate(
-            spec_id=spec.id,
-            task_id=task.id,
-            gate_type=GateType.CODE_REVIEW,
-            prompt_md=("## Automated build-failure retry (DEV-429)"
-                       if build_reason is not None else
-                       "## Automated build-warning retry (DEV-547)"),
-        )
-        db.respond_to_gate(synth_gate.id, "rejected", notes=feedback)
-        db.increment_task_retry(task.id)
-        db.update_task_status(task.id, TaskStatus.PENDING)
-        logger.info("spec %s: %s, rotating implementer "
-                    "without a human gate (attempt %d/%d)", spec.id,
-                    f"build failed ({build_reason})" if build_reason is not None
-                    else (f"build compiled with "
-                          f"{len(blocking_warnings)} blocking warning(s)"),
-                    task.retry_count + 1, MAX_RETRIES)
+        _dispose(db, spec, task, Failure(
+            FailureClass.BUILD_FAILURE, "implementer", "build_check",
+            build_reason if build_reason is not None else
+            f"{len(blocking_warnings)} blocking warning(s)",
+            feedback=feedback,
+            extra={"warnings": len(blocking_warnings)}))
         return
 
     # DEV-427: the dispatch drops off-limits files so the worktree keeps the
@@ -4121,18 +4209,11 @@ def _persist_implementer_response(spec_dir: Path, task, agent: str, result,
 def _route_unappliable_edits(db: Database, spec: Spec, task,
                              errors: "list[str]",
                              failures: "list[dict] | None" = None) -> None:
-    """Route unappliable diff-based edits back to the implementer (DEV-581).
-
-    Uses the same channel a build failure does: a synthetic REJECTED code_review
-    gate carrying the diagnostic, then the task is requeued for another
-    implementer attempt with the retry budget applied unchanged. No files were
-    written, so there is nothing to overwrite or partially apply. At budget
-    exhaustion it hands off to synthesis exactly like the build-failure path.
-
-    DEV-637: ``failures`` (ImplementerResult.apply_failures, parallel to
-    ``errors``) is recorded on the event as ``errors_full`` — path, block,
-    reason and the COMPLETE SEARCH text — while ``errors`` and the journal
-    line keep their one-line summaries.
+    """Unappliable diff-based edits are a verdict (DEV-581): the anchors the
+    model transcribed do not match. Record the DEV-637 evidence — every
+    failed block with its COMPLETE SEARCH text — then hand the verdict to
+    dispose, which charges the budget, rotates, and at exhaustion reaches
+    synthesis like every other verdict.
     """
     feedback = _edit_apply_feedback(errors)
     logger.warning("spec %s: %d edit block(s) did not apply — rotating "
@@ -4149,29 +4230,10 @@ def _route_unappliable_edits(db: Database, spec: Spec, task,
             for f in failures[:8]]
     db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
                     payload=payload)
-    if task.retry_count >= MAX_RETRIES:
-        logger.error("spec %s: unappliable-edit retry budget exhausted (%d/%d) "
-                     "— handing to synthesis", spec.id, task.retry_count,
-                     MAX_RETRIES)
-        reviewer_tasks = db.list_tasks_for_spec_by_role(spec.id, "reviewer")
-        reviewer_task = reviewer_tasks[0] if reviewer_tasks else None
-        if reviewer_task is None:
-            db.update_task_status(task.id, TaskStatus.FAILED)
-            db.update_spec_status(spec.id, SpecStatus.FAILED)
-        else:
-            _legacy_attempt_retry(db, spec, reviewer_task, feedback)
-        return
-    synth_gate = db.create_gate(
-        spec_id=spec.id,
-        task_id=task.id,
-        gate_type=GateType.CODE_REVIEW,
-        prompt_md="## Automated unappliable-edit retry (DEV-581)",
-    )
-    db.respond_to_gate(synth_gate.id, "rejected", notes=feedback)
-    db.increment_task_retry(task.id)
-    db.update_task_status(task.id, TaskStatus.PENDING)
-    logger.info("spec %s: unappliable edits, rotating implementer "
-                "(attempt %d/%d)", spec.id, task.retry_count + 1, MAX_RETRIES)
+    _dispose(db, spec, task, Failure(
+        FailureClass.UNAPPLIABLE_EDITS, "implementer", "apply",
+        "; ".join(e.splitlines()[0] for e in errors[:3]), feedback=feedback,
+        extra={"blocks": len(errors)}))
 
 
 def _route_build_failure_to_architect(db: Database, spec: Spec, task, spec_dir,
@@ -4848,29 +4910,20 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
         except OSError as e:
             logger.warning("spec %s: could not persist failed reviewer "
                            "response: %s", spec.id, e)
-        # Robustness (#2): a truncated/unparseable review must NOT instakill the
-        # spec (it used to mark spec FAILED here, bypassing the supervisor). The
-        # 122B reviewer's degenerate truncation is intermittent, so re-run the
-        # reviewer a bounded number of times; on persistent failure treat it as a
-        # soft FAIL and route through the normal retry path (supervisor →
-        # implementer retry / design revision / abort).
-        if task.retry_count < executor.REVIEWER_PARSE_RETRIES:
-            db.increment_task_retry(task.id)
-            db.update_task_status(task.id, TaskStatus.PENDING)
-            logger.warning("spec %s: re-running reviewer after unparseable output "
-                           "(attempt %d/%d)", spec.id, task.retry_count + 1,
-                           executor.REVIEWER_PARSE_RETRIES)
-            return
-        logger.error("spec %s: reviewer unparseable after %d attempt(s) — treating "
-                     "as soft FAIL and routing to retry", spec.id,
-                     task.retry_count + 1)
-        _attempt_retry(
-            db, spec, task,
+        # DEV-629: a truncated or empty review judged nothing — re-run without
+        # charging anyone. Real output that does not parse is charged to the
+        # reviewer's own small budget of re-runs, then to the implementer as
+        # a soft FAIL (the implementation was NOT actually reviewed).
+        failure = classify_model_output(
+            raw, meta, role="reviewer", parse_reason=result.reason,
+            strip_thinking=executor._strip_thinking)
+        assert failure is not None
+        failure.feedback = (
             f"The reviewer could not produce a parseable review after "
             f"{task.retry_count + 1} attempt(s) (likely truncation: {result.reason}). "
             f"The implementation was NOT actually reviewed — re-examine the code, "
-            f"or revise the design if the spec is hard to satisfy.",
-        )
+            f"or revise the design if the spec is hard to satisfy.")
+        _dispose(db, spec, task, failure)
         return
 
     if result.duplicate_paths:
@@ -5249,8 +5302,9 @@ def _apply_supervisor_decision(db: Database, spec: Spec, task,
 
     if decision.action == "abort":
         logger.warning("spec %s: supervisor → abort: %s", spec.id, decision.reason)
-        db.update_task_status(task.id, TaskStatus.FAILED)
-        db.update_spec_status(spec.id, SpecStatus.FAILED)
+        _outcome.terminate(db, spec, task, Failure(
+            FailureClass.ABORTED, task.role, "gate",
+            f"supervisor abort: {decision.reason}"))
         return
 
     if decision.action == "retry":
@@ -5377,30 +5431,17 @@ def _harness_retry(db: Database, spec: Spec, task, spec_dir: Path,
 
 
 def _attempt_retry(db: Database, spec: Spec, task, failure_detail: str) -> None:
-    """Decide what to do after a test-failure / reviewer-FAIL outcome.
+    """A test-failure / reviewer-FAIL outcome at the reviewer stage: a
+    verdict against the implementer's budget (DEV-629). The supervisor, when
+    enabled, is consulted inside dispose as a Strategy."""
+    _dispose(db, spec, task, _test_failure(failure_detail))
 
-    With SUPERVISOR_ENABLED, asks the supervisor agent; on SupervisorError
-    (transport, parse, schema violation), falls back to the legacy retry
-    path so a flaky meta-call can't take down the spec.
-    """
-    if not SUPERVISOR_ENABLED:
-        _legacy_attempt_retry(db, spec, task, failure_detail)
-        return
 
-    ctx = _build_supervisor_context(
-        db, spec, task,
-        outcome="test_fail",
-        test_output_excerpt=failure_detail,
-    )
-    try:
-        decision = _supervisor.decide(ctx)
-    except _supervisor.SupervisorError as e:
-        logger.warning("spec %s: supervisor failed (%s); falling back to legacy retry",
-                       spec.id, e)
-        _legacy_attempt_retry(db, spec, task, failure_detail)
-        return
-    _apply_supervisor_decision(db, spec, task, decision,
-                               legacy_feedback=failure_detail)
+def _test_failure(failure_detail: str) -> Failure:
+    first = (failure_detail or "").strip().splitlines()
+    return Failure(FailureClass.TESTS_FAILED, "reviewer", "tests",
+                   first[0] if first else "tests failed",
+                   feedback=failure_detail, charge_role="implementer")
 
 
 _SYNTHESIS_AGENT = os.getenv("AUTONOMOUS_SYNTHESIS_AGENT", "deep_reviewer")
@@ -5581,13 +5622,21 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
                     len(attempts))
                 continue
             logger.error("spec %s: synthesis call failed: %s", spec.id, exc)
-            return False, ""
+            # DEV-629: the merge was never judged — not a synthesis failure.
+            raise SynthesisNoVerdict(
+                classify_exception(exc, role="synthesizer", phase="synthesis"))
     _note_truncation(db, spec, impl_task, "synthesizer", meta, synth_max_tokens)
 
     result = parse_implementer_response(raw)
     if isinstance(result, ParseError):
         logger.error("spec %s: synthesis response unparseable: %s",
                      spec.id, result.reason)
+        no_verdict = classify_model_output(
+            raw, meta, role="synthesizer", parse_reason=result.reason,
+            strip_thinking=executor._strip_thinking, phase="synthesis")
+        if no_verdict is not None and \
+                no_verdict.outcome is _outcome.Outcome.NO_VERDICT:
+            raise SynthesisNoVerdict(no_verdict)
         return False, ""
 
     db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=impl_task.id,
@@ -5878,105 +5927,86 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
 
 
 def _legacy_attempt_retry(db: Database, spec: Spec, task, failure_detail: str) -> None:
-    """Send the spec back to the implementer for another attempt, or fail.
+    """The default (supervisor-less) disposition of a reviewer-stage test
+    failure: charge the implementer with a synthetic rejected gate carrying
+    the failure, re-run the reviewer after it; at MAX_RETRIES hand the
+    attempts to synthesis (DEV-433), whose failure is the one terminal
+    branch (DEV-532: every task closes with it)."""
+    _dispose(db, spec, task, _test_failure(failure_detail), supervisor=False)
 
-    At MAX_RETRIES exhaustion, attempts a synthesis pass first: merges the
-    union of correct behaviors across all rotation attempts and re-runs
-    the test phase. A passing synthesis goes to a release_approval gate
-    (it was assembled after repeated failures and has no reviewer verdict,
-    so it must not skip the human gate); only if synthesis also fails does
-    the spec get marked FAILED. See project_autonomous_validation_2026_05_04
-    for rationale.
-    """
-    impl_tasks = db.list_tasks_for_spec_by_role(spec.id, "implementer")
-    impl_task = impl_tasks[0] if impl_tasks else None
 
-    if impl_task is None:
-        logger.error("spec %s: no implementer task to retry", spec.id)
-        db.update_task_status(task.id, TaskStatus.FAILED)
-        db.update_spec_status(spec.id, SpecStatus.FAILED)
-        return
+def _synthesize_or_fail(db: Database, spec: Spec, impl_task, reviewer_task,
+                        feedback: str) -> "Failure | None":
+    """The exhaustion escape hatch (DEV-433). Runs synthesis and either
+    opens the release gate (None) or returns the terminal Failure. A
+    synthesis call that produced no verdict is disposed of on the reviewer
+    task and returns None — the spec stays alive."""
+    logger.info("spec %s: max retries (%d) exhausted — attempting synthesis",
+                spec.id, MAX_RETRIES)
+    framework, framework_opts = "pytest", {}
+    ts = _load_plan(spec).get("test_strategy")
+    if isinstance(ts, dict):
+        framework = ts.get("framework", "pytest")
+        framework_opts = {
+            k: v for k, v in ts.items()
+            if k not in ("framework", "required")
+        }
+    elif ts is not None:
+        logger.warning("spec %s: synthesis: test_strategy is %s, not a mapping; "
+                       "defaulting to pytest with no opts",
+                       spec.id, type(ts).__name__)
 
-    if impl_task.retry_count >= MAX_RETRIES:
-        logger.info("spec %s: max retries (%d) exhausted — attempting synthesis",
-                    spec.id, MAX_RETRIES)
-        # Reconstruct the framework + opts the test phase would have used.
-        # Pulled from plan.yaml (test_strategy block).
-        framework, framework_opts = "pytest", {}
-        ts = _load_plan(spec).get("test_strategy")
-        if isinstance(ts, dict):
-            framework = ts.get("framework", "pytest")
-            framework_opts = {
-                k: v for k, v in ts.items()
-                if k not in ("framework", "required")
-            }
-        elif ts is not None:
-            logger.warning("spec %s: synthesis: test_strategy is %s, not a mapping; "
-                           "defaulting to pytest with no opts",
-                           spec.id, type(ts).__name__)
-
+    try:
         synth_passed, synth_output = _run_synthesis(
             db, spec, impl_task, db.spec_dir(spec.id), framework, framework_opts)
-        if synth_passed:
-            db.update_task_status(impl_task.id, TaskStatus.DONE)
-            db.update_task_status(task.id, TaskStatus.BLOCKED_ON_REVIEW)
-            # DEV-636: 61 lines vs 6,130 must read as a red flag here, and a
-            # write the ledger refused must be named — the suite may be green
-            # only because the repository's own file filled the gap.
-            ledger = ArtifactLedger.open(db, spec)
-            synth_paths = ledger.landed_paths(roles=ATTEMPT_ROLES)
-            size_block = ledger.size_block(
-                synth_paths, "Synthesized files vs the repository version")
-            refused = ledger.recent(roles=("synthesizer", "synthesis_repair"),
-                                    actions=REFUSALS)
-            refused_block = ""
-            if refused:
-                refused_block = (
-                    "\n\n⚠ **SYNTHESIS WRITES REFUSED** (DEV-642 artifact "
-                    "ledger) — these files were NOT written; the tests ran "
-                    "against whatever the repository already holds:\n\n"
-                    + "\n".join(f"- `{e.requested or e.path}`: {e.action} — "
-                                 f"{e.detail}" for e in refused) + "\n")
-            db.create_gate(
-                spec_id=spec.id,
-                task_id=task.id,
-                gate_type=GateType.RELEASE_APPROVAL,
-                prompt_md=(
-                    f"## Release approval: {spec.title}\n\n"
-                    f"Spec ID: `{spec.id}`\n\n"
-                    f"**Synthesized after {MAX_RETRIES} failed retries.** This "
-                    f"output merges the passing behaviors of every rotation "
-                    f"attempt; tests **PASSED** on it, but it has no reviewer "
-                    f"verdict.{size_block}{refused_block}\n\n"
-                    f"### Test Output\n\n```\n{synth_output[:3000]}\n```\n\n"
-                    f"Approve to mark this spec as DONE, or reject to fail "
-                    f"the spec (implementer retries are exhausted).\n"
-                ),
-            )
-            logger.info("spec %s: synthesis PASSED — release_approval gate "
-                        "created", spec.id)
-            return
+    except SynthesisNoVerdict as e:
+        _dispose(db, spec, reviewer_task, e.failure)
+        return None
+    if synth_passed:
+        db.update_task_status(impl_task.id, TaskStatus.DONE)
+        db.update_task_status(reviewer_task.id, TaskStatus.BLOCKED_ON_REVIEW)
+        # DEV-636: 61 lines vs 6,130 must read as a red flag here, and a
+        # write the ledger refused must be named — the suite may be green
+        # only because the repository's own file filled the gap.
+        ledger = ArtifactLedger.open(db, spec)
+        synth_paths = ledger.landed_paths(roles=ATTEMPT_ROLES)
+        size_block = ledger.size_block(
+            synth_paths, "Synthesized files vs the repository version")
+        refused = ledger.recent(roles=("synthesizer", "synthesis_repair"),
+                                actions=REFUSALS)
+        refused_block = ""
+        if refused:
+            refused_block = (
+                "\n\n⚠ **SYNTHESIS WRITES REFUSED** (DEV-642 artifact "
+                "ledger) — these files were NOT written; the tests ran "
+                "against whatever the repository already holds:\n\n"
+                + "\n".join(f"- `{e.requested or e.path}`: {e.action} — "
+                             f"{e.detail}" for e in refused) + "\n")
+        db.create_gate(
+            spec_id=spec.id,
+            task_id=reviewer_task.id,
+            gate_type=GateType.RELEASE_APPROVAL,
+            prompt_md=(
+                f"## Release approval: {spec.title}\n\n"
+                f"Spec ID: `{spec.id}`\n\n"
+                f"**Synthesized after {MAX_RETRIES} failed retries.** This "
+                f"output merges the passing behaviors of every rotation "
+                f"attempt; tests **PASSED** on it, but it has no reviewer "
+                f"verdict.{size_block}{refused_block}\n\n"
+                f"### Test Output\n\n```\n{synth_output[:3000]}\n```\n\n"
+                f"Approve to mark this spec as DONE, or reject to fail "
+                f"the spec (implementer retries are exhausted).\n"
+            ),
+        )
+        logger.info("spec %s: synthesis PASSED — release_approval gate "
+                    "created", spec.id)
+        return None
 
-        logger.error("spec %s: synthesis FAILED — marking spec failed", spec.id)
-        db.update_task_status(task.id, TaskStatus.FAILED)
-        db.update_spec_status(spec.id, SpecStatus.FAILED)
-        return
-
-    # Create a synthetic rejected code_review gate with the failure details
-    # so _run_implementer picks it up as rejection_notes on its next run.
-    synth_gate = db.create_gate(
-        spec_id=spec.id,
-        task_id=impl_task.id,
-        gate_type=GateType.CODE_REVIEW,
-        prompt_md="## Automated test failure — retry",
-    )
-    db.respond_to_gate(synth_gate.id, "rejected", notes=failure_detail)
-
-    db.increment_task_retry(impl_task.id)
-    db.update_task_status(impl_task.id, TaskStatus.PENDING)
-    db.update_task_status(task.id, TaskStatus.PENDING)  # reviewer re-runs too
-    logger.info("spec %s: tests failed, retrying implementer (attempt %d/%d)",
-                spec.id, impl_task.retry_count + 1, MAX_RETRIES)
+    logger.error("spec %s: synthesis FAILED — marking spec failed", spec.id)
+    tail = (synth_output or "").strip().splitlines()
+    return Failure(FailureClass.SYNTHESIS_FAILED, "implementer", "tests",
+                   f"synthesis failed after {MAX_RETRIES} retries: "
+                   f"{tail[-1] if tail else 'no output'}", feedback=feedback)
 
 
 def _latest_task_clarification(db: Database, spec_id: str, task_id: str):
@@ -6043,8 +6073,9 @@ def _check_execution_gate(db: Database, spec: Spec, task) -> None:
         db.cancel_gate(clar.id)
         logger.warning("spec %s: clarification rejected by human — aborting",
                        spec.id)
-        db.update_task_status(task.id, TaskStatus.FAILED)
-        db.update_spec_status(spec.id, SpecStatus.FAILED)
+        _outcome.terminate(db, spec, task, Failure(
+            FailureClass.ABORTED, task.role, "gate",
+            "clarification rejected by the human"))
         return
 
     gate_type = _ROLE_TO_GATE_TYPE.get(task.role)
@@ -6085,16 +6116,17 @@ def _check_execution_gate(db: Database, spec: Spec, task) -> None:
 
 
 def _handle_gate_rejection(db: Database, spec: Spec, task, gate) -> None:
-    """Decide what to do after a human-rejected review gate.
+    """A human rejected a review gate: a verdict (DEV-629). The supervisor,
+    when enabled, is consulted inside dispose as a Strategy."""
+    _persist_human_design_feedback(db, spec, task, gate)
+    _dispose(db, spec, task, _gate_rejection(task, gate))
 
-    With SUPERVISOR_ENABLED, asks the supervisor agent; on SupervisorError,
-    falls back to the legacy role-keyed branching.
-    """
-    # DEV-569: human design-rejection notes get their own persistent file,
-    # written here — the one point both the supervisor and legacy paths pass
-    # through. design_review_feedback.md is a consume-once slot with four
-    # writers, and a testability bounce after the rejection used to overwrite
-    # the human's notes with seam findings, regenerating the design blind
+
+def _persist_human_design_feedback(db: Database, spec: Spec, task, gate) -> None:
+    # DEV-569: human design-rejection notes get their own persistent file.
+    # design_review_feedback.md is a consume-once slot with four writers,
+    # and a testability bounce after the rejection used to overwrite the
+    # human's notes with seam findings, regenerating the design blind
     # (run 14, spec_e257f925). This file is read WITHOUT deletion on every
     # architect pass and cleared only when a design gate is approved.
     if task.role == "architect" and (gate.reviewer_notes or "").strip():
@@ -6104,106 +6136,30 @@ def _handle_gate_rejection(db: Database, spec: Spec, task, gate) -> None:
         except OSError as e:
             logger.warning("spec %s: could not persist human design "
                            "feedback: %s", spec.id, e)
-    if not SUPERVISOR_ENABLED:
-        _legacy_handle_gate_rejection(db, spec, task, gate)
-        return
 
-    ctx = _build_supervisor_context(
-        db, spec, task,
-        outcome="review_reject",
-        reviewer_notes=gate.reviewer_notes,
-    )
-    try:
-        decision = _supervisor.decide(ctx)
-    except _supervisor.SupervisorError as e:
-        logger.warning("spec %s: supervisor failed (%s); falling back to legacy gate handler",
-                       spec.id, e)
-        _legacy_handle_gate_rejection(db, spec, task, gate)
-        return
-    _apply_supervisor_decision(db, spec, task, decision,
-                               legacy_feedback=gate.reviewer_notes)
+
+def _gate_rejection(task, gate) -> Failure:
+    notes = gate.reviewer_notes or ""
+    first = notes.strip().splitlines()
+    detail = first[0] if first else f"{gate.gate_type.value} rejected"
+    if task.role == "architect":
+        return Failure(FailureClass.REVIEW_REJECTED, "architect", "gate", detail,
+                       feedback=notes)
+    if task.role == "implementer":
+        # The human's REJECTED code_review gate already carries the notes
+        # _run_implementer reads; a synthetic copy would only duplicate it.
+        return Failure(FailureClass.REVIEW_REJECTED, "implementer", "gate", detail,
+                       feedback=notes or "Rejected at the code review gate.",
+                       extra={"gate_carries_notes": True})
+    return Failure(FailureClass.REVIEW_REJECTED, "reviewer", "gate", detail,
+                   feedback=notes or "Rejected at the release gate.",
+                   charge_role="implementer")
 
 
 def _legacy_handle_gate_rejection(db: Database, spec: Spec, task, gate) -> None:
-    """Handle a rejected review gate for a task."""
-    if task.role == "architect":
-        # Feed the rejection notes through the channel the architect
-        # actually reads. _run_architect only looks for feedback when
-        # retry_count > 0, via _latest_architect_feedback — which reads
-        # design_review_feedback.md, not CLARIFICATION gates. The old code
-        # parked the notes in a synthetic CLARIFICATION gate (a channel only
-        # the planner consumes) and never incremented the retry count, so
-        # the architect re-ran blind with rejection_notes=None and
-        # regenerated ~the same design, gate after gate (DEV-124).
-        if gate.reviewer_notes:
-            try:
-                (db.spec_dir(spec.id) / "design_review_feedback.md").write_text(
-                    gate.reviewer_notes)
-            except OSError as e:
-                logger.warning("spec %s: could not persist design rejection "
-                               "notes: %s", spec.id, e)
-        db.increment_task_retry(task.id)
-        db.update_task_status(task.id, TaskStatus.PENDING)
-        logger.info("spec %s: architect design rejected, re-running with "
-                    "feedback (retry %d)", spec.id, task.retry_count + 1)
-
-    elif task.role == "implementer":
-        impl_task = task
-        if impl_task.retry_count < MAX_RETRIES:
-            db.increment_task_retry(impl_task.id)
-            db.update_task_status(impl_task.id, TaskStatus.PENDING)
-            logger.info("spec %s: code rejected by human, retry %d/%d",
-                        spec.id, impl_task.retry_count + 1, MAX_RETRIES)
-        else:
-            # DEV-433: exhaustion here used to fail the spec outright, while
-            # the identical exhaustion reached via a failing test run went
-            # through the synthesis escape hatch. Whether the accumulated
-            # attempts survived depended on who noticed the defect, not on
-            # what the defect was — and the gate path carries strictly more
-            # information, since it comes with the reviewer's written notes.
-            # Route both through _legacy_attempt_retry, which synthesises at
-            # MAX_RETRIES and only fails the spec if synthesis fails too.
-            reviewer_tasks = db.list_tasks_for_spec_by_role(spec.id, "reviewer")
-            reviewer_task = reviewer_tasks[0] if reviewer_tasks else None
-            if reviewer_task is None:
-                logger.error("spec %s: code rejected, max retries exhausted "
-                             "and no reviewer task to synthesise into",
-                             spec.id)
-                db.update_task_status(impl_task.id, TaskStatus.FAILED)
-                db.update_spec_status(spec.id, SpecStatus.FAILED)
-            else:
-                logger.info("spec %s: code rejected, max retries exhausted — "
-                            "attempting synthesis from the rejected attempts",
-                            spec.id)
-                _legacy_attempt_retry(
-                    db, spec, reviewer_task,
-                    gate.reviewer_notes or "Rejected at the code review gate.",
-                )
-
-    elif task.role == "reviewer":
-        # Release rejected — send back to implementer.
-        impl_tasks = db.list_tasks_for_spec_by_role(spec.id, "implementer")
-        impl_task = impl_tasks[0] if impl_tasks else None
-        if impl_task and impl_task.retry_count < MAX_RETRIES:
-            if gate.reviewer_notes:
-                synth = db.create_gate(
-                    spec_id=spec.id,
-                    task_id=impl_task.id,
-                    gate_type=GateType.CODE_REVIEW,
-                    prompt_md="## Release rejection — retry",
-                )
-                db.respond_to_gate(synth.id, "rejected",
-                                   notes=gate.reviewer_notes)
-            db.increment_task_retry(impl_task.id)
-            db.update_task_status(impl_task.id, TaskStatus.PENDING)
-            db.update_task_status(task.id, TaskStatus.PENDING)
-            logger.info("spec %s: release rejected, retrying implementer",
-                        spec.id)
-        else:
-            db.update_task_status(task.id, TaskStatus.FAILED)
-            db.update_spec_status(spec.id, SpecStatus.FAILED)
-            logger.error("spec %s: release rejected, max retries exhausted",
-                         spec.id)
+    """The default (supervisor-less) disposition of a rejected gate."""
+    _persist_human_design_feedback(db, spec, task, gate)
+    _dispose(db, spec, task, _gate_rejection(task, gate), supervisor=False)
 
 
 def _list_code_artifacts(db: Database, spec_id: str):
