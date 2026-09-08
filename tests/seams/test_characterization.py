@@ -228,6 +228,10 @@ class TestReviewerVerdicts:
         assert "Reviewer verdict: FAIL" in rej[0].reviewer_notes
         assert [o.name for _, _, o in runner.test_calls] == [
             "pytest_pass", "pytest_fail", "pytest_fail", "pytest_pass", "pytest_pass"]
+        # The reviewer was reset to PENDING by the disposition, not rescued
+        # by crash recovery (which would have charged it a retry).
+        assert out.task("reviewer").retry_count == 0
+        assert events(db, spec.id, EventKind.AGENT_RAN, role="crash_recovery") == []
 
     def test_green_suite_with_fail_verdict_goes_to_human(self, db, model, runner):
         """DEV-560: a FAIL verdict over passing tests is adjudicated, not retried."""
