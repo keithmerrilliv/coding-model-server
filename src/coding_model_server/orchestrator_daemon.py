@@ -3606,6 +3606,17 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
     # (DEV-106). Restore what the snapshots have; flag the rest loudly.
     restored, still_missing = _verify_manifest_workspace(db, spec, task, spec_dir)
 
+    # DEV-645: single-call mode's equivalent of the check above. Placed with
+    # it, after the write so the ledger still records what this attempt did
+    # produce (an incomplete attempt's good half is worth having in the
+    # synthesis corpus — run 26's merge recovered from six of them), and
+    # before the build check, which cannot say anything useful about a
+    # workspace that is missing a file the plan promised.
+    missing_planned = _missing_planned_outputs(spec, spec_dir)
+    if missing_planned:
+        _route_missing_planned_outputs(db, spec, task, spec_md, missing_planned)
+        return
+
     # DEV-429: build the code before asking a human to review it. A gate that
     # opens on code which cannot compile spends the expensive resource (the
     # reviewer) on something the free one (the compiler) already decided. The
@@ -4254,6 +4265,96 @@ def _route_unappliable_edits(db: Database, spec: Spec, task,
         FailureClass.UNAPPLIABLE_EDITS, "implementer", "apply",
         "; ".join(e.splitlines()[0] for e in errors[:3]), feedback=feedback,
         extra={"blocks": len(errors)}))
+
+
+def _missing_planned_outputs(spec: Spec, spec_dir) -> "list[str]":
+    """Planned implement outputs the workspace does not actually have (DEV-645).
+
+    Manifest mode already verifies its own declared set and can restore a
+    dropped file from a snapshot (`_verify_manifest_workspace`, DEV-106); it
+    detects its applicability by the presence of manifest.json, and this check
+    steps aside on the same signal so manifest runs keep exactly their current
+    behaviour. Single-call mode had no equivalent: run 25's attempt 0 emitted
+    the test file and no edit at all for the module, and run 26's attempts 2-5
+    each produced one of the two planned files.
+
+    Existence on disk is the test, not the response's path list: a path that
+    the ledger refused, or that landed renamed after a collision, is missing
+    from the workspace whatever the model said it produced — and the workspace
+    is what the build check and the reviewer will see.
+    """
+    if (spec_dir / "manifest.json").is_file():
+        return []
+    return [p for p in _planned_implement_outputs(spec)
+            if not (spec_dir / p).is_file()]
+
+
+def _route_missing_planned_outputs(db: Database, spec: Spec, task,
+                                   spec_md: str, missing: "list[str]") -> None:
+    """An incomplete attempt is a verdict on real output, charged and rotated.
+
+    Never a no-verdict: the model answered, the answer is just short. What it
+    must NOT be is what it was — scored downstream as whatever the missing file
+    happens to break. Run 25 surfaced it as behaviour failures against an
+    unmodified module; run 26 surfaced it as nothing at all, because with no
+    test file pytest collected zero tests, the build check reported
+    "inconclusive" and a module that did not even parse reached a human gate
+    labelled "implementer done". Deciding it here, before the build check, also
+    saves that dispatch — on a Swift spec a ~300s Mac round-trip.
+    """
+    # The context stage already holds the repository state, so this costs no
+    # runner call: a path that reads at base_ref needs edit blocks, one that
+    # does not needs a whole-file block. Saying the wrong one is how run 21
+    # spent five rotations aiming SEARCH/REPLACE at files that did not exist.
+    planned = _planned_implement_outputs(spec)
+    try:
+        view = _spec_context(db, spec, spec_md, role="implementer").select(
+            "implementer", planned=planned)
+        existing = set(view.existing_by_path)
+    except Exception:  # a fetch problem must not mask the verdict
+        existing = set()
+    edit_mode = executor.DIFF_BASED_EDITS
+
+    lines = [f"Your response is missing {len(missing)} of the {len(planned)} "
+             f"file(s) the approved plan's implement phase declares. Nothing "
+             f"else about the attempt is judged until every planned file is "
+             f"present.\n"]
+    for path in missing:
+        if path in existing and edit_mode:
+            lines.append(
+                f"- `{path}` — EXISTS in the repository and was shown to you "
+                f"under \"Current contents of files you must modify\". Emit "
+                f"anchored SEARCH/REPLACE edit blocks under a `### {path}` "
+                f"header. An empty edit set for a file the plan declares "
+                f"modified is not \"no changes needed\".")
+        elif path in existing:
+            lines.append(
+                f"- `{path}` — EXISTS in the repository and was shown to you. "
+                f"Re-emit it whole as a complete `<<<FILE: {path}>>> ... "
+                f"<<<END_FILE>>>` block, preserving every declaration you were "
+                f"not asked to change.")
+        else:
+            lines.append(
+                f"- `{path}` — is a NEW file. Emit it whole as a complete "
+                f"`<<<FILE: {path}>>> ... <<<END_FILE>>>` block; never "
+                f"SEARCH/REPLACE blocks, there is no content to search.")
+    lines.append("\nRe-emit the complete attempt, including any file you got "
+                 "right last time — the workspace is reset between attempts.")
+
+    logger.error("spec %s: attempt produced %d of %d planned implement "
+                 "output(s) — missing %s; charging the implementer without a "
+                 "build check (DEV-645)", spec.id, len(planned) - len(missing),
+                 len(planned), ", ".join(missing))
+    db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
+                    payload={"role": "implementer", "model_call": False,
+                             "anomaly": "missing_planned_outputs",
+                             "missing": missing, "planned": planned,
+                             "retry": task.retry_count})
+    _dispose(db, spec, task, Failure(
+        FailureClass.PARSE_FAILURE, "implementer", "parse",
+        f"{len(missing)} planned implement output(s) not produced: "
+        + ", ".join(missing),
+        feedback="\n".join(lines), extra={"missing": missing}))
 
 
 def _route_build_failure_to_architect(db: Database, spec: Spec, task, spec_dir,

@@ -37,6 +37,10 @@ def _impl_ready(db, model, runner):
     return spec
 
 
+def _impl_task(db, spec_id):
+    return db.list_tasks_for_spec_by_role(spec_id, "implementer")[0]
+
+
 # ── the edit ladder ──────────────────────────────────────────────────────────
 
 class TestUnappliableEdits:
@@ -883,3 +887,79 @@ class TestPromptBudget:
         call = model.calls_for("implementer")[0]
         est = len(call.messages[-1]["content"]) // 3
         assert est + call.max_tokens <= d._agent_ctx_limit(call.model)
+
+
+# ── planned implement outputs (DEV-645) ──────────────────────────────────────
+
+class TestPlannedOutputs:
+    """The plan's implement phase declares two outputs. Manifest mode has
+    verified its own declared set since DEV-106; single-call mode verified
+    nothing, so an attempt that dropped a file was scored downstream as
+    whatever the missing file happened to break — behaviour failures on run
+    25, and on run 26 nothing at all."""
+
+    def test_a_missing_planned_output_is_charged_not_gated(
+            self, db, model, runner):
+        """Run 25's shape: only the test file. The attempt is a verdict — the
+        budget is charged and the rotation advances — and the human never sees
+        a gate for it."""
+        spec = _impl_ready(db, model, runner)
+        model.always("implementer", Reply(implementer_reply({TEST_PATH: TEST_FILE})))
+        model.script("synthesis", Reply(implementer_reply()))
+
+        drive(db, spec.id, model, wait_at(GateType.RELEASE_APPROVAL), runner=runner)
+
+        assert _impl_task(db, spec.id).retry_count >= 1
+        notes = [g.reviewer_notes or "" for g in rejected_gates(db, spec.id)]
+        assert notes and DAEMON_PATH in notes[0]
+        assert "missing" in notes[0].lower()
+        anomaly = events(db, spec.id, EventKind.AGENT_RAN,
+                         anomaly="missing_planned_outputs")
+        assert anomaly and anomaly[0]["missing"] == [DAEMON_PATH]
+
+    def test_no_build_check_is_dispatched_for_an_incomplete_attempt(
+            self, db, model, runner):
+        """The verdict is decided before the build check, so the dispatch is
+        not spent on a workspace that is missing a file the plan promised —
+        on a Swift spec that is a ~300s Mac round-trip."""
+        spec = _impl_ready(db, model, runner)
+        model.always("implementer", Reply(implementer_reply({TEST_PATH: TEST_FILE})))
+        model.script("synthesis", Reply(implementer_reply()))
+
+        drive(db, spec.id, model, wait_at(GateType.RELEASE_APPROVAL), runner=runner)
+
+        # Every run_tests call up to synthesis belongs to a complete attempt;
+        # the incomplete ones dispatched none.
+        assert len(runner.test_calls) < len(model.calls_for("implementer"))
+
+    def test_the_feedback_says_which_form_each_missing_file_needs(
+            self, db, model, runner, edit_mode):
+        """DEV-638's lesson applied to the feedback: an existing file needs
+        edit blocks, a new one needs a whole-file block. Run 21 spent five
+        rotations aiming SEARCH/REPLACE at files that did not exist."""
+        spec = _impl_ready(db, model, runner)
+        model.always("implementer", Reply(file_blocks({TEST_PATH: TEST_FILE})))
+        model.script("synthesis", Reply(implementer_reply()))
+
+        drive(db, spec.id, model, wait_at(GateType.RELEASE_APPROVAL), runner=runner)
+
+        notes = rejected_gates(db, spec.id)[0].reviewer_notes or ""
+        # The daemon path exists at base_ref (the runner serves it), so it is
+        # an edit target, not a whole-file emit.
+        assert f"### {DAEMON_PATH}" in notes
+        assert "SEARCH/REPLACE" in notes
+        assert "no changes needed" in notes
+
+    def test_a_complete_attempt_is_untouched(self, db, model, runner):
+        """The other half of the contract: both planned files present means
+        the check is silent and the run proceeds exactly as before."""
+        spec = _impl_ready(db, model, runner)
+        model.script("implementer", Reply(implementer_reply()))
+        model.script("reviewer", Reply(reviewer_reply("PASS")))
+
+        out = drive(db, spec.id, model, approve_all, runner=runner)
+
+        assert out.status == SpecStatus.DONE
+        assert events(db, spec.id, EventKind.AGENT_RAN,
+                      anomaly="missing_planned_outputs") == []
+        assert runner.test_calls  # the build check did run
