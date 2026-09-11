@@ -842,6 +842,25 @@ class TestPromptBudget:
         assert classified[0]["cls"] == "prompt_too_large"
         assert classified[0]["outcome"] == "no_verdict"
 
+    def test_a_file_bigger_than_its_knob_still_reaches_the_model(
+            self, db, model, runner):
+        """DEV-648: the knob is a preference, not a ceiling. The one file the
+        plan modifies is well past AUTONOMOUS_EXISTING_FILES_MAX_CHARS and
+        comfortably inside the window — run 28 showed it to NOBODY, and both
+        the architect and the implementer worked blind against the only file
+        they were meant to change."""
+        self._oversized_repo(runner, 150_000)   # > the 60_000 knob
+        spec = _impl_ready(db, model, runner)
+        model.script("implementer", Reply(implementer_reply()))
+        model.script("reviewer", Reply(reviewer_reply("PASS")))
+
+        out = drive(db, spec.id, model, approve_all, runner=runner)
+
+        assert out.status == SpecStatus.DONE
+        prompt = model.calls_for("implementer")[0].messages[-1]["content"]
+        assert "x" * 150_000 in prompt          # the whole file, not a stub
+        assert "Not shown" not in prompt
+
     def test_the_synthesis_corpus_sheds_by_the_sum_not_by_a_413(
             self, db, model, runner, monkeypatch):
         """DEV-572: the merge prompt grows linearly with the attempt count and

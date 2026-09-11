@@ -4343,15 +4343,18 @@ def _route_missing_planned_outputs(db: Database, spec: Spec, task,
              f"present.\n"]
     for path in missing:
         if path in existing and edit_mode:
+            # Not "was shown to you": the budget may have dropped it from
+            # the prompt (DEV-648), and feedback that asserts what the model
+            # saw has to be true or it teaches the wrong lesson.
             lines.append(
-                f"- `{path}` — EXISTS in the repository and was shown to you "
-                f"under \"Current contents of files you must modify\". Emit "
+                f"- `{path}` — EXISTS in the repository at base_ref. Emit "
                 f"anchored SEARCH/REPLACE edit blocks under a `### {path}` "
-                f"header. An empty edit set for a file the plan declares "
-                f"modified is not \"no changes needed\".")
+                f"header, anchored on its current content. An empty edit set "
+                f"for a file the plan declares modified is not \"no changes "
+                f"needed\".")
         elif path in existing:
             lines.append(
-                f"- `{path}` — EXISTS in the repository and was shown to you. "
+                f"- `{path}` — EXISTS in the repository at base_ref. "
                 f"Re-emit it whole as a complete `<<<FILE: {path}>>> ... "
                 f"<<<END_FILE>>>` block, preserving every declaration you were "
                 f"not asked to change.")
