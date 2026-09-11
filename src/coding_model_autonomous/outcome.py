@@ -43,7 +43,7 @@ from typing import Any, Callable, Iterable, Optional
 
 import requests
 
-from .context import RunnerOutage
+from .context import PromptTooLarge, RunnerOutage
 from .models import EventKind, GateType, SpecStatus, TaskStatus
 
 logger = logging.getLogger("orchestrator.outcome")
@@ -63,6 +63,7 @@ class FailureClass(str, Enum):
     EMPTY_COMPLETION = "empty_completion"      # nothing visible after think-stripping
     TRUNCATED = "truncated"                    # finish_reason=length
     RUNNER_OUTAGE = "runner_outage"            # fetch outage / mac-runner unreachable
+    PROMPT_TOO_LARGE = "prompt_too_large"      # no window holds the prompt (DEV-633)
     SANDBOX_PROVISIONING = "sandbox_provisioning"  # the repo's own package missing
     SHUTDOWN = "shutdown"                      # SIGTERM between calls
     UNKNOWN_EXCEPTION = "unknown_exception"    # a daemon bug, not a judgement
@@ -82,6 +83,7 @@ NO_VERDICT_CLASSES = frozenset({
     FailureClass.TRANSPORT, FailureClass.HTTP_REFUSAL,
     FailureClass.SERVER_MALFORMED, FailureClass.EMPTY_COMPLETION,
     FailureClass.TRUNCATED, FailureClass.RUNNER_OUTAGE,
+    FailureClass.PROMPT_TOO_LARGE,
     FailureClass.SANDBOX_PROVISIONING, FailureClass.SHUTDOWN,
     FailureClass.UNKNOWN_EXCEPTION,
 })
@@ -105,6 +107,11 @@ NO_VERDICT_CAP = int(os.getenv("AUTONOMOUS_NO_VERDICT_CAP", "5"))
 _CAPS: dict[tuple[FailureClass, str], Optional[int]] = {
     (FailureClass.RUNNER_OUTAGE, "existing_fetch"): None,
     (FailureClass.RUNNER_OUTAGE, "build_check"): 3,
+    # DEV-633: nothing about the prompt changes between attempts — the
+    # allocator already dropped everything droppable and tried every window.
+    # Retrying is N identical sums, so park on the first and name the knob
+    # the operator has to move.
+    (FailureClass.PROMPT_TOO_LARGE, "dispatch"): 1,
 }
 
 _MISSING_MODULE_RE = re.compile(r"No module named '([\w.]+)'")
@@ -192,6 +199,12 @@ def classify_exception(exc: BaseException, *, role: str,
                        f"HTTP {status or '?'}: {exc}", rotate=rotate,
                        exc_type=name, phase=phase,
                        extra={"status": status})
+    if isinstance(exc, PromptTooLarge) or name == "PromptTooLarge":
+        # Raised by the budget allocator BEFORE the call: no window holds the
+        # prompt even stripped of every droppable section. Nothing has been
+        # spent and nothing was judged (DEV-633).
+        return Failure(FailureClass.PROMPT_TOO_LARGE, role, "daemon", str(exc),
+                       rotate=False, exc_type=name, phase="dispatch")
     if isinstance(exc, RunnerOutage) or name in (
             "RunnerOutageAtImplement", "RunnerOutage"):
         return Failure(FailureClass.RUNNER_OUTAGE, role, "runner", str(exc),

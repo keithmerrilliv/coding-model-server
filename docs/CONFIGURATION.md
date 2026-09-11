@@ -101,15 +101,26 @@ count:
 
 **Context stage** — the repository files a role is shown (`docs/PIPELINE.md`
 section 8). Fetched once per spec from the Mac runner's read path and reused by
-every role; the char knobs clamp what each *section* renders into a prompt,
-files past a ceiling are named as "not shown" rather than dropped:
+every role. The char knobs are each section's *preference*: since DEV-633 one
+allocator sums every section against the window of the agent the prompt is
+actually going to, hands them out in priority order (editable → protected →
+prior artifacts) after reserving the completion and reasoning budget, and
+trims the lowest-priority section when the sum does not fit. Raising one knob
+therefore cannot buy another section room the window does not have. Files past
+a ceiling — a section's own, or the aggregate — are named as "not shown"
+rather than silently dropped, and a prompt that no window can hold even
+stripped is refused before the call (a `prompt_too_large` no-verdict park)
+instead of becoming a 413 at the model server.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `AUTONOMOUS_CONTEXT_REFRESH_SECONDS` | `600` | Age at which a context fetched at a symbolic `base_ref` (`main`, `HEAD`) is re-verified against the runner before the next role uses it. `0` re-verifies at every role boundary. A pinned commit is never re-verified. |
 | `AUTONOMOUS_CONTEXT_FETCH_CHUNK` | `40` | Paths per runner read request; matches the runner's `CODING_MODEL_RUNNER_READ_MAX_PATHS`. Longer candidate lists are split, never truncated. |
-| `AUTONOMOUS_EXISTING_FILES_MAX_CHARS` | `60000` | Ceiling for the editable-existing section of the single-call implementer prompt. |
-| `AUTONOMOUS_PROTECTED_FILES_MAX_CHARS` | `60000` | Ceiling for the read-only protected section, every role. Separate from the knob above on purpose (DEV-627): raising one must not raise the other. |
+| `AUTONOMOUS_EXISTING_FILES_MAX_CHARS` | `60000` | Preference for the editable-existing section — the declared modification set. First in the allocator's priority order, so it is the last section trimmed. |
+| `AUTONOMOUS_PROTECTED_FILES_MAX_CHARS` | `60000` | Preference for the read-only protected section, every role. Separate from the knob above on purpose (DEV-627): raising one must not raise the other. |
+| `AUTONOMOUS_PRIOR_ARTIFACTS_MAX_CHARS` | `300000` | Preference for the reviewer's implementation section and the synthesis attempt corpus. Last in priority order: an attempt is recoverable from the artifact ledger, repository context is not. |
+| `AUTONOMOUS_PROMPT_CHARS_PER_TOKEN` | `3` | Divisor the allocator estimates tokens with. Deliberately below the ~3.3–3.8 real tokenizers average on source, so the estimate errs high — the safe direction for a fit check. |
+| `AUTONOMOUS_PROMPT_HEADROOM` | `0.95` | Fraction of the window the input may claim once the completion and reasoning budgets are reserved. The margin for the estimate above being wrong on a prose-heavy prompt. |
 | `AUTONOMOUS_MANIFEST_WHOLE_FILE_MAX_CHARS` | `40000` | Per-file mode refuses to regenerate an existing file larger than this whole; it must be edited instead (DEV-604). |
 
 **Design review** (on by default — an extra review + revision loop between the

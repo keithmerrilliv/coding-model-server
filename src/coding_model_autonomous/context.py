@@ -43,9 +43,13 @@ still says who saw what. Prior artifacts by role — the reviewer's section
 — come from the artifact ledger through :func:`prior_artifacts`; they are
 workspace state, not repository state, and need no runner.
 
-Budgeting (which sections fit which agent window) is pattern 5, DEV-633;
-it belongs in this module and is not here yet — the per-section knobs in
-``executor`` still clamp at render time.
+Budgeting is pattern 5 (DEV-633), at the bottom of this module.
+``allocate`` is the one place the prompt's sections are summed against the
+window of the agent that will receive them; ``plan_dispatch`` picks the
+agent and the sections together. The per-section knobs in ``executor``
+survive as each section's preference — what it gets when the sum fits, and
+a ceiling it never exceeds — instead of N independent ceilings whose worst
+case was N knobs' worth of prompt.
 """
 from __future__ import annotations
 
@@ -492,6 +496,262 @@ def assemble(
                        "next role will fetch again", spec_id, exc)
     return ctx, True
 
+
+# ── budgeting: one sum against the destination window (DEV-633) ──────────────
+#
+# Before this, each prompt section clamped itself at its own char knob and
+# nothing added them up. The worst case was N knobs' worth of prompt, and an
+# operator tuning one knob could not see the others: run 20's
+# AUTONOMOUS_EXISTING_FILES_MAX_CHARS override silently raised the protected
+# ceiling 7.5x because the two sections shared the constant, and run 21's
+# implementer prompt went past 1 MB into a 413 (DEV-627). The fit check that
+# was supposed to catch that (DEV-624) ran AFTER the prompt was rendered and
+# could only move the prompt to a bigger agent, never make it smaller.
+#
+# ``allocate`` is the single sum. It is told what the prompt costs before any
+# file section (``fixed_chars``), what the destination window holds, and what
+# the completion needs; it hands each section, in priority order, the smaller
+# of its knob and what is left. A section that runs out is trimmed rather than
+# the prompt overflowing, and every trimmed path is reported so the render can
+# still name it — "you were not shown X" is actionable, a missing section is
+# not. The knobs stay: they are the preference each section gets WHEN THE SUM
+# FITS, and a ceiling it never exceeds. They are no longer independent.
+
+# Conservative for code-heavy prompts: real tokenizers average ~3.3-3.8
+# chars/token on this repo's source, so dividing by 3 overestimates the
+# prompt — the safe direction for a fit check.
+CHARS_PER_TOKEN = max(1, int(os.getenv("AUTONOMOUS_PROMPT_CHARS_PER_TOKEN", "3")))
+# Fraction of the window the input may claim once the completion is reserved.
+# The chars/token estimate is a guess; this is the margin for it being wrong
+# in the unsafe direction on a prompt that is mostly prose rather than code.
+HEADROOM = float(os.getenv("AUTONOMOUS_PROMPT_HEADROOM", "0.95"))
+
+
+class PromptTooLarge(RuntimeError):
+    """No available window holds this prompt even with every droppable
+    section dropped — the fixed part (spec, design, instructions) plus the
+    completion reserve is already over. Raised BEFORE the call, so the
+    catcher parks it as a no-verdict instead of the model server discovering
+    it as a 413 (DEV-624's terminal failure mode)."""
+
+
+@dataclass(frozen=True)
+class Section:
+    """One droppable block of files, with the knob it prefers."""
+    name: str
+    files: list[tuple[str, str]]
+    preferred_max_chars: Optional[int] = None
+
+    @property
+    def wanted_chars(self) -> int:
+        return sum(len(c) for _, c in self.files)
+
+
+@dataclass
+class SectionBudget:
+    """What one section actually got."""
+    name: str
+    kept: list[tuple[str, str]]
+    dropped: list[str]
+    budget: int                     # chars the allocator gave it
+    preferred: Optional[int]        # its knob, for the log line
+
+    @property
+    def chars(self) -> int:
+        return sum(len(c) for _, c in self.kept)
+
+    @property
+    def squeezed(self) -> bool:
+        """Trimmed by the aggregate sum rather than by its own knob."""
+        return bool(self.dropped) and (self.preferred is None
+                                       or self.budget < self.preferred)
+
+
+@dataclass
+class Allocation:
+    """The whole prompt's budget, as one decision."""
+    agent: Optional[str]
+    window_tokens: Optional[int]
+    completion_tokens: int
+    fixed_chars: int
+    input_budget_chars: int         # chars the file sections may share
+    sections: dict[str, SectionBudget] = field(default_factory=dict)
+
+    def files(self, name: str) -> list[tuple[str, str]]:
+        sec = self.sections.get(name)
+        return list(sec.kept) if sec else []
+
+    def dropped(self, name: str) -> list[str]:
+        sec = self.sections.get(name)
+        return list(sec.dropped) if sec else []
+
+    @property
+    def section_chars(self) -> int:
+        return sum(s.chars for s in self.sections.values())
+
+    @property
+    def prompt_chars(self) -> int:
+        return self.fixed_chars + self.section_chars
+
+    @property
+    def prompt_tokens(self) -> int:
+        return self.prompt_chars // CHARS_PER_TOKEN
+
+    @property
+    def needed_tokens(self) -> int:
+        return self.prompt_tokens + self.completion_tokens
+
+    @property
+    def dropped_any(self) -> bool:
+        return any(s.dropped for s in self.sections.values())
+
+    @property
+    def fits(self) -> bool:
+        return self.window_tokens is None or self.needed_tokens <= self.window_tokens
+
+    def describe(self) -> str:
+        parts = [f"{s.name} {s.chars}/{s.budget}"
+                 + (f" (-{len(s.dropped)})" if s.dropped else "")
+                 for s in self.sections.values()]
+        return (f"fixed {self.fixed_chars} + " + ", ".join(parts)
+                + f" = ~{self.prompt_tokens} tok + {self.completion_tokens} "
+                + f"completion vs {self.window_tokens or '?'}")
+
+
+def _fill(section: Section, budget: int) -> SectionBudget:
+    """Greedy, in candidate order: a file that does not fit is skipped and
+    named, and a later smaller one may still fit. Order is priority — the
+    caller sorts before it gets here — so skipping rather than stopping only
+    ever adds content."""
+    kept: list[tuple[str, str]] = []
+    dropped: list[str] = []
+    left = max(0, budget)
+    for path, content in section.files:
+        if len(content) > left:
+            dropped.append(path)
+            continue
+        left -= len(content)
+        kept.append((path, content))
+    return SectionBudget(name=section.name, kept=kept, dropped=dropped,
+                         budget=max(0, budget),
+                         preferred=section.preferred_max_chars)
+
+
+def allocate(sections: Iterable[Section], *, fixed_chars: int,
+             window_tokens: Optional[int], completion_tokens: int,
+             agent: Optional[str] = None) -> Allocation:
+    """Give each section, in priority order, the smaller of its knob and what
+    the destination window has left.
+
+    *sections* are in priority order: the declared modification set first
+    (a role that cannot see what it must edit invents it), protected
+    references next (they prevent redeclaration), prior artifacts last (they
+    are recoverable from the ledger). *fixed_chars* is everything else the
+    prompt costs — spec, design, notes, instructions — measured by building
+    the message with the file sections empty.
+
+    An unknown window (``window_tokens`` None: an agent not in the config)
+    applies no aggregate pressure and every section gets its knob, which is
+    exactly the pre-DEV-633 behaviour.
+    """
+    sections = list(sections)
+    if window_tokens is None:
+        budget_chars = -1  # unbounded
+    else:
+        spare = int(window_tokens * HEADROOM) - completion_tokens
+        budget_chars = max(0, spare * CHARS_PER_TOKEN - fixed_chars)
+    alloc = Allocation(agent=agent, window_tokens=window_tokens,
+                       completion_tokens=completion_tokens,
+                       fixed_chars=fixed_chars,
+                       input_budget_chars=budget_chars)
+    left = budget_chars
+    for section in sections:
+        knob = section.preferred_max_chars
+        if budget_chars < 0:
+            share = knob if knob is not None else section.wanted_chars
+        else:
+            share = left if knob is None else min(knob, left)
+        got = _fill(section, share)
+        alloc.sections[section.name] = got
+        if budget_chars >= 0:
+            left = max(0, left - got.chars)
+    return alloc
+
+
+def plan_dispatch(spec_id: str, *, role: str, sections: Iterable[Section],
+                  fixed_chars: int, completion_tokens: int,
+                  agent: Optional[str], candidates: Iterable[str] = (),
+                  window_of: Callable[[Optional[str]], Optional[int]],
+                  reserve_of: Optional[Callable[[Optional[str]], int]] = None,
+                  ) -> Allocation:
+    """Pick the agent AND the sections together, then say what it cost.
+
+    The chosen agent goes first: the architect's complexity recommendation
+    and the retry rotation picked it for a reason, and a prompt that fits it
+    should not be moved. When it cannot hold every section's preference, the
+    candidates are tried in order and the first that can holds the whole
+    prompt uncut — escalating to a bigger window is always better than
+    dropping context (DEV-624). Only when no window can is anything dropped,
+    from the largest window available, lowest priority first.
+
+    ``window_of`` and ``reserve_of`` are injected — this module knows
+    nothing about the agent config — and return the candidate's context
+    window and any reasoning budget its server spends ahead of the
+    completion.
+
+    Raises :class:`PromptTooLarge` when even that window cannot hold the
+    fixed part plus the completion reserve. Nothing has been spent at that
+    point, so the caller parks rather than discovering it as a 413.
+    """
+    sections = list(sections)
+    chain: list[Optional[str]] = [agent]
+    chain += [c for c in candidates if c != agent]
+    best: Optional[Allocation] = None
+    for cand in chain:
+        window = window_of(cand)
+        # The reasoning budget is spent in the same window as the completion
+        # and before it (DEV-616), so it is reserved the same way.
+        reserved = completion_tokens + (reserve_of(cand) if reserve_of else 0)
+        alloc = allocate(sections, fixed_chars=fixed_chars,
+                         window_tokens=window, completion_tokens=reserved,
+                         agent=cand)
+        # An escalation candidate must have a KNOWN window: an agent missing
+        # from the config estimates as unbounded, which would make it the
+        # winner of every oversized prompt for the worst possible reason. The
+        # originally chosen agent is exempt — an unknown pick is left alone,
+        # exactly as it was before any of this existed.
+        known = window is not None or cand == agent
+        if known and not alloc.dropped_any and alloc.fits:
+            if cand != agent:
+                logger.warning(
+                    "spec %s: the %s prompt does not fit %r — dispatching to "
+                    "%r (%s) instead (DEV-633: %s)", spec_id, role, agent,
+                    cand, window, alloc.describe())
+            return alloc
+        if window is not None and (best is None
+                                   or window > (best.window_tokens or 0)):
+            best = alloc
+        elif best is None:
+            best = alloc
+    assert best is not None  # chain is never empty
+    if not best.fits:
+        raise PromptTooLarge(
+            f"the {role} prompt needs ~{best.needed_tokens} tokens with every "
+            f"droppable section dropped and the largest window holds "
+            f"{best.window_tokens} — {best.describe()}")
+    for sec in best.sections.values():
+        if not sec.dropped:
+            continue
+        # Say WHICH ceiling bit: an operator can raise a knob, but no knob
+        # buys room the window does not have.
+        why = (f"no window holds the whole {role} prompt"
+               if sec.squeezed else
+               f"the {sec.name} section is at its own {sec.preferred}-char knob")
+        logger.warning("spec %s: %s — %d %s file(s) not shown to %r: %s",
+                       spec_id, why, len(sec.dropped), sec.name, best.agent,
+                       ", ".join(sec.dropped))
+    logger.info("spec %s: %s prompt budget — %s", spec_id, role, best.describe())
+    return best
 
 # ── prior artifacts (workspace state, no runner) ─────────────────────────────
 

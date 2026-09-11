@@ -286,7 +286,7 @@ question it asks is whether the model's output was ever evaluated:
 
 | Outcome | Classes | What happens |
 |---|---|---|
-| **no-verdict** | `transport`, `http_refusal`, `server_malformed`, `empty_completion`, `truncated`, `runner_outage`, `sandbox_provisioning`, `shutdown`, `unknown_exception` | The task goes back to PENDING with `retry_count` untouched. A 4xx, a truncation or an empty completion also advances the rotation (the next dispatch reaches a different agent) without spending the budget. After `AUTONOMOUS_NO_VERDICT_CAP` (5) consecutive no-verdicts on one attempt the task is parked behind a task-bound clarification gate that names the infrastructure; approve to re-run, reject to abort. Fetch-time runner outages are uncapped (DEV-620); the build-check outage keeps DEV-538's cap of three. |
+| **no-verdict** | `transport`, `http_refusal`, `server_malformed`, `empty_completion`, `truncated`, `runner_outage`, `prompt_too_large`, `sandbox_provisioning`, `shutdown`, `unknown_exception` | The task goes back to PENDING with `retry_count` untouched. A 4xx, a truncation or an empty completion also advances the rotation (the next dispatch reaches a different agent) without spending the budget. After `AUTONOMOUS_NO_VERDICT_CAP` (5) consecutive no-verdicts on one attempt the task is parked behind a task-bound clarification gate that names the infrastructure; approve to re-run, reject to abort. Fetch-time runner outages are uncapped (DEV-620); the build-check outage keeps DEV-538's cap of three; `prompt_too_large` is capped at one, because nothing about the prompt changes between attempts (DEV-633). |
 | **verdict** | `parse_failure`, `unappliable_edits`, `build_failure`, `tests_failed`, `review_rejected` | Charged against `MAX_RETRIES` with a synthetic rejected `code_review` gate carrying the feedback (the diagram below); at exhaustion every verdict class reaches synthesis. A reviewer parse failure is charged to the reviewer's own re-run budget first, then to the implementer. |
 | **terminal** | `synthesis_failed`, `design_exhausted`, `aborted` | The only branch that fails a spec. It closes every task row with it, so a terminal spec never leaves a task claiming to be RUNNING (DEV-532). |
 
@@ -407,6 +407,40 @@ last good fetch and says so in the prompt's journal line. Every fetch is one
 `AGENT_RAN` record (`role: context`, `model_call: false`) listing what was
 read and what was omitted, so a design or attempt generated without a file
 is identifiable from the event stream, not only from a WARNING.
+
+**The prompt budget.** Every section above has a char knob, and until DEV-633
+each clamped itself independently — nothing added them up and nothing compared
+the sum to the window of the agent the prompt was going to. The worst case was
+N knobs' worth of prompt: run 20's `AUTONOMOUS_EXISTING_FILES_MAX_CHARS`
+override raised the protected ceiling 7.5x because the two shared a constant,
+and run 21's implementer prompt went past 1 MB into a 413 (DEV-627). The fit
+check meant to catch that (DEV-624) ran *after* the prompt was rendered, so it
+could only move the prompt to a bigger agent, never make it smaller.
+
+`context.plan_dispatch` now picks the agent and the sections together, once,
+before any render:
+
+1. The prompt is built with every file section empty. That cost — spec,
+   design, notes, instructions — is the fixed part, and it is charged first.
+2. The destination window, less the completion budget and any reasoning budget
+   the agent's server spends ahead of it (DEV-616's `--reasoning-budget`), less
+   `AUTONOMOUS_PROMPT_HEADROOM`, is what the sections share.
+3. Sections are filled in priority order — editable, then protected, then prior
+   artifacts — each taking the smaller of its knob and what is left. A knob is
+   still a ceiling; it is no longer independent.
+4. If any section would be cut, the rotation is tried first: a bigger window is
+   always better than less context, so nothing is dropped while any candidate
+   agent can hold the whole prompt. Only the architect and the reviewer are
+   exempt — which model judges is an eval decision (DEV-99), not a window
+   decision, so their prompts trim in place rather than rerouting.
+5. What is dropped is *named* in the prompt ("Not shown", and for the reviewer
+   "do not judge them"). A model that believes it saw everything emits an
+   invention; one that is told what it missed can say so.
+6. A prompt no window can hold even with every droppable section dropped is
+   refused before the call — a `prompt_too_large` no-verdict (section 6),
+   capped at one attempt because the next computes the same sum. Nothing is
+   spent and nobody is charged, where DEV-624 would have dispatched into a
+   certain 413.
 
 ---
 

@@ -11,8 +11,12 @@ import pytest
 import requests
 
 import coding_model_server.orchestrator_daemon as d
+from coding_model_autonomous import context as _context
 from coding_model_autonomous.db import Database
 from coding_model_autonomous.models import GateType, SpecStatus, TaskStatus
+from coding_model_autonomous.outcome import (
+    FailureClass, Outcome, classify_exception,
+)
 
 
 # ── ctx limits ───────────────────────────────────────────────────────────────
@@ -62,9 +66,27 @@ def test_unknown_agent_is_left_alone():
     assert got == "mystery_agent"
 
 
-def test_nothing_fits_picks_the_largest_window():
-    got = d._ctx_capable_agent("spec_t", "fast_implementer", _messages(2_000_000), 32_000)
-    assert got == "deep_implementer"
+def test_nothing_fits_is_refused_before_the_call():
+    """DEV-633 changed this: DEV-624 dispatched to the largest window "for a
+    definitive answer", which is a guaranteed 413 — and, under DEV-629, five
+    no-verdict round-trips to learn what the sum already knew. The allocator
+    refuses before the call and the task parks."""
+    with pytest.raises(_context.PromptTooLarge) as exc:
+        d._ctx_capable_agent("spec_t", "fast_implementer",
+                             _messages(2_000_000), 32_000)
+    # The message has to name the numbers an operator needs to act.
+    assert "262144" in str(exc.value)
+
+
+def test_refusal_classifies_as_a_no_verdict_park():
+    """It is pattern-1 no-verdict, not a verdict on code never generated —
+    and it is capped at one, because the next attempt computes the same sum."""
+    failure = classify_exception(_context.PromptTooLarge("too big"),
+                                 role="implementer")
+    assert failure.cls is FailureClass.PROMPT_TOO_LARGE
+    assert failure.outcome is Outcome.NO_VERDICT
+    assert failure.rotate is False          # every window was already tried
+    assert failure.cap == 1
 
 
 # ── dispatch refusal rotates, never terminal ─────────────────────────────────
