@@ -16,6 +16,7 @@ from unittest import mock
 import pytest
 
 import coding_model_server.orchestrator_daemon as d
+from coding_model_autonomous.context import SpecContext
 from coding_model_autonomous import apply_edits, executor
 from coding_model_autonomous.apply_edits import (
     EditBlock,
@@ -296,9 +297,8 @@ def test_generate_implementation_records_the_tier_and_names_new_paths(db):
     model_out = ("### src/App.swift\n<<<<<<< SEARCH\nlet x = 1\nlet y = 2\n=======\n"
                  "let x = 2\nlet y = 2\n>>>>>>> REPLACE\n")
     with mock.patch.object(executor, "DIFF_BASED_EDITS", True), \
-            mock.patch.object(d, "_fetch_existing_files_for_spec",
-                              return_value=[("src/App.swift", "let x = 1   \nlet y = 2\n")]), \
-            mock.patch.object(d, "_fetch_protected_files_for_spec", return_value=[]), \
+            mock.patch.object(d, "_spec_context", return_value=SpecContext.from_files(
+                "spec", [("src/App.swift", "let x = 1   \nlet y = 2\n")])), \
             mock.patch.object(d, "_planned_implement_outputs",
                               return_value=["src/App.swift", "tests/test_new.py"]), \
             mock.patch.object(d, "call_agent", return_value=model_out) as ca:
@@ -363,7 +363,7 @@ def test_code_review_gate_names_tolerant_applies(db):
         edit_applies=[{"path": "src/app.py", "block": 1, "tier": "fuzzy",
                        "ratio": 0.9634, "line": 17}])
     with mock.patch.object(d, "_generate_implementation", return_value=result), \
-            mock.patch.object(d, "_fetch_protected_files_for_spec", return_value=[]), \
+            mock.patch.object(d, "_spec_context", return_value=SpecContext.empty("spec")), \
             mock.patch.object(d, "_load_plan", return_value={}):
         d._run_implementer(db, spec, task, spec_dir)
     gates = [g for g in db.list_gates_for_spec(spec.id) if g.gate_type is GateType.CODE_REVIEW]

@@ -45,7 +45,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
-from typing import NamedTuple
+from typing import Iterable, NamedTuple
 
 import requests
 from dotenv import load_dotenv
@@ -128,6 +128,8 @@ from coding_model_autonomous.workspace import (
     ACTION_RENAMED, ATTEMPT_ROLES, REFUSALS, ArtifactLedger,
 )
 from coding_model_autonomous import outcome as _outcome
+from coding_model_autonomous import context as _context
+from coding_model_autonomous.context import RunnerOutage, SpecContext
 from coding_model_autonomous.outcome import (
     Failure, FailureClass, Hooks, classify_exception, classify_model_output,
     classify_test_run, repo_packages, rotation_offset,
@@ -586,47 +588,16 @@ ALLOW_UNREAD_FILE_MODIFICATION = (
 # "do not modify Package.swift" while every file they write is new — the
 # Centipede spec does both and must not be blocked. A change-surface row is an
 # explicit declaration that an existing file is an output.
-_CHANGE_SURFACE_ROW = re.compile(
-    r"^\|\s*`?([^`|]+?)`?\s*\|\s*(?:\*\*)?(modif\w*)\b",
-    re.IGNORECASE | re.MULTILINE,
-)
+# DEV-632: candidate derivation lives in the context stage
+# (coding_model_autonomous.context); these names stay for the callers and
+# tests that grew up on them.
+_declared_file_modifications = _context.declared_modifications
+_change_surface_path_rows = _context.change_surface_path_rows
 
-
-def _declared_file_modifications(spec_md: str) -> list[str]:
-    """Paths a spec's change-surface table marks as modified, not created."""
-    if not spec_md:
-        return []
-    return [
-        m.group(1).strip()
-        for m in _CHANGE_SURFACE_ROW.finditer(spec_md)
-        if m.group(1).strip() and m.group(1).strip().lower() != "path"
-    ]
-
-
-# DEV-621: run 19's hand-written table used a descriptive second column
-# ("What changes here"), so every row failed the keyword match above and the
-# existing-file fetch lost the table entirely. Backticked-path rows are a
-# WEAKER tier of declaration: they become fetch candidates (existence at
-# base_ref is the real test — a candidate that reads is a modification, one
-# that doesn't is a creation), but they never carry the DEV-492 hard-stop,
-# which stays keyword-only so greenfield tables keep planning.
-_TABLE_PATH_ROW = re.compile(r"^\|\s*`([^`|]+?)`\s*\|", re.MULTILINE)
-
-
-def _change_surface_path_rows(spec_md: str) -> list[str]:
-    """Backticked first-column paths of any table row (DEV-621)."""
-    if not spec_md:
-        return []
-    seen: dict[str, None] = {}
-    for m in _TABLE_PATH_ROW.finditer(spec_md):
-        p = m.group(1).strip()
-        if p and p.lower() != "path" and ("/" in p or "." in p):
-            seen.setdefault(p)
-    return list(seen)
 
 
 def _unreadable_declared_modifications(
-    spec: Spec, yaml_text: str, spec_md: str
+    spec: Spec, yaml_text: str, spec_md: str, db: "Database | None" = None,
 ) -> list[str]:
     """Declared-modify paths the pipeline still cannot read (DEV-492).
 
@@ -635,7 +606,10 @@ def _unreadable_declared_modifications(
     plan is safe to run. Non-empty is the original hazard and still blocks.
 
     Reads the plan from *yaml_text* rather than spec.normalized_yaml: at plan
-    acceptance the plan has not been persisted yet.
+    acceptance the plan has not been persisted yet. This probe is also the
+    context stage's first run (DEV-632): with *db* it persists what it read,
+    so the architect and implementer select from that fetch instead of
+    asking the runner again.
     """
     import yaml as _yaml
 
@@ -644,21 +618,22 @@ def _unreadable_declared_modifications(
         return []
     try:
         plan = _yaml.safe_load(yaml_text) or {}
-        strategy = plan.get("test_strategy")
     except _yaml.YAMLError:
-        strategy = None
+        plan = {}
+    if not isinstance(plan, dict):
+        plan = {}
+    strategy = plan.get("test_strategy")
     if not isinstance(strategy, dict) or not strategy.get("repo"):
         # No registered repo to read from — unchanged from before the read path.
         return paths
     try:
-        files, _ = test_runner.fetch_repo_files(
-            strategy["repo"], paths, strategy.get("base_ref") or "HEAD")
-    except Exception as e:
+        ctx = _spec_context(db, spec, spec_md, role="plan probe", plan=plan)
+    except Exception as e:  # RunnerOutage included: unreadable is unreadable
         logger.warning("spec %s: could not probe declared modifications (%s)",
                        spec.id, e)
         return paths
-    got = {p for p, _ in files}
-    return [p for p in paths if p not in got]
+    return [p for p in paths if ctx.existing(p) is None]
+
 
 
 def _drop_undeliverable_manifest_entries(spec: Spec, entries: list) -> list:
@@ -734,103 +709,55 @@ def _drop_undeclared_manifest_entries(spec: Spec, entries: list) -> list:
     return kept
 
 
-def _fetch_protected_files_for_spec(spec: Spec) -> list[tuple[str, str]]:
-    """Read-only contents of the spec's `protected_paths` (DEV-492 / DEV-427).
+def _spec_context(
+    db: "Database | None", spec: Spec, spec_md: str, *, role: str,
+    extra_candidates: "Iterable[str]" = (), plan: "dict | None" = None,
+) -> SpecContext:
+    """The spec's repository context (DEV-632) — the only door to the
+    runner's read path for prompt context.
 
-    Protected files are dropped before dispatch so the pipeline cannot write
-    them — but they are still compiled into the target, and neither the
-    architect nor the implementer has ever been able to see what they declare.
-    Centipede run 5 died on `invalid redeclaration of 'Field'` for exactly that
-    reason: the design created a type the protected scaffold already had.
-
-    Showing them cannot widen what the pipeline may change, since the write
-    path drops these paths regardless of what any role produces.
+    Every role used to run its own fetch: the implementer's (DEV-571), the
+    architect's (DEV-599), manifest mode's (DEV-604), and a protected-file
+    fetch at five more sites, each with its own outage handling and log
+    line. The stage fetches the declared modification set and the protected
+    references together, once per spec, persists the result beside the
+    ledger, and hands each role a view. It raises RunnerOutage — before
+    any model call — when the runner is down and nothing earlier exists to
+    fall back on (DEV-620); a refresh that finds the runner down keeps the
+    last good fetch (DEV-544). *db* may be None for probes without a
+    workspace: then nothing is persisted or recorded.
     """
-    strategy = _load_plan(spec).get("test_strategy")
-    if not isinstance(strategy, dict):
-        return []
-    repo = strategy.get("repo")
-    paths = [p for p in (strategy.get("protected_paths") or []) if p]
-    if not repo or not paths:
-        return []
+    spec_dir = db.spec_dir(spec.id) if db is not None else None
+    ctx, fetched = _context.assemble(
+        spec_id=spec.id, spec_dir=spec_dir,
+        plan=_load_plan(spec) if plan is None else plan,
+        spec_md=spec_md, role=role, extra_candidates=extra_candidates,
+        fetch=test_runner.fetch_repo_files)
+    if fetched and db is not None:
+        # DEV-642: the repository version of every editable file is the
+        # baseline the shrink guard judges later writes against — recorded
+        # here so it is armed for every caller, not per role.
+        _note_baseline(db, spec, ctx.editable_files, role)
+        db.record_event(EventKind.AGENT_RAN, spec_id=spec.id,
+                        payload={"role": "context", "model_call": False,
+                                 "trigger": role, **ctx.summary()})
+    return ctx
+
+
+def _protected_files_soft(db: Database, spec: Spec, spec_md: str, *,
+                          role: str) -> list[tuple[str, str]]:
+    """Protected files for callers that run AFTER a role's output exists —
+    the post-implement normalization and synthesis. There is nothing to
+    park: the generation is done, so an outage degrades to no read-only
+    context, as those sites always did (the stage keeps the last fetch when
+    it has one, so this is rarer than before)."""
     try:
-        files, problems = test_runner.fetch_repo_files(
-            repo, paths, strategy.get("base_ref") or "HEAD")
-    except Exception as e:
-        logger.warning("spec %s: protected-file read failed (%s); roles will "
-                       "not see what those files declare", spec.id, e)
+        return _spec_context(db, spec, spec_md, role=role).protected_files
+    except RunnerOutage as e:
+        logger.warning("spec %s: protected files unavailable to the %s — the "
+                       "runner did not answer (%s)", spec.id, role, e)
         return []
-    for problem in problems:
-        logger.warning("spec %s: protected-file read problem — %s", spec.id, problem)
-    if files:
-        logger.info("spec %s: supplied %d protected file(s) as read-only "
-                    "context: %s", spec.id, len(files),
-                    ", ".join(p for p, _ in files))
-    return files
 
-
-def _fetch_existing_files_for_spec(
-    spec: Spec, spec_md: str, extra_paths: "tuple | list" = (), *, role: str = "implementer",
-) -> list[tuple[str, str]]:
-    """Current contents of the files this spec will overwrite (DEV-492).
-
-    Candidates come from the spec's change-surface table AND from
-    *extra_paths* (the manifest's own file list, DEV-571): the table is
-    optional and its absence used to silently disarm this guard — run 14a's
-    implementer reinvented ForcingStrategy.swift five times because the spec
-    had no table. Any candidate that reads successfully at base_ref already
-    exists in the repo and is therefore a modification, whatever the spec
-    declared. Returns [] for the true greenfield case and for local frameworks
-    whose repo is not on the Mac.
-
-    Raises RunnerOutageAtImplement when the fetch fails TRANSPORT-level with
-    candidates pending (DEV-620) — before that, "never raises" meant a dead
-    runner silently degraded a modification spec to greenfield regeneration,
-    which is how run 19's retry started rewriting an 8.5K-line surface from
-    priors. Every other failure still degrades soft.
-    """
-    declared = _declared_file_modifications(spec_md)
-    # DEV-621: descriptive tables (no "modify" keyword) still name their
-    # files in backticked path rows — those are candidates too. Existence at
-    # base_ref sorts modifications from creations, not the keyword.
-    path_rows = _change_surface_path_rows(spec_md)
-    candidates = list(dict.fromkeys([*declared, *path_rows, *extra_paths]))
-    if not candidates:
-        return []
-    strategy = _load_plan(spec).get("test_strategy")
-    if not isinstance(strategy, dict):
-        return []
-    repo = strategy.get("repo")
-    if not repo:
-        # No registered repo means no runner-side checkout to read from; this
-        # is the local-framework case (pytest/node), where the spec dir is the
-        # whole world and there is nothing to fetch.
-        return []
-    base_ref = strategy.get("base_ref") or "HEAD"
-    try:
-        files, problems = test_runner.fetch_repo_files(repo, candidates, base_ref)
-    except Exception as e:  # never let a read failure kill the spec
-        logger.warning("spec %s: existing-file read failed (%s); the %s will not see the files it must modify", spec.id, e, role)
-        return []
-    if not files and test_runner.problems_indicate_runner_outage(
-            problems, candidates):
-        # DEV-620: the runner did not answer at all. Nothing has been spent
-        # yet, so park rather than letting the implementer work blind.
-        raise RunnerOutageAtImplement(problems[0])
-    for problem in problems:
-        # DEV-620: log every problem — the old declared-paths filter is what
-        # made run 19's fully-failed fetch silent. A creation's "not found"
-        # costs one benign line; a swallowed outage costs a blind rewrite.
-        logger.warning("spec %s: existing-file read problem — %s",
-                       spec.id, problem)
-    if files:
-        logger.info("spec %s: supplied %d existing file(s) to the %s: %s",
-                    spec.id, len(files), role, ", ".join(p for p, _ in files))
-    elif declared:
-        logger.warning("spec %s: %d file(s) marked modify but none could be "
-                       "read — %s is working blind", spec.id,
-                       len(declared), role)
-    return files
 
 
 def _block_plan_for_unreadable_modification(
@@ -903,7 +830,8 @@ def _accept_plan(db: Database, spec: Spec, spec_dir, result: PlannerYaml) -> Non
     # that does not exist at base_ref is caught before a human reviews the plan,
     # not after the implementer has written an invention over it.
     if not ALLOW_UNREAD_FILE_MODIFICATION:
-        unreadable = _unreadable_declared_modifications(spec, yaml_text, spec_md)
+        unreadable = _unreadable_declared_modifications(
+            spec, yaml_text, spec_md, db=db)
         if unreadable:
             _block_plan_for_unreadable_modification(db, spec, unreadable)
             return
@@ -1032,11 +960,10 @@ class ShutdownRequested(RuntimeError):
     task is reset to PENDING so the next daemon start re-runs it."""
 
 
-class RunnerOutageAtImplement(RuntimeError):
-    """The existing-file fetch failed transport-level while modification
-    candidates were pending (DEV-620). Raised BEFORE any model call, so the
-    catcher can park the task at zero cost instead of letting the implementer
-    regenerate an existing surface from priors — run 19's blind retry."""
+# DEV-632: the outage is raised by the context stage for every role; the
+# daemon-side name stays for its catch sites and tests.
+RunnerOutageAtImplement = RunnerOutage
+
 
 
 class SpecScheduler:
@@ -1494,34 +1421,10 @@ def _load_plan(spec: Spec) -> dict:
 
 
 def _planned_implement_outputs(spec: Spec) -> list[str]:
-    """File paths the approved plan's implement phase says it will write.
+    """File paths the approved plan's implement phase says it will write
+    (DEV-571; the derivation lives in the context stage since DEV-632)."""
+    return _context.planned_outputs(_load_plan(spec))
 
-    DEV-571: the existing-file fetch (and therefore DEV-492 grounding AND
-    DEV-581 anchored edits) keyed ONLY on the spec's optional change-surface
-    table. A spec that declares its changes as prose or a bullet list — which
-    no spec template requires anyone to avoid — silently produced no existing
-    files, so the implementer re-imagined files it was never shown. Manifest
-    mode already treats its own file list as candidates; this is the
-    single-call path's equivalent, and it comes from the plan the operator
-    already approved rather than from prose parsing.
-
-    Paths that do not exist in the repo are simply new files — the fetch's
-    own read-failure branch already handles them — so a wrong guess here
-    costs nothing.
-    """
-    phases = _load_plan(spec).get("phases")
-    if not isinstance(phases, list):
-        return []
-    out: list[str] = []
-    for phase in phases:
-        if not isinstance(phase, dict):
-            continue
-        if str(phase.get("name", "")).strip().lower() != "implement":
-            continue
-        for path in phase.get("outputs") or []:
-            if isinstance(path, str) and path.strip():
-                out.append(path.strip())
-    return list(dict.fromkeys(out))
 
 
 def _bootstrap_tasks(db: Database, spec: Spec) -> None:
@@ -1674,22 +1577,21 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
         logger.info("spec %s: carrying %d chars of plan-approval conditions "
                     "into the architect prompt (DEV-546)",
                     spec.id, len(plan_conditions))
-    # DEV-599: the architect gets the same existing-file context DEV-571
-    # gave the implementer — a modify-spec designed blind invents APIs
-    # (run 16) or refuses to design and asks to examine files (run 20).
+    # DEV-599 / DEV-632: the architect selects from the same context stage
+    # as the implementer — a modify-spec designed blind invents APIs
+    # (run 16) or refuses to design and asks to examine files (run 20). A
+    # runner outage parks the task instead of stripping the protected
+    # section and charging the attempt (DEV-544).
     try:
-        design_existing = _fetch_existing_files_for_spec(
-            spec, spec_md, extra_paths=_planned_implement_outputs(spec),
-            role="architect")
-        _note_baseline(db, spec, design_existing, "architect")
-    except RunnerOutageAtImplement as e:
+        view = _spec_context(db, spec, spec_md, role="architect").select("architect")
+    except RunnerOutage as e:
         _requeue_implement_for_runner_outage(
             db, spec, task, str(e), phase="design_existing_fetch")
         return
     messages = build_architect_message(
         spec_md, rejection_notes=rejection_notes, plan_yaml=plan_yaml,
-        existing_files=design_existing,
-        reference_files=_fetch_protected_files_for_spec(spec),
+        existing_files=view.existing_files,
+        reference_files=view.reference_files,
         approval_conditions=plan_conditions)
 
     # Architect output is structured (<<<DESIGN>>> / <<<COMPLEXITY>>> blocks).
@@ -2196,15 +2098,14 @@ def _generate_implementation(
         )
 
     # Single-call path: one response with every file, budget scaled to the design.
-    # The approved plan's implement.outputs are candidates alongside the spec's
-    # change-surface table (DEV-571). Without them this path depended entirely
-    # on an optional table: a spec that listed its files as prose or bullets
-    # fetched nothing, so the implementer rewrote existing files from
-    # imagination (Centipede slices 3 and 4 lost their whole existing test
-    # suite this way) and edit_mode below silently stayed off.
-    existing_files = _fetch_existing_files_for_spec(
-        spec, spec_md, extra_paths=_planned_implement_outputs(spec))
-    _note_baseline(db, spec, existing_files, "implementer")
+    # The implementer selects from the context stage (DEV-632): the declared
+    # modification set — change-surface rows plus the approved plan's
+    # implement.outputs (DEV-571) — as it exists at base_ref, and the
+    # protected references, from one fetch shared with the architect.
+    planned = _planned_implement_outputs(spec)
+    view = _spec_context(db, spec, spec_md, role="implementer").select(
+        "implementer", planned=planned)
+    existing_files = view.existing_files
     # DEV-581: emit anchored SEARCH/REPLACE edits for existing files instead of
     # re-emitting them whole — but only when the flag is on AND there is at least
     # one existing file to edit. With the flag off this is byte-identical to the
@@ -2222,13 +2123,11 @@ def _generate_implementation(
     # DEV-638: the plan's implement outputs that are NOT existing files are the
     # new ones — the prompt names each path's mandatory form so a NEW path
     # never draws SEARCH/REPLACE blocks (five of run 21's eleven rotations).
-    existing_paths = {p for p, _ in existing_files}
-    new_files = [p for p in _planned_implement_outputs(spec)
-                 if p not in existing_paths]
+    new_files = view.new_files
     messages = build_implementer_message(
         spec_md, design_md, rejection_notes=rejection_notes,
         clarifications=clarifications, existing_files=existing_files,
-        reference_files=_fetch_protected_files_for_spec(spec),
+        reference_files=view.reference_files,
         approval_conditions=approval_conditions,
         edit_mode=edit_mode, new_files=new_files,
     )
@@ -2672,10 +2571,13 @@ def _build_from_manifest(
     # the old isinstance(e, dict) filter silently emptied this list, which is
     # how manifest mode ran blind and regenerated existing files from priors
     # (DEV-604, runs 18 and 19).
-    existing_by_path = dict(_fetch_existing_files_for_spec(
-        spec, spec_md,
-        extra_paths=[e.path for e in entries if getattr(e, "path", None)]))
-    _note_baseline(db, spec, list(existing_by_path.items()), "implementer")
+    # DEV-632: the manifest's paths join the stage's candidate set; a path
+    # the plan did not name is the one case that costs a second fetch.
+    view = _spec_context(
+        db, spec, spec_md, role="implementer",
+        extra_candidates=[e.path for e in entries if getattr(e, "path", None)],
+    ).select("implementer")
+    existing_by_path = view.existing_by_path
     if existing_by_path:
         editable = [e.path for e in entries if e.path in existing_by_path]
         if editable:
@@ -2685,10 +2587,10 @@ def _build_from_manifest(
                 "edited via SEARCH/REPLACE blocks (DEV-581)"
                 if executor.DIFF_BASED_EDITS else "regenerated whole",
                 ", ".join(editable))
-    # Fetched once for the whole manifest, same as the editable files: each
+    # Selected once for the whole manifest, same as the editable files: each
     # per-file call is isolated and would otherwise be blind to what the
     # protected scaffold already declares (Centipede run 8).
-    reference_files = _fetch_protected_files_for_spec(spec)
+    reference_files = view.reference_files
     for entry in entries:
         # Manifest mode chains one blocking agent call per file — the
         # longest uninterruptible stretch in the daemon. Check for a
@@ -3571,7 +3473,7 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
     # Fetched once and reused: the boilerplate/collision normalization below
     # and the DEV-512 Swift pre-check both need the protected scaffold, and it
     # costs a runner-side git read.
-    protected_files = _fetch_protected_files_for_spec(spec)
+    protected_files = _protected_files_soft(db, spec, spec_md, role="implementer")
     result.files = _normalize_generated_files(
         db, spec, task, result.files, "implementer",
         protected_files=protected_files)
@@ -4516,35 +4418,10 @@ def _workspace_has_test_files(
 
 def _collect_reviewer_code_files(db: Database, spec_id: str,
                                  spec_dir) -> list[tuple[str, str]]:
-    """Gather implementer code artifacts as (path, content) for the reviewer.
+    """The reviewer's section of the context stage (DEV-632): the code
+    artifacts on disk, latest row per path."""
+    return _context.prior_artifacts(db, spec_id, spec_dir)
 
-    Binary deliverables (icons, fonts, etc.) get a placeholder so the reviewer
-    still sees the path in `## Implementation Files` (preserves rule-5
-    cite-check and rule-6 file-list hygiene) without crashing on a UTF-8 decode.
-    """
-    # Artifact rows accumulate across retries (the retry wipe deletes files,
-    # not rows), so each path can have N+1 rows after N retries. Reading all
-    # of them duplicated every file N+1 times in the reviewer prompt —
-    # ballooning context on exactly the specs already in a retry loop
-    # (DEV-143). Rows are created_at-ordered; keep the latest per path.
-    latest_by_path: dict = {}
-    for art in _list_code_artifacts(db, spec_id):
-        latest_by_path[art.path] = art
-
-    code_files = []
-    for art in latest_by_path.values():
-        fpath = spec_dir / art.path
-        if not fpath.exists():
-            continue
-        try:
-            content = fpath.read_text()
-        except UnicodeDecodeError:
-            content = (
-                f"[binary file, {fpath.stat().st_size} bytes — "
-                f"reviewer cannot inspect content]"
-            )
-        code_files.append((art.path, content))
-    return code_files
 
 
 _HARNESS_ERROR_RE = re.compile(
@@ -5560,7 +5437,7 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
 
     # DEV-552: fetched once for the whole synthesis phase — the merge prompt,
     # the repair prompt, and both collision checks all use the same list.
-    protected_files = _fetch_protected_files_for_spec(spec)
+    protected_files = _protected_files_soft(db, spec, spec_md, role="synthesizer")
 
     # DEV-553: attempts written against a design the architect has since
     # revised carry an API a reviewer already struck. Mark them rather than

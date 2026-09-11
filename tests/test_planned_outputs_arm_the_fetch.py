@@ -74,10 +74,16 @@ def test_a_malformed_or_absent_plan_yields_nothing():
 
 # ── the fix: a table-less spec now fetches its existing files ───────────────
 
+
+def _ctx_files(spec, spec_md, extra_paths=(), *, role="implementer"):
+    """DEV-632: the fetch is the context stage's; a role selects from it."""
+    from coding_model_server import orchestrator_daemon as od
+    return od._spec_context(None, spec, spec_md, role=role,
+                            extra_candidates=extra_paths).editable_files
+
 def test_a_bulleted_spec_still_fetches_the_files_the_plan_will_write(monkeypatch):
     """The regression. No change-surface table, but the plan names the files —
     so they are fetched and the implementer is grounded (and edit_mode arms)."""
-    from coding_model_server import orchestrator_daemon as od
     seen = {}
 
     def fake(repo, paths, base_ref):
@@ -85,9 +91,7 @@ def test_a_bulleted_spec_still_fetches_the_files_the_plan_will_write(monkeypatch
         return [("Tests/CentipedeCoreTests/GameTests.swift", "final class T {}")], []
 
     monkeypatch.setattr(test_runner, "fetch_repo_files", fake)
-    out = od._fetch_existing_files_for_spec(
-        _Spec(PLAN), BULLETED_SPEC,
-        extra_paths=od._planned_implement_outputs(_Spec(PLAN)))
+    out = _ctx_files(_Spec(PLAN), BULLETED_SPEC)
 
     assert seen["paths"] == [
         "Sources/CentipedeCore/Game.swift",
@@ -99,9 +103,8 @@ def test_a_bulleted_spec_still_fetches_the_files_the_plan_will_write(monkeypatch
 
 
 def test_the_run_implementer_call_site_passes_the_planned_outputs(monkeypatch):
-    """Pins the wiring, not just the helper: the single-call path must hand the
-    plan's outputs to the fetch, or the whole fix is inert."""
-    from coding_model_server import orchestrator_daemon as od
+    """Pins the wiring, not just the helper: the context stage itself reads
+    the plan's outputs (DEV-632), so no call site can forget to pass them."""
     seen = {}
 
     def fake(repo, paths, base_ref):
@@ -110,8 +113,7 @@ def test_the_run_implementer_call_site_passes_the_planned_outputs(monkeypatch):
 
     monkeypatch.setattr(test_runner, "fetch_repo_files", fake)
     spec = _Spec(PLAN)
-    od._fetch_existing_files_for_spec(
-        spec, BULLETED_SPEC, extra_paths=od._planned_implement_outputs(spec))
+    _ctx_files(spec, BULLETED_SPEC)
     assert "Tests/CentipedeCoreTests/GameTests.swift" in seen["paths"]
 
 
@@ -120,12 +122,9 @@ def test_the_run_implementer_call_site_passes_the_planned_outputs(monkeypatch):
 def test_a_truly_greenfield_plan_still_asks_for_nothing(monkeypatch):
     """A plan whose implement phase declares no outputs, and a spec with no
     table, must still make no runner call — the greenfield case is unchanged."""
-    from coding_model_server import orchestrator_daemon as od
     monkeypatch.setattr(
         test_runner, "fetch_repo_files",
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("asked")))
     spec = _Spec("test_strategy:\n  repo: centipede\n"
                  "phases:\n  - name: implement\n    role: implementer\n")
-    assert od._fetch_existing_files_for_spec(
-        spec, "no table here",
-        extra_paths=od._planned_implement_outputs(spec)) == []
+    assert _ctx_files(spec, "no table here") == []

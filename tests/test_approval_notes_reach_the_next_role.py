@@ -19,6 +19,7 @@ from unittest import mock
 import pytest
 
 import coding_model_server.orchestrator_daemon as d
+from coding_model_autonomous.context import SpecContext
 from coding_model_autonomous import executor
 from coding_model_autonomous.db import Database
 from coding_model_autonomous.models import GateType, SpecStatus
@@ -160,8 +161,7 @@ def test_approved_design_conditions_reach_the_implementer_call(db, spec):
         return "<<<FILE: A.swift>>>\nstruct A {}\n<<<END_FILE>>>"
 
     with mock.patch.object(d, "call_agent", side_effect=_capture), \
-         mock.patch.object(d, "_fetch_existing_files_for_spec", return_value=[]), \
-         mock.patch.object(d, "_fetch_protected_files_for_spec", return_value=[]):
+         mock.patch.object(d, "_spec_context", return_value=SpecContext.empty("spec")):
         d._generate_implementation(db, spec, task, spec_dir, "# spec",
                                    "# design", None, [], None)
 

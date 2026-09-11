@@ -43,6 +43,7 @@ from typing import Any, Callable, Iterable, Optional
 
 import requests
 
+from .context import RunnerOutage
 from .models import EventKind, GateType, SpecStatus, TaskStatus
 
 logger = logging.getLogger("orchestrator.outcome")
@@ -191,7 +192,8 @@ def classify_exception(exc: BaseException, *, role: str,
                        f"HTTP {status or '?'}: {exc}", rotate=rotate,
                        exc_type=name, phase=phase,
                        extra={"status": status})
-    if name == "RunnerOutageAtImplement":
+    if isinstance(exc, RunnerOutage) or name in (
+            "RunnerOutageAtImplement", "RunnerOutage"):
         return Failure(FailureClass.RUNNER_OUTAGE, role, "runner", str(exc),
                        exc_type=name, phase=phase or "existing_fetch")
     if isinstance(exc, RuntimeError) and "missing choices" in str(exc):

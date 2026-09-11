@@ -689,3 +689,77 @@ class TestCrashRecovery:
         recov = events(db, spec.id, EventKind.AGENT_RAN, role="crash_recovery")
         assert [r["recovery"] for r in recov] == [1, 2, 3, 4, 5]
         assert model.calls == []
+
+
+# ── the context stage (DEV-632) ──────────────────────────────────────────────
+
+class TestContextStage:
+    def test_one_fetch_serves_the_whole_run(self, db, model, runner):
+        """Plan probe, architect, implementer and the post-implement
+        normalization all select from ONE runner round-trip (there were at
+        least seven per run before the stage), and the run records what the
+        fetch held and omitted."""
+        spec = make_pending_plan_spec(db)
+        model.script("planner", Reply(planner_reply()))
+        model.script("architect", Reply(architect_reply()))
+        model.script("design_review", Reply(design_review_reply("PASS")))
+        model.script("implementer", Reply(implementer_reply()))
+        model.script("reviewer", Reply(reviewer_reply("PASS")))
+
+        out = drive(db, spec.id, model, approve_all, runner=runner)
+
+        assert out.status == SpecStatus.DONE
+        assert len(runner.fetch_calls) == 1
+        _, paths, _ = runner.fetch_calls[0]
+        assert DAEMON_PATH in paths and TEST_PATH in paths
+        assert "src/coding_model_autonomous/" in paths  # the protected set rides along
+        # Both model roles saw the file the plan modifies.
+        for role in ("architect", "implementer"):
+            prompt = model.calls_for(role)[0].messages[-1]["content"]
+            assert "fixture stand-in for the daemon" in prompt
+        assert "context.json" in workspace_files(db, spec.id)
+        recorded = events(db, spec.id, EventKind.AGENT_RAN, role="context")
+        assert len(recorded) == 1
+        assert recorded[0]["model_call"] is False
+        assert recorded[0]["trigger"] == "plan probe"
+        assert recorded[0]["editable"] == [DAEMON_PATH]
+        assert any(o.startswith(f"{TEST_PATH} (editable)") for o in recorded[0]["omitted"])
+
+    def test_the_context_survives_the_retry_wipe(self, db, model, runner):
+        """A rotated attempt selects from the same fetch: context.json is
+        preserved through the retry cleanup like the ledger."""
+        from seam_harness import scripted
+        spec = _impl_ready(db, model, runner)
+        model.script("implementer", Reply(implementer_reply()), Reply(implementer_reply()))
+        model.script("reviewer", Reply(reviewer_reply("PASS")))
+
+        out = drive(db, spec.id, model,
+                    scripted({GateType.CODE_REVIEW: [("rejected", "again")]}),
+                    runner=runner)
+
+        assert out.status == SpecStatus.DONE
+        assert out.task("implementer").retry_count == 1
+        assert len(runner.fetch_calls) == 1
+        for call in model.calls_for("implementer"):
+            assert "fixture stand-in for the daemon" in call.messages[-1]["content"]
+
+    def test_refresh_outage_keeps_the_last_good_fetch(self, db, model, runner, monkeypatch, edit_mode):
+        """DEV-544: the runner going away between the architect and the
+        implementer no longer strips either section — the implementer works
+        from the architect's fetch, is told so, and is not parked."""
+        from coding_model_autonomous import context as c
+        monkeypatch.setattr(c, "REFRESH_SECONDS", 0)  # re-verify at every role
+        spec = make_executing_spec(db)
+        runner.fetch_mode = lambda n: "ok" if n == 1 else "down"
+        model.script("architect", Reply(architect_reply()))
+        model.script("design_review", Reply(design_review_reply("PASS")))
+        model.script("implementer", Reply(implementer_reply()))
+
+        out = drive(db, spec.id, model, wait_at(GateType.CODE_REVIEW), runner=runner)
+
+        assert out.reason == "waiting"
+        assert len(runner.fetch_calls) >= 2
+        assert events(db, spec.id, EventKind.TEST_RAN, phase="implement_existing_fetch") == []
+        prompt = model.calls_for("implementer")[0].messages[-1]["content"]
+        assert "fixture stand-in for the daemon" in prompt
+        assert "## File modes" in prompt  # edit mode stayed armed

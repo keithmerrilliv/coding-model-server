@@ -24,6 +24,12 @@ TABLE = """
 TRANSPORT_PROBLEM = "could not reach the runner's read path: connection refused"
 
 
+def _ctx_files(spec, spec_md, extra_paths=(), *, role="implementer"):
+    """DEV-632: the fetch is the context stage's; a role selects from it."""
+    return d._spec_context(None, spec, spec_md, role=role,
+                           extra_candidates=extra_paths).editable_files
+
+
 class TestOutageClassifier:
     def test_transport_single_problem_is_outage(self):
         assert test_runner.problems_indicate_runner_outage(
@@ -62,7 +68,7 @@ class TestFetchRaisesOnOutage:
             lambda repo, paths, base_ref="HEAD", timeout=30:
             ([], [TRANSPORT_PROBLEM]))
         with pytest.raises(d.RunnerOutageAtImplement):
-            d._fetch_existing_files_for_spec(self._spec(), TABLE)
+            _ctx_files(self._spec(), TABLE)
 
     def test_per_path_problems_degrade_soft(self, monkeypatch):
         self._plan(monkeypatch)
@@ -70,14 +76,14 @@ class TestFetchRaisesOnOutage:
             d.test_runner, "fetch_repo_files",
             lambda repo, paths, base_ref="HEAD", timeout=30:
             ([], ["src/big.py: not found at HEAD"]))
-        assert d._fetch_existing_files_for_spec(self._spec(), TABLE) == []
+        assert _ctx_files(self._spec(), TABLE) == []
 
     def test_no_candidates_never_fetches(self, monkeypatch):
         self._plan(monkeypatch)
         def boom(*a, **k):
             raise AssertionError("fetch should not run without candidates")
         monkeypatch.setattr(d.test_runner, "fetch_repo_files", boom)
-        assert d._fetch_existing_files_for_spec(self._spec(), "no table") == []
+        assert _ctx_files(self._spec(), "no table") == []
 
     def test_healthy_fetch_unchanged(self, monkeypatch):
         self._plan(monkeypatch)
@@ -85,7 +91,7 @@ class TestFetchRaisesOnOutage:
             d.test_runner, "fetch_repo_files",
             lambda repo, paths, base_ref="HEAD", timeout=30:
             ([("src/big.py", "content")], []))
-        assert d._fetch_existing_files_for_spec(self._spec(), TABLE) == [
+        assert _ctx_files(self._spec(), TABLE) == [
             ("src/big.py", "content")]
 
 
