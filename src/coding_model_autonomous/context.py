@@ -562,9 +562,16 @@ class SectionBudget:
 
     @property
     def squeezed(self) -> bool:
-        """Trimmed by the aggregate sum rather than by its own knob."""
+        """Trimmed by the aggregate sum rather than by its own knob.
+
+        On the budgeted path this is true of every remaining drop: the second
+        pass offers each section whatever the window still has, so a file that
+        is still not shown could not be held at all (DEV-648). It separates
+        the two reasons only on the unbounded path, where no window is known
+        and the knob really is the ceiling."""
         return bool(self.dropped) and (self.preferred is None
-                                       or self.budget < self.preferred)
+                                       or self.budget < self.preferred
+                                       or self.budget > self.preferred)
 
 
 @dataclass
@@ -675,6 +682,30 @@ def allocate(sections: Iterable[Section], *, fixed_chars: int,
         alloc.sections[section.name] = got
         if budget_chars >= 0:
             left = max(0, left - got.chars)
+
+    # Second pass (DEV-648): the knob is what a section ASKS for, not a
+    # ceiling. Run 28's architect was shown ZERO editable files because the
+    # one file the plan modifies is 146K and the knob is 60K — against a
+    # window with 343K chars free. The knob's purpose is crowding-out, and
+    # crowding-out is now measurable: `fixed_chars` is known, so anything the
+    # window can still hold after every section has had its preference is
+    # room a dropped file may have. Priority order again, so the declared
+    # modification set is refilled before the protected tree.
+    if budget_chars >= 0:
+        for section in sections:
+            got = alloc.sections[section.name]
+            if not got.dropped or left <= 0:
+                continue
+            # `left` is added to what the section actually USED, not to what
+            # it was granted: the unused remainder of its first-pass share is
+            # already counted in `left`, and adding both hands out the same
+            # chars twice — which overflows the window and turns a prompt that
+            # fits into a spurious PromptTooLarge.
+            grown = _fill(section, got.chars + left)
+            gained = grown.chars - got.chars
+            if gained > 0:
+                alloc.sections[section.name] = grown
+                left = max(0, left - gained)
     return alloc
 
 

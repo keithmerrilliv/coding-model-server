@@ -56,13 +56,40 @@ class TestAggregateSum:
         assert alloc.sections["editable"].chars == 50_000
         assert alloc.sections["protected"].chars == 50_000
 
-    def test_a_knob_is_still_a_ceiling(self):
-        """Room in the window does not let a section spend past its knob."""
+    def test_a_knob_is_a_preference_not_a_ceiling(self):
+        """DEV-648: a knob is what a section ASKS for. Room the window still
+        has after every section has had its preference goes back to whoever
+        was cut — run 28's architect was shown ZERO editable files because the
+        one file the plan modifies is 146K and the knob is 60K, against a
+        window with 343K chars free."""
         alloc = ctx.allocate([_section("editable", chars=90_000, knob=30_000, files=9)],
                              fixed_chars=0, window_tokens=262_144,
                              completion_tokens=8_000)
-        assert alloc.sections["editable"].chars <= 30_000
-        assert alloc.dropped("editable")
+        assert alloc.sections["editable"].chars == 90_000
+        assert not alloc.dropped("editable")
+
+    def test_one_file_bigger_than_its_whole_knob_is_still_shown(self):
+        """The run-28 shape exactly: a single editable file larger than the
+        section's entire knob, inside a window that holds it easily."""
+        big = [("src/coding_model_autonomous/executor.py", "x" * 146_000)]
+        alloc = ctx.allocate([ctx.Section(ctx.SECTION_EDITABLE, big, 60_000)],
+                             fixed_chars=17_517, window_tokens=131_072,
+                             completion_tokens=10_000)
+        assert not alloc.dropped(ctx.SECTION_EDITABLE)
+        assert alloc.files(ctx.SECTION_EDITABLE) == big
+        assert alloc.fits
+
+    def test_the_refill_still_respects_priority(self):
+        """Leftover room goes back in priority order, so the declared
+        modification set is made whole before the protected tree."""
+        alloc = ctx.allocate(
+            [_section("editable", chars=80_000, knob=20_000, files=8),
+             _section("protected", chars=80_000, knob=20_000, files=8)],
+            fixed_chars=0, window_tokens=40_000, completion_tokens=0)
+        # 40_000 * 0.95 * 3 = 114_000 chars for 160_000 of content.
+        assert not alloc.dropped("editable")          # made whole first
+        assert alloc.dropped("protected")             # pays for it
+        assert alloc.fits
 
     def test_priority_order_decides_who_gives(self):
         """Sections are allocated in the order they are passed: the declared
@@ -106,8 +133,10 @@ class TestAggregateSum:
         assert alloc.fits
 
     def test_a_dropped_file_is_named_never_silently_gone(self):
-        alloc = ctx.allocate([_section("editable", chars=90_000, knob=10_000, files=9)],
-                             fixed_chars=0, window_tokens=262_144,
+        """A window that genuinely cannot hold the section — after DEV-648's
+        refill, that is the only reason a file is still missing."""
+        alloc = ctx.allocate([_section("editable", chars=900_000, knob=900_000, files=90)],
+                             fixed_chars=0, window_tokens=20_000,
                              completion_tokens=8_000)
         assert alloc.dropped("editable")
         assert all(p.startswith("editable") for p in alloc.dropped("editable"))

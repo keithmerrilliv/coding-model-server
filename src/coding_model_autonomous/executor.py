@@ -1501,13 +1501,15 @@ def _render_reference_files(reference_files: list[tuple[str, str]],
         "new feature; reference the existing declaration instead, or extend "
         "it in a file you are allowed to write.\n\n",
     ]
-    # DEV-633: the allocator has usually trimmed this list already and hands
-    # back what it dropped, so those paths are still named as off-limits. The
-    # knob below is the section's preference and its ceiling — an allocated
-    # list is always within it, so this loop only bites for a caller that
-    # renders without budgeting.
+    # DEV-633: the allocator trims this list and hands back what it dropped,
+    # so those paths are still named as off-limits. DEV-648: when it has done
+    # so (``omitted`` is a list, even an empty one) its decision is final and
+    # this render does NOT clamp again — the allocator may deliberately grant
+    # a section more than its knob when the window has room, and re-applying
+    # the knob here would drop the file it just chose to include. The knob
+    # survives only as the fallback for a caller that renders unbudgeted.
     dropped: list[str] = list(omitted or [])
-    budget = PROTECTED_FILES_MAX_CHARS
+    budget = float("inf") if omitted is not None else PROTECTED_FILES_MAX_CHARS
     for path, content in reference_files:
         if len(content) > budget:
             dropped.append(path)
@@ -1812,10 +1814,11 @@ def _render_existing_files(existing_files: list[tuple[str, str]],
         "## Current contents of files you must modify\n\n",
         body,
     ]
-    # See _render_reference_files: with DEV-633 the aggregate allocator does
-    # the trimming and passes the paths it dropped in ``omitted``.
+    # See _render_reference_files: the allocator does the trimming and passes
+    # the paths it dropped in ``omitted``; when it has, its decision is final
+    # and the knob below is not re-applied (DEV-633, DEV-648).
     dropped: list[str] = list(omitted or [])
-    budget = EXISTING_FILES_MAX_CHARS
+    budget = float("inf") if omitted is not None else EXISTING_FILES_MAX_CHARS
     for path, content in existing_files:
         if len(content) > budget:
             dropped.append(path)
