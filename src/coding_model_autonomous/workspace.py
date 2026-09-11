@@ -14,21 +14,26 @@ workspace. Every write records role, kind, retry, sha256, size and the design
 digest it was written against, both in the artifacts table and in a sidecar
 ``ledger.json`` that survives retry cleanup and is copied into every
 ``retry_history`` snapshot — so the synthesis corpus can be built from what
-each attempt actually wrote. Four guards run before the bytes land:
+each attempt actually wrote. Four guards run before the bytes land. Two judge
+the PATH and apply to every artifact kind:
 
 * **collision** — a role writing at a path another role produced (and whose
   content is still on disk) is handled by policy: ``rename`` (default) moves
   the write to a sibling path that keeps test discovery working, ``refuse``
   drops it. Synthesis and its repair round may supersede implementer output;
   that is what they exist for.
+* **placeholder** — a path that is one of the prompt's own format examples
+  (``path``, ``...``, ``another/file.py``, ``relative/path/to/file.ext``) is
+  not a file; run 25's synthesis landed four of them as artifacts (DEV-646).
+
+The remaining two read the content, and they read it as CODE — both count
+declarations — so they run for ``ArtifactKind.CODE`` only (DEV-647):
+
 * **emptying** — replacing a file that has declarations with one that has
   none is refused for every role (DEV-602 fix 3, DEV-573's stub class).
 * **shrink** — when the repository version of a path is known (recorded
   whenever a role's existing-file fetch returned it), a write with fewer than
   ``SHRINK_REFUSE_RATIO`` of its lines AND declarations is refused (DEV-636).
-* **placeholder** — a path that is one of the prompt's own format examples
-  (``path``, ``...``, ``another/file.py``, ``relative/path/to/file.ext``) is
-  not a file; run 25's synthesis landed four of them as artifacts (DEV-646).
 
 Refusals and renames are returned as ``WriteOutcome`` values and persisted as
 ledger entries, so the caller can put them on the gate and the event.
@@ -378,8 +383,19 @@ class ArtifactLedger:
                 outcome = WriteOutcome(rel_path, None, REFUSED_COLLISION, role,
                                        prior_role)
 
+        # Guards 2 and 3 read CONTENT, and they read it as code: both count
+        # declarations. A design document's score is an accident of how many
+        # signatures the architect chose to quote that round, so on run 26 an
+        # 81-line design REVISION scored 0 against the 61-line original's 1 and
+        # was refused — the design-review loop spent a dispatch and changed
+        # nothing, and the gate opened over the document the reviewer had just
+        # failed (DEV-647). The guards exist to stop a stub replacing real
+        # code; they apply to code (`note` was already exempt, and the path
+        # guards above still apply to everything).
+        code = kind is ArtifactKind.CODE
+
         # 2. emptying — declarations replaced by none (any role, any producer).
-        if outcome is None:
+        if outcome is None and code:
             existing = self._read(target)
             if existing is not None:
                 old_decls = _count_declarations(existing)
@@ -390,7 +406,7 @@ class ArtifactLedger:
                         detail=f"had {old_decls} declaration(s), new has 0")
 
         # 3. shrink — a fraction of the repository version (DEV-636).
-        if outcome is None:
+        if outcome is None and code:
             base = self.baselines.get(target)
             if base is not None and base.lines >= SHRINK_MIN_BASELINE_LINES:
                 new_lines = _line_count(content)

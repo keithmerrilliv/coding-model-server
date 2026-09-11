@@ -1723,11 +1723,33 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
                       f"<<<COMPLEXITY>>> block.")))
         return
 
-    # Write design.md
+    # Write design.md. DEV-647: the outcome used to be discarded, so a refused
+    # write was one WARNING followed by an unqualified "architect done" and a
+    # gate over whatever document was still on disk — on run 26, the one the
+    # reviewer had just failed. The content guards no longer apply to a DESIGN
+    # artifact, so this should now be unreachable; if a guard we add later
+    # does refuse a design, the run must stop rather than proceed over stale
+    # bytes.
     ledger = ArtifactLedger.open(db, spec, spec_dir)
-    ledger.write("design.md", result.design_md, role="architect",
-                 kind=ArtifactKind.DESIGN, task_id=task.id,
-                 retry=task.retry_count)
+    design_write = ledger.write("design.md", result.design_md, role="architect",
+                                kind=ArtifactKind.DESIGN, task_id=task.id,
+                                retry=task.retry_count)
+    if not design_write.ok:
+        logger.error("spec %s: the design write was REFUSED (%s) — the "
+                     "workspace still holds the previous design, so there is "
+                     "nothing to review (DEV-647)",
+                     spec.id, design_write.describe())
+        db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
+                        payload={"role": "architect", "model_call": False,
+                                 "anomaly": "design_write_refused",
+                                 "action": design_write.action,
+                                 "detail": design_write.detail,
+                                 "retry": task.retry_count})
+        _dispose(db, spec, task, Failure(
+            FailureClass.UNKNOWN_EXCEPTION, "architect", "daemon",
+            f"the ledger refused the design write: {design_write.describe()}",
+            extra={"action": design_write.action}))
+        return
 
     # Persist complexity assessment as a workspace artifact. None when the
     # architect skipped or malformed the COMPLEXITY block — _run_implementer
