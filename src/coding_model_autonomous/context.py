@@ -727,6 +727,14 @@ def plan_dispatch(spec_id: str, *, role: str, sections: Iterable[Section],
                     "spec %s: the %s prompt does not fit %r — dispatching to "
                     "%r (%s) instead (DEV-633: %s)", spec_id, role, agent,
                     cand, window, alloc.describe())
+            # Say the sum on EVERY dispatch, not only when it had to move or
+            # cut something. Run 26 dispatched five implementer prompts and
+            # the journal recorded nothing about any of them, so whether the
+            # budget had run at all could only be established by replaying it
+            # afterwards. A guard that is silent when it passes is a guard
+            # nobody can show was armed (DEV-620's lesson).
+            logger.info("spec %s: %s prompt budget — %s",
+                        spec_id, role, alloc.describe())
             return alloc
         if window is not None and (best is None
                                    or window > (best.window_tokens or 0)):

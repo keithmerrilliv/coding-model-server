@@ -155,6 +155,21 @@ class TestPlanDispatch:
         assert alloc.dropped("editable")
         assert alloc.fits
 
+    def test_the_sum_is_journalled_on_every_dispatch(self, caplog):
+        """Run 26 dispatched five implementer prompts and the journal said
+        nothing about any of them, because the allocator only spoke when it
+        had to escalate or cut. A guard that is silent when it passes cannot
+        be shown to have been armed."""
+        import logging
+        with caplog.at_level(logging.INFO, logger="orchestrator.context"):
+            self._plan([_section("editable", chars=1_000, knob=60_000)])
+        budget_lines = [r.getMessage() for r in caplog.records
+                        if "prompt budget" in r.getMessage()]
+        assert len(budget_lines) == 1
+        # The line has to carry the numbers an operator would act on.
+        assert "editable" in budget_lines[0]
+        assert "completion" in budget_lines[0]
+
     def test_an_unknown_candidate_never_wins_an_oversized_prompt(self):
         """An agent missing from the config estimates as unbounded, so it
         would win every oversized prompt for the worst possible reason."""
