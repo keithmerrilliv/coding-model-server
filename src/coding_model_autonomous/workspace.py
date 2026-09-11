@@ -14,7 +14,7 @@ workspace. Every write records role, kind, retry, sha256, size and the design
 digest it was written against, both in the artifacts table and in a sidecar
 ``ledger.json`` that survives retry cleanup and is copied into every
 ``retry_history`` snapshot — so the synthesis corpus can be built from what
-each attempt actually wrote. Three guards run before the bytes land:
+each attempt actually wrote. Four guards run before the bytes land:
 
 * **collision** — a role writing at a path another role produced (and whose
   content is still on disk) is handled by policy: ``rename`` (default) moves
@@ -23,9 +23,12 @@ each attempt actually wrote. Three guards run before the bytes land:
   that is what they exist for.
 * **emptying** — replacing a file that has declarations with one that has
   none is refused for every role (DEV-602 fix 3, DEV-573's stub class).
-* **shrink** — when the repository version of the path is known (recorded
+* **shrink** — when the repository version of a path is known (recorded
   whenever a role's existing-file fetch returned it), a write with fewer than
   ``SHRINK_REFUSE_RATIO`` of its lines AND declarations is refused (DEV-636).
+* **placeholder** — a path that is one of the prompt's own format examples
+  (``path``, ``...``, ``another/file.py``, ``relative/path/to/file.ext``) is
+  not a file; run 25's synthesis landed four of them as artifacts (DEV-646).
 
 Refusals and renames are returned as ``WriteOutcome`` values and persisted as
 ledger entries, so the caller can put them on the gate and the event.
@@ -89,8 +92,41 @@ ACTION_RESTORED = "restored"
 REFUSED_COLLISION = "refused_collision"
 REFUSED_EMPTYING = "refused_emptying"
 REFUSED_SHRINK = "refused_shrink"
-REFUSALS = (REFUSED_COLLISION, REFUSED_EMPTYING, REFUSED_SHRINK)
+REFUSED_PLACEHOLDER = "refused_placeholder"
+REFUSALS = (REFUSED_COLLISION, REFUSED_EMPTYING, REFUSED_SHRINK, REFUSED_PLACEHOLDER)
 _LANDED = (ACTION_WRITTEN, ACTION_RENAMED, ACTION_RESTORED)
+
+# Placeholder path detection constants and predicate.
+_PLACEHOLDER_NAMES = frozenset({"path", "file", "filename", "filepath"})
+_PLACEHOLDER_PREFIXES = ("path/to/", "another/file", "relative/path", "your/file")
+
+
+def is_placeholder_path(rel_path: str) -> bool:
+    """Return True if rel_path matches a prompt-format placeholder pattern."""
+    p = rel_path.strip()
+    # Rule 1: empty string
+    if not p:
+        return True
+    # Rule 2: all-dots with >=3 characters (e.g., '...')
+    if len(p) >= 3 and all(c == '.' for c in p):
+        return True
+    # Compute low: lowercase, strip leading '/', then strip './' prefix
+    low = p.lower().lstrip('/')
+    while low.startswith('./'):
+        low = low[2:]
+    # Rule 3: starts with any known placeholder prefix
+    for pref in _PLACEHOLDER_PREFIXES:
+        if low.startswith(pref):
+            return True
+    # Compute base: segment after last '/' (or whole low if no '/')
+    base = low.rsplit('/', 1)[-1]
+    # Rule 4: bare placeholder name (no '.', in _PLACEHOLDER_NAMES)
+    if '.' not in base and base in _PLACEHOLDER_NAMES:
+        return True
+    # Rule 5: ends with '.ext'
+    if base.endswith('.ext'):
+        return True
+    return False
 
 
 def _with_trailing_newline(content: str) -> str:
@@ -175,6 +211,9 @@ class WriteOutcome:
             return (f"`{self.requested}` was produced by the {self.prior_role}; "
                     f"the {self.role}'s version was written as `{self.path}` "
                     f"instead (collision policy: rename)")
+        if self.action == REFUSED_PLACEHOLDER:
+            return (f"`{self.requested}` is not a file path — REFUSED "
+                    f"({self.detail})")
         if self.action == REFUSED_COLLISION:
             return (f"`{self.requested}` was produced by the {self.prior_role}; "
                     f"the {self.role}'s version was REFUSED (collision policy: refuse)")
@@ -315,8 +354,15 @@ class ArtifactLedger:
         prior_role = prior.role if prior else None
         outcome: "WriteOutcome | None" = None
 
+        # 0. placeholder — the prompt's own format examples, never a real file.
+        if is_placeholder_path(rel_path):
+            outcome = WriteOutcome(
+                rel_path, None, REFUSED_PLACEHOLDER, role,
+                prior_role, detail="a placeholder from the prompt's "
+                                   "format examples, not a file")
+
         # 1. collision — someone else's work is at this path.
-        if prior is not None and prior.role != role \
+        if outcome is None and prior is not None and prior.role != role \
                 and prior.role not in _MAY_SUPERSEDE.get(role, frozenset()):
             if self.policy is CollisionPolicy.RENAME:
                 candidate = renamed_path(rel_path, role)
