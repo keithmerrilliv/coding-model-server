@@ -287,7 +287,7 @@ question it asks is whether the model's output was ever evaluated:
 | Outcome | Classes | What happens |
 |---|---|---|
 | **no-verdict** | `transport`, `http_refusal`, `server_malformed`, `empty_completion`, `truncated`, `runner_outage`, `prompt_too_large`, `sandbox_provisioning`, `shutdown`, `unknown_exception` | The task goes back to PENDING with `retry_count` untouched. A 4xx, a truncation or an empty completion also advances the rotation (the next dispatch reaches a different agent) without spending the budget. After `AUTONOMOUS_NO_VERDICT_CAP` (5) consecutive no-verdicts on one attempt the task is parked behind a task-bound clarification gate that names the infrastructure; approve to re-run, reject to abort. Fetch-time runner outages are uncapped (DEV-620); the build-check outage keeps DEV-538's cap of three; `prompt_too_large` is capped at one, because nothing about the prompt changes between attempts (DEV-633). |
-| **verdict** | `parse_failure`, `unappliable_edits`, `build_failure`, `tests_failed`, `review_rejected` | Charged against `MAX_RETRIES` with a synthetic rejected `code_review` gate carrying the feedback (the diagram below); at exhaustion every verdict class reaches synthesis. A reviewer parse failure is charged to the reviewer's own re-run budget first, then to the implementer. |
+| **verdict** | `parse_failure`, `unappliable_edits`, `build_failure`, `tests_failed`, `review_rejected` | Charged against `MAX_RETRIES` with a synthetic rejected `code_review` gate carrying the feedback (the diagram below); at exhaustion every verdict class reaches synthesis. A reviewer parse failure is charged to the reviewer's own re-run budget first, then to the implementer. An attempt missing a file the plan's implement phase declares is a `parse_failure` too, decided before the build check (DEV-645). |
 | **terminal** | `synthesis_failed`, `design_exhausted`, `aborted` | The only branch that fails a spec. It closes every task row with it, so a terminal spec never leaves a task claiming to be RUNNING (DEV-532). |
 
 Each disposition is one `failure_classified` event (`cls`, `outcome`,
@@ -441,6 +441,25 @@ before any render:
    capped at one attempt because the next computes the same sum. Nothing is
    spent and nobody is charged, where DEV-624 would have dispatched into a
    certain 413.
+
+**The planned-output check.** The plan's implement phase declares the files
+the attempt will produce, and since DEV-645 the workspace is checked against
+that list once the writes have landed and before the build check. A missing
+file is a `parse_failure` verdict whose feedback names it and says which form
+it needs — edit blocks under a `### path` header for a file that exists at
+`base_ref`, a whole `<<<FILE:>>>` block for a new one. Existence on disk is
+the test, not the response's path list, so a path the ledger refused or
+renamed counts as missing.
+
+Manifest mode keeps DEV-106's own verification, which checks the *architect's*
+file list and can restore a dropped file from a retry snapshot; it detects
+itself by `manifest.json` and the DEV-645 check stands aside on the same
+signal. Single-call mode had nothing, and an attempt that dropped a planned
+file was scored downstream as whatever that file happened to break: run 25's
+missing module surfaced as behaviour failures against unmodified code, and run
+26's missing *test* file surfaced as nothing at all — with no tests to
+collect, the build check reported "inconclusive" and a module that did not
+parse reached a human gate labelled "implementer done".
 
 ---
 
