@@ -9,7 +9,8 @@ from coding_model_autonomous import ArtifactKind
 from coding_model_autonomous.db import Database
 from coding_model_autonomous.workspace import (
     ACTION_RENAMED, ACTION_RESTORED, ACTION_WRITTEN, LEDGER_FILE,
-    REFUSED_COLLISION, REFUSED_EMPTYING, REFUSED_SHRINK, ArtifactLedger,
+    REFUSED_COLLISION, REFUSED_EMPTYING, REFUSED_PLACEHOLDER, REFUSED_SHRINK,
+    ArtifactLedger,
     CollisionPolicy, attempt_files_from_ledger, read_entries, renamed_path,
 )
 
@@ -121,6 +122,58 @@ class TestEmptying:
     def test_prose_over_prose_is_fine(self, ledger):
         ledger.write("README.md", "# one\n", role="implementer")
         assert ledger.write("README.md", "# two\n", role="implementer").ok
+
+
+class TestGuardsAreScopedToCode:
+    """DEV-647: guards 2 and 3 read the content as CODE — both count
+    declarations — so a document's score is an accident of how many
+    signatures its author happened to quote. Run 26's 81-line design REVISION
+    scored 0 against the 61-line original's 1 and was refused; the
+    design-review loop spent a dispatch, changed nothing, and the gate opened
+    over the document the reviewer had just failed."""
+
+    DESIGN_WITH_CODE = ("# Design\n\n## API\n\n```python\n"
+                        "def is_placeholder_path(rel_path: str) -> bool: ...\n```\n")
+    DESIGN_PROSE_ONLY = ("# Design (revised)\n\n## Overview\n\n"
+                         + "Prose describing the change in detail.\n" * 40)
+
+    def test_a_prose_design_revision_lands_over_one_that_quoted_code(self, ledger):
+        """The exact run-26 sequence."""
+        first = ledger.write("design.md", self.DESIGN_WITH_CODE,
+                             role="architect", kind=ArtifactKind.DESIGN)
+        assert first.ok
+        revision = ledger.write("design.md", self.DESIGN_PROSE_ONLY,
+                                role="architect", kind=ArtifactKind.DESIGN)
+        assert revision.ok, revision.describe()
+        assert (ledger.spec_dir / "design.md").read_text() == self.DESIGN_PROSE_ONLY
+
+    def test_the_same_content_pair_is_still_refused_as_code(self, ledger):
+        """The guard is not weakened — only scoped. Identical bytes at a CODE
+        artifact still trip it."""
+        ledger.write("src/a.py", self.DESIGN_WITH_CODE, role="implementer")
+        out = ledger.write("src/a.py", self.DESIGN_PROSE_ONLY, role="implementer")
+        assert out.action == REFUSED_EMPTYING
+
+    def test_shrink_does_not_judge_a_design_either(self, ledger):
+        ledger.record_baseline([("design.md", BIG)])
+        out = ledger.write("design.md", "# Design\n\nOne short paragraph.\n",
+                           role="architect", kind=ArtifactKind.DESIGN)
+        assert out.ok
+
+    def test_a_report_is_not_judged_as_code(self, ledger):
+        """The diagnostic kinds are documents too."""
+        ledger.write("test_report.md", self.DESIGN_WITH_CODE,
+                     role="reviewer", kind=ArtifactKind.TEST_REPORT)
+        out = ledger.write("test_report.md", "# Report\n\nAll green.\n",
+                           role="reviewer", kind=ArtifactKind.TEST_REPORT)
+        assert out.ok
+
+    def test_the_path_guards_still_apply_to_every_kind(self, ledger):
+        """Scoping the CONTENT guards must not disarm the path guards: a
+        placeholder path is not a design document either (DEV-646)."""
+        out = ledger.write("path", "# Design\n", role="architect",
+                           kind=ArtifactKind.DESIGN)
+        assert out.action == REFUSED_PLACEHOLDER
 
 
 class TestShrink:

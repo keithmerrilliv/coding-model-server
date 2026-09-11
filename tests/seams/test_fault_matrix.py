@@ -22,7 +22,8 @@ from seam_fakes import (
     PytestPass, Refuse, Reply, Truncated, UnclosedThink, Unreachable,
 )
 from seam_harness import (
-    BAD_EDITS, DAEMON_PATH, DAEMON_STUB, GOOD_EDITS, PLAN_YAML, SPEC_MD,
+    BAD_EDITS, DAEMON_PATH, DAEMON_STUB, DESIGN_MD, GOOD_EDITS, PLAN_YAML,
+    SPEC_MD,
     TEST_FILE, TEST_PATH,
     approve_all, approve_design, architect_reply, design_review_reply, drive, file_blocks,
     events, implementer_edit_reply, implementer_reply,
@@ -963,3 +964,65 @@ class TestPlannedOutputs:
         assert events(db, spec.id, EventKind.AGENT_RAN,
                       anomaly="missing_planned_outputs") == []
         assert runner.test_calls  # the build check did run
+
+
+# ── the design-review revision loop (DEV-647) ────────────────────────────────
+
+class TestDesignRevision:
+    """Run 26: the reviewer FAILed the design, the architect produced an
+    81-line revision, and the ledger's emptying guard refused it because the
+    first design had quoted a `def` signature and the revision had not. One
+    WARNING later the daemon said "architect done" and opened the gate over
+    the document the reviewer had just failed."""
+
+    # The shape that bit: the first design quotes a signature, the revision is
+    # prose. Both are perfectly good designs; only their declaration counts
+    # differ, which is an accident of authoring style. (The bare fixture
+    # design scores 0, so the guard could never fire on it — the quoted
+    # signature below is what makes this the run-26 sequence.)
+    WITH_CODE = DESIGN_MD + (
+        "\n## API\n\n```python\n"
+        "def is_placeholder_path(rel_path: str) -> bool: ...\n```\n")
+    PROSE_ONLY = ("# Architecture (revised)\n\n## Overview\n\n"
+                  + "The revision the reviewer asked for, in prose.\n" * 30
+                  + "\n## File Structure\n\n"
+                  + f"- {DAEMON_PATH}\n- {TEST_PATH}\n")
+
+    def test_the_revision_reaches_the_gate(self, db, model, runner):
+        spec = make_executing_spec(db)
+        model.script("architect",
+                     Reply(architect_reply(self.WITH_CODE)),
+                     Reply(architect_reply(self.PROSE_ONLY)))
+        model.script("design_review", Reply(design_review_reply("FAIL", "redo it")))
+
+        out = drive(db, spec.id, model, wait_at(GateType.DESIGN_APPROVAL), runner=runner)
+
+        assert out.waiting_on[0].gate_type == GateType.DESIGN_APPROVAL
+        # The document a human is about to approve is the REVISION, not the
+        # one the reviewer failed.
+        design = workspace_files(db, spec.id)["design.md"]
+        assert "revised" in design
+        assert design.startswith("# Architecture (revised)")
+        assert not events(db, spec.id, EventKind.AGENT_RAN,
+                          anomaly="design_write_refused")
+
+    def test_a_refused_design_write_stops_the_run_instead_of_gating(
+            self, db, model, runner, monkeypatch):
+        """The content guards no longer reach a DESIGN artifact, so this is
+        defence in depth: if some later guard does refuse a design, the run
+        must not proceed over the bytes still on disk."""
+        from coding_model_autonomous import workspace as ws
+        spec = make_executing_spec(db)
+        model.always("architect", Reply(architect_reply()))
+        model.script("design_review", Reply(design_review_reply("PASS")))
+        monkeypatch.setattr(ws, "is_placeholder_path", lambda p: p == "design.md")
+
+        out = drive(db, spec.id, model, wait_at(GateType.DESIGN_APPROVAL),
+                    runner=runner, max_ticks=40)
+
+        assert out.reason != "waiting" or not [
+            g for g in out.waiting_on if g.gate_type == GateType.DESIGN_APPROVAL]
+        refused = events(db, spec.id, EventKind.AGENT_RAN,
+                         anomaly="design_write_refused")
+        assert refused and refused[0]["action"] == "refused_placeholder"
+        assert db.get_spec(spec.id).status is not SpecStatus.DONE

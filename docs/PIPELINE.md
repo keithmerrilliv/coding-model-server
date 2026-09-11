@@ -206,14 +206,30 @@ Whatever mode produced them, every role's files reach the workspace through
 one door: `workspace.ArtifactLedger.write` (DEV-642). Each write records the
 role, kind, retry, sha256, size and the design digest it was written against —
 in the `artifacts` table and in `ledger.json` beside the code, which survives
-retry cleanup and is copied into every `retry_history` snapshot. Three guards
-run before the bytes land:
+retry cleanup and is copied into every `retry_history` snapshot. Four guards
+run before the bytes land. The first two judge the PATH and apply to every
+artifact kind:
 
 | Guard | Trigger | Outcome |
 |---|---|---|
 | collision | a role writes at a path whose current bytes another role produced (synthesis and its repair may replace implementer output) | `AUTONOMOUS_COLLISION_POLICY=rename` (default) lands the write at a sibling path — `tests/test_x.py` → `tests/test_reviewer_x.py`, `Foo.swift` → `reviewer_Foo.swift` — so both suites run; `refuse` drops it |
+| placeholder | the path is one of the prompt's own format examples — `path`, `...`, `another/file.py`, `relative/path/to/file.ext` | refused, every role and kind — run 25's synthesis landed four of them as artifacts (DEV-646) |
+
+The other two read the CONTENT, and they read it as code — both count
+declarations — so they run for `code` artifacts only (DEV-647):
+
+| Guard | Trigger | Outcome |
+|---|---|---|
 | emptying | the file on disk has declarations and the new content has none | refused, every role |
 | shrink | the repository version (recorded from the context stage's fetch, section 8) has ≥ `AUTONOMOUS_SHRINK_MIN_BASELINE_LINES` (40) lines and the new content has under `AUTONOMOUS_SHRINK_REFUSE_RATIO` (0.25) of its lines **and** declarations | refused, every role — the DEV-636 stub never reaches a test |
+
+A document's declaration count is an accident of how many signatures its
+author happened to quote, so judging one as code refuses at random: run 26's
+81-line design *revision* scored 0 against the 61-line original's 1 and was
+discarded, the design-review loop spent a dispatch and changed nothing, and
+the gate opened over the document the reviewer had just failed. A refused
+`design.md` write now stops the architect instead of being one WARNING
+followed by "architect done" (DEV-647).
 
 Every refusal and rename is one `AGENT_RAN` anomaly event (`artifact_ledger`)
 and a block on the next gate; the synthesis release gate also lists each
