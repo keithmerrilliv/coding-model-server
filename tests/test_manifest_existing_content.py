@@ -22,6 +22,7 @@ from unittest import mock
 import pytest
 
 import coding_model_server.orchestrator_daemon as d
+from coding_model_autonomous.context import SpecContext
 from coding_model_autonomous import executor
 from coding_model_autonomous.db import Database
 from coding_model_autonomous.executor import (
@@ -61,14 +62,12 @@ def test_manifest_paths_arm_the_existing_file_fetch(db, spec_task):
     spec, task = spec_task
     seen = {}
 
-    def fake_fetch(spec_arg, spec_md, extra_paths=()):
-        seen["extra_paths"] = list(extra_paths)
-        return []
+    def fake_ctx(db_arg, spec_arg, spec_md, *, role, extra_candidates=(),
+                 plan=None):
+        seen["extra_paths"] = list(extra_candidates)
+        return SpecContext.empty(spec_arg.id)
 
-    with mock.patch.object(d, "_fetch_existing_files_for_spec",
-                           side_effect=fake_fetch), \
-         mock.patch.object(d, "_fetch_protected_files_for_spec",
-                           return_value=[]), \
+    with mock.patch.object(d, "_spec_context", side_effect=fake_ctx), \
          mock.patch.object(d, "_generate_one_file", return_value="content"):
         d._build_from_manifest(
             db, spec, task, "SPEC", "DESIGN", ENTRIES, "implementer", [],

@@ -218,5 +218,6 @@ def test_manifest_path_fetches_protected_files_once():
     import inspect
     from coding_model_server import orchestrator_daemon as od
     src = inspect.getsource(od._build_from_manifest)
-    assert src.count("_fetch_protected_files_for_spec(") == 1
-    assert src.index("_fetch_protected_files_for_spec(") < src.index("for entry in entries:")
+    # DEV-632: one context selection for the whole manifest, before the loop.
+    assert src.count("_spec_context(") == 1
+    assert src.index("_spec_context(") < src.index("for entry in entries:")

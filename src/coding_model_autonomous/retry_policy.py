@@ -24,6 +24,7 @@ from . import supervisor as _supervisor
 from .db import Database
 from .executor import ALLOWED_IMPLEMENTER_AGENTS, TIER_TO_IMPLEMENTER
 from .models import EventKind
+from .context import CONTEXT_FILE
 from .workspace import LEDGER_FILE, attempt_files_from_ledger, read_entries
 
 logger = logging.getLogger("orchestrator.retry_policy")
@@ -39,6 +40,9 @@ _PRESERVE_ON_RETRY: frozenset[str] = frozenset({
     # DEV-642: the artifact ledger is the record of every attempt's writes
     # and of the repository baselines; the synthesis corpus is built from it.
     LEDGER_FILE,
+    # DEV-632: the context stage's fetch — what every role selected from;
+    # re-fetching it per retry is what the stage exists to stop.
+    CONTEXT_FILE,
 })
 
 # Run diagnostics that live beside the code in a workspace and must never be

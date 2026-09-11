@@ -67,6 +67,12 @@ class TestPathRowTier:
         assert d._change_surface_path_rows("") == []
 
 
+def _ctx_files(spec, spec_md, extra_paths=(), *, role="implementer"):
+    """DEV-632: the fetch is the context stage's; a role selects from it."""
+    return d._spec_context(None, spec, spec_md, role=role,
+                           extra_candidates=extra_paths).editable_files
+
+
 class TestFetchCandidates:
     def _spec(self):
         return SimpleNamespace(id="spec_test")
@@ -81,7 +87,7 @@ class TestFetchCandidates:
         monkeypatch.setattr(d, "_load_plan",
                             lambda spec: {"test_strategy": {"repo": "r"}})
         monkeypatch.setattr(d.test_runner, "fetch_repo_files", fake_fetch)
-        files = d._fetch_existing_files_for_spec(self._spec(), RUN19_TABLE)
+        files = _ctx_files(self._spec(), RUN19_TABLE)
         assert "src/coding_model_server/orchestrator_daemon.py" in requested
         assert len(files) == 3
 
@@ -95,7 +101,7 @@ class TestFetchCandidates:
         monkeypatch.setattr(d, "_load_plan",
                             lambda spec: {"test_strategy": {"repo": "r"}})
         monkeypatch.setattr(d.test_runner, "fetch_repo_files", fake_fetch)
-        d._fetch_existing_files_for_spec(
+        _ctx_files(
             self._spec(), RUN19_TABLE,
             extra_paths=["src/coding_model_autonomous/delivery.py", "new.py"])
         assert requested.count("src/coding_model_autonomous/delivery.py") == 1

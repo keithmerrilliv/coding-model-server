@@ -7,11 +7,13 @@ Covers the wiring around the pure apply_edits module:
   - the single-call generator applies edits (flag ON) and surfaces unappliable
     anchors as apply_errors, which route back to the implementer.
 """
+import contextlib
 from unittest import mock
 
 import pytest
 
 import coding_model_server.orchestrator_daemon as d
+from coding_model_autonomous.context import SpecContext
 from coding_model_autonomous import executor
 from coding_model_autonomous.db import Database
 from coding_model_autonomous.apply_edits import parse_edit_blocks
@@ -152,10 +154,12 @@ SMALL_DESIGN = "## Files\nsrc/App.swift"
 
 
 def _patch_context(existing):
-    """Patch the two runner-backed context fetches for a single-call run."""
+    """Patch the context stage (DEV-632) for a single-call run: the editable
+    section is *existing*, the protected section empty."""
     return (
-        mock.patch.object(d, "_fetch_existing_files_for_spec", return_value=existing),
-        mock.patch.object(d, "_fetch_protected_files_for_spec", return_value=[]),
+        mock.patch.object(d, "_spec_context",
+                          return_value=SpecContext.from_files("spec", existing)),
+        contextlib.nullcontext(),
     )
 
 

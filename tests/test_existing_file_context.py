@@ -137,25 +137,29 @@ MODIFY_SPEC = """
 """
 
 
-def test_greenfield_spec_asks_for_nothing(monkeypatch):
+def _ctx_files(spec, spec_md, extra_paths=(), *, role="implementer"):
+    """DEV-632: the fetch is the context stage's; a role selects from it."""
     from coding_model_server import orchestrator_daemon as od
+    return od._spec_context(None, spec, spec_md, role=role,
+                            extra_candidates=extra_paths).editable_files
+
+
+def test_greenfield_spec_asks_for_nothing(monkeypatch):
     monkeypatch.setattr(test_runner, "fetch_repo_files",
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("asked")))
-    assert od._fetch_existing_files_for_spec(
+    assert _ctx_files(
         _spec("test_strategy:\n  repo: proj\n"), "no table here") == []
 
 
 def test_local_framework_without_a_repo_asks_for_nothing(monkeypatch):
     """pytest/node specs have no runner-side checkout to read from."""
-    from coding_model_server import orchestrator_daemon as od
     monkeypatch.setattr(test_runner, "fetch_repo_files",
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("asked")))
-    assert od._fetch_existing_files_for_spec(
+    assert _ctx_files(
         _spec("test_strategy:\n  framework: pytest\n"), MODIFY_SPEC) == []
 
 
 def test_modify_spec_with_a_repo_fetches_at_base_ref(monkeypatch):
-    from coding_model_server import orchestrator_daemon as od
     seen = {}
 
     def fake(repo, paths, base_ref):
@@ -163,7 +167,7 @@ def test_modify_spec_with_a_repo_fetches_at_base_ref(monkeypatch):
         return [("ElectricSheep/ForcingStrategy.swift", "struct A {}")], []
 
     monkeypatch.setattr(test_runner, "fetch_repo_files", fake)
-    out = od._fetch_existing_files_for_spec(
+    out = _ctx_files(
         _spec("test_strategy:\n  repo: electric-sheep\n  base_ref: abc123\n"),
         MODIFY_SPEC,
     )
@@ -174,13 +178,12 @@ def test_modify_spec_with_a_repo_fetches_at_base_ref(monkeypatch):
 
 
 def test_a_read_failure_never_kills_the_spec(monkeypatch):
-    from coding_model_server import orchestrator_daemon as od
 
     def boom(*a, **k):
         raise RuntimeError("runner exploded")
 
     monkeypatch.setattr(test_runner, "fetch_repo_files", boom)
-    assert od._fetch_existing_files_for_spec(
+    assert _ctx_files(
         _spec("test_strategy:\n  repo: proj\n"), MODIFY_SPEC) == []
 
 

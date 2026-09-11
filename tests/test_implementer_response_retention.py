@@ -18,6 +18,7 @@ from unittest import mock
 import pytest
 
 import coding_model_server.orchestrator_daemon as d
+from coding_model_autonomous.context import SpecContext
 from coding_model_autonomous import executor
 from coding_model_autonomous.apply_edits import (
     EditBlock,
@@ -122,9 +123,8 @@ def _failed_result(raw=EDIT_WITH_LONG_ANCHOR):
 def test_generate_implementation_surfaces_structured_failures(db):
     spec, task, spec_dir = _spec_with_task(db)
     with mock.patch.object(executor, "DIFF_BASED_EDITS", True), \
-            mock.patch.object(d, "_fetch_existing_files_for_spec",
-                              return_value=[("src/app.py", CURRENT)]), \
-            mock.patch.object(d, "_fetch_protected_files_for_spec", return_value=[]), \
+            mock.patch.object(d, "_spec_context", return_value=SpecContext.from_files(
+                spec.id, [("src/app.py", CURRENT)])), \
             mock.patch.object(d, "call_agent", return_value=EDIT_WITH_LONG_ANCHOR):
         res = d._generate_implementation(db, spec, task, spec_dir, "S",
                                          "## Files\nsrc/app.py", "implementer",

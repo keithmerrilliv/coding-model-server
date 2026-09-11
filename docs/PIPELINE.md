@@ -213,7 +213,7 @@ run before the bytes land:
 |---|---|---|
 | collision | a role writes at a path whose current bytes another role produced (synthesis and its repair may replace implementer output) | `AUTONOMOUS_COLLISION_POLICY=rename` (default) lands the write at a sibling path — `tests/test_x.py` → `tests/test_reviewer_x.py`, `Foo.swift` → `reviewer_Foo.swift` — so both suites run; `refuse` drops it |
 | emptying | the file on disk has declarations and the new content has none | refused, every role |
-| shrink | the repository version (recorded whenever a role's existing-file fetch returned it) has ≥ `AUTONOMOUS_SHRINK_MIN_BASELINE_LINES` (40) lines and the new content has under `AUTONOMOUS_SHRINK_REFUSE_RATIO` (0.25) of its lines **and** declarations | refused, every role — the DEV-636 stub never reaches a test |
+| shrink | the repository version (recorded from the context stage's fetch, section 8) has ≥ `AUTONOMOUS_SHRINK_MIN_BASELINE_LINES` (40) lines and the new content has under `AUTONOMOUS_SHRINK_REFUSE_RATIO` (0.25) of its lines **and** declarations | refused, every role — the DEV-636 stub never reaches a test |
 
 Every refusal and rename is one `AGENT_RAN` anomaly event (`artifact_ledger`)
 and a block on the next gate; the synthesis release gate also lists each
@@ -351,6 +351,7 @@ table to read first when a run ends somewhere surprising.
 | Warning blocking | on | `AUTONOMOUS_BLOCK_ON_BUILD_WARNINGS` | The whole WARNING BLOCK intercept in diagram 5. `0` disables it. |
 | Targeted-retry repeats | 1 | `AUTONOMOUS_TARGETED_RETRY_MAX_REPEATS` | Identical targeted failures before the retry widens to a full regeneration. |
 | Manifest threshold | 8 | `AUTONOMOUS_MANIFEST_FILE_THRESHOLD` | Files (or declared units) a design enumerates before the implementer forks to manifest mode (diagram 4). |
+| Context refresh window | 600 s | `AUTONOMOUS_CONTEXT_REFRESH_SECONDS` | How old a context fetched at a *symbolic* `base_ref` may be before the next role re-verifies it against the runner (section 8). `0` re-verifies at every role boundary; a pinned commit is never re-verified. |
 | No-verdict cap | 5 | `AUTONOMOUS_NO_VERDICT_CAP` | Consecutive no-verdict failures on one attempt (section 6) before a task is parked behind an infrastructure gate. |
 | Collision policy | rename | `AUTONOMOUS_COLLISION_POLICY` | What the artifact ledger does with a cross-role write at a produced path (section 4): `rename` or `refuse`. |
 | Shrink refusal | 0.25 / 40 | `AUTONOMOUS_SHRINK_REFUSE_RATIO`, `AUTONOMOUS_SHRINK_MIN_BASELINE_LINES` | A write under this fraction of the repository file's lines and declarations is refused; baselines smaller than the line floor are never checked. |
@@ -381,8 +382,31 @@ Feedback is not symmetric, and the asymmetries are deliberate.
 | Gate **approval** notes | The *next* role | Design approval → implementer, plan approval → architect, as conditions on an approved artefact — not as a rejection, so it is not invited to redesign. |
 | Clarification answers | Planner, then implementer | Rendered at spec authority. |
 | Plan `acceptance_criteria` | Architect | Supersede the spec where they differ; a criterion struck from the plan was struck on purpose. |
-| Protected files | Architect and implementer, read-only | They are compiled in but must not be edited. Without them, agents redeclare types that already exist. |
+| Editable existing files | Architect, implementer (single-call, manifest and per-file), read-write | The declared modification set as it exists at `base_ref`: change-surface rows, the plan's implement outputs, the manifest's own paths. A candidate that reads is a modification whatever the spec called it. With diff-based edits on, these are the files that draw SEARCH/REPLACE blocks. |
+| Protected files | Architect, implementer, synthesis, read-only | They are compiled in but must not be edited. Without them, agents redeclare types that already exist. |
+| Prior artifacts | Reviewer (latest row per path), synthesis (every attempt, from the ledger) | Workspace state, not repository state. |
 | Compiler diagnostics | Implementer, or architect when recurring | See diagram 6. |
+
+**The context stage.** The first three rows come from one place
+(`context.assemble`, DEV-632). Every role used to run its own fetch against
+the Mac runner — the implementer's, the architect's, manifest mode's, and a
+protected-file read at five more sites — so a run cost at least seven read
+round-trips, each with its own outage handling, and a transient outage could
+strip one role's protected section while another's was intact (DEV-544).
+Now the runner is read once per spec, at plan acceptance (the DEV-492 probe
+is the first run), and the result is persisted as `context.json` beside the
+ledger, where it survives every retry wipe. Each role *selects* from it;
+the journal line `supplied N existing file(s) to the architect` is written
+at selection. The runner is asked again only when the candidate set grows
+(a manifest names a path the plan did not), the plan's `base_ref` or
+`protected_paths` change, or a symbolic ref (`main`, `HEAD`) is older than
+`AUTONOMOUS_CONTEXT_REFRESH_SECONDS` — a pinned commit is never re-read.
+A first fetch that finds the runner down parks the role at zero cost (the
+`runner_outage` row in section 6); a *refresh* that finds it down keeps the
+last good fetch and says so in the prompt's journal line. Every fetch is one
+`AGENT_RAN` record (`role: context`, `model_call: false`) listing what was
+read and what was omitted, so a design or attempt generated without a file
+is identifiable from the event stream, not only from a WARNING.
 
 ---
 

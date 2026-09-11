@@ -21,6 +21,7 @@ from unittest import mock
 import pytest
 
 import coding_model_server.orchestrator_daemon as d
+from coding_model_autonomous.context import SpecContext
 from coding_model_autonomous import design_testability, executor
 from coding_model_autonomous.db import Database
 from coding_model_autonomous.models import (
@@ -100,7 +101,7 @@ def _run_architect(db, spec, task, spec_dir, findings):
          mock.patch.object(design_testability, "check_design_completeness",
                            return_value=[]), \
          mock.patch.object(executor, "DESIGN_REVIEW_ENABLED", False), \
-         mock.patch.object(d, "_fetch_protected_files_for_spec", return_value=[]), \
+         mock.patch.object(d, "_spec_context", return_value=SpecContext.empty("spec")), \
          mock.patch.object(d, "_approved_gate_conditions", return_value=None):
         d._run_architect(db, spec, task, spec_dir)
 

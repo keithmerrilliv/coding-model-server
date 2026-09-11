@@ -99,6 +99,19 @@ count:
 | `AUTONOMOUS_MANIFEST_MAX_TOKENS` | `8000` | Token budget for the manifest pass. |
 | `AUTONOMOUS_PER_FILE_MAX_TOKENS` | `16000` | Token budget per file in per-file mode. |
 
+**Context stage** — the repository files a role is shown (`docs/PIPELINE.md`
+section 8). Fetched once per spec from the Mac runner's read path and reused by
+every role; the char knobs clamp what each *section* renders into a prompt,
+files past a ceiling are named as "not shown" rather than dropped:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AUTONOMOUS_CONTEXT_REFRESH_SECONDS` | `600` | Age at which a context fetched at a symbolic `base_ref` (`main`, `HEAD`) is re-verified against the runner before the next role uses it. `0` re-verifies at every role boundary. A pinned commit is never re-verified. |
+| `AUTONOMOUS_CONTEXT_FETCH_CHUNK` | `40` | Paths per runner read request; matches the runner's `CODING_MODEL_RUNNER_READ_MAX_PATHS`. Longer candidate lists are split, never truncated. |
+| `AUTONOMOUS_EXISTING_FILES_MAX_CHARS` | `60000` | Ceiling for the editable-existing section of the single-call implementer prompt. |
+| `AUTONOMOUS_PROTECTED_FILES_MAX_CHARS` | `60000` | Ceiling for the read-only protected section, every role. Separate from the knob above on purpose (DEV-627): raising one must not raise the other. |
+| `AUTONOMOUS_MANIFEST_WHOLE_FILE_MAX_CHARS` | `40000` | Per-file mode refuses to regenerate an existing file larger than this whole; it must be edited instead (DEV-604). |
+
 **Design review** (on by default — an extra review + revision loop between the
 architect and the implementer):
 
