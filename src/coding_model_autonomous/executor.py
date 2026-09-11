@@ -1476,7 +1476,8 @@ def file_memory_query(entry: "ManifestEntry") -> str:
     ]))[:_MEMORY_QUERY_MAX_CHARS]
 
 
-def _render_reference_files(reference_files: list[tuple[str, str]]) -> str:
+def _render_reference_files(reference_files: list[tuple[str, str]],
+                            *, omitted: list[str] | None = None) -> str:
     """Read-only view of files the spec puts off-limits (DEV-492 / DEV-427).
 
     Protected files are stripped from the dispatch payload, so neither role has
@@ -1500,18 +1501,23 @@ def _render_reference_files(reference_files: list[tuple[str, str]]) -> str:
         "new feature; reference the existing declaration instead, or extend "
         "it in a file you are allowed to write.\n\n",
     ]
+    # DEV-633: the allocator has usually trimmed this list already and hands
+    # back what it dropped, so those paths are still named as off-limits. The
+    # knob below is the section's preference and its ceiling — an allocated
+    # list is always within it, so this loop only bites for a caller that
+    # renders without budgeting.
+    dropped: list[str] = list(omitted or [])
     budget = PROTECTED_FILES_MAX_CHARS
-    omitted: list[str] = []
     for path, content in reference_files:
         if len(content) > budget:
-            omitted.append(path)
+            dropped.append(path)
             continue
         budget -= len(content)
         out.append(f"### {path} (read-only)\n\n````\n{content}\n````\n\n")
-    if omitted:
+    if dropped:
         out.append(
             "**Not shown** (over the context budget), but still off-limits and "
-            "still compiled in: " + ", ".join(omitted) + "\n\n"
+            "still compiled in: " + ", ".join(dropped) + "\n\n"
         )
     return "".join(out)
 
@@ -1545,6 +1551,8 @@ def build_architect_message(spec_md: str,
                             reference_files: list[tuple[str, str]] | None = None,
                             approval_conditions: str | None = None,
                             existing_files: list[tuple[str, str]] | None = None,
+                            omitted_existing: list[str] | None = None,
+                            omitted_reference: list[str] | None = None,
                             ) -> list[dict[str, str]]:
     user_parts: list[str] = []
     # On a re-run (design-review rejection or supervisor design-revision), the
@@ -1576,17 +1584,34 @@ def build_architect_message(spec_md: str,
     # files and invented APIs (run 16) or refused to design at all and asked
     # to "examine the module" (run 20). Editable-existing is distinct from
     # read-only-protected: the architect needs both, for different reasons.
-    if existing_files:
+    # DEV-633: this section was the one unbudgeted file render in the pipeline
+    # — a raw join of every editable file, straight into an 8000-token-budget
+    # architect. It now shares the aggregate allocation with the protected
+    # section and, like every other render, names what it could not show
+    # rather than leaving the model to assume it saw everything.
+    if existing_files or omitted_existing:
         blocks = "\n\n".join(
-            f"### {path}\n\n```\n{content}\n```" for path, content in existing_files)
+            f"### {path}\n\n```\n{content}\n```"
+            for path, content in (existing_files or []))
+        shown = ("every file you may modify is shown here in full"
+                 if not omitted_existing else
+                 "the files shown here are shown in full")
         user_parts.append(
             "## Current contents of files the plan will MODIFY\n\n"
             "Design against THIS code — its real names, signatures, and "
             "structure. Do not assume or invent an API, and do not ask to "
-            "examine anything: every file you may modify is shown here in "
-            "full.\n\n" + blocks + "\n\n---\n\n")
-    if reference_files:
-        user_parts.append(_render_reference_files(reference_files) + "---\n\n")
+            f"examine anything: {shown}.\n\n" + blocks + "\n\n")
+        if omitted_existing:
+            user_parts.append(
+                "**Not shown** (over the context budget), but the plan still "
+                "modifies them: " + ", ".join(omitted_existing) + ". Design "
+                "the change they need without restating their current "
+                "contents — you have not read them.\n\n")
+        user_parts.append("---\n\n")
+    if reference_files or omitted_reference:
+        user_parts.append(
+            _render_reference_files(reference_files or [],
+                                    omitted=omitted_reference) + "---\n\n")
     user_parts.append(
         "## Specification\n\n"
         f"{spec_md}\n\n---\n\n"
@@ -1712,6 +1737,16 @@ EXISTING_FILES_MAX_CHARS = int(
 PROTECTED_FILES_MAX_CHARS = int(
     os.getenv("AUTONOMOUS_PROTECTED_FILES_MAX_CHARS", "60000"))
 
+# The reviewer's implementation section and synthesis's attempt corpus — prior
+# artifacts rather than repository state, and the lowest-priority section in
+# the aggregate budget (DEV-633), because they are the one section the pipeline
+# can regenerate. Generous by default: the reviewer's window is 192K tokens and
+# reviewing a file it was not shown is worse than a long prompt. It is a
+# preference, not an independent ceiling — the allocator gives the section
+# less whenever the sum against the destination window demands it.
+PRIOR_ARTIFACTS_MAX_CHARS = int(
+    os.getenv("AUTONOMOUS_PRIOR_ARTIFACTS_MAX_CHARS", "300000"))
+
 
 def _render_file_modes(existing_paths: list[str],
                        new_paths: list[str]) -> str:
@@ -1739,7 +1774,8 @@ def _render_file_modes(existing_paths: list[str],
 
 
 def _render_existing_files(existing_files: list[tuple[str, str]],
-                           *, edit_mode: bool = False) -> str:
+                           *, edit_mode: bool = False,
+                           omitted: list[str] | None = None) -> str:
     """Current repo contents, framed as ground truth the model must preserve.
 
     Deliberately not wrapped in the <<<FILE:…>>> delimiters the implementer
@@ -1776,18 +1812,20 @@ def _render_existing_files(existing_files: list[tuple[str, str]],
         "## Current contents of files you must modify\n\n",
         body,
     ]
+    # See _render_reference_files: with DEV-633 the aggregate allocator does
+    # the trimming and passes the paths it dropped in ``omitted``.
+    dropped: list[str] = list(omitted or [])
     budget = EXISTING_FILES_MAX_CHARS
-    omitted: list[str] = []
     for path, content in existing_files:
         if len(content) > budget:
-            omitted.append(path)
+            dropped.append(path)
             continue
         budget -= len(content)
         out.append(f"### {path}\n\n````\n{content}\n````\n\n")
-    if omitted:
+    if dropped:
         out.append(
             "**Not shown** (over the context budget): "
-            + ", ".join(omitted)
+            + ", ".join(dropped)
             + ". You have NOT seen these files. Do not emit them — emitting a "
               "file you have not read would replace it with an invention.\n\n"
         )
@@ -1804,6 +1842,8 @@ def build_implementer_message(
     approval_conditions: str | None = None,
     edit_mode: bool = False,
     new_files: list[str] | None = None,
+    omitted_existing: list[str] | None = None,
+    omitted_reference: list[str] | None = None,
 ) -> list[dict[str, str]]:
     # DEV-581: edit-mode only changes anything when there ARE existing files to
     # edit. With no existing files the response is all new whole files, so the
@@ -1841,20 +1881,25 @@ def build_implementer_message(
     # After the design, so the model reads intent first and then the reality it
     # has to preserve — and close to the task instruction, where it is most
     # salient at the moment of writing (DEV-492).
-    if existing_files:
+    # DEV-633: a section the allocator emptied still renders — the whole point
+    # of the "Not shown" listing is that the model is TOLD what it did not see.
+    if existing_files or omitted_existing:
         user_parts.append("\n\n")
-        user_parts.append(_render_existing_files(existing_files, edit_mode=edit_mode))
+        user_parts.append(_render_existing_files(existing_files or [],
+                                                 edit_mode=edit_mode,
+                                                 omitted=omitted_existing))
         if edit_mode:
             # DEV-638: only in edit mode, so the flag-off prompt stays
             # byte-identical. ``new_files`` is the plan's implement outputs
             # minus the existing set; absent, only the EDIT ONLY rows render.
-            existing_paths = [p for p, _ in existing_files]
+            existing_paths = [p for p, _ in (existing_files or [])]
             user_parts.append(_render_file_modes(
                 existing_paths,
                 [p for p in (new_files or []) if p not in existing_paths]))
-    if reference_files:
+    if reference_files or omitted_reference:
         user_parts.append("\n\n")
-        user_parts.append(_render_reference_files(reference_files))
+        user_parts.append(_render_reference_files(reference_files or [],
+                                                  omitted=omitted_reference))
     if rejection_notes:
         if edit_mode:
             task_line = (
@@ -2238,6 +2283,7 @@ def build_per_file_message(
     approval_conditions: str | None = None,
     edit_mode: bool = False,
     edit_errors: str | None = None,
+    omitted_reference: list[str] | None = None,
 ) -> list[dict[str, str]]:
     # DEV-604: edit mode only means anything when the target already exists.
     # With no existing content the file is new, whole-file emission is correct,
@@ -2275,8 +2321,9 @@ def build_per_file_message(
     # architect had this context and correctly used the scaffold's `Field`, then
     # the per-file implementer, which did not, declared `struct Field` in
     # World.swift and reproduced run 5's `invalid redeclaration of 'Field'`.
-    if reference_files:
-        parts.append("\n" + _render_reference_files(reference_files))
+    if reference_files or omitted_reference:
+        parts.append("\n" + _render_reference_files(
+            reference_files or [], omitted=omitted_reference))
     # Manifest mode writes one file per call, so unlike the single-call path it
     # needs only the target's own current content — which is exactly the file at
     # risk of being reconstructed (DEV-492).
@@ -2698,10 +2745,23 @@ def build_reviewer_message(
     code_files: list[tuple[str, str]],
     test_framework: str = "pytest",
     rejection_notes: Optional[str] = None,
+    omitted_code: Optional[list[str]] = None,
 ) -> list[dict[str, str]]:
     file_sections = []
     for path, content in code_files:
         file_sections.append(f"### {path}\n```\n{content}\n```\n")
+    # DEV-633: the reviewer's section was the only one with no budget at all —
+    # the attempts it reviews grow with every retry, and nothing summed them
+    # against the reviewer window. What the allocator could not fit is named,
+    # because a review that silently never saw a file still returns a verdict
+    # on it.
+    if omitted_code:
+        file_sections.append(
+            "### Files NOT shown (over the context budget)\n\n"
+            + ", ".join(omitted_code)
+            + "\n\nYou have NOT read these. Do not judge them: say so in the "
+              "review rather than passing or failing them unseen.\n"
+        )
 
     # Hand the reviewer a deterministic, comment/string-aware `any`-type scan so
     # its no-`any` verdict can't false-FAIL on the word "any" in a comment or
@@ -2810,6 +2870,7 @@ def build_synthesis_message(
     review_notes: list[str] | None = None,
     reference_files: list[tuple[str, str]] | None = None,
     current_design_digest: str | None = None,
+    omitted_reference: list[str] | None = None,
 ) -> list[dict[str, str]]:
     """Build a single synthesis prompt that gives the model the full
     rotation history (code + per-attempt test outcome) and asks for a
@@ -2831,8 +2892,9 @@ def build_synthesis_message(
     # DEV-552: synthesis was the only generation that could not see the files
     # it is forbidden to edit, and it is reached only after every retry is
     # spent — the worst possible place to be missing that context.
-    if reference_files:
-        parts.append("\n\n" + _render_reference_files(reference_files))
+    if reference_files or omitted_reference:
+        parts.append("\n\n" + _render_reference_files(
+            reference_files or [], omitted=omitted_reference))
     if review_notes:
         parts.append("\n\n## Reviewer feedback on the attempts below\n\n")
         parts.append(
@@ -2897,6 +2959,7 @@ def build_synthesis_repair_message(
     build_diagnostic: str | None = None,
     warning_diagnostic: str | None = None,
     reference_files: list[tuple[str, str]] | None = None,
+    omitted_reference: list[str] | None = None,
 ) -> list[dict[str, str]]:
     """One targeted repair round on a synthesized artifact.
 
@@ -2939,8 +3002,9 @@ def build_synthesis_repair_message(
     # DEV-552: the repair is the LAST generation of the run. Run 10 died here
     # because it invented a file redeclaring a type the protected scaffold
     # already had — it had never been shown that scaffold.
-    if reference_files:
-        parts.append("\n\n" + _render_reference_files(reference_files))
+    if reference_files or omitted_reference:
+        parts.append("\n\n" + _render_reference_files(
+            reference_files or [], omitted=omitted_reference))
     parts.append(state)
     for relpath, content in files:
         parts.append(f"### {relpath}\n\n```\n{content}\n```\n\n")

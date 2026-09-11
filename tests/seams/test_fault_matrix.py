@@ -11,16 +11,19 @@ from __future__ import annotations
 
 import pytest
 
+import coding_model_server.orchestrator_daemon as d
 from coding_model_autonomous import (
     EventKind, GateType, SpecStatus, TaskStatus,
 )
+from coding_model_autonomous import executor
 
 from seam_fakes import (
     CollectionError, Down, Empty, Hang, Inconclusive, MissingChoices,
     PytestPass, Refuse, Reply, Truncated, UnclosedThink, Unreachable,
 )
 from seam_harness import (
-    BAD_EDITS, DAEMON_PATH, GOOD_EDITS, PLAN_YAML, SPEC_MD, TEST_FILE, TEST_PATH,
+    BAD_EDITS, DAEMON_PATH, DAEMON_STUB, GOOD_EDITS, PLAN_YAML, SPEC_MD,
+    TEST_FILE, TEST_PATH,
     approve_all, approve_design, architect_reply, design_review_reply, drive, file_blocks,
     events, implementer_edit_reply, implementer_reply,
     make_executing_spec, make_pending_plan_spec, planner_reply, rejected_gates,
@@ -763,3 +766,120 @@ class TestContextStage:
         prompt = model.calls_for("implementer")[0].messages[-1]["content"]
         assert "fixture stand-in for the daemon" in prompt
         assert "## File modes" in prompt  # edit mode stayed armed
+
+
+# ── the aggregate prompt budget (DEV-633) ────────────────────────────────────
+
+class TestPromptBudget:
+    """Run 20 raised AUTONOMOUS_EXISTING_FILES_MAX_CHARS for one big
+    modification target; run 21's prompt went past 1 MB into a 413 because
+    nothing summed the sections against the window they were headed for."""
+
+    def _oversized_repo(self, runner, chars: int):
+        runner.repo_files[DAEMON_PATH] = DAEMON_STUB + "\n# " + "x" * chars
+        return runner
+
+    def test_a_prompt_too_big_for_the_pick_escalates_before_it_sheds(
+            self, db, model, runner, monkeypatch):
+        """300K chars of editable file is ~100K tokens: over implementer's
+        64K window, inside deep_implementer's 256K. A bigger window is always
+        better than less context, so the dispatch moves and nothing is cut."""
+        monkeypatch.setattr(executor, "EXISTING_FILES_MAX_CHARS", 400_000)
+        self._oversized_repo(runner, 300_000)
+        spec = _impl_ready(db, model, runner)
+        model.script("implementer", Reply(implementer_reply()))
+        model.script("reviewer", Reply(reviewer_reply("PASS")))
+
+        out = drive(db, spec.id, model, approve_all, runner=runner)
+
+        assert out.status == SpecStatus.DONE
+        call = model.calls_for("implementer")[0]
+        assert call.model == "deep_implementer"
+        assert "Not shown" not in call.messages[-1]["content"]
+
+    def test_a_prompt_no_window_holds_sheds_and_names_what_it_dropped(
+            self, db, model, runner, monkeypatch):
+        """900K chars is ~300K tokens — past the largest window even alone.
+        The section is droppable, so the prompt is trimmed rather than
+        refused, and the implementer is TOLD it did not see the file."""
+        monkeypatch.setattr(executor, "EXISTING_FILES_MAX_CHARS", 1_000_000)
+        self._oversized_repo(runner, 900_000)
+        spec = _impl_ready(db, model, runner)
+        model.script("implementer", Reply(implementer_reply()))
+        model.script("reviewer", Reply(reviewer_reply("PASS")))
+
+        out = drive(db, spec.id, model, approve_all, runner=runner)
+
+        assert out.status == SpecStatus.DONE
+        prompt = model.calls_for("implementer")[0].messages[-1]["content"]
+        assert "Not shown" in prompt and DAEMON_PATH in prompt
+        assert "Do not emit them" in prompt
+        assert "x" * 900_000 not in prompt
+
+    def test_a_prompt_nothing_can_hold_parks_without_a_model_call(
+            self, db, model, runner):
+        """The fixed part alone — spec, design, instructions — overflows every
+        window, and none of it is droppable. DEV-624 dispatched anyway "for a
+        definitive answer"; that is a guaranteed 413 and, under DEV-629, five
+        no-verdict round-trips to learn what the sum already knew. Refuse
+        before the call: nothing spent, nothing judged, nobody charged."""
+        spec = make_executing_spec(db, spec_md=SPEC_MD + "\n\n" + "z" * 3_000_000)
+        approve_design(db, spec)
+        model.script("implementer", Reply(implementer_reply()))
+
+        out = drive(db, spec.id, model, approve_all, runner=runner)
+
+        assert out.status is not SpecStatus.FAILED
+        assert model.calls_for("implementer") == []
+        assert out.task("implementer").retry_count == 0
+        classified = events(db, spec.id, EventKind.FAILURE_CLASSIFIED)
+        assert classified
+        assert classified[0]["cls"] == "prompt_too_large"
+        assert classified[0]["outcome"] == "no_verdict"
+
+    def test_the_synthesis_corpus_sheds_by_the_sum_not_by_a_413(
+            self, db, model, runner, monkeypatch):
+        """DEV-572: the merge prompt grows linearly with the attempt count and
+        the server refused an oversized body with a 413 — after six failed
+        attempts, the worst possible place to lose the run. The budget sheds
+        the corpus before the call; the 413 loop stays only as a backstop."""
+        from seam_fakes import PytestFail, PytestPass
+        # Each attempt carries ~200K chars of file, so six of them are ~1.2M —
+        # well past deep_reviewer's 256K-token window.
+        fat = {DAEMON_PATH: DAEMON_STUB + "\n# " + "y" * 200_000}
+        spec = _impl_ready(db, model, runner)
+        model.always("implementer", Reply(implementer_reply(fat)))
+        model.always("reviewer", Reply(reviewer_reply("FAIL", review="still red")))
+        model.script("synthesis", Reply(implementer_reply()))
+        runner.default_test = PytestFail()
+        runner.tests.extend([PytestFail()] * 18 + [PytestPass()])
+
+        out = drive(db, spec.id, model, approve_all, runner=runner, max_ticks=120)
+
+        synth = model.calls_for("synthesis")
+        assert len(synth) == 1, out.reason      # one call, not a shed loop
+        call = synth[0]
+        est = len(call.messages[-1]["content"]) // 3
+        assert est + call.max_tokens <= d._agent_ctx_limit(call.model)
+        # Shed, not emptied: the merge still has something to merge.
+        assert "y" * 200_000 in call.messages[-1]["content"]
+
+    def test_one_knob_cannot_raise_another_section(self, db, model, runner, monkeypatch):
+        """DEV-627's regression as a whole-run assertion: the operator raises
+        the editable knob for a big modification target, and the protected
+        section does NOT inherit the room — the window is the ceiling both
+        sections share."""
+        monkeypatch.setattr(executor, "EXISTING_FILES_MAX_CHARS", 1_000_000)
+        monkeypatch.setattr(executor, "PROTECTED_FILES_MAX_CHARS", 1_000_000)
+        runner.repo_files["Scaffold/Field.swift"] = "// " + "p" * 400_000
+        self._oversized_repo(runner, 400_000)
+        spec = _impl_ready(db, model, runner)
+        model.script("implementer", Reply(implementer_reply()))
+        model.script("reviewer", Reply(reviewer_reply("PASS")))
+
+        out = drive(db, spec.id, model, approve_all, runner=runner)
+
+        assert out.status == SpecStatus.DONE
+        call = model.calls_for("implementer")[0]
+        est = len(call.messages[-1]["content"]) // 3
+        assert est + call.max_tokens <= d._agent_ctx_limit(call.model)

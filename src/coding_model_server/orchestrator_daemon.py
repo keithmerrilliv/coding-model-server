@@ -1588,11 +1588,35 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
         _requeue_implement_for_runner_outage(
             db, spec, task, str(e), phase="design_existing_fetch")
         return
-    messages = build_architect_message(
-        spec_md, rejection_notes=rejection_notes, plan_yaml=plan_yaml,
-        existing_files=view.existing_files,
-        reference_files=view.reference_files,
-        approval_conditions=plan_conditions)
+    def _architect_prompt(existing, reference, omitted_e=None, omitted_r=None):
+        return build_architect_message(
+            spec_md, rejection_notes=rejection_notes, plan_yaml=plan_yaml,
+            existing_files=existing, reference_files=reference,
+            approval_conditions=plan_conditions,
+            omitted_existing=omitted_e, omitted_reference=omitted_r)
+
+    # DEV-633: the architect's editable render was the pipeline's one entirely
+    # unbudgeted file section — a raw join of every modified file into a model
+    # whose whole reply fits in 8000 tokens (DEV-543 watched it spend that
+    # budget and return empty). No candidates: which architect runs is an eval
+    # decision (DEV-99), not a window decision, so an oversized prompt is
+    # trimmed here rather than quietly rerouted to a different model.
+    alloc = _prompt_budget(
+        spec.id, "architect",
+        fixed_chars=_message_chars(_architect_prompt([], [])),
+        completion_tokens=executor.ARCHITECT_MAX_TOKENS,
+        agent=executor.role_to_agent("architect"),
+        sections=[
+            _context.Section(_context.SECTION_EDITABLE, view.existing_files,
+                             executor.EXISTING_FILES_MAX_CHARS),
+            _context.Section(_context.SECTION_PROTECTED, view.reference_files,
+                             executor.PROTECTED_FILES_MAX_CHARS),
+        ])
+    messages = _architect_prompt(
+        alloc.files(_context.SECTION_EDITABLE),
+        alloc.files(_context.SECTION_PROTECTED),
+        omitted_e=alloc.dropped(_context.SECTION_EDITABLE),
+        omitted_r=alloc.dropped(_context.SECTION_PROTECTED))
 
     # Architect output is structured (<<<DESIGN>>> / <<<COMPLEXITY>>> blocks).
     # The model occasionally drifts and returns prose without the markers; one
@@ -2026,44 +2050,85 @@ def _agent_ctx_limit(agent: "str | None") -> "int | None":
         return None
 
 
-# Conservative for code-heavy prompts: real tokenizers average ~3.3-3.8
-# chars/token on this repo's source, so dividing by 3 overestimates the
-# prompt — the safe direction for a fit check.
-_PROMPT_CHARS_PER_TOKEN = 3
+_REASONING_BUDGET_ARG = "--reasoning-budget"
+
+
+def _agent_reasoning_reserve(agent: "str | None") -> int:
+    """Tokens *agent*'s server spends reasoning BEFORE the completion.
+
+    DEV-616 caps Qwen3.8's reasoning with ``--reasoning-budget``; those
+    tokens live in the same window as the prompt and the completion, so the
+    allocator reserves them alongside max_tokens. An agent without the flag
+    reserves nothing — the same sum as before this existed.
+    """
+    if not agent:
+        return 0
+    try:
+        from coding_model_server.config import Config
+        name = Config.AGENT_ALIASES.get(agent, agent)
+        args = list(Config.AGENTS[name]["model_config"].get("server_extra_args") or [])
+        return int(args[args.index(_REASONING_BUDGET_ARG) + 1])
+    except Exception:
+        return 0
+
+
+def _prompt_budget(spec_id: str, role: str, *, fixed_chars: int,
+                   completion_tokens: int, agent: "str | None",
+                   sections: "list[_context.Section] | tuple" = (),
+                   candidates: "list[str] | tuple" = (),
+                   ) -> "_context.Allocation":
+    """The one sum (DEV-633): every section against the destination window.
+
+    ``fixed_chars`` is what the prompt costs with the file sections empty —
+    the caller measures it by building the message that way, so the figure
+    is exact rather than another estimate.
+    """
+    # No pick means call_agent will resolve the role's default, so budget
+    # against THAT window — an unresolved agent has no window and would skip
+    # the sum entirely.
+    agent = agent or executor.role_to_agent(role)
+    return _context.plan_dispatch(
+        spec_id, role=role, sections=sections, fixed_chars=fixed_chars,
+        completion_tokens=completion_tokens, agent=agent,
+        candidates=candidates, window_of=_agent_ctx_limit,
+        reserve_of=_agent_reasoning_reserve)
+
+
+def _message_chars(messages: list) -> int:
+    return sum(len(m.get("content") or "") for m in messages
+               if isinstance(m, dict))
+
+
+def _attempt_chars(attempt: dict) -> str:
+    """A synthesis attempt's cost in the prompt, as a string the allocator can
+    measure. Only the length is ever read — the content is rebuilt by
+    ``build_synthesis_message`` from the attempt dict itself."""
+    n = len(attempt.get("test_summary") or "")
+    n += sum(len(c) + len(path) for path, c
+             in (attempt.get("files") or {}).items())
+    return " " * n
 
 
 def _ctx_capable_agent(spec_id: str, agent: "str | None", messages: list,
                        completion_tokens: int) -> "str | None":
-    """Never dispatch a prompt to an agent whose window cannot hold it (DEV-624).
+    """DEV-624's fit check, now the allocator's (DEV-633).
 
-    The architect's complexity recommendation and the retry rotation are both
-    context-blind: run 19 rotated a 152K-token prompt onto moe_implementer's
-    116K window, and run 21 v2's architect recommended fast_implementer (64K)
-    for a 75K-token prompt — each a guaranteed-wasted dispatch that the
-    admission layer refuses with a 413. Estimate the fit up front and escalate
-    to the first rotation agent that can hold prompt + completion; when none
-    can, dispatch to the largest and let the server answer definitively.
+    For the dispatch sites whose prompt has no droppable file section — the
+    manifest and per-file calls, the synthesis repair — the whole prompt is
+    fixed, so the only lever is which window it goes to. The architect's
+    complexity recommendation and the retry rotation are both context-blind:
+    run 19 rotated a 152K-token prompt onto moe_implementer's 116K window,
+    and run 21 v2's architect recommended fast_implementer (64K) for a 75K
+    prompt. Escalate to the first rotation agent that holds prompt +
+    completion + reasoning; when none does, :class:`PromptTooLarge` reaches
+    the caller and parks the task, instead of the old "dispatch to the
+    largest and let the server answer with a 413" — five wasted round-trips
+    to learn what the sum already said.
     """
-    est_prompt = sum(len(m.get("content") or "") for m in messages
-                     if isinstance(m, dict)) // _PROMPT_CHARS_PER_TOKEN
-    needed = est_prompt + completion_tokens
-    limit = _agent_ctx_limit(agent)
-    if limit is None or needed <= limit:
-        return agent
-    for cand in _IMPLEMENTER_ROTATION:
-        cand_limit = _agent_ctx_limit(cand)
-        if cand_limit is not None and needed <= cand_limit:
-            logger.warning(
-                "spec %s: prompt needs ~%d tokens but %r holds %d — "
-                "escalating dispatch to %r (%d ctx) (DEV-624)",
-                spec_id, needed, agent, limit, cand, cand_limit)
-            return cand
-    biggest = max(_IMPLEMENTER_ROTATION, key=lambda a: _agent_ctx_limit(a) or 0)
-    logger.warning(
-        "spec %s: prompt needs ~%d tokens and no implementer window holds it "
-        "(largest is %r) — dispatching there for a definitive answer (DEV-624)",
-        spec_id, needed, biggest)
-    return biggest
+    return _prompt_budget(spec_id, "implementer",
+                          fixed_chars=_message_chars(messages),
+                          completion_tokens=completion_tokens, agent=agent,
+                          candidates=_IMPLEMENTER_ROTATION).agent
 
 
 def _generate_implementation(
@@ -2105,11 +2170,46 @@ def _generate_implementation(
     planned = _planned_implement_outputs(spec)
     view = _spec_context(db, spec, spec_md, role="implementer").select(
         "implementer", planned=planned)
-    existing_files = view.existing_files
+    # DEV-638: the plan's implement outputs that are NOT existing files are the
+    # new ones — the prompt names each path's mandatory form so a NEW path
+    # never draws SEARCH/REPLACE blocks (five of run 21's eleven rotations).
+    new_files = view.new_files
+    impl_max_tokens = executor.implementer_max_tokens_for(design_md)
+
+    def _implementer_prompt(existing, reference, omitted_e=None, omitted_r=None):
+        return build_implementer_message(
+            spec_md, design_md, rejection_notes=rejection_notes,
+            clarifications=clarifications, existing_files=existing,
+            reference_files=reference,
+            approval_conditions=approval_conditions,
+            edit_mode=executor.DIFF_BASED_EDITS and bool(existing),
+            new_files=new_files,
+            omitted_existing=omitted_e, omitted_reference=omitted_r)
+
+    # DEV-633: budget the two file sections against the window that will
+    # actually receive them, BEFORE rendering. fixed_chars is what this exact
+    # prompt costs with both sections empty — measured, not estimated a second
+    # time. (The per-path file-mode lines edit mode adds scale with the path
+    # count, not with content; they are inside the allocator's headroom.)
+    alloc = _prompt_budget(
+        spec.id, "implementer",
+        fixed_chars=_message_chars(_implementer_prompt([], [])),
+        completion_tokens=impl_max_tokens, agent=chosen_agent,
+        sections=[
+            _context.Section(_context.SECTION_EDITABLE, view.existing_files,
+                             executor.EXISTING_FILES_MAX_CHARS),
+            _context.Section(_context.SECTION_PROTECTED, view.reference_files,
+                             executor.PROTECTED_FILES_MAX_CHARS),
+        ],
+        candidates=_IMPLEMENTER_ROTATION)
+    chosen_agent = alloc.agent
+    existing_files = alloc.files(_context.SECTION_EDITABLE)
     # DEV-581: emit anchored SEARCH/REPLACE edits for existing files instead of
     # re-emitting them whole — but only when the flag is on AND there is at least
     # one existing file to edit. With the flag off this is byte-identical to the
     # legacy whole-file path (build_implementer_message + parse_implementer_response).
+    # The list is the ALLOCATED one: an edit block can only be anchored against
+    # content the prompt actually carried.
     edit_mode = executor.DIFF_BASED_EDITS and bool(existing_files)
     if executor.DIFF_BASED_EDITS and not existing_files and (
             _declared_file_modifications(spec_md)
@@ -2120,20 +2220,10 @@ def _generate_implementation(
             "spec %s: diff-based edits configured and the spec names existing "
             "files, but none were supplied — edit mode DISARMED, implementer "
             "will re-emit whole files", spec.id)
-    # DEV-638: the plan's implement outputs that are NOT existing files are the
-    # new ones — the prompt names each path's mandatory form so a NEW path
-    # never draws SEARCH/REPLACE blocks (five of run 21's eleven rotations).
-    new_files = view.new_files
-    messages = build_implementer_message(
-        spec_md, design_md, rejection_notes=rejection_notes,
-        clarifications=clarifications, existing_files=existing_files,
-        reference_files=view.reference_files,
-        approval_conditions=approval_conditions,
-        edit_mode=edit_mode, new_files=new_files,
-    )
-    impl_max_tokens = executor.implementer_max_tokens_for(design_md)
-    chosen_agent = _ctx_capable_agent(spec.id, chosen_agent, messages,
-                                      impl_max_tokens)
+    messages = _implementer_prompt(
+        existing_files, alloc.files(_context.SECTION_PROTECTED),
+        omitted_e=alloc.dropped(_context.SECTION_EDITABLE),
+        omitted_r=alloc.dropped(_context.SECTION_PROTECTED))
     logger.info("spec %s: single-call implementer budget=%d tokens (~%d files)%s",
                 spec.id, impl_max_tokens, n_files,
                 " [diff-based edits]" if edit_mode else "")
@@ -2742,9 +2832,16 @@ def _generate_via_manifest(
 
     # ── Full generation: manifest call + per-file ─────────────────────────────
     meta: dict = {}
+    manifest_messages = build_manifest_message(
+        spec_md, design_md, clarifications,
+        approval_conditions=approval_conditions)
+    # Nothing in a manifest prompt is droppable — spec, design and the
+    # operator's clarifications are the whole ask — so the budget here is only
+    # a fit check (DEV-633).
+    chosen_agent = _ctx_capable_agent(spec.id, chosen_agent, manifest_messages,
+                                      executor.MANIFEST_MAX_TOKENS)
     manifest_raw = call_agent(
-        "implementer", build_manifest_message(spec_md, design_md, clarifications,
-                                             approval_conditions=approval_conditions),
+        "implementer", manifest_messages,
         agent=chosen_agent, max_tokens=executor.MANIFEST_MAX_TOKENS, meta=meta,
     )
     _note_truncation(db, spec, task, "manifest", meta, executor.MANIFEST_MAX_TOKENS)
@@ -3013,17 +3110,38 @@ def _generate_one_file(
                 return c
         return None
 
+    def _per_file_prompt(reference, omitted=None, edit_errors=None):
+        return build_per_file_message(
+            spec_md, design_md, manifest_entries, entry,
+            written_summary, clarifications, rejection_notes,
+            existing_content=existing_content,
+            reference_files=reference,
+            approval_conditions=approval_conditions,
+            edit_mode=edit_mode, edit_errors=edit_errors,
+            omitted_reference=omitted)
+
+    # DEV-633: the protected section is the only droppable part of a per-file
+    # prompt — the target's own content and the manifest are what the call is
+    # FOR. Budgeted against the same window the call will go to, and escalated
+    # through the rotation before anything is dropped.
+    file_alloc = _prompt_budget(
+        spec.id, "implementer",
+        fixed_chars=_message_chars(_per_file_prompt([])),
+        completion_tokens=executor.PER_FILE_MAX_TOKENS, agent=chosen_agent,
+        sections=[_context.Section(_context.SECTION_PROTECTED,
+                                   list(reference_files or []),
+                                   executor.PROTECTED_FILES_MAX_CHARS)],
+        candidates=_IMPLEMENTER_ROTATION)
+    chosen_agent = file_alloc.agent
+    reference_files = file_alloc.files(_context.SECTION_PROTECTED)
+    omitted_reference = file_alloc.dropped(_context.SECTION_PROTECTED)
+
     edit_errors = None
     for attempt in range(executor.PER_FILE_PARSE_RETRIES + 1):
         meta: dict = {}
         raw = call_agent(
             "implementer",
-            build_per_file_message(spec_md, design_md, manifest_entries, entry,
-                                   written_summary, clarifications, rejection_notes,
-                                   existing_content=existing_content,
-                                   reference_files=reference_files,
-                                   approval_conditions=approval_conditions,
-                                   edit_mode=edit_mode, edit_errors=edit_errors),
+            _per_file_prompt(reference_files, omitted_reference, edit_errors),
             agent=chosen_agent, max_tokens=executor.PER_FILE_MAX_TOKENS, meta=meta,
             memory_query=executor.file_memory_query(entry),
         )
@@ -4761,9 +4879,25 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
     rejection_notes = _latest_supervisor_feedback(db, spec.id, target_role="reviewer") \
         if task.retry_count > 0 else None
 
-    messages = build_reviewer_message(spec_md, design_md, code_files,
-                                       test_framework=framework,
-                                       rejection_notes=rejection_notes)
+    def _reviewer_prompt(files, omitted=None):
+        return build_reviewer_message(spec_md, design_md, files,
+                                      test_framework=framework,
+                                      rejection_notes=rejection_notes,
+                                      omitted_code=omitted)
+
+    # DEV-633: the reviewer's implementation section had no budget of any kind,
+    # and it is the section that GROWS — artifacts accumulate across retries.
+    # No candidates: deep_reviewer is a different model with its own eval
+    # history, so an oversized review prompt sheds the lowest-priority files
+    # rather than silently changing which reviewer judged the code.
+    alloc = _prompt_budget(
+        spec.id, "reviewer",
+        fixed_chars=_message_chars(_reviewer_prompt([])),
+        completion_tokens=executor.REVIEWER_MAX_TOKENS,
+        agent=executor.role_to_agent("reviewer"),
+        sections=[_context.Section("code", code_files,
+                                   executor.PRIOR_ARTIFACTS_MAX_CHARS)])
+    messages = _reviewer_prompt(alloc.files("code"), alloc.dropped("code"))
     meta: dict = {}
     raw = call_agent("reviewer", messages, meta=meta)
     _note_truncation(db, spec, task, "reviewer", meta, executor.REVIEWER_MAX_TOKENS)
@@ -5473,21 +5607,71 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
     # A size rejection is a retry-with-less condition: shed attempts (stale-
     # design ones first per DEV-553, then oldest) until the call fits or a
     # single attempt is also refused.
-    kept = list(attempts)
+    def _synthesis_prompt(corpus, reference, omitted=None):
+        return build_synthesis_message(
+            spec_md, design_md, corpus,
+            review_notes=review_notes,
+            reference_files=reference,
+            current_design_digest=current_design_digest,
+            omitted_reference=omitted)
+
+    # DEV-633: shed by the sum rather than by discovering a 413. The corpus is
+    # the lowest-priority section — an attempt is recoverable from the ledger,
+    # the protected scaffold is not (DEV-552: synthesis is the LAST generation
+    # of the run, and run 10 died here inventing a file that redeclared a type
+    # it had never been shown). Within the corpus the shed order is DEV-553's:
+    # superseded designs first, then oldest, so what survives is the newest
+    # work against the current design.
+    indexed = list(enumerate(attempts))
+
+    def _shed_last(pair) -> tuple:
+        i, att = pair
+        stale = bool(current_design_digest and att.get("design_digest")
+                     and att["design_digest"] != current_design_digest)
+        return (stale, -i)
+
+    # The section is allocated in KEEP order (newest against the current
+    # design first) and rebuilt in prompt order below, so what the allocator
+    # sheds is what DEV-553 would have shed.
+    corpus = [(str(i), _attempt_chars(att))
+              for i, att in sorted(indexed, key=_shed_last)]
+    synth_alloc = _prompt_budget(
+        spec.id, "synthesizer",
+        fixed_chars=_message_chars(_synthesis_prompt([], [])),
+        completion_tokens=synth_max_tokens, agent=_SYNTHESIS_AGENT,
+        sections=[
+            _context.Section(_context.SECTION_PROTECTED, list(protected_files or []),
+                             executor.PROTECTED_FILES_MAX_CHARS),
+            _context.Section("attempts", corpus,
+                             executor.PRIOR_ARTIFACTS_MAX_CHARS),
+        ])
+    keep_idx = {int(k) for k, _ in synth_alloc.files("attempts")}
+    kept = [att for i, att in indexed if i in keep_idx]
+    if len(kept) < len(attempts):
+        logger.warning(
+            "spec %s: the synthesis corpus does not fit %r — merging %d of %d "
+            "attempt(s), superseded designs shed first (DEV-633/DEV-553)",
+            spec.id, synth_alloc.agent, len(kept), len(attempts))
+    if not kept:
+        # Every attempt shed: the merge has nothing to merge. Keep the newest
+        # one so synthesis is still a repair pass rather than a blind rewrite.
+        kept = attempts[-1:]
+    protected_files = synth_alloc.files(_context.SECTION_PROTECTED)
+    omitted_protected = synth_alloc.dropped(_context.SECTION_PROTECTED)
+
     meta = {}
     raw = None
     while True:
-        messages = build_synthesis_message(
-            spec_md, design_md, kept,
-            review_notes=review_notes,
-            reference_files=protected_files,
-            current_design_digest=current_design_digest)
+        messages = _synthesis_prompt(kept, protected_files, omitted_protected)
         meta = {}
         try:
             raw = call_agent("implementer", messages, agent=_SYNTHESIS_AGENT,
                              max_tokens=synth_max_tokens, meta=meta)
             break
         except Exception as exc:
+            # Backstop: the allocator's chars/token estimate is a guess and
+            # the admission layer is the authority. A 413 that survives the
+            # budget still sheds rather than failing the merge (DEV-572).
             if "413" in str(exc) and len(kept) > 1:
                 stale = [a for a in kept
                          if a.get("design_digest")
