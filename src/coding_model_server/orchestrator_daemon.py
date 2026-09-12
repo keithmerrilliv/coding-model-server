@@ -1585,8 +1585,7 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
     try:
         view = _spec_context(db, spec, spec_md, role="architect").select("architect")
     except RunnerOutage as e:
-        _requeue_implement_for_runner_outage(
-            db, spec, task, str(e), phase="design_existing_fetch")
+        _requeue_implement_for_runner_outage(db, spec, task, str(e))
         return
     def _architect_prompt(existing, reference, omitted_e=None, omitted_r=None):
         return build_architect_message(
@@ -3229,85 +3228,60 @@ def _generate_one_file(
 # this is not free: three covers a sleeping Mac or a link re-enumeration
 # (DEV-518, which clears in seconds to minutes) without regenerating all night
 # against a Mac that is simply switched off.
-_MAX_UNREACHABLE_REQUEUES = 3
-
-
 def _requeue_for_unreachable_runner(db: Database, spec: Spec, task) -> bool:
     """Put the task back in the queue after a transport-only build check.
 
-    Returns True when the caller should return without opening a gate.
+    Returns True when the caller should return without opening a gate — which
+    is always: past the cap ``dispose`` parks behind an infrastructure gate
+    itself, which is the gate this path wanted anyway.
 
-    Mirrors what the daemon already does when the *model* server is
-    unreachable (`_TRANSPORT_ERRORS` in _run_task): reset to PENDING, leave the
-    spec EXECUTING, let the next tick re-run it — and deliberately do not touch
-    retry_count, because a sleeping Mac is not an implementer's mistake.
-
-    Bounded, because a requeue re-runs the implementer and that is a whole
-    generation. Past the cap we do open a gate, but one that says the runner is
-    unreachable rather than one that asks someone to review code nobody has
-    compiled.
+    DEV-652: this used to count its own requeues by re-scanning TEST_RAN
+    events and cap them against a local _MAX_UNREACHABLE_REQUEUES = 3. That
+    is precisely dispose's no-verdict branch — consecutive_no_verdicts and
+    Failure.cap — written a second time, and _CAPS already carries
+    (RUNNER_OUTAGE, "build_check") = 3 for it. A requeue re-runs the
+    implementer and that is a whole generation, so the bound stays; it is
+    now the same bound everything else uses, and the requeue finally appears
+    in the failure_classified stream instead of only in TEST_RAN.
     """
-    prior = sum(
-        1 for e in db.list_events_by_kind(
-            spec_id=spec.id, kind=EventKind.TEST_RAN, limit=20)
-        if (e.payload or {}).get("phase") == "pre_gate_build_check"
-        and (e.payload or {}).get("runner_unreachable")
-    )
-    if prior >= _MAX_UNREACHABLE_REQUEUES:
-        logger.error(
-            "spec %s: runner still unreachable after %d requeue(s) — "
-            "escalating to a human; this is an infrastructure fault, not a "
-            "code review", spec.id, prior)
-        return False
-
-    db.record_event(EventKind.TEST_RAN, spec_id=spec.id, task_id=task.id,
-                    payload={"phase": "pre_gate_build_check",
-                             "passed": False,
-                             "runner_unreachable": True,
-                             "requeue": prior + 1,
-                             "retry": task.retry_count})
-    db.update_task_status(task.id, TaskStatus.PENDING)
-    logger.warning(
-        "spec %s: mac-runner unreachable — requeued for retry %d/%d without "
-        "burning an implementer attempt (still at %d/%d); the next tick will "
-        "try again",
-        spec.id, prior + 1, _MAX_UNREACHABLE_REQUEUES,
-        task.retry_count, MAX_RETRIES)
+    _dispose(db, spec, task, _outcome.Failure(
+        _outcome.FailureClass.RUNNER_OUTAGE, task.role, "runner",
+        "mac-runner unreachable during the pre-gate build check",
+        phase="build_check"))
     return True
 
 
 def _requeue_implement_for_runner_outage(
     db: Database, spec: Spec, task, detail: str,
-    phase: str = "implement_existing_fetch",
+    phase: str = "existing_fetch",
 ) -> None:
-    """Park an implement task whose existing-file fetch hit a dead runner
-    (DEV-620), mirroring the DEV-538 build-check requeue — but PATIENT: a
-    build-check requeue caps at _MAX_UNREACHABLE_REQUEUES because it ages an
-    already-generated attempt, while here nothing has been spent and this
-    outage class lasts hours (a powered-off Mac), so there is no cap. The
-    stale-phase watchdog keeps a parked spec visible; the event stream gets
-    the first park and every 20th thereafter to stay legible without spam.
+    """Park a task whose existing-file fetch hit a dead runner (DEV-620).
+
+    PATIENT by design: _CAPS gives (RUNNER_OUTAGE, "existing_fetch") no cap,
+    because nothing has been spent here and this outage class lasts hours (a
+    powered-off Mac). The build-check sibling above is capped because it ages
+    an already-generated attempt. The stale-phase watchdog keeps a parked
+    spec visible.
+
+    DEV-652: collapsed onto dispose. The role on the Failure is what
+    distinguishes a design-time fetch from an implement-time one — the two
+    callers pass their own task — so the descriptive phase strings this used
+    to invent ("design_existing_fetch", "implement_existing_fetch") are gone;
+    they missed the _CAPS key and would have been charged the default cap of
+    five, turning an uncapped park into a premature gate.
+
+    Note the anti-spam this replaces never worked: it counted only the events
+    it had itself written, so ``prior`` went 0 -> 1 and stuck, and the
+    "first park and every 20th thereafter" its docstring promised wrote
+    exactly one event ever. Every requeue is now recorded. That is the
+    behaviour the ticket's acceptance asks for -- every advanced attempt has
+    a classified event -- but it does mean a multi-hour outage writes one row
+    per re-probe where it used to write one in total; if that volume bites,
+    throttle it in one place in dispose rather than here.
     """
-    prior = sum(
-        1 for e in db.list_events_by_kind(
-            spec_id=spec.id, kind=EventKind.TEST_RAN, limit=200)
-        if (e.payload or {}).get("phase") == phase
-        and (e.payload or {}).get("runner_unreachable")
-    )
-    if prior == 0 or (prior + 1) % 20 == 0:
-        db.record_event(EventKind.TEST_RAN, spec_id=spec.id, task_id=task.id,
-                        payload={"phase": phase,
-                                 "passed": False,
-                                 "runner_unreachable": True,
-                                 "requeue": prior + 1,
-                                 "detail": detail[:300],
-                                 "retry": task.retry_count})
-    db.update_task_status(task.id, TaskStatus.PENDING)
-    logger.warning(
-        "spec %s: runner unreachable at implement time (%s) — task parked "
-        "for requeue %d without a model call; retry stays %d/%d and the next "
-        "tick re-probes", spec.id, detail, prior + 1,
-        task.retry_count, MAX_RETRIES)
+    _dispose(db, spec, task, _outcome.Failure(
+        _outcome.FailureClass.RUNNER_OUTAGE, task.role, "runner", detail,
+        phase=phase))
 
 
 def _drop_protected_type_collisions(db: Database, spec: Spec, task, files,
