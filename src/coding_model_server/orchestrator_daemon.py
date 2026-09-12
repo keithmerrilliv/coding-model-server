@@ -261,7 +261,12 @@ def _process_pending_plan(db: Database, spec: Spec) -> None:
     if not md_path.exists():
         logger.error("spec %s: source markdown missing at %s",
                      spec.id, md_path)
-        db.update_spec_status(spec.id, SpecStatus.FAILED)
+        # DEV-652: still a structural abort, not an agent failure — but a spec
+        # that ends leaves ONE row saying why, and terminate() also closes
+        # every in-flight task (DEV-532) where this used to leave them.
+        _outcome.terminate(db, spec, None, Failure(
+            FailureClass.ABORTED, "planner", "daemon",
+            f"source markdown missing at {md_path}", phase="source_md"))
         return
 
     markdown = md_path.read_text()
@@ -541,7 +546,12 @@ def _reject_plan_for_validation(db: Database, spec: Spec, problems: list[str],
     if prior >= PLAN_VALIDATION_MAX_ROUNDS:
         logger.error("spec %s: plan still invalid after %d validation round(s) "
                      "— failing: %s", spec.id, prior, "; ".join(problems))
-        db.update_spec_status(spec.id, SpecStatus.FAILED)
+        # DEV-652: still a structural abort, not an agent failure — but a spec
+        # that ends leaves ONE row saying why, and terminate() also closes
+        # every in-flight task (DEV-532) where this used to leave them.
+        _outcome.terminate(db, spec, None, Failure(
+            FailureClass.ABORTED, "planner", "daemon",
+            f"plan still invalid after {prior} validation round(s): {'; '.join(problems)}", phase="plan_validation"))
         return False
 
     bullets = "\n".join(f"- {p}" for p in problems)
@@ -795,7 +805,12 @@ def _block_plan_for_unreadable_modification(
         ),
     )
     db.respond_to_gate(gate.id, "rejected", notes="blocked by DEV-492 guard")
-    db.update_spec_status(spec.id, SpecStatus.FAILED)
+    # DEV-652: still a structural abort, not an agent failure — but a spec
+    # that ends leaves ONE row saying why, and terminate() also closes
+    # every in-flight task (DEV-532) where this used to leave them.
+    _outcome.terminate(db, spec, None, Failure(
+        FailureClass.ABORTED, "planner", "daemon",
+        "spec modifies files the implementer cannot read (DEV-492 guard)", phase="unread_file_guard"))
 
 
 def _accept_plan(db: Database, spec: Spec, spec_dir, result: PlannerYaml) -> None:
@@ -880,7 +895,12 @@ def _process_needs_clarification(db: Database, spec: Spec) -> None:
     if gate is None:
         logger.warning("spec %s: NEEDS_CLARIFICATION but no clarification "
                        "gate exists; marking failed", spec.id)
-        db.update_spec_status(spec.id, SpecStatus.FAILED)
+        # DEV-652: still a structural abort, not an agent failure — but a spec
+        # that ends leaves ONE row saying why, and terminate() also closes
+        # every in-flight task (DEV-532) where this used to leave them.
+        _outcome.terminate(db, spec, None, Failure(
+            FailureClass.ABORTED, "daemon", "daemon",
+            "NEEDS_CLARIFICATION but no clarification gate exists", phase="clarification"))
         return
 
     if gate.status == GateStatus.PENDING:
@@ -905,7 +925,12 @@ def _process_plan_review(db: Database, spec: Spec) -> None:
     if gate is None:
         logger.warning("spec %s: PLAN_REVIEW without a plan_approval gate; "
                        "marking failed", spec.id)
-        db.update_spec_status(spec.id, SpecStatus.FAILED)
+        # DEV-652: still a structural abort, not an agent failure — but a spec
+        # that ends leaves ONE row saying why, and terminate() also closes
+        # every in-flight task (DEV-532) where this used to leave them.
+        _outcome.terminate(db, spec, None, Failure(
+            FailureClass.ABORTED, "daemon", "daemon",
+            "PLAN_REVIEW without a plan_approval gate", phase="plan_review"))
         return
 
     if gate.status == GateStatus.PENDING:
@@ -1437,19 +1462,34 @@ def _bootstrap_tasks(db: Database, spec: Spec) -> None:
         # trace that's hard to read in the daemon log.
         logger.error("spec %s: EXECUTING with no normalized_yaml — marking failed",
                      spec.id)
-        db.update_spec_status(spec.id, SpecStatus.FAILED)
+        # DEV-652: still a structural abort, not an agent failure — but a spec
+        # that ends leaves ONE row saying why, and terminate() also closes
+        # every in-flight task (DEV-532) where this used to leave them.
+        _outcome.terminate(db, spec, None, Failure(
+            FailureClass.ABORTED, "daemon", "daemon",
+            "EXECUTING with no normalized_yaml", phase="bootstrap"))
         return
     plan = _yaml.safe_load(spec.normalized_yaml)
     if not isinstance(plan, dict):
         logger.error("spec %s: normalized_yaml is not a dict (got %s) — marking failed",
                      spec.id, type(plan).__name__)
-        db.update_spec_status(spec.id, SpecStatus.FAILED)
+        # DEV-652: still a structural abort, not an agent failure — but a spec
+        # that ends leaves ONE row saying why, and terminate() also closes
+        # every in-flight task (DEV-532) where this used to leave them.
+        _outcome.terminate(db, spec, None, Failure(
+            FailureClass.ABORTED, "daemon", "daemon",
+            f"normalized_yaml is not a dict (got {type(plan).__name__})", phase="bootstrap"))
         return
     phases = plan.get("phases", [])
     if not phases:
         logger.error("spec %s: plan YAML has no phases — marking failed",
                      spec.id)
-        db.update_spec_status(spec.id, SpecStatus.FAILED)
+        # DEV-652: still a structural abort, not an agent failure — but a spec
+        # that ends leaves ONE row saying why, and terminate() also closes
+        # every in-flight task (DEV-532) where this used to leave them.
+        _outcome.terminate(db, spec, None, Failure(
+            FailureClass.ABORTED, "daemon", "daemon",
+            "plan YAML has no phases", phase="bootstrap"))
         return
     # Non-mapping phase entries — `phases: [design, implement, test]` is
     # plausible LLM output — used to AttributeError on phase.get() every
@@ -1461,7 +1501,12 @@ def _bootstrap_tasks(db: Database, spec: Spec) -> None:
             "spec %s: plan phases must be mappings, got %s — marking failed",
             spec.id, ", ".join(type(p).__name__ for p in bad),
         )
-        db.update_spec_status(spec.id, SpecStatus.FAILED)
+        # DEV-652: still a structural abort, not an agent failure — but a spec
+        # that ends leaves ONE row saying why, and terminate() also closes
+        # every in-flight task (DEV-532) where this used to leave them.
+        _outcome.terminate(db, spec, None, Failure(
+            FailureClass.ABORTED, "daemon", "daemon",
+            f"plan phases must be mappings, got {', '.join(type(p).__name__ for p in bad)}", phase="bootstrap"))
         return
     for phase in phases:
         role = phase.get("role", "implementer")
@@ -5371,15 +5416,23 @@ def _retry_role_with_feedback(db: Database, spec: Spec, target_role: str,
     if target is None:
         logger.error("spec %s: supervisor said retry %s but no such task; aborting",
                      spec.id, target_role)
-        db.update_task_status(current_task.id, TaskStatus.FAILED)
-        db.update_spec_status(spec.id, SpecStatus.FAILED)
+        # DEV-652: still a structural abort, not an agent failure — but a spec
+        # that ends leaves ONE row saying why, and terminate() also closes
+        # every in-flight task (DEV-532) where this used to leave them.
+        _outcome.terminate(db, spec, current_task, Failure(
+            FailureClass.ABORTED, "supervisor", "daemon",
+            f"supervisor said retry {target_role} but no such task", phase="supervisor"))
         return
 
     if target.retry_count >= MAX_RETRIES:
         logger.error("spec %s: supervisor said retry %s but retry budget exhausted (%d/%d); aborting",
                      spec.id, target_role, target.retry_count, MAX_RETRIES)
-        db.update_task_status(current_task.id, TaskStatus.FAILED)
-        db.update_spec_status(spec.id, SpecStatus.FAILED)
+        # DEV-652: still a structural abort, not an agent failure — but a spec
+        # that ends leaves ONE row saying why, and terminate() also closes
+        # every in-flight task (DEV-532) where this used to leave them.
+        _outcome.terminate(db, spec, current_task, Failure(
+            FailureClass.ABORTED, "supervisor", "daemon",
+            f"supervisor said retry {target_role} but retry budget exhausted ({target.retry_count}/{MAX_RETRIES})", phase="supervisor"))
         return
 
     if target_role == "implementer":
@@ -5494,8 +5547,12 @@ def _apply_supervisor_decision(db: Database, spec: Spec, task,
     # Defensive: schema validation in supervisor.py should make this unreachable
     logger.error("spec %s: unknown supervisor action %r; aborting",
                  spec.id, decision.action)
-    db.update_task_status(task.id, TaskStatus.FAILED)
-    db.update_spec_status(spec.id, SpecStatus.FAILED)
+    # DEV-652: still a structural abort, not an agent failure — but a spec
+    # that ends leaves ONE row saying why, and terminate() also closes
+    # every in-flight task (DEV-532) where this used to leave them.
+    _outcome.terminate(db, spec, task, Failure(
+        FailureClass.ABORTED, "supervisor", "daemon",
+        f"unknown supervisor action {decision.action!r}", phase="supervisor"))
 
 
 # Free (non-budget) harness-fix retries per spec. Capped so a model that
