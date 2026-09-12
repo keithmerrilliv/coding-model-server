@@ -1823,6 +1823,16 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
                                "feedback: %s", spec.id, e)
             db.increment_task_retry(task.id)
             db.update_task_status(task.id, TaskStatus.PENDING)
+            # DEV-652: the routing above is this loop's own and stays its own
+            # — but the charge belongs in the classifier's stream like every
+            # other charge, or the architect's budget drains invisibly.
+            _outcome.record_local_charge(
+                db, spec, db.get_task(task.id), _outcome.Failure(
+                    _outcome.FailureClass.REVIEW_REJECTED, "architect",
+                    "review", f"testability check: {len(findings)} finding(s) "
+                    f"{kinds}", phase="testability_check"),
+                f"round {rounds_used + 1}/"
+                f"{executor.TESTABILITY_CHECK_MAX_ROUNDS}")
             return
         # Revision budget spent. The findings are still true, and the human
         # about to read this design is the only one left who can act on them —
@@ -1862,6 +1872,13 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
                                spec.id, e)
             db.increment_task_retry(task.id)
             db.update_task_status(task.id, TaskStatus.PENDING)
+            # DEV-652: as above — local routing, shared record.
+            _outcome.record_local_charge(
+                db, spec, db.get_task(task.id), _outcome.Failure(
+                    _outcome.FailureClass.REVIEW_REJECTED, "architect",
+                    "review", f"design review FAILed: {notes.splitlines()[0][:200]}"
+                    if notes else "design review FAILed",
+                    phase="design_review"))
             return
 
     # Create design_approval gate
@@ -4418,6 +4435,19 @@ def _route_build_failure_to_architect(db: Database, spec: Spec, task, spec_dir,
                              "diagnostic": build_reason[:200]})
     db.increment_task_retry(architect.id)
     db.update_task_status(architect.id, TaskStatus.PENDING)
+    # DEV-652: the AGENT_RAN row above says where the work was routed; this
+    # says the architect was CHARGED for it. Only the second is in the stream
+    # the rotation and the taxonomy read, and only the second makes "these
+    # diagnostics are invariant across attempts" legible after the fact —
+    # which is exactly the judgement DEV-631 has to make.
+    _outcome.record_local_charge(
+        db, spec, db.get_task(architect.id), _outcome.Failure(
+            _outcome.FailureClass.BUILD_FAILURE, "architect", "build_check",
+            f"{len(persistent)} diagnostic(s) survived "
+            f"{BUILD_FAILURE_ARCHITECT_THRESHOLD + 1} attempts: "
+            f"{sorted(persistent)[0][:200]}",
+            phase="persistent_build_diagnostics"),
+        f"routed from the implementer; {len(persistent)} persistent")
     # The implementer re-runs after the new design; its budget is untouched.
     db.update_task_status(task.id, TaskStatus.PENDING)
     logger.warning("spec %s: %d diagnostic(s) survived %d consecutive attempts "

@@ -76,6 +76,37 @@ def test_repeated_identical_failure_goes_to_the_architect(db, spec_with_roles):
     assert "behavioural invariants" in fb  # told not to rewrite what was approved
 
 
+def test_the_architect_charge_reaches_the_classifier_stream(db, spec_with_roles):
+    """DEV-652: routing upstream charges the architect, and that charge has to
+    be visible where every other charge is.
+
+    Before this, the only record was an AGENT_RAN row saying where the work
+    went. `consecutive_no_verdicts` and `rotation_offset` read
+    failure_classified, and so will DEV-631's invariant detector — for which
+    "these diagnostics survived N attempts" is exactly the judgement it needs
+    to make — so a spec could drain its architect budget here leaving nothing
+    in the taxonomy DEV-529 asked for.
+    """
+    spec, arch, impl, spec_dir = spec_with_roles
+    notes = f"## does not compile\n{DIAG}"
+    _prior_build_failure(db, spec.id, notes)
+
+    assert d._route_build_failure_to_architect(db, spec, impl, spec_dir,
+                                               notes, DIAG) is True
+
+    ev = [e.payload for e in db.list_events_by_kind(
+              spec_id=spec.id, kind=d.EventKind.FAILURE_CLASSIFIED, limit=10)]
+    assert len(ev) == 1
+    assert ev[0]["cls"] == "build_failure"
+    assert ev[0]["role"] == "architect"
+    assert ev[0]["outcome"] == "verdict"
+    assert ev[0]["disposition"] == "charge"
+    assert ev[0]["phase"] == "persistent_build_diagnostics"
+    assert "mutating" in ev[0]["detail"]
+    # recorded AFTER the increment, so it names the attempt it produced
+    assert ev[0]["retry"] == db.get_task(arch.id).retry_count == 1
+
+
 def test_the_implementers_budget_is_not_charged(db, spec_with_roles):
     """The attempt was not the implementer's fault."""
     spec, arch, impl, spec_dir = spec_with_roles

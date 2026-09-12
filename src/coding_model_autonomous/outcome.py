@@ -356,6 +356,31 @@ def _record(db: Any, spec: Any, task: Any, failure: Failure, action: str,
                     task_id=getattr(task, "id", None), payload=payload)
 
 
+def record_local_charge(db: Any, spec: Any, task: Any, failure: Failure,
+                        detail: str = "") -> None:
+    """Record a retry charged by a caller that routes itself (DEV-652).
+
+    A few loops decide their own routing and are right to: the testability
+    check and the design review already know the architect must revise, they
+    carry their own revision budgets, and when those are spent they fall
+    through to the gate rather than terminating. Handing them to `dispose`
+    would re-decide a decision they have already made correctly — and would
+    let its DESIGN_EXHAUSTED branch end a spec whose LOCAL budget still had a
+    round left.
+
+    What they were missing is not routing but the record. Every other charge
+    lands in the `failure_classified` stream; theirs did not, so a spec could
+    burn its architect budget leaving nothing in the taxonomy DEV-529 asked
+    for and nothing for DEV-631's invariant detector to read. This writes
+    that row and changes nothing else — the caller still increments and
+    requeues itself.
+
+    Call it AFTER the increment, so the recorded ``retry`` is the attempt the
+    charge produced, matching what `dispose` records.
+    """
+    _record(db, spec, task, failure, "charge", 0, detail)
+
+
 def close_spec_tasks(db: Any, spec_id: str, failed_task_id: Optional[str]) -> list[str]:
     """DEV-532: a terminal spec leaves no task row claiming to be in flight."""
     closed = []

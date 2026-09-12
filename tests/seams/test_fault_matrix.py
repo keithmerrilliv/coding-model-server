@@ -1112,6 +1112,26 @@ class TestDesignRevision:
         assert not events(db, spec.id, EventKind.AGENT_RAN,
                           anomaly="design_write_refused")
 
+    def test_the_revision_charge_reaches_the_classifier_stream(
+            self, db, model, runner):
+        """DEV-652: a design-review FAIL sends the architect back and charges
+        it. The routing is this loop's own and stays its own; the charge now
+        lands in the stream every other charge lands in."""
+        spec = make_executing_spec(db)
+        model.script("architect",
+                     Reply(architect_reply(self.WITH_CODE)),
+                     Reply(architect_reply(self.PROSE_ONLY)))
+        model.script("design_review", Reply(design_review_reply("FAIL", "redo it")))
+
+        out = drive(db, spec.id, model, wait_at(GateType.DESIGN_APPROVAL),
+                    runner=runner)
+
+        assert out.waiting_on[0].gate_type == GateType.DESIGN_APPROVAL
+        ev = events(db, spec.id, EventKind.FAILURE_CLASSIFIED, role="architect")
+        assert [(e["cls"], e["disposition"], e["phase"]) for e in ev] == [
+            ("review_rejected", "charge", "design_review")]
+        assert ev[0]["retry"] == out.task("architect").retry_count == 1
+
     def test_a_refused_design_write_stops_the_run_instead_of_gating(
             self, db, model, runner, monkeypatch):
         """The content guards no longer reach a DESIGN artifact, so this is
