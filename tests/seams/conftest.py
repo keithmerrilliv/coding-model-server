@@ -24,7 +24,7 @@ for _k in set(os.environ) - set(_env_before):
     del os.environ[_k]
 os.environ.update(_env_before)
 
-from coding_model_autonomous import adversarial, executor, planner, retry_policy  # noqa: E402
+from coding_model_autonomous import adversarial, executor, outcome, planner, retry_policy  # noqa: E402
 from coding_model_autonomous.db import Database  # noqa: E402
 
 from seam_fakes import FakeModelServer, FakeRunner  # noqa: E402
@@ -68,7 +68,10 @@ def seam_env(monkeypatch):
     monkeypatch.setattr(planner, "PLANNER_PARSE_RETRIES", 1)
     monkeypatch.setattr(d, "PLAN_VALIDATION_MAX_ROUNDS", 2)
     monkeypatch.setattr(d, "BUILD_FAILURE_ARCHITECT_THRESHOLD", 1)
-    monkeypatch.setattr(d, "_MAX_UNREACHABLE_REQUEUES", 3)
+    # DEV-652: the runner-outage requeue is capped by outcome._CAPS now, not
+    # by a local constant. NO_VERDICT_CAP is its env-derived fallback and the
+    # tier already depends on the shipped 5 (the architect park asserts "x6").
+    monkeypatch.setattr(outcome, "NO_VERDICT_CAP", 5)
     monkeypatch.setattr(d, "BLOCK_ON_BUILD_WARNINGS", False)
     monkeypatch.setattr(d, "ALLOW_UNREAD_FILE_MODIFICATION", False)
     # Agents, so assertions can name models.

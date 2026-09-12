@@ -261,7 +261,12 @@ def _process_pending_plan(db: Database, spec: Spec) -> None:
     if not md_path.exists():
         logger.error("spec %s: source markdown missing at %s",
                      spec.id, md_path)
-        db.update_spec_status(spec.id, SpecStatus.FAILED)
+        # DEV-652: still a structural abort, not an agent failure — but a spec
+        # that ends leaves ONE row saying why, and terminate() also closes
+        # every in-flight task (DEV-532) where this used to leave them.
+        _outcome.terminate(db, spec, None, Failure(
+            FailureClass.ABORTED, "planner", "daemon",
+            f"source markdown missing at {md_path}", phase="source_md"))
         return
 
     markdown = md_path.read_text()
@@ -541,7 +546,12 @@ def _reject_plan_for_validation(db: Database, spec: Spec, problems: list[str],
     if prior >= PLAN_VALIDATION_MAX_ROUNDS:
         logger.error("spec %s: plan still invalid after %d validation round(s) "
                      "— failing: %s", spec.id, prior, "; ".join(problems))
-        db.update_spec_status(spec.id, SpecStatus.FAILED)
+        # DEV-652: still a structural abort, not an agent failure — but a spec
+        # that ends leaves ONE row saying why, and terminate() also closes
+        # every in-flight task (DEV-532) where this used to leave them.
+        _outcome.terminate(db, spec, None, Failure(
+            FailureClass.ABORTED, "planner", "daemon",
+            f"plan still invalid after {prior} validation round(s): {'; '.join(problems)}", phase="plan_validation"))
         return False
 
     bullets = "\n".join(f"- {p}" for p in problems)
@@ -795,7 +805,12 @@ def _block_plan_for_unreadable_modification(
         ),
     )
     db.respond_to_gate(gate.id, "rejected", notes="blocked by DEV-492 guard")
-    db.update_spec_status(spec.id, SpecStatus.FAILED)
+    # DEV-652: still a structural abort, not an agent failure — but a spec
+    # that ends leaves ONE row saying why, and terminate() also closes
+    # every in-flight task (DEV-532) where this used to leave them.
+    _outcome.terminate(db, spec, None, Failure(
+        FailureClass.ABORTED, "planner", "daemon",
+        "spec modifies files the implementer cannot read (DEV-492 guard)", phase="unread_file_guard"))
 
 
 def _accept_plan(db: Database, spec: Spec, spec_dir, result: PlannerYaml) -> None:
@@ -880,7 +895,12 @@ def _process_needs_clarification(db: Database, spec: Spec) -> None:
     if gate is None:
         logger.warning("spec %s: NEEDS_CLARIFICATION but no clarification "
                        "gate exists; marking failed", spec.id)
-        db.update_spec_status(spec.id, SpecStatus.FAILED)
+        # DEV-652: still a structural abort, not an agent failure — but a spec
+        # that ends leaves ONE row saying why, and terminate() also closes
+        # every in-flight task (DEV-532) where this used to leave them.
+        _outcome.terminate(db, spec, None, Failure(
+            FailureClass.ABORTED, "daemon", "daemon",
+            "NEEDS_CLARIFICATION but no clarification gate exists", phase="clarification"))
         return
 
     if gate.status == GateStatus.PENDING:
@@ -905,7 +925,12 @@ def _process_plan_review(db: Database, spec: Spec) -> None:
     if gate is None:
         logger.warning("spec %s: PLAN_REVIEW without a plan_approval gate; "
                        "marking failed", spec.id)
-        db.update_spec_status(spec.id, SpecStatus.FAILED)
+        # DEV-652: still a structural abort, not an agent failure — but a spec
+        # that ends leaves ONE row saying why, and terminate() also closes
+        # every in-flight task (DEV-532) where this used to leave them.
+        _outcome.terminate(db, spec, None, Failure(
+            FailureClass.ABORTED, "daemon", "daemon",
+            "PLAN_REVIEW without a plan_approval gate", phase="plan_review"))
         return
 
     if gate.status == GateStatus.PENDING:
@@ -1437,19 +1462,34 @@ def _bootstrap_tasks(db: Database, spec: Spec) -> None:
         # trace that's hard to read in the daemon log.
         logger.error("spec %s: EXECUTING with no normalized_yaml — marking failed",
                      spec.id)
-        db.update_spec_status(spec.id, SpecStatus.FAILED)
+        # DEV-652: still a structural abort, not an agent failure — but a spec
+        # that ends leaves ONE row saying why, and terminate() also closes
+        # every in-flight task (DEV-532) where this used to leave them.
+        _outcome.terminate(db, spec, None, Failure(
+            FailureClass.ABORTED, "daemon", "daemon",
+            "EXECUTING with no normalized_yaml", phase="bootstrap"))
         return
     plan = _yaml.safe_load(spec.normalized_yaml)
     if not isinstance(plan, dict):
         logger.error("spec %s: normalized_yaml is not a dict (got %s) — marking failed",
                      spec.id, type(plan).__name__)
-        db.update_spec_status(spec.id, SpecStatus.FAILED)
+        # DEV-652: still a structural abort, not an agent failure — but a spec
+        # that ends leaves ONE row saying why, and terminate() also closes
+        # every in-flight task (DEV-532) where this used to leave them.
+        _outcome.terminate(db, spec, None, Failure(
+            FailureClass.ABORTED, "daemon", "daemon",
+            f"normalized_yaml is not a dict (got {type(plan).__name__})", phase="bootstrap"))
         return
     phases = plan.get("phases", [])
     if not phases:
         logger.error("spec %s: plan YAML has no phases — marking failed",
                      spec.id)
-        db.update_spec_status(spec.id, SpecStatus.FAILED)
+        # DEV-652: still a structural abort, not an agent failure — but a spec
+        # that ends leaves ONE row saying why, and terminate() also closes
+        # every in-flight task (DEV-532) where this used to leave them.
+        _outcome.terminate(db, spec, None, Failure(
+            FailureClass.ABORTED, "daemon", "daemon",
+            "plan YAML has no phases", phase="bootstrap"))
         return
     # Non-mapping phase entries — `phases: [design, implement, test]` is
     # plausible LLM output — used to AttributeError on phase.get() every
@@ -1461,7 +1501,12 @@ def _bootstrap_tasks(db: Database, spec: Spec) -> None:
             "spec %s: plan phases must be mappings, got %s — marking failed",
             spec.id, ", ".join(type(p).__name__ for p in bad),
         )
-        db.update_spec_status(spec.id, SpecStatus.FAILED)
+        # DEV-652: still a structural abort, not an agent failure — but a spec
+        # that ends leaves ONE row saying why, and terminate() also closes
+        # every in-flight task (DEV-532) where this used to leave them.
+        _outcome.terminate(db, spec, None, Failure(
+            FailureClass.ABORTED, "daemon", "daemon",
+            f"plan phases must be mappings, got {', '.join(type(p).__name__ for p in bad)}", phase="bootstrap"))
         return
     for phase in phases:
         role = phase.get("role", "implementer")
@@ -1585,8 +1630,7 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
     try:
         view = _spec_context(db, spec, spec_md, role="architect").select("architect")
     except RunnerOutage as e:
-        _requeue_implement_for_runner_outage(
-            db, spec, task, str(e), phase="design_existing_fetch")
+        _requeue_implement_for_runner_outage(db, spec, task, str(e))
         return
     def _architect_prompt(existing, reference, omitted_e=None, omitted_r=None):
         return build_architect_message(
@@ -1824,6 +1868,16 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
                                "feedback: %s", spec.id, e)
             db.increment_task_retry(task.id)
             db.update_task_status(task.id, TaskStatus.PENDING)
+            # DEV-652: the routing above is this loop's own and stays its own
+            # — but the charge belongs in the classifier's stream like every
+            # other charge, or the architect's budget drains invisibly.
+            _outcome.record_local_charge(
+                db, spec, db.get_task(task.id), _outcome.Failure(
+                    _outcome.FailureClass.REVIEW_REJECTED, "architect",
+                    "review", f"testability check: {len(findings)} finding(s) "
+                    f"{kinds}", phase="testability_check"),
+                f"round {rounds_used + 1}/"
+                f"{executor.TESTABILITY_CHECK_MAX_ROUNDS}")
             return
         # Revision budget spent. The findings are still true, and the human
         # about to read this design is the only one left who can act on them —
@@ -1863,6 +1917,13 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
                                spec.id, e)
             db.increment_task_retry(task.id)
             db.update_task_status(task.id, TaskStatus.PENDING)
+            # DEV-652: as above — local routing, shared record.
+            _outcome.record_local_charge(
+                db, spec, db.get_task(task.id), _outcome.Failure(
+                    _outcome.FailureClass.REVIEW_REJECTED, "architect",
+                    "review", f"design review FAILed: {notes.splitlines()[0][:200]}"
+                    if notes else "design review FAILed",
+                    phase="design_review"))
             return
 
     # Create design_approval gate
@@ -3229,85 +3290,60 @@ def _generate_one_file(
 # this is not free: three covers a sleeping Mac or a link re-enumeration
 # (DEV-518, which clears in seconds to minutes) without regenerating all night
 # against a Mac that is simply switched off.
-_MAX_UNREACHABLE_REQUEUES = 3
-
-
 def _requeue_for_unreachable_runner(db: Database, spec: Spec, task) -> bool:
     """Put the task back in the queue after a transport-only build check.
 
-    Returns True when the caller should return without opening a gate.
+    Returns True when the caller should return without opening a gate — which
+    is always: past the cap ``dispose`` parks behind an infrastructure gate
+    itself, which is the gate this path wanted anyway.
 
-    Mirrors what the daemon already does when the *model* server is
-    unreachable (`_TRANSPORT_ERRORS` in _run_task): reset to PENDING, leave the
-    spec EXECUTING, let the next tick re-run it — and deliberately do not touch
-    retry_count, because a sleeping Mac is not an implementer's mistake.
-
-    Bounded, because a requeue re-runs the implementer and that is a whole
-    generation. Past the cap we do open a gate, but one that says the runner is
-    unreachable rather than one that asks someone to review code nobody has
-    compiled.
+    DEV-652: this used to count its own requeues by re-scanning TEST_RAN
+    events and cap them against a local _MAX_UNREACHABLE_REQUEUES = 3. That
+    is precisely dispose's no-verdict branch — consecutive_no_verdicts and
+    Failure.cap — written a second time, and _CAPS already carries
+    (RUNNER_OUTAGE, "build_check") = 3 for it. A requeue re-runs the
+    implementer and that is a whole generation, so the bound stays; it is
+    now the same bound everything else uses, and the requeue finally appears
+    in the failure_classified stream instead of only in TEST_RAN.
     """
-    prior = sum(
-        1 for e in db.list_events_by_kind(
-            spec_id=spec.id, kind=EventKind.TEST_RAN, limit=20)
-        if (e.payload or {}).get("phase") == "pre_gate_build_check"
-        and (e.payload or {}).get("runner_unreachable")
-    )
-    if prior >= _MAX_UNREACHABLE_REQUEUES:
-        logger.error(
-            "spec %s: runner still unreachable after %d requeue(s) — "
-            "escalating to a human; this is an infrastructure fault, not a "
-            "code review", spec.id, prior)
-        return False
-
-    db.record_event(EventKind.TEST_RAN, spec_id=spec.id, task_id=task.id,
-                    payload={"phase": "pre_gate_build_check",
-                             "passed": False,
-                             "runner_unreachable": True,
-                             "requeue": prior + 1,
-                             "retry": task.retry_count})
-    db.update_task_status(task.id, TaskStatus.PENDING)
-    logger.warning(
-        "spec %s: mac-runner unreachable — requeued for retry %d/%d without "
-        "burning an implementer attempt (still at %d/%d); the next tick will "
-        "try again",
-        spec.id, prior + 1, _MAX_UNREACHABLE_REQUEUES,
-        task.retry_count, MAX_RETRIES)
+    _dispose(db, spec, task, _outcome.Failure(
+        _outcome.FailureClass.RUNNER_OUTAGE, task.role, "runner",
+        "mac-runner unreachable during the pre-gate build check",
+        phase="build_check"))
     return True
 
 
 def _requeue_implement_for_runner_outage(
     db: Database, spec: Spec, task, detail: str,
-    phase: str = "implement_existing_fetch",
+    phase: str = "existing_fetch",
 ) -> None:
-    """Park an implement task whose existing-file fetch hit a dead runner
-    (DEV-620), mirroring the DEV-538 build-check requeue — but PATIENT: a
-    build-check requeue caps at _MAX_UNREACHABLE_REQUEUES because it ages an
-    already-generated attempt, while here nothing has been spent and this
-    outage class lasts hours (a powered-off Mac), so there is no cap. The
-    stale-phase watchdog keeps a parked spec visible; the event stream gets
-    the first park and every 20th thereafter to stay legible without spam.
+    """Park a task whose existing-file fetch hit a dead runner (DEV-620).
+
+    PATIENT by design: _CAPS gives (RUNNER_OUTAGE, "existing_fetch") no cap,
+    because nothing has been spent here and this outage class lasts hours (a
+    powered-off Mac). The build-check sibling above is capped because it ages
+    an already-generated attempt. The stale-phase watchdog keeps a parked
+    spec visible.
+
+    DEV-652: collapsed onto dispose. The role on the Failure is what
+    distinguishes a design-time fetch from an implement-time one — the two
+    callers pass their own task — so the descriptive phase strings this used
+    to invent ("design_existing_fetch", "implement_existing_fetch") are gone;
+    they missed the _CAPS key and would have been charged the default cap of
+    five, turning an uncapped park into a premature gate.
+
+    Note the anti-spam this replaces never worked: it counted only the events
+    it had itself written, so ``prior`` went 0 -> 1 and stuck, and the
+    "first park and every 20th thereafter" its docstring promised wrote
+    exactly one event ever. Every requeue is now recorded. That is the
+    behaviour the ticket's acceptance asks for -- every advanced attempt has
+    a classified event -- but it does mean a multi-hour outage writes one row
+    per re-probe where it used to write one in total; if that volume bites,
+    throttle it in one place in dispose rather than here.
     """
-    prior = sum(
-        1 for e in db.list_events_by_kind(
-            spec_id=spec.id, kind=EventKind.TEST_RAN, limit=200)
-        if (e.payload or {}).get("phase") == phase
-        and (e.payload or {}).get("runner_unreachable")
-    )
-    if prior == 0 or (prior + 1) % 20 == 0:
-        db.record_event(EventKind.TEST_RAN, spec_id=spec.id, task_id=task.id,
-                        payload={"phase": phase,
-                                 "passed": False,
-                                 "runner_unreachable": True,
-                                 "requeue": prior + 1,
-                                 "detail": detail[:300],
-                                 "retry": task.retry_count})
-    db.update_task_status(task.id, TaskStatus.PENDING)
-    logger.warning(
-        "spec %s: runner unreachable at implement time (%s) — task parked "
-        "for requeue %d without a model call; retry stays %d/%d and the next "
-        "tick re-probes", spec.id, detail, prior + 1,
-        task.retry_count, MAX_RETRIES)
+    _dispose(db, spec, task, _outcome.Failure(
+        _outcome.FailureClass.RUNNER_OUTAGE, task.role, "runner", detail,
+        phase=phase))
 
 
 def _drop_protected_type_collisions(db: Database, spec: Spec, task, files,
@@ -4444,6 +4480,19 @@ def _route_build_failure_to_architect(db: Database, spec: Spec, task, spec_dir,
                              "diagnostic": build_reason[:200]})
     db.increment_task_retry(architect.id)
     db.update_task_status(architect.id, TaskStatus.PENDING)
+    # DEV-652: the AGENT_RAN row above says where the work was routed; this
+    # says the architect was CHARGED for it. Only the second is in the stream
+    # the rotation and the taxonomy read, and only the second makes "these
+    # diagnostics are invariant across attempts" legible after the fact —
+    # which is exactly the judgement DEV-631 has to make.
+    _outcome.record_local_charge(
+        db, spec, db.get_task(architect.id), _outcome.Failure(
+            _outcome.FailureClass.BUILD_FAILURE, "architect", "build_check",
+            f"{len(persistent)} diagnostic(s) survived "
+            f"{BUILD_FAILURE_ARCHITECT_THRESHOLD + 1} attempts: "
+            f"{sorted(persistent)[0][:200]}",
+            phase="persistent_build_diagnostics"),
+        f"routed from the implementer; {len(persistent)} persistent")
     # The implementer re-runs after the new design; its budget is untouched.
     db.update_task_status(task.id, TaskStatus.PENDING)
     logger.warning("spec %s: %d diagnostic(s) survived %d consecutive attempts "
@@ -5367,15 +5416,23 @@ def _retry_role_with_feedback(db: Database, spec: Spec, target_role: str,
     if target is None:
         logger.error("spec %s: supervisor said retry %s but no such task; aborting",
                      spec.id, target_role)
-        db.update_task_status(current_task.id, TaskStatus.FAILED)
-        db.update_spec_status(spec.id, SpecStatus.FAILED)
+        # DEV-652: still a structural abort, not an agent failure — but a spec
+        # that ends leaves ONE row saying why, and terminate() also closes
+        # every in-flight task (DEV-532) where this used to leave them.
+        _outcome.terminate(db, spec, current_task, Failure(
+            FailureClass.ABORTED, "supervisor", "daemon",
+            f"supervisor said retry {target_role} but no such task", phase="supervisor"))
         return
 
     if target.retry_count >= MAX_RETRIES:
         logger.error("spec %s: supervisor said retry %s but retry budget exhausted (%d/%d); aborting",
                      spec.id, target_role, target.retry_count, MAX_RETRIES)
-        db.update_task_status(current_task.id, TaskStatus.FAILED)
-        db.update_spec_status(spec.id, SpecStatus.FAILED)
+        # DEV-652: still a structural abort, not an agent failure — but a spec
+        # that ends leaves ONE row saying why, and terminate() also closes
+        # every in-flight task (DEV-532) where this used to leave them.
+        _outcome.terminate(db, spec, current_task, Failure(
+            FailureClass.ABORTED, "supervisor", "daemon",
+            f"supervisor said retry {target_role} but retry budget exhausted ({target.retry_count}/{MAX_RETRIES})", phase="supervisor"))
         return
 
     if target_role == "implementer":
@@ -5490,8 +5547,12 @@ def _apply_supervisor_decision(db: Database, spec: Spec, task,
     # Defensive: schema validation in supervisor.py should make this unreachable
     logger.error("spec %s: unknown supervisor action %r; aborting",
                  spec.id, decision.action)
-    db.update_task_status(task.id, TaskStatus.FAILED)
-    db.update_spec_status(spec.id, SpecStatus.FAILED)
+    # DEV-652: still a structural abort, not an agent failure — but a spec
+    # that ends leaves ONE row saying why, and terminate() also closes
+    # every in-flight task (DEV-532) where this used to leave them.
+    _outcome.terminate(db, spec, task, Failure(
+        FailureClass.ABORTED, "supervisor", "daemon",
+        f"unknown supervisor action {decision.action!r}", phase="supervisor"))
 
 
 # Free (non-budget) harness-fix retries per spec. Capped so a model that

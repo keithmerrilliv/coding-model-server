@@ -117,20 +117,38 @@ class TestPark:
         after = db.get_task(task.id)
         assert after.status == TaskStatus.PENDING
         assert after.retry_count == before
-        events = [e for e in db.list_events_by_kind(
-                      spec_id=spec.id, kind=d.EventKind.TEST_RAN, limit=10)
-                  if (e.payload or {}).get("phase") == "implement_existing_fetch"]
-        assert len(events) == 1
-        assert events[0].payload.get("runner_unreachable") is True
+        # DEV-652: a classified no-verdict, not a private TEST_RAN row.
+        ev = [e.payload for e in db.list_events_by_kind(
+                  spec_id=spec.id, kind=d.EventKind.FAILURE_CLASSIFIED, limit=10)]
+        assert len(ev) == 1
+        assert ev[0]["cls"] == "runner_outage"
+        assert ev[0]["outcome"] == "no_verdict"
+        assert ev[0]["phase"] == "existing_fetch"
+        assert ev[0]["disposition"] == "requeue"
 
-    def test_repeat_parks_do_not_spam_events(self, db):
+    def test_repeat_parks_are_uncapped_and_each_one_is_recorded(self, db):
+        """DEV-652. This replaces a test that asserted the OPPOSITE, and the
+        behaviour it asserted was a bug: the old anti-spam counted only the
+        events it had itself written, so ``prior`` went 0 -> 1 and stuck
+        there, and the "first park and every 20th thereafter" its docstring
+        promised wrote exactly one event, ever.
+
+        A fetch outage is uncapped by design (_CAPS gives
+        (RUNNER_OUTAGE, "existing_fetch") no cap) because nothing has been
+        spent and a powered-off Mac lasts hours — so every re-probe requeues
+        and every requeue is now on the record.
+        """
         spec = db.create_spec(title="demo", source_md_path="spec.md")
         task = db.create_task(spec_id=spec.id, agent="implementer",
                               role="implementer", title="impl")
         for _ in range(5):
             d._requeue_implement_for_runner_outage(
                 db, db.get_spec(spec.id), db.get_task(task.id), "down")
-        events = [e for e in db.list_events_by_kind(
-                      spec_id=spec.id, kind=d.EventKind.TEST_RAN, limit=50)
-                  if (e.payload or {}).get("phase") == "implement_existing_fetch"]
-        assert len(events) == 1  # first park only; next event at requeue 20
+
+        ev = [e.payload for e in db.list_events_by_kind(
+                  spec_id=spec.id, kind=d.EventKind.FAILURE_CLASSIFIED, limit=50)]
+        assert len(ev) == 5
+        assert {e["disposition"] for e in ev} == {"requeue"}
+        # never charged, never parked behind a gate
+        assert db.get_task(task.id).retry_count == 0
+        assert db.get_task(task.id).status == TaskStatus.PENDING

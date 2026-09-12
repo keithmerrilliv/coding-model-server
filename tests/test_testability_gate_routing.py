@@ -83,6 +83,30 @@ class TestStrandedDesignBounces:
         _run_architect(db, spec, task, spec_dir, STRANDED)
         assert db.get_task(task.id).retry_count == 1
 
+    def test_the_charge_reaches_the_classifier_stream(self, db, arch):
+        """DEV-652: this loop decides its own routing — correctly, it has its
+        own revision budget and falls through to the gate when that is spent —
+        but the retry it charges was invisible to the classifier, so the
+        architect's budget could drain with no row saying why."""
+        spec, task, spec_dir = arch
+        _run_architect(db, spec, task, spec_dir, STRANDED)
+
+        ev = [e.payload for e in db.list_events_by_kind(
+                  spec_id=spec.id, kind=d.EventKind.FAILURE_CLASSIFIED, limit=10)]
+        assert len(ev) == 1
+        assert ev[0]["cls"] == "review_rejected"
+        assert ev[0]["role"] == "architect"
+        assert ev[0]["disposition"] == "charge"
+        assert ev[0]["phase"] == "testability_check"
+        # recorded after the increment, so it names the attempt it produced
+        assert ev[0]["retry"] == db.get_task(task.id).retry_count == 1
+
+    def test_a_sound_design_is_never_charged(self, db, arch):
+        spec, task, spec_dir = arch
+        _run_architect(db, spec, task, spec_dir, SOUND)
+        assert db.list_events_by_kind(
+            spec_id=spec.id, kind=d.EventKind.FAILURE_CLASSIFIED, limit=10) == []
+
 
 class TestSoundDesignProceeds:
     def test_the_gate_opens(self, db, arch):

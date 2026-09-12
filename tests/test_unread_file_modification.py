@@ -84,14 +84,36 @@ class TestGuardIsWiredIntoTheGate:
         read path lands, or a deliberate accepted risk."""
         assert od.ALLOW_UNREAD_FILE_MODIFICATION is False
 
-    def test_block_marks_the_spec_failed_not_replanned(self):
+    def test_block_marks_the_spec_failed_not_replanned(self, tmp_path):
         """Routing this back to the planner would loop: replanning cannot give
-        the pipeline an ability it structurally lacks."""
+        the pipeline an ability it structurally lacks.
+
+        Asserted on the behaviour rather than the source: this used to grep
+        the function for the literal `SpecStatus.FAILED`, and DEV-652 routed
+        the abort through `outcome.terminate` (which fails the spec AND leaves
+        the row saying why), so the literal is gone while the behaviour is
+        stronger.
+        """
         import inspect
-        src = inspect.getsource(od._block_plan_for_unreadable_modification)
-        assert "SpecStatus.FAILED" in src
+        from coding_model_autonomous.db import Database
+        from coding_model_autonomous.models import SpecStatus
+        db = Database(db_path=tmp_path / "t.sqlite", workspace_root=tmp_path / "ws")
+        try:
+            spec = db.create_spec(title="demo", source_md_path="spec.md")
+            od._block_plan_for_unreadable_modification(
+                db, db.get_spec(spec.id), ["src/pkg/existing.py"])
+            after = db.get_spec(spec.id)
+            assert after.status is SpecStatus.FAILED
+            assert after.status is not SpecStatus.PENDING_PLAN
+            rows = [e.payload for e in db.list_events_by_kind(
+                        spec_id=spec.id, kind=od.EventKind.FAILURE_CLASSIFIED, limit=10)]
+            assert [(r["cls"], r["disposition"], r["phase"]) for r in rows] == [
+                ("aborted", "terminal", "unread_file_guard")]
+        finally:
+            db.close_all()
         # The call, not the name — the docstring explains why replanning is
         # wrong here, so a bare substring match would flag its own rationale.
+        src = inspect.getsource(od._block_plan_for_unreadable_modification)
         assert "_reject_plan_for_validation(" not in src
 
     def test_accept_plan_checks_before_creating_the_human_gate(self):

@@ -353,8 +353,14 @@ class TestRunnerFaults:
 
         assert out.reason == "waiting"
         assert out.task("implementer").retry_count == 0
-        parks = events(db, spec.id, EventKind.TEST_RAN, phase="implement_existing_fetch")
-        assert len(parks) == 1 and parks[0]["runner_unreachable"] is True
+        # DEV-652: the park is a classified no-verdict now, not a private
+        # TEST_RAN row. existing_fetch is uncapped (_CAPS), so every outage
+        # requeues and none parks behind a gate.
+        parks = events(db, spec.id, EventKind.FAILURE_CLASSIFIED,
+                       cls="runner_outage", role="implementer")
+        assert [p["disposition"] for p in parks] == ["requeue"] * 4
+        assert all(p["phase"] == "existing_fetch" for p in parks)
+        assert all(p["outcome"] == "no_verdict" for p in parks)
         assert len(model.calls_for("implementer")) == 1
 
     def test_dead_runner_at_design_fetch_parks_architect(self, db, model, runner):
@@ -366,8 +372,13 @@ class TestRunnerFaults:
         out = drive(db, spec.id, model, wait_at(GateType.DESIGN_APPROVAL), runner=runner)
 
         assert out.reason == "waiting"
-        parks = events(db, spec.id, EventKind.TEST_RAN, phase="design_existing_fetch")
-        assert len(parks) == 1
+        # DEV-652: the ROLE on the Failure is what separates a design-time
+        # fetch from an implement-time one — the phase is "existing_fetch"
+        # for both, which is the key _CAPS actually holds.
+        parks = events(db, spec.id, EventKind.FAILURE_CLASSIFIED,
+                       cls="runner_outage", role="architect")
+        assert [p["disposition"] for p in parks] == ["requeue"] * 2
+        assert all(p["phase"] == "existing_fetch" for p in parks)
         assert out.task("architect").retry_count == 0
 
     def test_runner_raising_at_fetch_degrades_soft(self, db, model, runner):
@@ -381,28 +392,40 @@ class TestRunnerFaults:
         out = drive(db, spec.id, model, wait_at(GateType.CODE_REVIEW), runner=runner)
 
         assert out.reason == "waiting"
-        assert events(db, spec.id, EventKind.TEST_RAN, phase="implement_existing_fetch") == []
+        assert events(db, spec.id, EventKind.FAILURE_CLASSIFIED,
+                      cls="runner_outage") == []
         prompt = model.calls[0].messages[-1]["content"]
         assert "fixture stand-in for the daemon" not in prompt  # no existing file shown
 
     def test_unreachable_build_check_requeues_then_escalates(self, db, model, runner):
         """DEV-538/622: three requeues without burning a retry; the fourth
-        opens a gate that says the build is unverified."""
+        parks behind a gate that says the build is unverified. Under DEV-652
+        that gate is dispose's infrastructure gate, so the wait is there —
+        approving it is what resumes the run, as for every other no-verdict
+        class."""
         spec = _impl_ready(db, model, runner)
         model.always("implementer", Reply(implementer_reply()))
         runner.then(Unreachable(), Unreachable(), Unreachable(), Unreachable())
 
-        out = drive(db, spec.id, model, wait_at(GateType.CODE_REVIEW), runner=runner)
+        out = drive(db, spec.id, model, wait_at(GateType.CLARIFICATION), runner=runner)
 
         assert out.reason == "waiting"
         assert out.task("implementer").retry_count == 0
-        requeues = events(db, spec.id, EventKind.TEST_RAN,
-                          phase="pre_gate_build_check", runner_unreachable=True)
-        assert [r["requeue"] for r in requeues] == [1, 2, 3]
+        # DEV-652: _CAPS caps (runner_outage, build_check) at 3 — the same
+        # bound the deleted _MAX_UNREACHABLE_REQUEUES held — so three
+        # requeues and then a park.
+        ev = events(db, spec.id, EventKind.FAILURE_CLASSIFIED,
+                    cls="runner_outage", phase="build_check")
+        assert [e["disposition"] for e in ev] == ["requeue"] * 3 + ["park"]
+        assert [e["consecutive"] for e in ev] == [1, 2, 3, 4]
         assert len(model.calls_for("implementer")) == 4
+        # and the escalation is an INFRASTRUCTURE gate, not a request to
+        # review code nobody compiled. DEV-538 wanted "a gate that says the
+        # runner is unreachable"; sharing dispose's park is how every other
+        # no-verdict class already says it (DEV-616/617).
         gate = out.waiting_on[0]
-        assert "Build check: **could not run" in gate.prompt_md
-        assert "mac-runner unreachable" in gate.prompt_md
+        assert gate.gate_type == GateType.CLARIFICATION
+        assert "Infrastructure gate: runner_outage ×4" in gate.prompt_md
 
     def test_unreachable_build_check_recovers(self, db, model, runner):
         spec = _impl_ready(db, model, runner)
@@ -412,12 +435,13 @@ class TestRunnerFaults:
         out = drive(db, spec.id, model, wait_at(GateType.CODE_REVIEW), runner=runner)
 
         assert out.reason == "waiting" and out.task("implementer").retry_count == 0
-        # Each unreachable dispatch leaves two events: the check's own record
-        # and the requeue's. The passing one leaves only the check.
+        # DEV-652: the check's own TEST_RAN row is all that is left — the
+        # requeue's parallel row is gone, replaced by a classified event.
         checks = events(db, spec.id, EventKind.TEST_RAN, phase="pre_gate_build_check")
-        assert [c.get("runner_unreachable", False) for c in checks] == [
-            False, True, False, True, False]
-        assert [c["passed"] for c in checks] == [False] * 4 + [True]
+        assert [c["passed"] for c in checks] == [False, False, True]
+        ev = events(db, spec.id, EventKind.FAILURE_CLASSIFIED,
+                    cls="runner_outage", phase="build_check")
+        assert [e["disposition"] for e in ev] == ["requeue"] * 2
         assert (db.spec_dir(spec.id) / "tested_manifest.json").is_file()
 
     def test_inconclusive_output_is_not_a_pass(self, db, model, runner):
@@ -807,7 +831,8 @@ class TestContextStage:
 
         assert out.reason == "waiting"
         assert len(runner.fetch_calls) >= 2
-        assert events(db, spec.id, EventKind.TEST_RAN, phase="implement_existing_fetch") == []
+        assert events(db, spec.id, EventKind.FAILURE_CLASSIFIED,
+                      cls="runner_outage") == []
         prompt = model.calls_for("implementer")[0].messages[-1]["content"]
         assert "fixture stand-in for the daemon" in prompt
         assert "## File modes" in prompt  # edit mode stayed armed
@@ -1086,6 +1111,26 @@ class TestDesignRevision:
         assert design.startswith("# Architecture (revised)")
         assert not events(db, spec.id, EventKind.AGENT_RAN,
                           anomaly="design_write_refused")
+
+    def test_the_revision_charge_reaches_the_classifier_stream(
+            self, db, model, runner):
+        """DEV-652: a design-review FAIL sends the architect back and charges
+        it. The routing is this loop's own and stays its own; the charge now
+        lands in the stream every other charge lands in."""
+        spec = make_executing_spec(db)
+        model.script("architect",
+                     Reply(architect_reply(self.WITH_CODE)),
+                     Reply(architect_reply(self.PROSE_ONLY)))
+        model.script("design_review", Reply(design_review_reply("FAIL", "redo it")))
+
+        out = drive(db, spec.id, model, wait_at(GateType.DESIGN_APPROVAL),
+                    runner=runner)
+
+        assert out.waiting_on[0].gate_type == GateType.DESIGN_APPROVAL
+        ev = events(db, spec.id, EventKind.FAILURE_CLASSIFIED, role="architect")
+        assert [(e["cls"], e["disposition"], e["phase"]) for e in ev] == [
+            ("review_rejected", "charge", "design_review")]
+        assert ev[0]["retry"] == out.task("architect").retry_count == 1
 
     def test_a_refused_design_write_stops_the_run_instead_of_gating(
             self, db, model, runner, monkeypatch):

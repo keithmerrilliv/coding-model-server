@@ -89,80 +89,20 @@ def test_read_timeout_is_retried_only_once(monkeypatch):
 
 
 # ── requeue decision ────────────────────────────────────────────────────────
-
-class _FakeDB:
-    def __init__(self, prior_unreachable=0):
-        self._events = [
-            _Ev({"phase": "pre_gate_build_check", "runner_unreachable": True})
-            for _ in range(prior_unreachable)
-        ]
-        self.recorded = []
-        self.status_updates = []
-
-    def list_events_by_kind(self, *, spec_id, kind, limit=20):
-        return list(self._events)
-
-    def record_event(self, kind, *, spec_id=None, task_id=None, payload=None):
-        self.recorded.append(payload or {})
-
-    def update_task_status(self, task_id, status):
-        self.status_updates.append((task_id, status))
-
-
-class _Ev:
-    def __init__(self, payload):
-        self.payload = payload
-
-
-class _Obj:
-    def __init__(self, **kw):
-        self.__dict__.update(kw)
-
-
-def _spec_and_task(retry_count=2):
-    return (_Obj(id="spec_63a31526"),
-            _Obj(id="task_1", retry_count=retry_count))
-
-
-def test_first_unreachable_dispatch_requeues_instead_of_gating():
-    db = _FakeDB(prior_unreachable=0)
-    spec, task = _spec_and_task()
-    assert od._requeue_for_unreachable_runner(db, spec, task) is True
-    assert db.status_updates == [("task_1", od.TaskStatus.PENDING)]
-    assert db.recorded[-1]["runner_unreachable"] is True
-    assert db.recorded[-1]["requeue"] == 1
-
-
-def test_requeue_does_not_burn_an_implementer_attempt():
-    """The retry budget belongs to the implementer, not to a sleeping Mac."""
-    db = _FakeDB(prior_unreachable=1)
-    spec, task = _spec_and_task(retry_count=2)
-    od._requeue_for_unreachable_runner(db, spec, task)
-    # retry_count is reported, never incremented, and no increment API is used.
-    assert db.recorded[-1]["retry"] == 2
-    assert task.retry_count == 2
-
-
-def test_escalates_to_a_human_once_the_cap_is_reached():
-    db = _FakeDB(prior_unreachable=od._MAX_UNREACHABLE_REQUEUES)
-    spec, task = _spec_and_task()
-    assert od._requeue_for_unreachable_runner(db, spec, task) is False
-    assert db.status_updates == [], "must not requeue past the cap"
-    assert db.recorded == [], "the caller opens the gate; this records nothing"
-
-
-def test_unrelated_test_ran_events_do_not_count_toward_the_cap():
-    db = _FakeDB(prior_unreachable=0)
-    db._events = [
-        _Ev({"phase": "pre_gate_build_check", "passed": False}),   # real failure
-        _Ev({"phase": "synthesis_repair", "runner_unreachable": True}),
-        _Ev({"phase": "pre_gate_build_check", "runner_unreachable": True}),
-    ]
-    spec, task = _spec_and_task()
-    assert od._requeue_for_unreachable_runner(db, spec, task) is True
-    assert db.recorded[-1]["requeue"] == 2  # only the one matching event
-
-
+#
+# DEV-652 deleted what used to be tested here. The requeue decision was a
+# private re-implementation of dispose's no-verdict branch — it re-scanned
+# TEST_RAN events to count its own requeues and capped them against a local
+# _MAX_UNREACHABLE_REQUEUES — and these tests pinned that machinery through a
+# _FakeDB rather than the behaviour. Both helpers now build a RUNNER_OUTAGE
+# Failure and hand it to dispose, so the cap lives in outcome._CAPS with every
+# other cap and the requeue lands in the failure_classified stream.
+#
+# The behaviour they covered is now pinned end-to-end, through the real
+# dispatch loop instead of a fake database, in tests/seams/test_fault_matrix.py
+# ::TestRunnerFaults — requeues_then_escalates (three requeues, then the
+# infrastructure gate) and recovers (the outage clears and the run continues).
+#
 # ── gate wording, for the case that does reach a human ──────────────────────
 
 def test_gate_says_the_runner_was_unreachable_not_review_this_code():
