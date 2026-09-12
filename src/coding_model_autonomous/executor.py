@@ -153,6 +153,31 @@ PER_FILE_PARSE_RETRIES = int(os.getenv("AUTONOMOUS_PER_FILE_PARSE_RETRIES", "2")
 MANIFEST_WHOLE_FILE_MAX_CHARS = int(
     os.getenv("AUTONOMOUS_MANIFEST_WHOLE_FILE_MAX_CHARS", "40000"))
 
+# DEV-649: synthesis and its repair have no edit mode — they emit whole
+# <<<FILE:>>> blocks — so re-emitting an existing file costs its whole size in
+# output tokens. Run 28 asked deep_reviewer to merge a 145,825-char
+# executor.py inside a 32,000-token budget: re-emitting it needs ~48,600, so
+# every possible answer was a stub and the DEV-636 shrink guard refused three
+# of them, 77 minutes and a 213K-token prompt later. This is the same
+# arithmetic MANIFEST_WHOLE_FILE_MAX_CHARS settles for per-file mode, stated
+# as a fraction of the budget rather than a second independent ceiling
+# (DEV-633): the existing files synthesis must reproduce may claim at most
+# this share of its output budget, leaving the rest for new files and the
+# block markers. 0 disables the check.
+SYNTHESIS_EMIT_HEADROOM = float(
+    os.getenv("AUTONOMOUS_SYNTHESIS_EMIT_HEADROOM", "0.8"))
+
+
+def whole_file_emission_tokens(files: "list[tuple[str, str]]") -> int:
+    """Output tokens needed to re-emit *files* whole, conservatively.
+
+    Divides by the allocator's own chars-per-token estimator, which is below
+    what real tokenizers average on source — so this OVERestimates the cost,
+    the safe direction when the question is "can the answer fit at all".
+    """
+    from .context import CHARS_PER_TOKEN
+    return sum(len(c) for _, c in files) // CHARS_PER_TOKEN
+
 # Architect parse-retry: how many times to re-call the architect when its
 # response can't be parsed for the <<<DESIGN>>> / <<<COMPLEXITY>>> blocks.
 # Total attempts = ARCHITECT_PARSE_RETRIES + 1. Default 2 retries
