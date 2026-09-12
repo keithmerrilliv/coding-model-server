@@ -458,6 +458,18 @@ before any render:
    spent and nobody is charged, where DEV-624 would have dispatched into a
    certain 413.
 
+**Synthesis must be able to emit its answer.** Synthesis and its repair round
+emit whole `<<<FILE:>>>` blocks — they never got the implementer's edit mode —
+so an existing planned output costs its full size in *output* tokens. Since
+DEV-649 that sum is checked before the dispatch: when the files the merge must
+reproduce need more than `AUTONOMOUS_SYNTHESIS_EMIT_HEADROOM` of its budget,
+the spec ends terminal with the arithmetic named (file, size, budget) instead
+of spending the pipeline's most expensive call on a response that can only be
+a fragment. Run 28 asked for a 145,825-char file inside 32,000 tokens —
+re-emitting it needs ~48,600 — and the shrink guard duly refused the 484-line
+answer and then the 156-line repair, 77 minutes later. Per-file mode settles
+the same arithmetic with `AUTONOMOUS_MANIFEST_WHOLE_FILE_MAX_CHARS` (DEV-604).
+
 **The planned-output check.** The plan's implement phase declares the files
 the attempt will produce, and since DEV-645 the workspace is checked against
 that list once the writes have landed and before the build check. A missing

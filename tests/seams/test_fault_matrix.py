@@ -861,6 +861,28 @@ class TestPromptBudget:
         assert "x" * 150_000 in prompt          # the whole file, not a stub
         assert "Not shown" not in prompt
 
+    def test_synthesis_is_not_dispatched_when_it_cannot_emit_its_answer(
+            self, db, model, runner):
+        """DEV-649: synthesis has no edit mode, so an existing planned output
+        costs its full size on the way OUT. Run 28 asked for a 145,825-char
+        file inside a 32,000-token budget — every possible answer was a stub,
+        and the shrink guard refused two of them 77 minutes later."""
+        from seam_fakes import PytestFail
+        self._oversized_repo(runner, 150_000)
+        spec = _impl_ready(db, model, runner)
+        model.always("implementer", Reply("not a file block"))
+        runner.default_test = PytestFail()
+
+        drive(db, spec.id, model, wait_at(GateType.RELEASE_APPROVAL),
+              runner=runner, max_ticks=120)
+
+        assert model.calls_for("synthesis") == []    # never dispatched
+        assert db.get_spec(spec.id).status is SpecStatus.FAILED
+        over = events(db, spec.id, EventKind.AGENT_RAN,
+                      anomaly="synthesis_emission_over_budget")
+        assert over and over[0]["needed_tokens"] > over[0]["allowed_tokens"]
+        assert DAEMON_PATH in over[0]["paths"]
+
     def test_the_synthesis_corpus_sheds_by_the_sum_not_by_a_413(
             self, db, model, runner, monkeypatch):
         """DEV-572: the merge prompt grows linearly with the attempt count and

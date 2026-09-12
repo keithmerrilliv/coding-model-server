@@ -6122,6 +6122,64 @@ def _legacy_attempt_retry(db: Database, spec: Spec, task, failure_detail: str) -
     _dispose(db, spec, task, _test_failure(failure_detail), supervisor=False)
 
 
+def _synthesis_cannot_emit(db: Database, spec: Spec,
+                           spec_dir: Path) -> "Failure | None":
+    """Terminal Failure when synthesis provably cannot produce its answer.
+
+    Synthesis and its repair emit whole `<<<FILE:>>>` blocks — they never got
+    the implementer's edit mode (DEV-581) — so an existing file costs its full
+    size in OUTPUT tokens. When the files the merge must reproduce need more
+    of the budget than it has, every possible response is a stub: run 28 asked
+    for a 145,825-char executor.py inside 32,000 tokens, and DEV-636's shrink
+    guard duly refused the 484-line and then the 156-line answer, 77 minutes
+    after the dispatch. Manifest mode settles the same arithmetic up front
+    with MANIFEST_WHOLE_FILE_MAX_CHARS (DEV-604); this is its counterpart for
+    the escape hatch. Says the numbers so the operator sees the arithmetic
+    rather than a stub refusal an hour later (DEV-649).
+    """
+    if executor.SYNTHESIS_EMIT_HEADROOM <= 0:
+        return None
+    spec_md_path = spec_dir / spec.source_md_path
+    spec_md = spec_md_path.read_text() if spec_md_path.exists() else ""
+    design_path = spec_dir / "design.md"
+    design_md = design_path.read_text() if design_path.exists() else ""
+    budget = executor.implementer_max_tokens_for(design_md)
+    allowed = int(budget * executor.SYNTHESIS_EMIT_HEADROOM)
+    try:
+        view = _spec_context(db, spec, spec_md, role="synthesizer").select(
+            "synthesizer", planned=_planned_implement_outputs(spec))
+    except Exception as exc:   # a context problem must not mask the merge
+        logger.warning("spec %s: could not size the synthesis emission (%s) — "
+                       "dispatching anyway", spec.id, exc)
+        return None
+    planned = set(_planned_implement_outputs(spec))
+    must_emit = [(p, c) for p, c in view.existing_files if p in planned]
+    if not must_emit:
+        return None
+    needed = executor.whole_file_emission_tokens(must_emit)
+    if needed <= allowed:
+        return None
+    biggest = max(must_emit, key=lambda pc: len(pc[1]))
+    detail = (
+        f"synthesis cannot emit its own answer: re-emitting "
+        f"{len(must_emit)} existing planned output(s) whole needs ~{needed} "
+        f"output tokens and the budget is {budget} "
+        f"({allowed} after the {executor.SYNTHESIS_EMIT_HEADROOM:g} emission "
+        f"headroom). Largest is `{biggest[0]}` at {len(biggest[1])} chars. "
+        f"Synthesis has no edit mode, so every response it could give would "
+        f"be a fragment the shrink guard refuses (DEV-649)")
+    logger.error("spec %s: %s", spec.id, detail)
+    db.record_event(EventKind.AGENT_RAN, spec_id=spec.id,
+                    payload={"role": "synthesizer", "model_call": False,
+                             "anomaly": "synthesis_emission_over_budget",
+                             "needed_tokens": needed, "allowed_tokens": allowed,
+                             "max_tokens": budget,
+                             "paths": [p for p, _ in must_emit]})
+    return Failure(FailureClass.SYNTHESIS_FAILED, "synthesizer", "daemon",
+                   detail, extra={"needed_tokens": needed,
+                                  "allowed_tokens": allowed})
+
+
 def _synthesize_or_fail(db: Database, spec: Spec, impl_task, reviewer_task,
                         feedback: str) -> "Failure | None":
     """The exhaustion escape hatch (DEV-433). Runs synthesis and either
@@ -6130,6 +6188,11 @@ def _synthesize_or_fail(db: Database, spec: Spec, impl_task, reviewer_task,
     task and returns None — the spec stays alive."""
     logger.info("spec %s: max retries (%d) exhausted — attempting synthesis",
                 spec.id, MAX_RETRIES)
+    # DEV-649: before the most expensive dispatch in the pipeline, check that
+    # it could answer at all.
+    cannot = _synthesis_cannot_emit(db, spec, db.spec_dir(spec.id))
+    if cannot is not None:
+        return cannot
     framework, framework_opts = "pytest", {}
     ts = _load_plan(spec).get("test_strategy")
     if isinstance(ts, dict):

@@ -122,6 +122,7 @@ instead of becoming a 413 at the model server.
 | `AUTONOMOUS_PROMPT_CHARS_PER_TOKEN` | `3` | Divisor the allocator estimates tokens with. Deliberately below the ~3.3–3.8 real tokenizers average on source, so the estimate errs high — the safe direction for a fit check. |
 | `AUTONOMOUS_PROMPT_HEADROOM` | `0.95` | Fraction of the window the input may claim once the completion and reasoning budgets are reserved. The margin for the estimate above being wrong on a prose-heavy prompt. |
 | `AUTONOMOUS_MANIFEST_WHOLE_FILE_MAX_CHARS` | `40000` | Per-file mode refuses to regenerate an existing file larger than this whole; it must be edited instead (DEV-604). |
+| `AUTONOMOUS_SYNTHESIS_EMIT_HEADROOM` | `0.8` | Share of the synthesis output budget the existing planned outputs may claim. Synthesis has no edit mode, so it must re-emit them whole; over this share the merge is refused before dispatch instead of returning a stub the shrink guard rejects (DEV-649). `0` disables the check. |
 
 **Design review** (on by default — an extra review + revision loop between the
 architect and the implementer):
