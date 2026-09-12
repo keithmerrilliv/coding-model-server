@@ -5949,8 +5949,15 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
                                 agent=_SYNTHESIS_AGENT,
                                 max_tokens=synth_max_tokens, meta=repair_meta)
     except Exception as exc:
+        # DEV-651: `return False, test_output` used to fall through here, and
+        # that is the signature of "the tests failed" — so a dead server on
+        # the LAST model call of the run was charged to the implementer as a
+        # verdict and ended the spec. The merge call above has asked the
+        # DEV-629 question since it landed; the repair was never brought
+        # along. A no-verdict requeues and the escape hatch tries again.
         logger.error("spec %s: synthesis repair call failed: %s", spec.id, exc)
-        return False, test_output
+        raise SynthesisNoVerdict(
+            classify_exception(exc, role="synthesis_repair", phase="repair"))
     _note_truncation(db, spec, impl_task, "synthesis_repair", repair_meta,
                      synth_max_tokens)
     repair = parse_implementer_response(repair_raw)

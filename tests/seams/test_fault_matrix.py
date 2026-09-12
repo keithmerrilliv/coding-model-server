@@ -2,10 +2,14 @@
 
 Each case injects exactly one fault at a seam and asserts what the daemon
 does about it. Plain tests pin today's handling — the fixes DEV-538, 581,
-620, 622, 624, 637 and 638 shipped. ``xfail(strict=True)`` marks a behaviour
-the DEV-628 epic still owes: the test is written against the intended
-outcome and its ticket, and it starts passing (and therefore failing the
-xfail) the day the fix lands, so the mark has to be lifted with the fix.
+620, 622, 624, 637 and 638 shipped.
+
+The tier opened with three ``xfail(strict=True)`` marks standing for work the
+DEV-628 epic still owed; all three were lifted with their fixes (two by
+DEV-629, one by DEV-642) and none remain. That is the convention if you add
+one: write the test against the INTENDED outcome, name its ticket in the
+reason, and keep it strict so it fails the day the fix lands and the mark has
+to come off with it.
 """
 from __future__ import annotations
 
@@ -640,6 +644,42 @@ class TestSynthesisLedger:
         anomaly = events(db, spec.id, EventKind.AGENT_RAN, anomaly="artifact_ledger")
         assert anomaly[-1]["role"] == "synthesizer"
         assert anomaly[-1]["refused"][0]["action"] == "refused_shrink"
+
+    def test_a_dead_server_during_the_repair_is_not_a_test_failure(
+            self, db, model, runner):
+        """DEV-651: the repair round is the LAST model call of the run, and
+        its ``except`` returned ``False, test_output`` — the signature of
+        "the tests failed" — so a dead server was charged to the implementer
+        as a verdict and ended the spec. The merge call 140 lines up has
+        asked the DEV-629 question since it landed; the repair was never
+        brought along. A no-verdict requeues and the escape hatch tries
+        again."""
+        from seam_fakes import PytestFail
+        spec = _impl_ready(db, model, runner)
+        model.always("implementer", Reply("not a file block"))
+        model.script("synthesis", Reply(implementer_reply()), Down(),
+                     Reply(implementer_reply()))
+        # The merge's own run fails at a REPAIRABLE rate — 9 of 10 pass, over
+        # the near-miss threshold — so it enters the repair round, where the
+        # dead server is waiting. The second merge's run is clean.
+        runner.then(PytestFail(1, 9))
+        runner.default_test = PytestPass(10)
+
+        out = drive(db, spec.id, model, wait_at(GateType.RELEASE_APPROVAL),
+                    runner=runner)
+
+        # The spec survived the outage and reached its release gate.
+        assert out.reason == "waiting" and out.status is not SpecStatus.FAILED
+        assert out.waiting_on[0].gate_type == GateType.RELEASE_APPROVAL
+        ev = events(db, spec.id, EventKind.FAILURE_CLASSIFIED,
+                    role="synthesis_repair")
+        assert [(e["cls"], e["outcome"], e["disposition"]) for e in ev] == [
+            ("transport", "no_verdict", "requeue")]
+        # and the outage was never filed as a verdict on the code: the old
+        # `return False, test_output` reached the caller as "the synthesized
+        # merge does not pass its tests" and ended the spec there.
+        assert events(db, spec.id, EventKind.FAILURE_CLASSIFIED,
+                      cls="synthesis_failed") == []
 
     def test_synthesis_corpus_is_only_the_attempts(self, db, model, runner):
         """DEV-639: a sandbox overlay and a pytest cache left in the workspace
