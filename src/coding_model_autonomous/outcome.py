@@ -339,6 +339,65 @@ def rotation_offset(db: Any, spec_id: str, task) -> int:
                and p.get("rotate"))
 
 
+# DEV-631: the stable part of a failure, for asking "is this the same problem
+# again?". `Failure.signature` is deliberately precise — it carries the first
+# line of the detail — which makes it good diagnostics and a poor identity.
+# Run 29 produced six verdicts and six distinct signatures while failing the
+# same way twice: `edit block #1: SEARCH text not found` and `edit block #5:
+# SEARCH text not found. Closest window: 0.81 similarity` are one defect (the
+# model cannot place an anchor in a 147K file) wearing two labels. The block
+# number and the score are exactly the volatile particulars that must NOT be
+# part of an identity. Class, phase and the file it is about are what is left.
+_KEY_PATH_RE = re.compile(r"((?:[\w.+-]+/)+[\w.+-]+\.[A-Za-z0-9]+)")
+
+
+def coarse_key(failure: Failure) -> str:
+    """Identity of a failure for invariance detection: class | phase | path."""
+    m = _KEY_PATH_RE.search(failure.detail or "")
+    return f"{failure.cls.value}|{failure.phase}|{m.group(1) if m else ''}"
+
+
+def attempt_agent(db: Any, spec_id: str, task: Any) -> str:
+    """Which agent produced this task's current attempt.
+
+    Read from the generation ``AGENT_RAN`` event rather than threaded through
+    every catch site: the rotation already records its pick there, and a
+    dozen extra parameters to carry it to the classifier would be worse.
+    """
+    try:
+        events = db.list_events_by_kind(spec_id=spec_id,
+                                        kind=EventKind.AGENT_RAN, limit=100)
+    except Exception:
+        return ""
+    for ev in events:  # newest first
+        if getattr(ev, "task_id", None) != getattr(task, "id", None):
+            continue
+        agent = _payload(ev).get("agent")
+        if agent:
+            return str(agent)
+    return ""
+
+
+def invariant_agents(db: Any, spec_id: str, task: Any, failure: Failure) -> list[str]:
+    """Distinct agents that have already produced this failure's coarse key.
+
+    Two or more means the rotation pulled its one lever — a different model —
+    and the outcome did not move. That is a stronger statement than the two
+    consecutive identical signatures DEV-631 originally proposed, and it does
+    not lose the pattern when an unrelated failure lands between two instances
+    of the real one (run 29's retry 3 did exactly that).
+    """
+    key = coarse_key(failure)
+    agents = []
+    for p in _classified_events(db, spec_id, getattr(task, "id", None)):
+        if p.get("coarse_key") != key:
+            continue
+        a = p.get("agent")
+        if a and a not in agents:
+            agents.append(str(a))
+    return agents
+
+
 def _record(db: Any, spec: Any, task: Any, failure: Failure, action: str,
             consecutive: int, detail: str = "") -> None:
     payload = {
@@ -348,7 +407,17 @@ def _record(db: Any, spec: Any, task: Any, failure: Failure, action: str,
         "retry": getattr(task, "retry_count", None), "consecutive": consecutive,
         "cap": failure.cap, "disposition": action, "rotate": failure.rotate,
         "exc_type": failure.exc_type, "phase": failure.phase,
+        # DEV-631: the identity used for invariance detection, and which agent
+        # produced it. Both on EVERY classification, not just the no-verdict
+        # classes that happened to carry an agent before — "did changing the
+        # model change anything?" is unanswerable without them, which is also
+        # what DEV-530's confound needs.
+        "coarse_key": coarse_key(failure),
     }
+    if "agent" not in failure.extra or not failure.extra.get("agent"):
+        resolved = attempt_agent(db, getattr(spec, "id", ""), task)
+        if resolved:
+            payload["agent"] = resolved
     if detail:
         payload["disposition_detail"] = detail[:300]
     payload.update({k: v for k, v in failure.extra.items() if v is not None})
