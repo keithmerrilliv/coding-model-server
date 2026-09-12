@@ -14,7 +14,7 @@ from that run.
 import pytest
 
 from coding_model_autonomous.db import Database
-from coding_model_autonomous.models import EventKind, SpecStatus, TaskStatus
+from coding_model_autonomous.models import EventKind, SpecStatus
 from coding_model_autonomous.outcome import (
     Failure, FailureClass, attempt_agent, coarse_key, invariant_agents,
 )
