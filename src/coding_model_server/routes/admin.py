@@ -1,5 +1,5 @@
 """Admin/observability routes for the dashboard: metrics, GPU, active model."""
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 
 from coding_model_server.config import Config
 from coding_model_server.metrics import gpu_sampler, rag_metrics, request_metrics
@@ -64,3 +64,22 @@ def admin_active_model() -> dict:
     snap['chat_in_flight'] = chat_admission.in_flight
     snap['chat_max_inflight'] = chat_admission.max_inflight
     return snap
+
+
+@router.post("/v1/admin/swap/reset", dependencies=[Depends(verify_admin_key)])
+def admin_swap_reset(force: bool = False) -> dict:
+    """Operator escape hatch for a wedged model swap (DEV-583, DEV-582).
+
+    Clears leaked in-flight reservations so the next swap proceeds without a
+    service restart. Refuses (409) while a proxy is genuinely executing —
+    reaping real work would swap the model out from under a request — unless
+    ``force=true``, which is the operator saying they know better.
+    """
+    result = llama_server_manager.reset_swap_state(force=force)
+    if not result["reset"]:
+        raise HTTPException(
+            status_code=409,
+            detail=(f"{result['live_proxies']} proxy(ies) executing — a request "
+                    f"is genuinely in flight; pass force=true to reap it anyway"))
+    return result
+

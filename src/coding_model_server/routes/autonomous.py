@@ -11,8 +11,9 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 
 from coding_model_server.runtime import get_autonomous_db, verify_admin_key
-from coding_model_autonomous.db import GateAlreadyDecidedError
+from coding_model_autonomous.db import GateAlreadyDecidedError, SpecAlreadyTerminal
 from coding_model_autonomous.models import (
+    CancelSpecRequest,
     GateRespondRequest,
     SpecSummary,
     SubmitSpecRequest,
@@ -87,6 +88,25 @@ def get_autonomous_spec(spec_id: str) -> SpecSummary:
         tasks=db.list_tasks_for_spec(spec_id),
         all_gates=db.list_gates_for_spec(spec_id),
     )
+
+
+@router.post("/v1/autonomous/specs/{spec_id}/cancel",
+             dependencies=[Depends(verify_admin_key)])
+def cancel_spec(spec_id: str, request: Optional[CancelSpecRequest] = None) -> dict:
+    """Cancel a running spec (DEV-583, DEV-493): CANCELLED survives any pass
+    still in flight (DEV-567), open gates are cancelled, task rows closed,
+    the reason recorded. A model call already issued runs to completion and
+    is discarded; a leaked slot is reaped by the model server (DEV-582)."""
+    db = get_autonomous_db()
+    reason = request.reason if request else None
+    try:
+        summary = db.cancel_spec(spec_id, reason=reason, by="operator")
+    except ValueError:
+        raise HTTPException(status_code=404, detail=f"spec {spec_id} not found")
+    except SpecAlreadyTerminal as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    logger.warning("Spec %s cancelled by operator: %s", spec_id, reason or "no reason")
+    return summary
 
 
 @router.get("/v1/autonomous/gates", dependencies=[Depends(verify_admin_key)])
