@@ -3,12 +3,9 @@ import requests
 import json
 import time
 import os
-import sys
-import re
 import zipfile
 import io
 import threading
-from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from coding_model_server.code_chunker import CodeChunker
@@ -139,7 +136,7 @@ def process_zip(zip_id, title):
                                         })
                                     pool.map(send_chunk, payloads)
                                 except: continue
-        print(f"      Processed all source files in zip.")
+        print("      Processed all source files in zip.")
     except Exception as e:
         print(f"      Zip processing failed: {e}")
 
@@ -166,7 +163,7 @@ def ingest_sample(identifier):
         abstract = " ".join([item.get('text', '') for item in data.get('abstract', []) if 'text' in item])
         prose = extract_text_from_json(data.get('primaryContentSections', []))
         ingest_content(f"Title: {title}\nAbstract: {abstract}\n\n{prose}", data_url, title)
-        print(f"    Ingested documentation prose.")
+        print("    Ingested documentation prose.")
 
         # 2. Ingest Source (Intelligent Chunking)
         zip_id = data.get('sampleCodeDownload', {}).get('action', {}).get('identifier')
@@ -208,7 +205,6 @@ def main():
         futures = {pool.submit(ingest_sample, ident): ident for ident in to_process}
 
         for future in as_completed(futures):
-            ident = futures[future]
             try:
                 result = future.result()
                 if result:

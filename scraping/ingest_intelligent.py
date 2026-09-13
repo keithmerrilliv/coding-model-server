@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 import os
-import sys
 import requests
 import hashlib
-import time
 import json
 import logging
 import threading
-from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from coding_model_server.code_chunker import CodeChunker
