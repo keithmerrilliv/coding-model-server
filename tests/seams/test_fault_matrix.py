@@ -490,6 +490,29 @@ class TestRunnerFaults:
         assert [e["disposition"] for e in ev] == ["requeue"] * 2
         assert (db.spec_dir(spec.id) / "tested_manifest.json").is_file()
 
+    def test_a_suspected_reconstruction_is_named_at_the_gate(self, db, model, runner):
+        """DEV-536 (folded into DEV-630): the runner's overwrite detector was
+        produced and never consumed. It heads the build output now, so it is
+        on the code-review gate a human reads and on the TEST_RAN row."""
+        from seam_fakes import TestOutcome
+        marker = d.test_runner.RECONSTRUCTION_MARKER
+        spec = _impl_ready(db, model, runner)
+        model.script("implementer", Reply(implementer_reply()))
+        runner.then(TestOutcome(False, (
+            f"{marker} 1 existing file(s) were REPLACED by a much smaller "
+            "version. A file the implementer never read, re-emitted from "
+            "imagination (DEV-492): an edit does not shrink a file like this.\n"
+            f"  - {DAEMON_PATH}: 163 -> 45 lines\n\n"
+            "collected 2 items\n\n2 failed in 0.20s\n"), "reconstruction"))
+
+        out = drive(db, spec.id, model, wait_at(GateType.CODE_REVIEW), runner=runner)
+
+        assert out.reason == "waiting"
+        assert marker in out.waiting_on[0].prompt_md
+        assert "163 -> 45 lines" in out.waiting_on[0].prompt_md
+        checks = events(db, spec.id, EventKind.TEST_RAN, phase="pre_gate_build_check")
+        assert checks and checks[-1]["suspected_reconstruction"] is True
+
     def test_inconclusive_output_is_not_a_pass(self, db, model, runner):
         """Exit 0 with no summary line: the structural guard refuses PASS and
         the gate says so instead of claiming a green build."""

@@ -353,7 +353,12 @@ def _planner_no_verdict(db: Database, spec: Spec, failure: Failure) -> None:
             if payload.get("phase") == "planner" and \
                     payload.get("outcome") == _outcome.Outcome.NO_VERDICT.value:
                 prior += 1
-    except Exception:
+    except Exception as exc:
+        # DEV-630: the planner's no-verdict cap reads as 'unused' when it
+        # cannot be read. Still 0, never silently.
+        logger.warning("spec %s: could not count planner no-verdicts (%s) — "
+                       "the planner cap is NOT enforced this tick (DEV-630)",
+                       spec.id, exc)
         prior = 0
     consecutive = prior + 1
     cap = failure.cap
@@ -521,10 +526,19 @@ def _validate_test_strategy(yaml_text: str, spec_md: str) -> list[str]:
     # repo key as "every declared file is unreadable" and terminally fails
     # the spec before any gate opens — though a planner round fixes a dropped
     # key (run 19's plan gate proved it in one note; run 20 died on it).
+    surface = _change_surface(spec_md)
+    if surface.kind == "unrecognised":
+        # DEV-630: the spec has a table and we could not read a path from it.
+        # "Nothing declared" and "could not tell" used to be the same [] here,
+        # and this guard stood down on both. Arm it by name instead.
+        logger.warning(
+            "plan validation: the change-surface table has %d row(s) but no "
+            "path could be read from any of them — the DEV-492 repo-key check "
+            "cannot tell whether existing files are modified and is NOT armed "
+            "for this plan (DEV-630)", surface.rows)
     if (not strategy.get("repo")
             and not any("`repo`" in p for p in problems)
-            and (_declared_file_modifications(spec_md)
-                 or _change_surface_path_rows(spec_md))):
+            and surface.any):
         problems.append(
             "the spec declares modifications to existing files but the plan's "
             "`test_strategy` has no `repo` key naming the repository to read "
@@ -603,6 +617,7 @@ ALLOW_UNREAD_FILE_MODIFICATION = (
 # tests that grew up on them.
 _declared_file_modifications = _context.declared_modifications
 _change_surface_path_rows = _context.change_surface_path_rows
+_change_surface = _context.change_surface  # DEV-630: the typed reading
 
 
 
@@ -1293,7 +1308,14 @@ def _crash_recoveries_used(db: Database, spec_id: str, task_id: str) -> int:
     try:
         events = db.list_events_by_kind(spec_id=spec_id,
                                         kind=EventKind.AGENT_RAN, limit=500)
-    except Exception:
+    except Exception as exc:
+        # DEV-630: a cap that cannot be read must not read as "unused". This
+        # is the crash-recovery bound; returning 0 here silently lifts it for
+        # this tick. Still 0 — failing closed would park every spec on a
+        # transient read error — but never silently.
+        logger.warning("spec %s: could not count crash recoveries (%s) — the "
+                       "recovery cap is NOT enforced this tick (DEV-630)",
+                       spec_id, exc)
         return 0
     for ev in events:
         if ev.task_id != task_id:
@@ -1584,7 +1606,12 @@ def _testability_rounds_used(db: Database, spec_id: str) -> int:
     try:
         events = db.list_events_by_kind(spec_id=spec_id,
                                         kind=EventKind.AGENT_RAN)
-    except Exception:
+    except Exception as exc:
+        # DEV-630: as for the crash-recovery cap — the testability check's
+        # revision budget reads as "unspent" whenever it cannot be read.
+        logger.warning("spec %s: could not count testability rounds (%s) — "
+                       "the revision cap is NOT enforced this tick (DEV-630)",
+                       spec_id, exc)
         return 0
     for ev in events:
         try:
@@ -2294,9 +2321,17 @@ def _generate_implementation(
     # The list is the ALLOCATED one: an edit block can only be anchored against
     # content the prompt actually carried.
     edit_mode = executor.DIFF_BASED_EDITS and bool(existing_files)
-    if executor.DIFF_BASED_EDITS and not existing_files and (
-            _declared_file_modifications(spec_md)
-            or _change_surface_path_rows(spec_md)):
+    surface = _change_surface(spec_md)
+    if executor.DIFF_BASED_EDITS and not existing_files and surface.kind == "unrecognised":
+        # DEV-630: same distinction as the plan-validation guard. The spec has
+        # a table; edit mode could not read a path from it; the "edit mode
+        # DISARMED" warning below only fires when a path WAS read, so this
+        # case used to disarm with no line at all — DEV-621's run 19.
+        logger.warning(
+            "spec %s: the change-surface table has %d row(s) but no path could "
+            "be read from any of them — edit mode cannot tell whether existing "
+            "files are involved and is NOT armed (DEV-630)", spec.id, surface.rows)
+    if executor.DIFF_BASED_EDITS and not existing_files and surface.any:
         # DEV-620: the silent version of this was run 19's only trace — a log
         # line missing its "[diff-based edits]" suffix.
         logger.warning(
@@ -3733,6 +3768,14 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
 
             build_payload = {"phase": "pre_gate_build_check",
                              "passed": build_passed if not build_reason else False,
+                             # DEV-536 (via DEV-630): the runner's overwrite
+                             # detector was produced and never consumed. It now
+                             # heads the output (see test_runner) and is
+                             # queryable here, so a silent regression of the
+                             # read path is detectable after the fact.
+                             "suspected_reconstruction":
+                                 test_runner.RECONSTRUCTION_MARKER
+                                 in (build_output or "")[:2000],
                              "build_failed": build_reason is not None,
                              # DEV-547/DEV-529: warnings become queryable
                              # rather than living only in the raw log.

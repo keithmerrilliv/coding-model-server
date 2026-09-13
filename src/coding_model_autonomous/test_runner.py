@@ -725,6 +725,18 @@ def _drop_protected(patch_files: list[dict],
 # is how callers branch on it.
 RUNNER_UNREACHABLE = "mac-runner unreachable"
 
+# DEV-536: the runner's per-file overwrite record carries
+# `suspected_reconstruction` (new_lines < old_lines * RUNNER_OVERWRITE_SHRINK_RATIO)
+# and the orchestrator never read it, so the detector helped only someone
+# reading the Mac's log by hand. It heads the output now — first, not last,
+# as the runner does with its own integration warnings — so the reviewer, the
+# retry feedback and the human at the gate all see it, and the daemon records
+# it on the TEST_RAN row. Since DEV-492's read path removed the CAUSE, this is
+# a regression detector: it is what says the read path has silently stopped
+# working (a Mac not redeployed, a fetch failing soft, a table naming nothing).
+RECONSTRUCTION_MARKER = "[suspected reconstruction]"
+
+
 # Connection-level failures fail fast (the Mac is asleep, the tunnel is gone),
 # so retrying is nearly free and covers DEV-518's link re-enumeration, which
 # clears in seconds. A read timeout is the opposite: it has already waited the
@@ -845,6 +857,19 @@ def _run_mac_runner_tests(
         return False, f"mac-runner returned non-JSON response: {resp.text[:2000]}"
 
     output = str(data.get("output", ""))
+    reconstructed = [ow for ow in (data.get("overwrites") or [])
+                     if isinstance(ow, dict) and ow.get("suspected_reconstruction")]
+    if reconstructed:
+        output = (
+            f"{RECONSTRUCTION_MARKER} {len(reconstructed)} existing file(s) "
+            "were REPLACED by a much smaller version. A file the implementer "
+            "never read, re-emitted from imagination (DEV-492): an edit does "
+            "not shrink a file like this. Treat the shrunken file as suspect "
+            "before anything else in this output:\n"
+            + "".join(f"  - {ow.get('path')}: {ow.get('old_lines')} -> "
+                      f"{ow.get('new_lines')} lines\n" for ow in reconstructed)
+            + "\n" + output
+        )
     if dropped_protected:
         # Say so in the output the reviewer and the retry both read: silently
         # discarding the implementer's version of a file would be its own
