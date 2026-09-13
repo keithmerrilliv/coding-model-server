@@ -942,6 +942,64 @@ def _run_mac_runner_tests(
     return bool(data.get("passed")), output
 
 
+def _is_self_target_repo(repo: str) -> bool:
+    """True when *repo* names this very repository and it is a git checkout."""
+    return bool(repo) and repo == _SERVER_REPO_ROOT.name and \
+        (_SERVER_REPO_ROOT / ".git").exists()
+
+
+def _local_head(root: Path) -> str:
+    try:
+        return subprocess.run(["git", "-C", str(root), "rev-parse", "--short", "HEAD"],
+                              capture_output=True, text=True, check=False).stdout.strip() or "?"
+    except OSError:
+        return "?"
+
+
+def _reject_unsafe_read_path(rel: str) -> Optional[str]:
+    """Mirror of the runner's check: `git show ref:path` cannot leave the
+    tree anyway, but a clear refusal beats a confusing git error."""
+    if not rel or not rel.strip():
+        return "empty path"
+    if rel.startswith("/"):
+        return "absolute paths are not accepted"
+    if ".." in Path(rel).parts:
+        return "path escapes the repository"
+    return None
+
+
+_LOCAL_READ_PER_FILE_MAX_BYTES = 2_000_000
+
+
+def _read_local_repo_files(root: Path, paths: list[str], base_ref: str,
+                           ) -> tuple[list[tuple[str, str]], list[str]]:
+    """`git show <base_ref>:<path>` in *root* for every path — files as their
+    text, directories as git's own `tree <ref>:<dir>/` listing — with the same
+    in-band per-path problems the runner returns (DEV-674)."""
+    files: list[tuple[str, str]] = []
+    problems: list[str] = []
+    for rel in paths:
+        err = _reject_unsafe_read_path(rel)
+        if err:
+            problems.append(f"{rel}: {err}")
+            continue
+        try:
+            proc = subprocess.run(["git", "-C", str(root), "show", f"{base_ref}:{rel}"],
+                                  capture_output=True, check=False)
+        except OSError as e:
+            problems.append(f"{rel}: git unavailable: {e}")
+            continue
+        if proc.returncode != 0:
+            detail = proc.stderr.decode("utf-8", "replace").strip()
+            problems.append(f"{rel}: {(detail or 'git show failed')[:300]}")
+            continue
+        if len(proc.stdout) > _LOCAL_READ_PER_FILE_MAX_BYTES:
+            problems.append(f"{rel}: file too large ({len(proc.stdout)} bytes)")
+            continue
+        files.append((rel, proc.stdout.decode("utf-8", "replace")))
+    return files, problems
+
+
 def fetch_repo_files(
     repo: str,
     paths: list[str],
@@ -966,6 +1024,17 @@ def fetch_repo_files(
     """
     if not paths:
         return [], []
+    if _is_self_target_repo(repo):
+        # DEV-674: a self-target read must come from the tree the sandbox
+        # overlay is built from — this repository's own HEAD — never from the
+        # Mac's clone of it, which is at whatever commit it was last pulled to.
+        # Run 32 edited a pre-DEV-672 outcome.py fetched from the Mac and its
+        # artifact reverted the merged fix with every new test green.
+        local_files, local_problems = _read_local_repo_files(_SERVER_REPO_ROOT, paths, base_ref)
+        logger.info("read_files: repo=%s source=local sha=%s ref=%s requested=%d got=%d problems=%d",
+                    repo, _local_head(_SERVER_REPO_ROOT), base_ref, len(paths),
+                    len(local_files), len(local_problems))
+        return local_files, local_problems
     url = f"{MAC_RUNNER_URL.rstrip('/')}/v1/read_files"
     payload = {"repo": repo, "base_ref": base_ref, "paths": list(paths)}
     try:
