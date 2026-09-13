@@ -3613,9 +3613,14 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
     # Pick the implementer. Retry 0 honors the architect's complexity-based
     # recommendation; later retries walk the rotation chain so each attempt
     # uses a different model family — see project_implementer_rotation.md.
-    # Falling back to task.agent (env-default) when complexity.json is absent
-    # so retries still rotate from a sensible anchor.
-    initial_agent = _select_implementer_agent(spec_dir) or task.agent
+    # DEV-640: the anchor must be something this loop does not mutate.
+    # `task.agent` is overwritten by every pick below, so anchoring on it
+    # re-based the chain each retry and retries 3 and 4 both landed on the
+    # last rotation slot. The role's configured default is what the task was
+    # created with (_bootstrap_tasks) and never changes; task.agent is only
+    # the last resort when no default is configured.
+    initial_agent = (_select_implementer_agent(spec_dir)
+                     or executor.role_to_agent("implementer") or task.agent)
     # DEV-629: a no-verdict that asked for a different agent (a 413, a
     # truncation, an empty completion) advances the pick without spending
     # the budget.
