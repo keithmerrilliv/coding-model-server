@@ -338,6 +338,8 @@ coding-model-autonomous status <spec_id>        # Watch progress (omit id to lis
 coding-model-autonomous gates                   # Review and approve gates
 coding-model-autonomous review <gate_id> --approve [--notes ...]
 coding-model-autonomous events <spec_id>        # Event log (alias: logs)
+coding-model-autonomous cancel <spec_id> --reason "…"   # Stop a run; open gates cancelled, reason recorded
+coding-model-autonomous swap-reset              # Clear a wedged model swap without a restart
 ```
 
 **Pipeline:** Planner (`dense_architect`) → *plan approval gate* → Architect →
@@ -428,6 +430,30 @@ about code that did not build. A reviewer's approval notes accepted by the API,
 mirrored to the issue tracker, and read by no agent. Each was found by running
 the thing end to end against a real compiler and reading what it actually said.
 
+**Runs 17 to 30 — the pipeline turned on itself.** After run 16 the target
+became this repository: specs that modify the daemon, run in its own sandbox,
+land on a `pipeline/` branch. Every fix since is a system defect found that
+way, and the kernel refactor ([CHANGELOG](CHANGELOG.md)) is their sum.
+
+| Run | What happened |
+|----|----|
+| 17 | **First self-delivery.** The pipeline changed its own daemon and delivered the branch with nobody editing the code (DEV-597, DEV-574). |
+| 18–19 | Manifest mode regenerated existing files from priors: its path filter expected dicts and received dataclasses, so no file was ever fetched (DEV-604). Run 19's change-surface table was written as prose, matched zero rows, and silently disarmed every guard keyed on it (DEV-621). |
+| 20 | Pipeline-written write guards landed on main (DEV-602); the sandbox could not import the repository's own package, so every attempt failed the same way regardless of the code (DEV-626). |
+| 21 | An implementer prompt passed 1 MB into an HTTP 413 — per-section knobs that nothing summed (DEV-627); anchored edits failed byte-exact transcription of an 18-line anchor three retries running (DEV-635, DEV-638). |
+| 23 | The reviewer wrote a file at the implementer's path and nothing objected: the collision guard from run 17's incident had shipped, and none of the sixteen write sites called it. This is the run that made the refactor a plan rather than a list. |
+| 24 | The artifact ledger redirected the reviewer's write, visible on the gate — phase 1 proven. Three different models guessed a `src.` import root the sandbox does not have (DEV-644). |
+| 25 | A transport failure was a no-verdict and charged nothing; a re-emitted stub was refused against the repository baseline; the synthesis corpus came from the ledger, not a directory walk — phase 2 proven. |
+| 26 | A spec against the 300 KB daemon ran with no environment override for the first time, and synthesis merged six failed attempts into a passing one — phase 3 proven. |
+| 28 | Synthesis was asked to re-emit a 145,825-character file inside a 32,000-token budget; 77 minutes later two stubs had been refused. The arithmetic is now checked before the call (DEV-649). |
+| 29 | Five attempts, four agents, six distinct failure signatures for what were two defects; refused at DEV-649's guard. The run the invariance detector was built from (DEV-631). |
+| 30 | **Delivered.** A pipeline-written change to its own placeholder-path guard (DEV-656) went from spec to branch end to end. |
+
+No per-agent success rates appear here, on purpose: rotation is
+failure-triggered, so an agent's position in it confounds its rate (DEV-530).
+Every dispatch now records what preceded it and how the agent was assigned,
+which is what a fair comparison needs; the comparison itself has not been run.
+
 Every defect above is tracked, with the evidence that produced it, and the fix
 is pinned by a regression test.
 
@@ -453,6 +479,8 @@ header (or `Authorization: Bearer <key>`).
 | `GET /v1/autonomous/specs` | List recent specs |
 | `GET /v1/autonomous/specs/{id}` | Spec details with gates and events |
 | `GET /v1/autonomous/specs/{id}/events` | Event log for a spec |
+| `POST /v1/autonomous/specs/{id}/cancel` | Cancel a running spec (DEV-583) |
+| `POST /v1/admin/swap/reset` | Clear leaked in-flight reservations on the model server (DEV-583) |
 | `GET /v1/autonomous/gates` | List open review gates |
 | `GET /v1/autonomous/gates/{id}` | Gate detail |
 | `POST /v1/autonomous/gates/{id}/respond` | Approve or reject a gate |
@@ -517,7 +545,7 @@ coding-model-server/
 │       ├── seccomp_filter.py   #   seccomp-BPF filter for sandboxed test runs
 │       ├── jira_client.py      #   Jira interface (FakeJiraClient + real Atlassian)
 │       └── jira_sync.py        #   Bidirectional sync (SQLite ↔ Jira)
-├── tests/                      # pytest suite (127 modules; `pytest` from the repo root)
+├── tests/                      # pytest suite (169 modules plus the seam tier; `pytest` from the repo root)
 ├── bin/                        # Entry-point scripts: setup.sh, start*.sh
 ├── scripts/                    # Operational scripts (redeploy, benchmarks, sweeps, stats)
 ├── systemd/                    # Service units (use `python -m coding_model_server.X` ExecStart)
