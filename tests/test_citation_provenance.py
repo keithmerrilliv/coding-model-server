@@ -61,22 +61,30 @@ class TestTiers:
         assert d._cite_paths(notes, known) == {"tests/test_x.py": "fenced"}
 
     def test_prose_is_the_last_resort(self):
-        """A human review with no build output: a full path or a code span
-        counts; a bare basename in running prose does not."""
-        known = {"src/pkg/engine.py", "src/pkg/util.py", "src/pkg/cli.py"}
+        """A human review with no build output: the pre-DEV-539 rule, and
+        logged as weak. "cli.py is fine" cites cli.py here — the alternative
+        when nothing else cites is regenerating every file, cli.py included,
+        so the prose tier costs nothing the fallback would not."""
+        known = {"src/pkg/engine.py", "src/pkg/util.py", "src/pkg/cli.py", "src/pkg/io.py"}
         notes = ("Please fix src/pkg/engine.py — the loop is off by one. "
                  "`util.py` needs the same guard. cli.py is fine.")
         assert d._cite_paths(notes, known) == {
-            "src/pkg/engine.py": "prose", "src/pkg/util.py": "prose"}
+            "src/pkg/engine.py": "prose", "src/pkg/util.py": "prose",
+            "src/pkg/cli.py": "prose"}
 
     def test_prose_does_not_count_once_anything_positional_exists(self):
         known = {"src/pkg/engine.py", "src/pkg/util.py"}
         notes = "src/pkg/engine.py:10: error: boom\nalso check `util.py`"
         assert d._cite_paths(notes, known) == {"src/pkg/engine.py": "diagnostic"}
 
-    def test_a_bare_basename_in_prose_never_cites(self):
-        known = {"Sources/CentipedeCore/Mushroom.swift"}
-        assert d._cite_paths("Mushroom.swift is fine. Compare with Mushroom.swift.", known) == {}
+    def test_a_fenced_block_also_outranks_prose(self):
+        known = {"src/pkg/engine.py", "src/pkg/util.py"}
+        notes = "```\nTraceback in src/pkg/engine.py\n```\nutil.py is unrelated"
+        assert d._cite_paths(notes, known) == {"src/pkg/engine.py": "fenced"}
+
+    def test_a_basename_never_matches_inside_another_token(self):
+        known = {"shared/t.ts"}
+        assert d._cite_paths("unrelated note about anything else", known) == {}
 
     def test_nothing_known_nothing_cited(self):
         assert d._cite_paths(RUN_8, set()) == {}
