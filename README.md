@@ -448,6 +448,7 @@ way, and the kernel refactor ([CHANGELOG](CHANGELOG.md)) is their sum.
 | 28 | Synthesis was asked to re-emit a 145,825-character file inside a 32,000-token budget; 77 minutes later two stubs had been refused. The arithmetic is now checked before the call (DEV-649). |
 | 29 | Five attempts, four agents, six distinct failure signatures for what were two defects; refused at DEV-649's guard. The run the invariance detector was built from (DEV-631). |
 | 30 | **Delivered.** A pipeline-written change to its own placeholder-path guard (DEV-656) went from spec to branch end to end. |
+| 31 | **Delivered.** Centipede logic core slice 7 on the Mac runner: one build-failure retry (rotated, only the cited file regenerated), 52 tests green, three files pushed — the proving run for phases 4–6 (DEV-666, DEV-667, DEV-668). It also found the coarse-key defect in DEV-672. |
 
 No per-agent success rates appear here, on purpose: rotation is
 failure-triggered, so an agent's position in it confounds its rate (DEV-530).
