@@ -107,7 +107,9 @@ _PLACEHOLDER_PREFIXES = ("path/to/", "another/file", "relative/path", "your/file
 
 
 def is_placeholder_path(rel_path: str) -> bool:
-    """Return True if rel_path matches a prompt-format placeholder pattern."""
+    """Return True if rel_path matches a prompt-format placeholder pattern.
+
+    Rules 6-7 added per DEV-655 (DEV-656)."""
     p = rel_path.strip()
     # Rule 1: empty string
     if not p:
@@ -130,6 +132,12 @@ def is_placeholder_path(rel_path: str) -> bool:
         return True
     # Rule 5: ends with '.ext'
     if base.endswith('.ext'):
+        return True
+    # Rule 6: format placeholder — contains '{' or '}'
+    if '{' in p or '}' in p:
+        return True
+    # Rule 7: glob metacharacter — contains '*', '?', or '['
+    if '*' in p or '?' in p or '[' in p:
         return True
     return False
 
