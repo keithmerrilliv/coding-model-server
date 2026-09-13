@@ -140,11 +140,25 @@ class TestInvariantAgents:
         assert invariant_agents(db, spec.id, task, _edits(RUN29_BLOCK5)) == [
             "implementer"]
 
-    def test_a_different_problem_shares_no_history(self, db, spec_task):
+    def test_a_different_problem_starts_its_own_count(self, db, spec_task):
+        """A new key inherits nothing — it counts only the agent on the attempt
+        that just produced it, which is one, which is below the threshold."""
         spec, task = spec_task
         self._charge(db, spec, task, _edits(RUN29_BLOCK1), "implementer")
         other = _edits("`tests/test_x.py`: edit block #1: SEARCH text not found")
-        assert invariant_agents(db, spec.id, task, other) == []
+        assert invariant_agents(db, spec.id, task, other) == ["implementer"]
+
+    def test_the_current_attempts_agent_counts(self, db, spec_task):
+        """dispose runs BEFORE the failure is recorded, so the agent that just
+        produced it is not yet in the stream. Without counting it the check
+        needs three agents to notice two — which is what the seam case caught."""
+        spec, task = spec_task
+        self._charge(db, spec, task, _edits(RUN29_BLOCK1), "implementer")
+        db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
+                        payload={"role": "implementer", "agent": "deep_implementer"})
+        # deep_implementer's failure has NOT been recorded yet
+        assert sorted(invariant_agents(db, spec.id, task, _edits(RUN29_BLOCK5))) == [
+            "deep_implementer", "implementer"]
 
 
 def test_every_classification_records_the_key_and_the_agent(db, spec_task):

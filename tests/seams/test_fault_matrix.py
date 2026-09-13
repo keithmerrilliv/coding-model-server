@@ -20,6 +20,7 @@ from coding_model_autonomous import (
     EventKind, GateType, SpecStatus, TaskStatus,
 )
 from coding_model_autonomous import executor
+from coding_model_autonomous import outcome as _outcome
 
 from seam_fakes import (
     CollectionError, Down, Empty, Hang, Inconclusive, MissingChoices,
@@ -78,9 +79,17 @@ class TestUnappliableEdits:
         # The retry prompt carries the diagnostic.
         assert "SEARCH" in model.calls[1].messages[-1]["content"]
 
-    def test_exhaustion_hands_to_synthesis(self, db, model, runner, edit_mode):
+    def test_exhaustion_hands_to_synthesis(self, db, model, runner, edit_mode,
+                                           monkeypatch):
         """Six unappliable attempts walk the rotation, then synthesis merges
-        them and the result goes to a release gate, never a silent FAIL."""
+        them and the result goes to a release gate, never a silent FAIL.
+
+        DEV-631 off for this case: identical failures from every agent are
+        exactly what it now cuts short, and what this pins is the FULL walk
+        and the escape hatch at the end of it. The cut-short path is the
+        sibling case below.
+        """
+        monkeypatch.setattr(_outcome, "INVARIANT_AGENTS", 0)
         spec = _impl_ready(db, model, runner)
         model.always("implementer",
                      Reply(implementer_edit_reply(BAD_EDITS, {TEST_PATH: TEST_FILE})))
@@ -99,20 +108,56 @@ class TestUnappliableEdits:
         assert out.task("implementer").status == TaskStatus.DONE
         assert len(rejected_gates(db, spec.id)) == 5
 
+    def test_an_invariant_failure_reaches_synthesis_without_spending_the_rotation(
+            self, db, model, runner, edit_mode):
+        """DEV-631. The same failure from two different agents establishes that
+        the rotation's one lever does not reach it. The remaining four
+        generations would re-prove that at full price, so the escape hatch is
+        handed the work immediately instead.
+
+        Deliberately synthesis and NOT a park: DEV-433's merge is the
+        pipeline's own answer to "the rotation could not do it", it needs no
+        human, and DEV-649 already refuses it when it provably cannot emit its
+        answer. The spec still reaches a release gate."""
+        spec = _impl_ready(db, model, runner)
+        model.always("implementer",
+                     Reply(implementer_edit_reply(BAD_EDITS, {TEST_PATH: TEST_FILE})))
+        model.script("synthesis", Reply(implementer_reply()))
+
+        out = drive(db, spec.id, model, wait_at(GateType.RELEASE_APPROVAL), runner=runner)
+
+        assert out.reason == "waiting"
+        assert out.waiting_on[0].gate_type == GateType.RELEASE_APPROVAL
+        # two agents, not six — the rotation stopped as soon as the second
+        # model produced the same coarse_key as the first.
+        assert [c.model for c in model.calls_for("implementer")] == [
+            "implementer", "deep_implementer"]
+        assert [c.model for c in model.calls_for("synthesis")] == ["deep_reviewer"]
+        ev = events(db, spec.id, EventKind.FAILURE_CLASSIFIED,
+                    disposition="synthesize")
+        assert "invariant across 2 agents" in ev[0]["disposition_detail"]
+        assert ev[0]["coarse_key"].startswith("unappliable_edits|")
+
 
 class TestRotation:
-    def test_anchor_is_stable_with_complexity_json(self, db, model, runner):
+    def test_anchor_is_stable_with_complexity_json(self, db, model, runner, monkeypatch):
         spec = _impl_ready(db, model, runner)
         model.always("implementer", Reply("not a file block"))
         model.script("synthesis", Reply(implementer_reply()))
 
+        # DEV-631 off: an identical parse failure from every agent is the
+        # invariant case it cuts short at two, and what is under test here is
+        # the rotation's anchoring across the FULL walk. Note the interaction
+        # for real runs — with the check on, a rotation only reaches its later
+        # picks when the failures genuinely differ.
+        monkeypatch.setattr(_outcome, "INVARIANT_AGENTS", 0)
         drive(db, spec.id, model, wait_at(GateType.RELEASE_APPROVAL), runner=runner)
 
         assert [c.model for c in model.calls_for("implementer")] == [
             "implementer", "deep_implementer", "moe_implementer",
             "fast_implementer", "implementer", "deep_implementer"]
 
-    def test_anchor_drifts_without_complexity_json(self, db, model, runner):
+    def test_anchor_drifts_without_complexity_json(self, db, model, runner, monkeypatch):
         """Without complexity.json the pick anchors on task.agent, which the
         previous pick overwrote — so the chain re-bases every retry and
         retries 3 and 4 both land on fast_implementer. Pinned as today's
@@ -123,6 +168,7 @@ class TestRotation:
         model.always("implementer", Reply("not a file block"))
         model.script("synthesis", Reply(implementer_reply()))
 
+        monkeypatch.setattr(_outcome, "INVARIANT_AGENTS", 0)  # see the sibling
         drive(db, spec.id, model, wait_at(GateType.RELEASE_APPROVAL), runner=runner)
 
         assert [c.model for c in model.calls_for("implementer")] == [

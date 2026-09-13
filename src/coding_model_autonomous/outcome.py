@@ -104,6 +104,12 @@ TERMINAL_CLASSES = frozenset({
 # lasts hours and nothing has been spent); the build-check outage keeps
 # DEV-538's cap of three because it ages a generated attempt.
 NO_VERDICT_CAP = int(os.getenv("AUTONOMOUS_NO_VERDICT_CAP", "5"))
+
+# DEV-631: how many DISTINCT agents must produce the same coarse_key before the
+# failure is called invariant and the rotation stops paying for it. Two is the
+# point at which the rotation's only lever — a different model — has been
+# pulled and the outcome did not move. 0 disables the check.
+INVARIANT_AGENTS = int(os.getenv("AUTONOMOUS_INVARIANT_AGENTS", "2"))
 _CAPS: dict[tuple[FailureClass, str], Optional[int]] = {
     (FailureClass.RUNNER_OUTAGE, "existing_fetch"): None,
     (FailureClass.RUNNER_OUTAGE, "build_check"): 3,
@@ -395,6 +401,12 @@ def invariant_agents(db: Any, spec_id: str, task: Any, failure: Failure) -> list
         a = p.get("agent")
         if a and a not in agents:
             agents.append(str(a))
+    # The failure being disposed has not been recorded yet, so the agent that
+    # just produced it is not in the stream. It is the whole point of the
+    # count — without it the check needs THREE agents to notice two.
+    current = failure.extra.get("agent") or attempt_agent(db, spec_id, task)
+    if current and str(current) not in agents:
+        agents.append(str(current))
     return agents
 
 
@@ -600,11 +612,34 @@ def dispose(db: Any, spec: Any, task: Any, failure: Failure, hooks: Hooks,
         revs = db.list_tasks_for_spec_by_role(spec.id, "reviewer")
         reviewer_task = revs[0] if revs else None
 
-    if impl_task.retry_count >= max_retries:
+    # DEV-631: the rotation's one lever is the model. When two or more distinct
+    # agents have produced the same coarse_key, that lever has been pulled and
+    # the outcome did not move — the remaining attempts would cost a full
+    # generation each to re-prove it. Hand to the escape hatch NOW rather than
+    # parking: DEV-433's synthesis is the pipeline's own answer to "the
+    # rotation could not do it", it needs no human, and DEV-649 already
+    # refuses it when it provably cannot emit its answer. Requires a working
+    # hatch — with none, the budget is spent as before rather than cut short.
+    invariant: list[str] = []
+    if INVARIANT_AGENTS > 0 and hooks.synthesize is not None:
+        seen = invariant_agents(db, spec.id, impl_task, failure)
+        if len(seen) >= INVARIANT_AGENTS:
+            invariant = seen
+
+    if impl_task.retry_count >= max_retries or invariant:
         # The escape hatch (DEV-433): merge the attempts on disk, test the
         # merge, and either open a release gate or end the spec — for EVERY
         # verdict class, parse failures included.
-        _record(db, spec, impl_task, failure, "synthesize", 0)
+        if invariant:
+            logger.error(
+                "spec %s: invariant failure — %s each produced `%s` on the %s; "
+                "handing to synthesis at attempt %d/%d instead of spending the "
+                "rest of the rotation", spec.id, ", ".join(invariant),
+                coarse_key(failure), failure.role, impl_task.retry_count,
+                max_retries)
+        _record(db, spec, impl_task, failure, "synthesize", 0,
+                detail=(f"invariant across {len(invariant)} agents: "
+                        f"{', '.join(invariant)}") if invariant else "")
         if hooks.synthesize is None or reviewer_task is None:
             return terminate(db, spec, impl_task, Failure(
                 FailureClass.SYNTHESIS_FAILED, "implementer", failure.source,
