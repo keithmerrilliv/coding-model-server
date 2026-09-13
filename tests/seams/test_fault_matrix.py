@@ -158,12 +158,12 @@ class TestRotation:
             "implementer", "deep_implementer", "moe_implementer",
             "fast_implementer", "implementer", "deep_implementer"]
 
-    def test_anchor_drifts_without_complexity_json(self, db, model, runner, monkeypatch):
-        """Without complexity.json the pick anchors on task.agent, which the
-        previous pick overwrote — so the chain re-bases every retry and
-        retries 3 and 4 both land on fast_implementer. Pinned as today's
-        behaviour (DEV-640); the rotation's own contract says consecutive
-        retries never repeat a model."""
+    def test_anchor_holds_without_complexity_json(self, db, model, runner, monkeypatch):
+        """DEV-640: without complexity.json the pick used to anchor on
+        task.agent, which the previous pick overwrote — the chain re-based
+        every retry and retries 3 and 4 both landed on fast_implementer. The
+        anchor is the role's configured default now, so the walk is the
+        same clean one the complexity.json case always had."""
         spec = make_executing_spec(db)
         approve_design(db, spec, complexity=False)
         model.always("implementer", Reply("not a file block"))
@@ -174,7 +174,7 @@ class TestRotation:
 
         assert [c.model for c in model.calls_for("implementer")] == [
             "implementer", "deep_implementer", "moe_implementer",
-            "fast_implementer", "fast_implementer", "implementer"]
+            "fast_implementer", "implementer", "deep_implementer"]
 
 
 # ── model-server faults ──────────────────────────────────────────────────────
