@@ -172,6 +172,135 @@ def diagnostic_messages(notes: str) -> set:
     return set(attributed_diagnostics(notes))
 
 
+# ── DEV-529: a closed set of diagnostic classes ──────────────────────────────
+#
+# Runs 1–7 produced a repeating failure taxonomy that lived only in prose:
+# missing conformance (run 6's Mushroom, never Equatable), mutability (`let`
+# where `var` is needed, `mutating` on a class method), undeclared type,
+# file placement (a test one character off its directory, a module the
+# sandbox cannot see), cross-file drift (signatures diverging between
+# manifest-generated files). Each is classified at capture time onto the
+# failure_classified row beside the raw text, so "failures by class, by
+# agent, by retry" is a query and not a re-read of the logs. The class is a
+# lossy index, never a replacement: unrecognised output is `other`, and
+# `other` staying large is itself the signal that the set needs a member.
+DIAG_MISSING_CONFORMANCE = "missing_conformance"
+DIAG_MUTABILITY = "mutability"
+DIAG_UNDECLARED_TYPE = "undeclared_type"
+DIAG_FILE_PLACEMENT = "file_placement"
+DIAG_CROSS_FILE_DRIFT = "cross_file_drift"
+DIAG_OTHER = "other"
+DIAGNOSTIC_CLASSES = (DIAG_MISSING_CONFORMANCE, DIAG_MUTABILITY,
+                      DIAG_UNDECLARED_TYPE, DIAG_FILE_PLACEMENT,
+                      DIAG_CROSS_FILE_DRIFT, DIAG_OTHER)
+# Order matters: the first match wins, and the specific classes come before
+# the broad ones (a conformance error also mentions a type name).
+_DIAG_CLASS_RES = (
+    (DIAG_MISSING_CONFORMANCE, re.compile(
+        r"does not conform to(?: protocol)?\b|requires that .+ conform to|"
+        r"must conform to|no protocol conformance|protocol requirements? .+ not|"
+        r"missing conformance|unsupported operand type|"
+        r"not supported between instances|object is not (?:iterable|subscriptable|hashable)",
+        re.I)),
+    (DIAG_MUTABILITY, re.compile(
+        r"'mutating'|cannot assign to (?:property|value|immutable)|"
+        r"is a 'let' constant|cannot use mutating (?:member|getter|setter)|"
+        r"immutable value|cannot pass immutable value|"
+        r"marked with 'let'|object does not support item assignment|"
+        r"can't set attribute|cannot assign to field",
+        re.I)),
+    (DIAG_FILE_PLACEMENT, re.compile(
+        r"no such module|No module named|ModuleNotFoundError|"
+        r"cannot find module|module '.+' has no attribute|"
+        r"file not found|no such file or directory|"
+        r"is not part of (?:the|any) (?:target|module)|"
+        r"could not find module|found no tests|collected 0 items",
+        re.I)),
+    (DIAG_CROSS_FILE_DRIFT, re.compile(
+        r"has no member|incorrect argument label|extra argument|"
+        r"missing argument(?:s)? for parameter|cannot convert value of type|"
+        r"argument type .+ does not|cannot import name|"
+        r"unexpected keyword argument|"
+        r"takes \d+ positional arguments? but|"
+        r"missing \d+ required positional argument|"
+        r"is not callable|no exact matches in call|"
+        r"has no attribute|ambiguous use of|"
+        r"argument passed to call that takes no arguments|"
+        r"initializer .+ requires|cannot call value of non-function type",
+        re.I)),
+    (DIAG_UNDECLARED_TYPE, re.compile(
+        r"cannot find (?:type )?'[^']+' in scope|use of undeclared|"
+        r"NameError|name '[^']+' is not defined|undefined (?:symbol|reference)|"
+        r"unresolved identifier|cannot find '[^']+'|is not a member type|"
+        r"no type named|unknown type name|undeclared identifier",
+        re.I)),
+)
+_SYMBOL_RE = re.compile(r"'([A-Za-z_][\w.]*)'")
+# Names that recur in unrelated diagnostics and would make any two attempts
+# look like the same defect.
+_SYMBOL_NOISE = frozenset({
+    "Int", "Int64", "UInt", "String", "Bool", "Double", "Float", "Any", "Void",
+    "Self", "self", "None", "str", "int", "float", "bool", "list", "dict",
+    "tuple", "set", "object", "Optional", "Array", "Dictionary", "Error",
+    "Equatable", "Hashable", "Codable", "Sendable", "Comparable", "let", "var",
+})
+
+
+def classify_diagnostic(message: str) -> str:
+    """The class of one location-stripped diagnostic message (DEV-529).
+    Never raises; unrecognised text is ``other``."""
+    text = message or ""
+    for cls, pattern in _DIAG_CLASS_RES:
+        try:
+            if pattern.search(text):
+                return cls
+        except Exception:  # a pathological message must not fail a run
+            return DIAG_OTHER
+    return DIAG_OTHER
+
+
+def diagnostic_classes(messages: Iterable[str]) -> list:
+    """Sorted distinct classes over *messages*."""
+    return sorted({classify_diagnostic(m) for m in messages})
+
+
+def diagnostic_symbols(messages: Iterable[str]) -> set:
+    """The quoted identifiers the diagnostics name, minus the noise — the
+    cheapest stable proxy for "the same defect wearing a different
+    symptom" (DEV-509: `cannot find 'SeededRNG'` one attempt, `'SeededRNG'
+    has no member 'next'` the next)."""
+    out: set = set()
+    for m in messages:
+        for sym in _SYMBOL_RE.findall(m or ""):
+            leaf = sym.split(".")[-1]
+            if leaf and leaf not in _SYMBOL_NOISE and len(leaf) > 1:
+                out.add(leaf)
+    return out
+
+
+_CITED_FILE_RE = re.compile(r"^\s*(\S+?):\d+:\d+: error: ", re.MULTILINE)
+
+
+def cited_files(notes: str) -> list:
+    """Distinct files the attributed diagnostics name, in order, as the
+    repository-relative path when one can be read off the absolute worktree
+    path and the basename otherwise."""
+    seen: list = []
+    for m in _CITED_FILE_RE.finditer(notes or ""):
+        path = m.group(1)
+        parts = path.split("/")
+        rel = path
+        for i, part in enumerate(parts):
+            if part in ("Sources", "Tests", "src", "tests", "lib", "app", "Packages"):
+                rel = "/".join(parts[i:])
+                break
+        else:
+            rel = parts[-1]
+        if rel not in seen:
+            seen.append(rel)
+    return seen
+
+
 @dataclass
 class Failure:
     """One failed attempt, classified."""
@@ -439,11 +568,28 @@ def persistent_diagnostics(db: Any, spec_id: str, current: set, *,
     prior = verdict_diagnostics(db, spec_id)[:lookback]
     if len(prior) < lookback:
         return set()  # not enough history to call anything persistent
+    survived = set(current)
     for diags in prior:
-        current = current & diags
-        if not current:
-            return set()
-    return current
+        survived &= diags
+    # DEV-529 / DEV-509 option 3: an alternating symptom with a stable cause.
+    # A current message whose class (never `other`) or whose named symbol
+    # appears in EVERY prior attempt counts as persistent even when the
+    # exact text does not — "cannot find 'SeededRNG'" one attempt and
+    # "'SeededRNG' has no member 'next'" the next are one missing type.
+    common_classes = None
+    common_symbols = None
+    for diags in prior:
+        classes = {classify_diagnostic(m) for m in diags} - {DIAG_OTHER}
+        symbols = diagnostic_symbols(diags)
+        common_classes = classes if common_classes is None else common_classes & classes
+        common_symbols = symbols if common_symbols is None else common_symbols & symbols
+    for m in current:
+        cls = classify_diagnostic(m)
+        if cls != DIAG_OTHER and common_classes and cls in common_classes:
+            survived.add(m)
+        elif common_symbols and diagnostic_symbols([m]) & common_symbols:
+            survived.add(m)
+    return survived
 
 
 def consecutive_no_verdicts(db: Any, spec_id: str, task) -> int:
@@ -546,6 +692,8 @@ def invariant_agents(db: Any, spec_id: str, task: Any, failure: Failure) -> list
 
 def _record(db: Any, spec: Any, task: Any, failure: Failure, action: str,
             consecutive: int, detail: str = "") -> None:
+    msgs: list = sorted(diagnostic_messages(
+        failure.feedback or failure.detail or ""))[:DIAGNOSTICS_ON_EVENT]
     payload = {
         "role": failure.role, "outcome": failure.outcome.value,
         "cls": failure.cls.value, "source": failure.source,
@@ -562,9 +710,14 @@ def _record(db: Any, spec: Any, task: Any, failure: Failure, action: str,
         # DEV-631: the diagnostics of a verdict, so "the same failure again?"
         # (DEV-434's widening, DEV-541's routing to the architect) is
         # answered from this stream rather than by re-parsing gate notes.
-        "diagnostics": sorted(diagnostic_messages(
-            failure.feedback or failure.detail or ""))[:DIAGNOSTICS_ON_EVENT],
+        "diagnostics": msgs,
     }
+    # DEV-529: the closed-set class, the files and the symbols the
+    # diagnostics name — beside the raw text, never instead of it.
+    payload["diagnostic_classes"] = diagnostic_classes(msgs)
+    payload["cited_files"] = cited_files(
+        failure.feedback or failure.detail or "")[:DIAGNOSTICS_ON_EVENT]
+    payload["symbols"] = sorted(diagnostic_symbols(msgs))[:DIAGNOSTICS_ON_EVENT]
     if "agent" not in failure.extra or not failure.extra.get("agent"):
         resolved = attempt_agent(db, getattr(spec, "id", ""), task)
         if resolved:
