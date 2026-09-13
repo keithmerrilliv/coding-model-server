@@ -121,6 +121,42 @@ _CAPS: dict[tuple[FailureClass, str], Optional[int]] = {
 }
 
 _MISSING_MODULE_RE = re.compile(r"No module named '([\w.]+)'")
+_SRC_IMPORT_RE = re.compile(r"No module named 'src\.([A-Za-z_]\w*)")
+
+
+def import_root_hint(text: str) -> str:
+    """Return hint for src.<pkg> import errors, or "" if no match."""
+    m = _SRC_IMPORT_RE.search(text or "")
+    if not m:
+        return ""
+    pkg = m.group(1)
+    return (
+        f"The import root is wrong, not the module. The test sandbox puts the repository's `src/` directory on "
+        f"`sys.path`, so `src/` is the package root and is not a package: `src.{pkg}` does not exist. Import the code under "
+        f"test by its package name — `from {pkg}.<module> import <name>` — and fix the test's import line. Do not change "
+        f"the module's own imports; nothing is missing from `{pkg}`."
+    )
+
+
+def with_import_root_hint(failure: Failure) -> Failure:
+    """Prepend import-root hint to BUILD_FAILURE feedback when applicable.
+
+    Mutates the input Failure in place and returns it. Idempotent: applying
+    twice leaves feedback unchanged.
+    """
+    if failure.cls is not FailureClass.BUILD_FAILURE:
+        return failure
+
+    text = failure.feedback or failure.detail or ""
+    hint = import_root_hint(text)
+    if not hint:
+        return failure
+
+    if (failure.feedback or "").startswith(hint):
+        return failure
+
+    failure.feedback = hint + "\n\n" + (failure.feedback or failure.detail or "")
+    return failure
 
 # ── diagnostics: the stable text of a build or test failure ──────────────────
 # Moved here from the daemon (DEV-631): the failure_classified stream is the
@@ -924,6 +960,8 @@ def dispose(db: Any, spec: Any, task: Any, failure: Failure, hooks: Hooks,
     if reviewer_task is None:
         revs = db.list_tasks_for_spec_by_role(spec.id, "reviewer")
         reviewer_task = revs[0] if revs else None
+
+    failure = with_import_root_hint(failure)
 
     # DEV-631: the rotation's one lever is the model. When two or more distinct
     # agents have produced the same coarse_key, that lever has been pulled and
