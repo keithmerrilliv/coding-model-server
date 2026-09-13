@@ -1097,6 +1097,10 @@ class ImplementerResult:
     # written — the orchestrator routes it back to the implementer. Always empty
     # when diff-based edits are off (the whole-file path never populates it).
     apply_errors: list[str] = field(default_factory=list)
+    # DEV-655: <<<FILE:>>> blocks whose body was only an ellipsis — an echoed
+    # instruction, not a file. Dropped by the parser and listed here so the
+    # daemon can record the anomaly instead of writing a 4-byte junk file.
+    echoed_placeholders: list[str] = field(default_factory=list)
     # DEV-637: the structured twin of apply_errors, parallel and same order —
     # one dict per failure with ``path``, ``block`` (1-based, 0 = file-level),
     # ``reason`` and the COMPLETE ``search`` text (apply_errors previews only
@@ -1276,6 +1280,13 @@ def parse_implementer_response(text: str) -> ImplementerResult | ParseError:
     if not matches:
         return ParseError("No <<<FILE: path>>>…<<<END_FILE>>> blocks found", text)
     raw_files = [(path.strip(), _strip_markdown_fence(content)) for path, content in matches]
+    # DEV-655, defence in depth behind the prompt fix above: a block whose
+    # whole body is `...`/`…`/whitespace is an echoed template, not a file the
+    # model composed. It is dropped and NAMED, never silently — an empty
+    # emission the model meant is a different fault and must stay visible.
+    echoed = [p for p, c in raw_files if not c.strip().strip(".…").strip()]
+    if echoed:
+        raw_files = [(p, c) for p, c in raw_files if p not in echoed]
     files, duplicates = _dedupe_files_last_wins(raw_files)
     if duplicates:
         logger.warning(
@@ -1283,7 +1294,8 @@ def parse_implementer_response(text: str) -> ImplementerResult | ParseError:
             "(last-write-wins applied): %s",
             duplicates,
         )
-    return ImplementerResult(files=files, raw=text, duplicate_paths=duplicates)
+    return ImplementerResult(files=files, raw=text, duplicate_paths=duplicates,
+                             echoed_placeholders=echoed)
 
 
 def parse_reviewer_response(text: str) -> ReviewerResult | ParseError:
@@ -1843,9 +1855,15 @@ def _render_file_modes(existing_paths: list[str],
         out.append(f"- EDIT ONLY — existing: `{p}` — SEARCH/REPLACE edit blocks "
                    "against its shown content; never a <<<FILE:>>> block.\n")
     for p in new_paths:
-        out.append(f"- EMIT WHOLE — new file: `{p}` — one complete "
-                   f"<<<FILE: {p}>>> ... <<<END_FILE>>> block; never "
-                   "SEARCH/REPLACE blocks.\n")
+        # DEV-655: never render a closed marker pair around a real path in
+        # instructional text. Runs 28 and 29 echoed this line back and the
+        # parser took the echo for a write — a 4-byte file named `{p}`
+        # holding the literal `...`. The opener is named, the closer is
+        # described, and the pair never appears together on one line.
+        out.append(f"- EMIT WHOLE — new file: `{p}` — one complete whole-file "
+                   f"block opening with <<<FILE: {p}>>> and closed by the "
+                   "END_FILE marker on its own line; never SEARCH/REPLACE "
+                   "blocks.\n")
     out.append("\nAny other path you create is NEW: emit it whole. An edit "
                "block aimed at a NEW path is rejected — there is no content "
                "for it to search.\n\n")

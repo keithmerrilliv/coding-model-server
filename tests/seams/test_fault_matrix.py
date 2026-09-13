@@ -490,6 +490,22 @@ class TestRunnerFaults:
         assert [e["disposition"] for e in ev] == ["requeue"] * 2
         assert (db.spec_dir(spec.id) / "tested_manifest.json").is_file()
 
+    def test_an_echoed_file_modes_section_lands_no_junk_file(self, db, model, runner, edit_mode):
+        """DEV-655: the implementer restates the File-modes instruction next
+        to its real output. Before the fix the echo parsed as a write and a
+        4-byte file holding `...` reached the workspace (runs 28, 29)."""
+        from coding_model_autonomous.executor import _render_file_modes
+        spec = _impl_ready(db, model, runner)
+        echo = _render_file_modes([DAEMON_PATH], [TEST_PATH])
+        model.script("implementer", Reply(implementer_reply() + "\n\n" + echo))
+
+        out = drive(db, spec.id, model, wait_at(GateType.CODE_REVIEW), runner=runner)
+
+        assert out.reason == "waiting"
+        files = workspace_files(db, spec.id)
+        assert TEST_PATH in files and files[TEST_PATH].strip() != "..."
+        assert not any(p.strip(".…") == "" or "{p}" in p for p in files)
+
     def test_a_suspected_reconstruction_is_named_at_the_gate(self, db, model, runner):
         """DEV-536 (folded into DEV-630): the runner's overwrite detector was
         produced and never consumed. It heads the build output now, so it is

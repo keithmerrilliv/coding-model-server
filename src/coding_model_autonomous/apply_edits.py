@@ -566,7 +566,8 @@ def resolve_edits(
                 f"`{fe.path}` is a NEW file — EMIT WHOLE. It is not among the "
                 "existing files shown to you, so there is no content to edit "
                 "and SEARCH/REPLACE blocks cannot apply to it. Emit it as one "
-                f"complete <<<FILE: {fe.path}>>> ... <<<END_FILE>>> block.")
+                f"complete whole-file block opening with <<<FILE: {fe.path}>>> "
+                "and closed by the END_FILE marker on its own line.")
             errors.append(detail)
             # Keep the first block's SEARCH: a new-path block set with an empty
             # SEARCH is the "meant to emit whole" signature DEV-638 wants to
