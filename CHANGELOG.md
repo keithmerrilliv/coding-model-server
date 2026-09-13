@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- [DEV-660](https://keith-merrill4.atlassian.net/browse/DEV-660) — Build-failure feedback for `No module named 'src.<pkg>'` names the cause — the import root — not the missing module (pipeline-written on run 32)
+- [DEV-674](https://keith-merrill4.atlassian.net/browse/DEV-674) — Self-target context is read from this repository's own HEAD, never from the Mac runner's clone of it
+- [DEV-672](https://keith-merrill4.atlassian.net/browse/DEV-672) † — coarse_key keys on the repository-relative path, so Mac build failures can match across attempts
+- [DEV-618](https://keith-merrill4.atlassian.net/browse/DEV-618) † — eval_agents.py `--tool-loop N`: inspection markers answered from an empty sandbox before judging
+
 ## v0.2.0 — 2026-09-13
 
 The Pipeline Kernel Refactor ([DEV-628](https://keith-merrill4.atlassian.net/browse/DEV-628)): the decisions that kept killing runs moved out of a 6,300-line daemon into five typed kernel modules — `workspace.py`, `outcome.py`, `context.py`, `retry_policy.py` and the event schemas — behind a fault-injecting seam tier. Seven phases, one ticket each; every line below links the ticket that carries the evidence and the live proof. A dagger (†) marks a ticket merged and In Review: it awaits live proof on a run before it moves to Done. Run 31 (Centipede logic core slice 7, `spec_c1e1c9ac`, 2026-09-13) was the proving run for phases 4–6: it delivered on the Mac runner with 52 tests green after one build-failure retry, and every ticket without a dagger below that names a run-time behaviour was moved to Done on its events.
