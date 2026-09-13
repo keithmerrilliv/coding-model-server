@@ -29,11 +29,22 @@ whatever `.env.example` happens to ship.
 | `MAC_RUNNER_API_KEY` | *(empty)* | Shared secret — must match `CODING_MODEL_RUNNER_API_KEY` in the Mac runner's `~/.config/coding-model-runner/.env`. |
 | `CODING_MODEL_SANDBOX_NODE_ROOT` | *(auto)* | Node install root bound into the test sandbox, so `node_test`/`jest`/`vitest` specs have a `node` on PATH. Usually required: the orchestrator's systemd PATH has no Node, and nvm installs it under `/home`, which the sandbox masks with tmpfs. |
 | `CODING_MODEL_NPM_INSTALL_TIMEOUT` | `300` | Seconds allowed for the `jest`/`vitest` dependency-install phase. Budgeted separately from the test timeout — a cold React install fetches a few hundred MB. |
+| `CODING_MODEL_MIN_COMPLETION_TOKENS` | `16` | Floor on the completion budget after the prompt is subtracted from the window. A request that cannot be given this many output tokens is refused up front instead of clamped to a stub the caller's parser then fails on (DEV-195). |
+| `CODING_MODEL_MEMORY_COUNT_WARN` | `100000` | Memory-collection size at which the server logs a warning that retrieval quality and per-query scan cost are degrading. No automatic eviction (DEV-162). |
+| `CODING_MODEL_MODELS_ROOT` | `~/.lmstudio/models` | Root the relative GGUF paths in `config.py` resolve against. |
+| `CODING_MODEL_POLL_ACCESS_LOG` | `/tmp/coding-model-poll-access.log` | Where the dashboard's ~1 Hz polls (`/health`, `/v1/admin/*`, the autonomous status reads) are logged instead of the main access log. Empty drops them silently. |
+| `CODING_MODEL_REQUIRE_SECCOMP` | `0` | `1` makes a test dispatch refuse to run when the seccomp filter cannot be installed inside bubblewrap; the default warns and runs with bubblewrap alone. |
+| `CODING_MODEL_WORKSPACE` | *(unset)* | Root the interactive client's file tools may write under. Unset means the repository root; set it when the client is used against another tree. |
 | `CODING_MODEL_NPM_CACHE_DIR` | *(unset)* | Host directory bound in as npm's package cache. Unset means the cache lives on the sandbox's tmpfs and is discarded every run, so each spec re-downloads its tree. Setting it makes cold installs warm, at the cost of shared mutable state across specs. See [JS dependency provisioning](#js-dependency-provisioning). |
 
 ### Models
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `LLAMA_CACHE_RAM_MIB` | `32768` | llama-server's KV cache RAM budget. Bounded rather than unlimited because the large MoE models' CPU-resident expert weights already claim over 100 GB (DEV-408). |
+| `LLAMA_SLOT_SAVE` | `1` | Persist slot KV across model swaps so a long prefill restores in seconds instead of minutes of recompute (DEV-393). `0` disables. |
+| `LLAMA_SLOT_SAVE_MIN_TOKENS` | `8192` | Below this many cached tokens the save costs more than the recompute it avoids, so it is skipped. |
+| `LLAMA_SLOT_SAVE_MAX_TOTAL_GIB` | `100` | Cap on the total size of saved slots on disk. |
+| `LLAMA_ORPHAN_SLOT_REAP_S` | `120` | How long an in-flight reservation with no proxy executing behind it may persist before the swap guard reaps it as a leak (a request abandoned by a cancelled spec, DEV-582). Real work is never reaped. `coding-model-autonomous swap-reset` does it on demand (DEV-583). |
 | `MODEL_N_THREADS` | `24` | CPU threads for token generation (physical cores) |
 | `MODEL_N_THREADS_BATCH` | `32` | CPU threads for prompt prefill (all threads incl. HT) |
 | `MODEL_PATH_*` | *(per-config)* | Override a model's GGUF path. One var per model config: `MODEL_PATH_35B`, `MODEL_PATH_27B`, `MODEL_PATH_30B_TURBO`, `MODEL_PATH_30B_FAST`, `MODEL_PATH_30B_HD`, `MODEL_PATH_30B_FLASH`, `MODEL_PATH_80B_Q8`, `MODEL_PATH_122B`, `MODEL_PATH_230B`, `MODEL_PATH_HYBRID_30B`, `MODEL_PATH_24B_DEVSTRAL`, `MODEL_PATH_27B_38`. (`MODEL_PATH_480B_ULTRA` is gone — the 480B config was retired by DEV-99 and nothing reads it.) |
@@ -53,6 +64,8 @@ because every one of them is a VRAM-budget decision that has been measured.
 | `COMMAND_WHITELIST` | *(none)* | CSV of allowed commands (empty = all allowed) |
 | `CODING_MODEL_WORKSPACE` | *(a fresh temp dir)* | Root the agent's file tools resolve relative paths against, and the only place `WRITE_FILE` / `EDIT_FILE` may write. Writes outside it are **refused in every permission mode, including `yolo`** — this is a hard gate, not a prompt. Shell commands also run with this as their CWD. Unset means a throwaway `coding-model-work-*` temp dir, so an unconfigured session cannot touch a real project. Change it at runtime with `/workspace <dir>`. The server checkout itself is permanently protected and can never be the workspace. |
 | `CODING_MODEL_NATIVE_TOOLS` | *(unset)* | Set to `1` to send an OpenAI `tools` array (native function-calls for `remote_exec`) to agents that define a native-tools system prompt. Otherwise all tools are marker-based. |
+
+| `CODING_MODEL_SERVER_URL` | `http://<CODING_MODEL_SERVER_IP>:<CODING_MODEL_SERVER_PORT>` | Overrides the whole base URL every interactive client and the autonomous CLI talk to — for tunnels and hostnames. |
 
 ### Memory / RAG
 | Variable | Default | Description |
@@ -82,7 +95,7 @@ because every one of them is a VRAM-budget decision that has been measured.
 | `AUTONOMOUS_PLANNER_MAX_TOKENS` | `4000` | Token budget for planner output. |
 | `AUTONOMOUS_ARCHITECT_MAX_TOKENS` | `8000` | Token budget for architect output. |
 | `AUTONOMOUS_REVIEWER_MAX_TOKENS` | `16000` | Token budget for reviewer output. |
-| `AUTONOMOUS_MAX_RETRIES` | `5` | Per-task retry cap before the supervisor escalates. |
+| `AUTONOMOUS_MAX_RETRIES` | `5` | Per-task budget of charged attempts (verdicts — section 6 of `docs/PIPELINE.md`). The implementer's exhaustion hands to synthesis, never straight to FAILED; no-verdict failures do not count against it. |
 
 **Implementer sizing.** `AUTONOMOUS_IMPLEMENTER_MAX_TOKENS` (default `16000`) is a
 floor, not the whole story — the real budget is computed per task from the file
@@ -123,6 +136,43 @@ instead of becoming a 413 at the model server.
 | `AUTONOMOUS_PROMPT_HEADROOM` | `0.95` | Fraction of the window the input may claim once the completion and reasoning budgets are reserved. The margin for the estimate above being wrong on a prose-heavy prompt. |
 | `AUTONOMOUS_MANIFEST_WHOLE_FILE_MAX_CHARS` | `40000` | Per-file mode refuses to regenerate an existing file larger than this whole; it must be edited instead (DEV-604). |
 | `AUTONOMOUS_SYNTHESIS_EMIT_HEADROOM` | `0.8` | Share of the synthesis output budget the existing planned outputs may claim. Synthesis has no edit mode, so it must re-emit them whole; over this share the merge is refused before dispatch instead of returning a stub the shrink guard rejects (DEV-649). `0` disables the check. |
+
+**Retries, rotation and invariance** — how the daemon decides whether trying
+again can help (`docs/PIPELINE.md` sections 6 and 8):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AUTONOMOUS_NO_VERDICT_CAP` | `5` | Consecutive no-verdict failures (transport, refusal, truncation, empty completion, outage) on one attempt before the task is parked behind an infrastructure gate. Per-class caps override it: a build-check runner outage parks after 3, a `prompt_too_large` after 1, a fetch-time outage never. |
+| `AUTONOMOUS_INVARIANT_AGENTS` | `2` | Distinct agents that must produce the same coarse failure key (class, phase, file) before the rotation is cut short and the attempts go to synthesis (DEV-631). `0` disables and the full rotation is spent. |
+| `AUTONOMOUS_ROTATION_RANDOM_FRACTION` | `0` | Fraction of implementer dispatches whose agent is drawn uniformly from the rotation instead of taken from failure history — decouples agent from attempt difficulty for the per-agent data (DEV-530). The assignment is recorded on the `attempt_planned` event either way. |
+| `AUTONOMOUS_BUILD_FAILURE_ARCHITECT_THRESHOLD` | `1` | Consecutive implementer attempts a diagnostic — by exact text, class or named symbol (DEV-529) — must survive before the failure is routed to the architect instead of the implementer. |
+| `AUTONOMOUS_TARGETED_RETRY_MAX_REPEATS` | `1` | Identical diagnostics across manifest-mode targeted retries before the retry widens to a full regeneration (DEV-434). |
+| `AUTONOMOUS_PLAN_VALIDATION_MAX_ROUNDS` | `2` | Automatic replans a plan that fails validation may take before the spec fails. |
+| `AUTONOMOUS_TESTABILITY_CHECK` | `1` | The design testability and completeness check between the architect and the design review. `0` disables it. |
+| `AUTONOMOUS_TESTABILITY_CHECK_MAX_ROUNDS` | `2` | Architect revisions the check may force. |
+| `AUTONOMOUS_SYNTHESIS_REPAIR_MIN_RATE` | `0.8` | Pass rate the synthesis merge must reach for one repair round to be worth a call. |
+| `AUTONOMOUS_BUSY_WAIT_CAP` | `0` | Seconds to wait on `503 Retry-After` (another spec's generation holds the model) before giving up. `0` bounds the wait by the calling role's own timeout, which is the budget the task already has (DEV-491). |
+| `AUTONOMOUS_MEMORY_ROLES` | *(empty)* | Comma-separated roles (`architect,implementer,reviewer,planner`) whose prompts get RAG retrieval from the memory store. Empty means no role does. |
+
+**Guards on what an attempt may write** (`docs/PIPELINE.md` section 4):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AUTONOMOUS_DIFF_BASED_EDITS` | `0` | `1` asks the implementer for anchored SEARCH/REPLACE edit blocks against existing files instead of whole-file re-emission (DEV-581). |
+| `AUTONOMOUS_ALLOW_UNREAD_FILE_MODIFICATION` | `0` | `1` lets a plan proceed when a declared modification cannot be read at `base_ref`. The default fails the spec rather than let the implementer rewrite a file it has never seen (DEV-492). |
+| `AUTONOMOUS_COLLISION_POLICY` | `rename` | What the artifact ledger does with a cross-role write at a path another role produced: `rename` (to `reviewer_<name>`) or `refuse`. |
+| `AUTONOMOUS_SHRINK_REFUSE_RATIO` | `0.25` | A write under this fraction of the repository file's lines and declarations is refused as a suspected reconstruction. |
+| `AUTONOMOUS_SHRINK_MIN_BASELINE_LINES` | `40` | Baselines smaller than this are never shrink-checked. |
+| `AUTONOMOUS_BLOCK_ON_BUILD_WARNINGS` | `1` | Treat a blocking compiler warning (a defined-but-unused binding, unreachable code) as a failed attempt (DEV-547). `0` records them without blocking. |
+| `AUTONOMOUS_OVERLAY_FROM_WORKING_TREE` | *(unset)* | Self-target runs sandbox the *committed* `src/` (`git archive HEAD`), so editing the tree during a run is safe (DEV-654). `1` overlays the working tree instead — an explicit opt-in that a warning names. |
+
+**Delivery** — pushing a delivered spec to a `pipeline/<spec>` branch:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AUTONOMOUS_DELIVERY_REMOTES` | *(empty)* | `name=url` pairs, comma or whitespace separated, naming the remote each registered repo delivers to. Empty means delivery is skipped and nothing touches git. |
+| `AUTONOMOUS_DELIVERY_SSH_KEY` | *(empty)* | Deploy-key path used for every delivery push. Empty runs git with ambient SSH. |
+| `AUTONOMOUS_DELIVERY_SSH_KEY_<REPO>` | *(empty)* | Per-repository deploy key (GitHub binds a key to one repo): `<REPO>` is the repo name upper-cased with non-alphanumerics as `_`. Keep key files outside the config dir the unit marks inaccessible (DEV-597). |
 
 **Design review** (on by default — an extra review + revision loop between the
 architect and the implementer):
