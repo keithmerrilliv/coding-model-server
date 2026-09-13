@@ -375,10 +375,19 @@ def attempt_agent(db: Any, spec_id: str, task: Any) -> str:
                                         kind=EventKind.AGENT_RAN, limit=100)
     except Exception:
         return ""
+    want = getattr(task, "role", None)
     for ev in events:  # newest first
         if getattr(ev, "task_id", None) != getattr(task, "id", None):
             continue
-        agent = _payload(ev).get("agent")
+        p = _payload(ev)
+        # Run 30: the design review's own AGENT_RAN (role=design_review,
+        # agent=reviewer) is recorded against the ARCHITECT's task, so the
+        # newest event on the task was the reviewer's and the architect's
+        # design-review charge was attributed to `reviewer`. Only the task's
+        # own generations say which agent produced the attempt.
+        if want and p.get("role") not in (None, "", want):
+            continue
+        agent = p.get("agent")
         if agent:
             return str(agent)
     return ""
