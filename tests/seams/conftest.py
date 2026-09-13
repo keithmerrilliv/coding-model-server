@@ -72,6 +72,10 @@ def seam_env(monkeypatch):
     # by a local constant. NO_VERDICT_CAP is its env-derived fallback and the
     # tier already depends on the shipped 5 (the architect park asserts "x6").
     monkeypatch.setattr(outcome, "NO_VERDICT_CAP", 5)
+    # DEV-631: also env-derived. Pinned to the shipped default so the
+    # tier exercises the real contract; the rotation cases below opt out
+    # explicitly, because truncating the walk is the whole point of it.
+    monkeypatch.setattr(outcome, "INVARIANT_AGENTS", 2)
     monkeypatch.setattr(d, "BLOCK_ON_BUILD_WARNINGS", False)
     monkeypatch.setattr(d, "ALLOW_UNREAD_FILE_MODIFICATION", False)
     # Agents, so assertions can name models.
