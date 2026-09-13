@@ -29,7 +29,8 @@ Jira sync.
 ## Where things live
 
 - Agent registry, model configs, system prompts → `src/coding_model_server/config.py`
-  (`Config.AGENTS`, `_create_model_config`). NOT `server.py` — that is now just
+  (`Config.AGENTS` built with `_create_agent_config`; the model side is
+  `_create_model_config`). NOT `server.py` — that is now just
   app assembly and router wiring.
 - HTTP endpoints → `src/coding_model_server/routes/` (chat, memory, autonomous,
   admin, meta).
@@ -49,6 +50,7 @@ Jira sync.
   `src/coding_model_autonomous/test_runner.py::_run_local_tests`,
   `src/coding_model_autonomous/seccomp_filter.py`, the shell allow-list in
   `src/coding_model_server/tool_handlers/safety.py`, and
-  `~/.claude/.../memory/project_security_actionables.md`.
+  `~/.claude/.../memory/project_security_actionables.md` (a private,
+  uncommitted note on the author's machine — not part of this repository).
 - Anything else → `git log --grep '<keyword>'` is usually faster than
   documentation.

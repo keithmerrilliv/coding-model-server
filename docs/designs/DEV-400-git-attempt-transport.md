@@ -4,6 +4,10 @@
 **Author:** drafted 2026-08-02 against `main` @ `486255a1`
 **Ticket:** DEV-400. Motivating defects: DEV-399, DEV-196, DEV-393, DEV-391.
 
+> Author's-infrastructure example: `gitserver:/srv/private/git` and the
+> `~/Dev/…` paths below are the author's own setup, not something this
+> repository provides or expects. Substitute your own git host and paths.
+
 ## Decision in one paragraph
 
 Spec attempts move from JSON `patch_files` payloads to branches on the local

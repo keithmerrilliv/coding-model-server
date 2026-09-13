@@ -66,6 +66,7 @@ the deployed one on 3001; whichever you use must be listed in the server's
 ## Usage
 
 - On first load, you will be prompted for the admin API key. It is stored in `localStorage["codingModel.adminKey"]`.
+  **Security note:** anything that can run script on the dashboard's origin can read that key, and it survives closing the tab. Serve the dashboard on loopback (the default) or behind an SSH tunnel, do not open it on a shared machine, and log out when you are done.
 - Pages: Overview (`/`), Specs List (`/specs`), Spec Detail (`/specs/:id`), Metrics (`/metrics`).
 - **Approve or reject gates** from the spec detail view (`GateActions`), with
   markdown notes. Rejection notes feed back to the agent for its retry — this is
