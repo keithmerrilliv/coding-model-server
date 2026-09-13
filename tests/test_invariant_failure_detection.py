@@ -75,6 +75,28 @@ class TestCoarseKey:
                     "E   SyntaxError: '(' was never closed", phase="build_check")
         assert coarse_key(f) == "build_failure|build_check|"
 
+    # DEV-672 — run 31's first Mac build failure keyed on the runner's
+    # absolute worktree path, which carries a per-dispatch hash. Two attempts
+    # failing identically in the same file must share one key.
+    WT = "/Users/km4/Library/Caches/coding-model-runner/worktrees/spec_c1e1c9ac-{h}/Sources/CentipedeCore/Game.swift:27:14: error: value of type 'Game' has no member 'nextExtraLifeAt'"
+
+    def test_mac_worktree_paths_key_on_the_repo_relative_file(self):
+        a = Failure(FailureClass.BUILD_FAILURE, "implementer", "build_check",
+                    self.WT.format(h="277805d1"), phase="build_check")
+        b = Failure(FailureClass.BUILD_FAILURE, "implementer", "build_check",
+                    self.WT.format(h="7aeae7c4"), phase="build_check")
+        assert coarse_key(a) == coarse_key(b)
+        assert coarse_key(a) == "build_failure|build_check|Sources/CentipedeCore/Game.swift"
+        assert "worktrees" not in coarse_key(a)
+
+    def test_a_relative_path_is_unchanged_and_an_unknown_layout_keeps_its_basename(self):
+        rel = Failure(FailureClass.UNAPPLIABLE_EDITS, "implementer", "apply",
+                      "edit block #1: SEARCH text not found in src/a.py", phase="apply")
+        assert coarse_key(rel) == "unappliable_edits|apply|src/a.py"
+        odd = Failure(FailureClass.BUILD_FAILURE, "implementer", "build_check",
+                      "/tmp/build-9f/Module/Thing.swift:3:1: error: x", phase="build_check")
+        assert coarse_key(odd) == "build_failure|build_check|Thing.swift"
+
 
 class TestAttemptAgent:
     def test_reads_the_rotations_pick_off_the_generation_event(self, db, spec_task):
