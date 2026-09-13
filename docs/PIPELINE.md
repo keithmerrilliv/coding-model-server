@@ -51,9 +51,11 @@ rejected straight back to `pending_plan`, automatically — up to
 `PLAN_VALIDATION_MAX_ROUNDS` (2) replans with no human involved. A third
 failure fails the spec before anyone sees it.
 
-Note the edge that is **not** there: nothing in the code writes `cancelled`
-except a human rejecting a clarification gate. Cancelling a spec that is
-already executing takes DB surgery (DEV-493 tracks giving it a real path).
+`cancelled` has two writers: a human rejecting a clarification gate, and the
+operator's `coding-model-autonomous cancel <spec_id>` (section 10). Both are
+terminal against any pass still in flight — the status write is a
+compare-and-swap (DEV-567), so a generation that finishes after the cancel
+cannot resurrect the spec, and a gate it opens is born cancelled.
 
 ---
 
@@ -158,9 +160,10 @@ Two edges are worth naming because they are the ones people miss:
   not fail the spec; the accumulated attempts are merged, because the union of
   six near-misses is often closer to correct than any single one of them.
 - **`CLASS --> IMPL` on runner-unreachable** re-runs the whole implementer
-  generation: the task is set back to PENDING, uncharged. There is no way to
-  re-run just the build check, so a free requeue still costs a full generation
-  of wall-clock — which is why the requeue budget in section 7 is small.
+  generation: the task is set back to PENDING, uncharged — a `runner_outage`
+  no-verdict (section 6). There is no way to re-run just the build check, so a
+  free requeue still costs a full generation of wall-clock, which is why the
+  build-check outage is capped at three consecutive before a human is asked.
 
 ---
 
@@ -316,9 +319,11 @@ Same failure, three destinations, decided by evidence rather than by state.
 ```mermaid
 %%{init: {'themeVariables': {'fontSize': '30px'}}}%%
 flowchart TD
-    F[/build failed/] --> Q1{"same located diagnostic<br/>as the previous attempt,<br/>AND the architect has<br/>retries left?"}
+    F[/build failed/] --> Q1{"same diagnostic as the<br/>previous attempt — by text,<br/>class or named symbol —<br/>AND the architect has<br/>retries left?"}
     Q1 -->|yes| A[route to ARCHITECT<br/>implementer NOT charged<br/>architect IS charged]
-    Q1 -->|no| Q2{implementer<br/>retry_count &lt; 5?}
+    Q1 -->|no| INV{"same coarse key<br/>(class · phase · file)<br/>from 2+ distinct agents?"}
+    INV -->|yes| S
+    INV -->|no| Q2{implementer<br/>retry_count &lt; 5?}
     Q2 -->|yes| I[retry IMPLEMENTER<br/>charged, notes attached]
     Q2 -->|no| S[SYNTHESIS<br/>merge every attempt]
     S --> Q3{"what does the merge's<br/>own build say?"}
@@ -335,12 +340,23 @@ flowchart TD
     RB --> X
 ```
 
-Two preconditions the boxes cannot hold: the upstream route needs an architect
-task to exist *with retries left* — otherwise the failure falls through to an
-ordinary, charged implementer retry — and a WARNING BLOCK never takes the
-upstream route at all; only build failures do. "Not charged" refers to the
-implementer: the architect's own `retry_count` is incremented for every routed
-failure, which is what stops the loop from being free.
+Three preconditions the boxes cannot hold: the upstream route needs an
+architect task to exist *with retries left* — otherwise the failure falls
+through to an ordinary, charged implementer retry; a WARNING BLOCK never takes
+the upstream route at all, only build failures do; and the invariance edge
+needs synthesis to be available (`AUTONOMOUS_INVARIANT_AGENTS`, default 2, `0`
+disables). "Not charged" refers to the implementer: the architect's own
+`retry_count` is incremented for every routed failure, which is what stops the
+loop from being free.
+
+The invariance edge is the rotation admitting its one lever did not move
+anything: the identity is the *coarse key* — class, phase and the file the
+failure is about, never the volatile particulars (which edit block, what
+similarity score) — and the trigger is two different agents producing it, not
+two attempts in a row (run 29 produced six distinct signatures while failing
+the same way twice, with an unrelated failure between). Synthesis is where it
+goes because merging six near-misses has delivered where the rotation could
+not (run 26); parking would ask a human to solve something the pipeline can.
 
 The rollback exists because a repair round once fixed the defect it was given
 and simultaneously stripped `import Foundation` from every file, taking the
@@ -355,12 +371,15 @@ table to read first when a run ends somewhere surprising.
 
 | Budget | Default | Env var | What it bounds |
 |---|---|---|---|
-| `MAX_RETRIES` | 5 | `AUTONOMOUS_MAX_RETRIES` | Per-task retries. Shared by human rejections, automated rotations and crash recovery. |
+| `MAX_RETRIES` | 5 | `AUTONOMOUS_MAX_RETRIES` | Per-task *charged* attempts — verdicts only (section 6). Shared by human rejections and automated rotations; no-verdicts and crash recovery have their own counters. |
 | Testability rounds | 2 | `AUTONOMOUS_TESTABILITY_CHECK_MAX_ROUNDS` | Architect revisions the testability check may force. |
 | Design review revisions | 1 | `AUTONOMOUS_DESIGN_REVIEW_MAX_REVISIONS` | Automated design-review rejections. |
 | Plan validation rounds | 2 | `AUTONOMOUS_PLAN_VALIDATION_MAX_ROUNDS` | Automatic replans before the spec fails. |
 | Upstream-routing threshold | 1 | `AUTONOMOUS_BUILD_FAILURE_ARCHITECT_THRESHOLD` | Consecutive identical diagnostics before the design is blamed. |
-| Unreachable-runner requeues | 3 | — | Free requeues before escalating to a human — counted across the spec's last 20 test dispatches, *not* consecutively. Three scattered outages exhaust it the same as three in a row. |
+| No-verdict caps | 5 / 3 / 1 / ∞ | `AUTONOMOUS_NO_VERDICT_CAP` | Consecutive no-verdicts on one attempt before a task is parked behind an infrastructure gate: the default, the build-check runner outage, `prompt_too_large` (the sum is the same next time), and the fetch-time outage (never — the fetch is retried each tick). |
+| Invariant agents | 2 | `AUTONOMOUS_INVARIANT_AGENTS` | Distinct agents producing the same coarse failure key before the rotation is cut short into synthesis (diagram 6). |
+| Random rotation | 0 | `AUTONOMOUS_ROTATION_RANDOM_FRACTION` | Fraction of dispatches whose agent is drawn at random rather than from failure history — off unless you are collecting per-agent data (DEV-530). |
+| Crash recoveries | 5 | — | Recoveries of one task from RUNNING after a daemon restart, counted from recovery's own records rather than `retry_count` (DEV-558). |
 | Synthesis repair rounds | 1 | — | Hard-coded. One repair, then the run ends. |
 | Repair pass-rate floor | 0.8 | `AUTONOMOUS_SYNTHESIS_REPAIR_MIN_RATE` | Below this, a repair call is not worth making. |
 | Parse retries | 2 / 2 | `AUTONOMOUS_ARCHITECT_PARSE_RETRIES`, `AUTONOMOUS_PER_FILE_PARSE_RETRIES` | Malformed agent output before giving up. |
@@ -378,13 +397,17 @@ table to read first when a run ends somewhere surprising.
 1. **`retry_count` is shared.** Human design rejections, the testability check
    and upstream routing all draw on the same counter. Spend three rejections
    arguing about a design and the automatic recovery has nothing left.
-2. **Crash recovery charges a retry.** A daemon restart mid-generation costs the
-   task an attempt, deliberately — otherwise a call that reliably crashes the
-   daemon loops forever. A power cut therefore costs budget.
-3. **Architect rejections are uncapped, but crash recovery is not.** Rejecting a
-   design re-runs the architect with no `MAX_RETRIES` check, so you can iterate
-   as long as you like. What runs out is crash-recovery headroom: past
-   `MAX_RETRIES`, a daemon crash during that generation fails the spec outright.
+2. **Crash recovery is counted, but not on `retry_count`.** A daemon restart
+   mid-generation re-runs the pass and records the recovery; five recoveries
+   of one task end the spec, because a call that reliably crashes the daemon
+   must not loop forever. It used to count on `retry_count` and run 12 — five
+   substantive design reviews, one SIGKILL — died of it (DEV-558).
+3. **A no-verdict is free, and that is the point.** A transport error, a
+   refusal, a truncation or a dead runner charges nothing and rotates where
+   rotating can help; what bounds them is the consecutive cap above, which
+   parks the task behind a gate that names the infrastructure. Every one is a
+   `failure_classified` row (section 11), so "how much did infrastructure cost
+   this run" is a query.
 
 ---
 
@@ -420,9 +443,24 @@ at selection. The runner is asked again only when the candidate set grows
 A first fetch that finds the runner down parks the role at zero cost (the
 `runner_outage` row in section 6); a *refresh* that finds it down keeps the
 last good fetch and says so in the prompt's journal line. Every fetch is one
-`AGENT_RAN` record (`role: context`, `model_call: false`) listing what was
-read and what was omitted, so a design or attempt generated without a file
-is identifiable from the event stream, not only from a WARNING.
+`context_assembled` event (section 11) listing what was read, what was
+omitted and — separately — what is *unknown*, so a design or attempt
+generated without a file is identifiable from the event stream, not only from
+a WARNING.
+
+**Absent is not unknown.** A path that did not read is one of two things: the
+runner said it is not at `base_ref` (a creation — the prompt marks it "new,
+emit whole"), or the runner could not say (a read error, a transport problem
+on that chunk, a daemon-side failure before any answer). The second is
+`unknown`, and nothing is inferred from it: it is neither EXISTING nor NEW to
+the implementer, the DEV-645 feedback says "could not be read" rather than
+"is a new file", and the journal names the guard that is not armed for it
+(DEV-630). Before that distinction, one read failure presented every existing
+file as a creation and aimed the retry at re-inventing a 147K-line daemon.
+The same rule holds at every parse boundary the guards key on: a
+change-surface table with rows no tier can read is *unrecognised*, not
+absent, and the plan-validation guard says so by name instead of standing
+down.
 
 **The prompt budget.** Every section above has a char knob, and until DEV-633
 each clamped itself independently — nothing added them up and nothing compared
@@ -457,6 +495,38 @@ before any render:
    capped at one attempt because the next computes the same sum. Nothing is
    spent and nobody is charged, where DEV-624 would have dispatched into a
    certain 413.
+
+**The retry must differ from the attempt it retries.** Every dispatch is
+planned before the call (`retry_policy.plan_attempt`): the agent, a digest of
+everything prompt-shaping, a digest of the feedback alone, the temperature and
+a digest of the environment the attempt is judged in. That plan is written as
+an `attempt_planned` event (section 11) with what changed since the previous
+attempt and the rationale in words — "retry 2 after unappliable_edits
+(unappliable_edits|apply|executor.py) by deep_implementer: changed agent". A
+plan identical to an *earlier* attempt's on every lever is a dispatch that
+has already been tried; the loop injects the one difference it owns — the
+first agent along the rotation whose dispatch nobody has tried — and when
+every agent has had that exact dispatch, the record says so and the loop
+proceeds (the invariance edge in diagram 6 is what actually cuts it short).
+The rotation itself anchors on the role's configured default, never on the
+previous pick, so six retries walk six different models (DEV-640).
+
+The same record carries the difficulty proxy DEV-530 needs: which failure
+caused this attempt, produced by which agent, with how many diagnostics, and
+how the agent was assigned (`recommended`, `rotation`, `random`, `injected`).
+Per-agent rates read without it rank agents backwards, because an agent gets
+attempt N only because attempt N−1 failed.
+
+**The failure stream is the identity.** DEV-434's widening ("the cited files
+are not where the fix is") and DEV-541's routing to the architect ("this
+diagnostic survives every attempt") used to re-parse gate notes to ask "the
+same failure again?". They read the `failure_classified` stream now, where
+every verdict carries its diagnostics, their closed-set class, the files and
+the symbols they name (DEV-529). Persistence matches by exact text, by class,
+or by symbol — `cannot find 'SeededRNG'` one attempt and `'SeededRNG' has no
+member 'next'` the next are one missing type, which exact-text intersection
+could never see (DEV-509). A transport requeue between two identical verdicts
+no longer breaks the streak, because it is not a verdict.
 
 **Synthesis must be able to emit its answer.** Synthesis and its repair round
 emit whole `<<<FILE:>>>` blocks — they never got the implementer's edit mode —
@@ -517,6 +587,23 @@ with no Rejected status this is asymmetric in a dangerous direction — **a plai
 close reads as approval.** To reject from Jira, add a comment starting with
 `REJECT` and then close the issue. A comment alone, on a still-open gate, is
 inert: annotate freely.
+
+**`cancel` is the only sanctioned way to stop a run.** It sets CANCELLED
+through a compare-and-swap no in-flight pass can overwrite, cancels the open
+gates, closes the task rows, records the reason on the events and the Jira
+epic, and a gate a late pass opens afterwards is born cancelled. A model call
+already issued runs to completion and is discarded; a manifest build stops
+between files. Killing the daemon does none of this: crash recovery re-runs
+whatever was RUNNING.
+
+**A parser that cannot tell says so.** Every guard keys on some parse or
+fetch — the change-surface table, the manifest, the test-strategy block, the
+repository read — and each of those distinguishes "nothing there" from "could
+not tell". A guard fed the second arms (refuses, bounces, or at minimum warns
+by its own name); it never stands down silently. The daemon still has broad
+catch sites, each classified as fail-open (a skipped diagnostic write decides
+nothing) or arming (a cap that cannot be read warns that it is not enforced),
+and the classification is in the code beside each one (DEV-630).
 
 **The event log is the measurement substrate, not just a log.** Every
 transition, agent call and test dispatch is recorded with its payload —
