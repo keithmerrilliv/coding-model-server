@@ -1775,6 +1775,58 @@ PRIOR_ARTIFACTS_MAX_CHARS = int(
     os.getenv("AUTONOMOUS_PRIOR_ARTIFACTS_MAX_CHARS", "300000"))
 
 
+_SRC_PACKAGE_RE = re.compile(r"^src/([A-Za-z_]\w*)/")
+
+
+def import_packages(paths: "list[str]") -> "list[str]":
+    """Top-level packages a Python change touches, from `src/<pkg>/....py`.
+
+    DEV-644. Deliberately NOT `outcome.repo_packages`: that one also collects
+    `<pkg>/....py` (so `tests/test_x.py` yields `tests`) because it serves
+    sandbox-provisioning classification. `tests` is not an import root.
+    """
+    found = set()
+    for raw in paths or []:
+        norm = str(raw).replace("\\", "/").lstrip("./")
+        if not norm.endswith(".py"):
+            continue
+        m = _SRC_PACKAGE_RE.match(norm)
+        if m:
+            found.add(m.group(1))
+    return sorted(found)
+
+
+def render_import_root(paths: "list[str]") -> str:
+    """The import-root section, or "" when this is not a src/-layout Python
+    change (a Swift or node spec renders nothing and its prompt is
+    byte-identical).
+
+    DEV-644: on run 24 fast_implementer, implementer and deep_implementer
+    each wrote `from src.coding_model_autonomous.workspace import ...`, which
+    fails at collection because the sandbox puts `src/` itself on sys.path.
+    The build feedback named the missing module, so each next agent "fixed"
+    the module rather than the import, and one deleted a real import. Every
+    self-target spec since carried a hand-written paragraph saying this; it
+    is stated on every Python run now.
+    """
+    packages = import_packages(paths)
+    if not packages:
+        return ""
+    example = packages[0]
+    return (
+        "## Import root — MANDATORY\n\n"
+        "The test sandbox puts the repository's `src/` directory on "
+        "`sys.path`, so `src/` is the PACKAGE ROOT and is NOT itself a "
+        "package. Import the code under test by its package name:\n\n"
+        f"    from {example}.<module> import <name>\n\n"
+        f"Package(s) in this change: {', '.join('`' + p + '`' for p in packages)}.\n\n"
+        f"NEVER write `from src.{example}...` or `import src.{example}`. There "
+        "is no `src` package: that import fails at collection with "
+        f"`ModuleNotFoundError: No module named 'src.{example}'`, and the "
+        "module's own relative imports then resolve against the wrong root.\n\n"
+    )
+
+
 def _render_file_modes(existing_paths: list[str],
                        new_paths: list[str]) -> str:
     """Per-path MANDATORY output mode for edit-mode prompts (DEV-638 item 2).
@@ -1924,6 +1976,10 @@ def build_implementer_message(
             user_parts.append(_render_file_modes(
                 existing_paths,
                 [p for p in (new_files or []) if p not in existing_paths]))
+    import_root = render_import_root(
+        [p for p, _ in (existing_files or [])] + list(new_files or []))
+    if import_root:
+        user_parts.append("\n\n" + import_root)
     if reference_files or omitted_reference:
         user_parts.append("\n\n")
         user_parts.append(_render_reference_files(reference_files or [],
@@ -2847,6 +2903,7 @@ def build_reviewer_message(
             "## Implementation Files\n\n"
             + "\n".join(file_sections)
             + any_section
+            + render_import_root([p for p, _ in code_files])
             + tautology_section
             + retry_block
             + f"\n\n---\n\n"
