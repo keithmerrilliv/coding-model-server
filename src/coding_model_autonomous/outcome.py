@@ -287,18 +287,31 @@ def cited_files(notes: str) -> list:
     path and the basename otherwise."""
     seen: list = []
     for m in _CITED_FILE_RE.finditer(notes or ""):
-        path = m.group(1)
-        parts = path.split("/")
-        rel = path
-        for i, part in enumerate(parts):
-            if part in ("Sources", "Tests", "src", "tests", "lib", "app", "Packages"):
-                rel = "/".join(parts[i:])
-                break
-        else:
-            rel = parts[-1]
+        rel = repo_relative(m.group(1))
         if rel not in seen:
             seen.append(rel)
     return seen
+
+
+_REPO_ROOT_SEGMENTS = ("Sources", "Tests", "src", "tests", "lib", "app", "Packages")
+
+
+def repo_relative(path: str) -> str:
+    """The repository-relative form of a path a diagnostic named.
+
+    The Mac runner materialises a fresh worktree per dispatch
+    (`…/worktrees/<spec>-<hash>/Sources/…`, hash differs every time), so an
+    absolute path is different on every attempt while naming the same file.
+    Cut at the first recognised repository root segment; a path with none
+    (a bare basename, or a layout we do not know) keeps its basename only.
+    A path that is already relative and starts at such a segment is returned
+    unchanged (DEV-672).
+    """
+    parts = path.split("/")
+    for i, part in enumerate(parts):
+        if part in _REPO_ROOT_SEGMENTS:
+            return "/".join(parts[i:])
+    return parts[-1]
 
 
 @dataclass
@@ -629,9 +642,17 @@ _KEY_PATH_RE = re.compile(r"((?:[\w.+-]+/)+[\w.+-]+\.[A-Za-z0-9]+)")
 
 
 def coarse_key(failure: Failure) -> str:
-    """Identity of a failure for invariance detection: class | phase | path."""
+    """Identity of a failure for invariance detection: class | phase | path.
+
+    The path is repository-relative (`repo_relative`): run 31's first Mac
+    build failure keyed on `…/worktrees/spec_c1e1c9ac-277805d1/Sources/…`,
+    a string no second attempt could ever reproduce, so two identical
+    failures on the Mac runner never matched and the invariance hand-off
+    was unreachable there (DEV-672).
+    """
     m = _KEY_PATH_RE.search(failure.detail or "")
-    return f"{failure.cls.value}|{failure.phase}|{m.group(1) if m else ''}"
+    path = repo_relative(m.group(1)) if m else ""
+    return f"{failure.cls.value}|{failure.phase}|{path}"
 
 
 def attempt_agent(db: Any, spec_id: str, task: Any) -> str:
