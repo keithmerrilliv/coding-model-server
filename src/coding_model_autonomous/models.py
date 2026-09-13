@@ -94,6 +94,108 @@ class EventKind(str, Enum):
     # environment), what changed since the previous attempt, why, and the
     # difficulty proxy (what failure preceded it, how many diagnostics).
     ATTEMPT_PLANNED = "attempt_planned"
+    # DEV-669: one record per context fetch (DEV-632) — what the runner
+    # served at base_ref for this spec, what it could not, and which role
+    # triggered the fetch. Used to be an AGENT_RAN row with role=context.
+    CONTEXT_ASSEMBLED = "context_assembled"
+
+
+# ── Payload schemas for the taxonomy events (DEV-669) ────────────────────────
+#
+# Event payloads are JSON in a text column, so nothing in the store enforces
+# a shape. These three kinds are the ones queries are written against, so
+# their shapes are fixed here and pinned by tests/test_event_schemas.py:
+# every key a writer emits must be listed (required or optional), and every
+# required key must be present. Add a key here BEFORE emitting it.
+EVENT_PAYLOAD_SCHEMAS: dict = {
+    EventKind.FAILURE_CLASSIFIED: {
+        "required": {
+            "role": "the task role that failed (architect | implementer | reviewer | daemon)",
+            "outcome": "no_verdict | verdict | terminal (outcome.Outcome)",
+            "cls": "the failure class (outcome.FailureClass value)",
+            "source": "model_call | parse | apply | build_check | tests | gate | runner | daemon",
+            "detail": "first 600 chars of the failure text; its first line is the signature",
+            "signature": "cls + first 140 chars of the first detail line — precise, for diagnostics",
+            "coarse_key": "cls | phase | first path named — the identity invariance is judged on (DEV-631)",
+            "retry": "task.retry_count when recorded (the attempt this failure belongs to)",
+            "consecutive": "no-verdicts in a row on this attempt, 0 for verdicts",
+            "cap": "the consecutive no-verdict cap for this class, null for shutdown",
+            "disposition": "requeue | rotate | charge | synthesize | park | terminal | supervisor | handled",
+            "rotate": "no-verdict only: the next dispatch should reach a different agent",
+            "exc_type": "the exception type for exception-class failures, else empty",
+            "phase": "free text naming where it happened (build_check, existing_fetch, ...)",
+            "diagnostics": "sorted location-stripped attributed diagnostic messages, at most 40 (DEV-631)",
+            "diagnostic_classes": "sorted closed-set classes over the diagnostics (DEV-529)",
+            "cited_files": "files the diagnostics name, repository-relative where possible (DEV-529)",
+            "symbols": "quoted identifiers the diagnostics name, minus builtin noise (DEV-529)",
+        },
+        "optional": {
+            "agent": "the agent that produced the attempt (resolved from AGENT_RAN when not given)",
+            "disposition_detail": "why this disposition, when it is not the default for the class",
+            # Failure.extra — per-class particulars a writer attaches:
+            "status": "HTTP status for http_refusal",
+            "module": "the module the sandbox could not import (sandbox_provisioning)",
+            "missing": "planned outputs the attempt did not produce (DEV-645)",
+            "blocks": "unappliable edit blocks (DEV-581)",
+            "warnings": "blocking compiler warnings (DEV-547)",
+            "action": "the supervisor's action when it handled the failure",
+            "gate_carries_notes": "the human gate already holds the notes the retry reads",
+            "needed_tokens": "prompt_too_large: what the prompt needs (DEV-633)",
+            "allowed_tokens": "prompt_too_large: what the largest window allows",
+            "max_tokens": "prompt_too_large: the completion reserve that was budgeted",
+        },
+    },
+    EventKind.ATTEMPT_PLANNED: {
+        "required": {
+            "role": "the role being dispatched",
+            "retry": "task.retry_count for this dispatch",
+            "agent": "the agent the dispatch goes to",
+            "prompt_digest": "digest of everything prompt-shaping (design, clarifications, feedback)",
+            "feedback_digest": "digest of the feedback alone, empty when there is none",
+            "temperature": "sampling temperature of the call",
+            "env_digest": "digest of the test_strategy the attempt is judged in",
+            "assignment": "recommended | rotation | random | injected | fixed — how the agent was chosen (DEV-530)",
+            "prior_cls": "class of the failure that caused this attempt, null on the first",
+            "prior_coarse_key": "its coarse key",
+            "prior_agent": "the agent that produced it",
+            "prior_outcome": "its outcome",
+            "diagnostics": "attributed diagnostic count in the feedback (difficulty proxy)",
+            "feedback_chars": "length of the feedback (difficulty proxy)",
+            "changed": "levers that differ from the previous attempt's plan",
+            "identical_to": "retry index of an earlier attempt this one repeats on every lever, else null",
+            "rationale": "the plan in words",
+        },
+        "optional": {},
+    },
+    EventKind.CONTEXT_ASSEMBLED: {
+        "required": {
+            "trigger": "the role whose need triggered the fetch (plan probe, architect, implementer, ...)",
+            "repo": "the registered repository read from",
+            "base_ref": "the ref the files were read at",
+            "fetched_by": "the role recorded on the persisted context.json",
+            "fetches": "how many runner fetches this spec has made",
+            "editable": "paths served as editable (the declared modification set)",
+            "protected": "paths served as read-only references",
+            "omitted": "'path (section): reason' for every requested path not served",
+            "unknown": "requested paths whose absence the runner could not confirm (DEV-630)",
+            "editable_chars": "total chars of the editable section",
+            "protected_chars": "total chars of the protected section",
+        },
+        "optional": {},
+    },
+}
+
+
+def check_event_payload(kind: "EventKind", payload: dict) -> list:
+    """Problems with *payload* against EVENT_PAYLOAD_SCHEMAS — missing
+    required keys and keys the schema does not know. Empty means it fits."""
+    schema = EVENT_PAYLOAD_SCHEMAS.get(kind)
+    if schema is None:
+        return []
+    known = set(schema["required"]) | set(schema["optional"])
+    problems = [f"missing required key {k!r}" for k in schema["required"] if k not in payload]
+    problems += [f"undocumented key {k!r}" for k in payload if k not in known]
+    return problems
 
 
 # ── Records ──────────────────────────────────────────────────────────────────

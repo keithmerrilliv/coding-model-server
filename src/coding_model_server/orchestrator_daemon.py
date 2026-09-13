@@ -789,9 +789,10 @@ def _spec_context(
         # baseline the shrink guard judges later writes against — recorded
         # here so it is armed for every caller, not per role.
         _note_baseline(db, spec, ctx.editable_files, role)
-        db.record_event(EventKind.AGENT_RAN, spec_id=spec.id,
-                        payload={"role": "context", "model_call": False,
-                                 "trigger": role, **ctx.summary()})
+        # DEV-669: its own kind, with a fixed schema — no longer an AGENT_RAN
+        # row that every per-agent query had to filter out.
+        db.record_event(EventKind.CONTEXT_ASSEMBLED, spec_id=spec.id,
+                        payload={"trigger": role, **ctx.summary()})
     return ctx
 
 
