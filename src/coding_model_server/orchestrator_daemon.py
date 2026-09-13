@@ -2801,9 +2801,8 @@ def _consecutive_identical_failures(db, spec_id: str, current_notes: str,
 # at retry 4, came back missing its initialiser at retry 5).
 CITED_BY_DIAGNOSTIC = "diagnostic"   # `path:line` — the compiler named it
 CITED_BY_FENCE = "fenced"            # inside a ``` block the reviewer pasted
-CITED_BY_PROSE = "prose"             # a full path or `code span` in prose — weak
+CITED_BY_PROSE = "prose"             # named in prose, nothing positional — weak
 _FENCE_RE = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
-_CODE_SPAN_RE = re.compile(r"`([^`\n]+)`")
 
 
 def _token_re(name: str) -> "re.Pattern":
@@ -2828,23 +2827,26 @@ def _cite_paths(rejection_notes: str, known_paths) -> "dict[str, str]":
     2. ``fenced`` — the path inside a ``` block the reviewer pasted (a
        diagnostic the regex above did not recognise, a diff, a stack).
     3. ``prose`` — only when nothing positional exists (a human review with
-       no build output): a full path, or a basename in a `code span`. A bare
-       basename in running prose never counts on its own.
+       no build output, "please fix main.js"): the pre-DEV-539 rule, a full
+       path or a basename as a whole token anywhere in the notes. Weak, and
+       logged as such — but the alternative when nothing else cites is full
+       regeneration, which rewrites every file the prose named AND every
+       file it did not.
 
-    ``resolver.ts:129`` resolves by basename as DEV-434 needs; the notes'
-    prose is free to say "not in X" without putting X at risk.
+    ``resolver.ts:129`` resolves by basename as DEV-434 needs; once a
+    diagnostic or a fenced block exists, the prose is free to say "not in
+    X" without putting X at risk.
     """
     notes = rejection_notes or ""
     known = [p for p in known_paths if p]
     fenced = "\n".join(_FENCE_RE.findall(notes))
-    spans = " ".join(_CODE_SPAN_RE.findall(notes))
     tiers: "list[tuple[str, callable]]" = [
         (CITED_BY_DIAGNOSTIC, lambda p, b: _positional_mentions(notes, p)
          or (b and _positional_mentions(notes, b))),
         (CITED_BY_FENCE, lambda p, b: p in fenced
          or (b and _token_re(b).search(fenced) is not None)),
-        (CITED_BY_PROSE, lambda p, b: (p in notes and "/" in p)
-         or (b and _token_re(b).search(spans) is not None)),
+        (CITED_BY_PROSE, lambda p, b: p in notes
+         or (b and _token_re(b).search(notes) is not None)),
     ]
     for why, hit in tiers:
         cited = {p: why for p in known if hit(p, os.path.basename(p))}
