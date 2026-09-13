@@ -28,12 +28,14 @@ Design decisions that matter, and why:
 Usage:
     ADMIN_API_KEY=... python3 eval_agents.py -a implementer -a ornith
     python3 eval_agents.py -a implementer -a ornith --judge deep_reviewer
+    python3 eval_agents.py -a dense_architect -a qwen38_architect --tool-loop 3   # DEV-618
 """
 import argparse
 import json
 import os
 import re
 import sys
+import tempfile
 import time
 from collections import Counter
 
@@ -72,21 +74,178 @@ def scrub(text):
     return _IDENTITY.sub("I am an AI assistant", text)
 
 
-def ask_agent(server, headers, agent, prompt, max_tokens, system=None):
-    """One completion through the real server path (system prompt, budget, RAG)."""
-    t0 = time.time()
-    messages = ([{"role": "system", "content": system}] if system else []) \
-        + [{"role": "user", "content": prompt}]
+# ── tool loop (DEV-618) ───────────────────────────────────────────────────────
+# The harness is single-turn: one user message, one completion, judged as is.
+# An agentic model under the architect prompt may elect to inspect the
+# workspace first — Qwen3.8-27B emitted <<<LIST_DIR>>>/<<<GLOB>>>/<<<PLAN>>>
+# and then stopped, awaiting tool results that never came (DEV-616). That is
+# an automatic loss for a completion style, not for engineering merit. With
+# --tool-loop N the harness answers those markers from an EMPTY sandbox and
+# feeds the results back, up to N rounds, before judging the final answer.
+# Default 0 — single-turn stays the baseline every prior eval was scored on.
+#
+# The sandbox is deliberately minimal and read-only: the tasks carry all their
+# material in the prompt, so an inspecting model finds nothing and must answer
+# from what it was given — the same footing as a model that never inspects.
+_READ_TOOLS = ("READ_FILE", "LIST_DIR", "GLOB", "GREP")
+_REFUSED_TOOLS = ("REMOTE_EXEC", "WRITE_FILE", "EDIT_FILE", "SAVE_MEMORY", "WEB_SEARCH",
+                  "APPLE_DEEP_DOCS", "INGEST_PDF", "DEEP_INGEST")
+_ACK_TOOLS = ("PLAN", "SCRATCHPAD", "CONFIDENCE")
+_ALL_TAGS = _READ_TOOLS + _REFUSED_TOOLS + _ACK_TOOLS
+# A marker's argument is one line for the path/pattern tools and runs to the
+# next marker (or the end) for the block tools — the same split the server's
+# dispatcher makes, so that a CONFIDENCE line mid-answer does not swallow the
+# answer that follows it when the markers are stripped.
+_BLOCK_TAGS = ("PLAN", "SCRATCHPAD", "WRITE_FILE", "EDIT_FILE")
+_LINE_TAGS = tuple(t for t in _ALL_TAGS if t not in _BLOCK_TAGS)
+_ANY_TAG = "|".join(_ALL_TAGS)
+_LINE_RE = re.compile(rf"(<{{1,3}})({'|'.join(_LINE_TAGS)})(>{{1,3}})[ \t]*([^\n]*)",
+                      re.IGNORECASE)
+_BLOCK_RE = re.compile(rf"(<{{1,3}})({'|'.join(_BLOCK_TAGS)})(>{{1,3}})\s*(.*?)(?=<{{1,3}}(?:{_ANY_TAG})>{{1,3}}|\Z)",
+                       re.DOTALL | re.IGNORECASE)
+_VALID_BRACKETS = frozenset({("<<<", ">>>"), ("<", ">>>"), ("<", ">")})
+
+
+def _marker_spans(text):
+    """[(start, end, TAG, arg)] for every well-formed marker, in order."""
+    text = re.sub(r"</?tool_call\s*>", "", text or "")
+    spans = []
+    for rx in (_LINE_RE, _BLOCK_RE):
+        for m in rx.finditer(text):
+            if (m.group(1), m.group(3)) not in _VALID_BRACKETS:
+                continue
+            spans.append((m.start(), m.end(), m.group(2).upper(), m.group(4).strip()))
+    spans.sort()
+    return text, spans
+
+
+def parse_markers(text):
+    """[(TAG, arg)] for every well-formed tool marker in `text`, in order."""
+    return [(tag, arg) for _, _, tag, arg in _marker_spans(text)[1]]
+
+
+def strip_markers(text):
+    """The visible answer with every tool marker (and its argument) removed."""
+    text, spans = _marker_spans(text)
+    out, pos = [], 0
+    for start, end, _, _ in spans:
+        if start >= pos:
+            out.append(text[pos:start])
+            pos = end
+    out.append(text[pos:])
+    return re.sub(r"\n{3,}", "\n\n", "".join(out)).strip()
+
+
+class EvalSandbox:
+    """An empty scratch directory the read-only tools run against."""
+
+    def __init__(self, root=None):
+        self.root = os.path.realpath(root or tempfile.mkdtemp(prefix="eval_sandbox_"))
+
+    def _inside(self, path):
+        # An absolute path never joins under the root, so it is refused below.
+        p = os.path.realpath(os.path.join(self.root, (path or ".").strip()))
+        return p if p == self.root or p.startswith(self.root + os.sep) else None
+
+    def run(self, tag, arg):
+        if tag in _ACK_TOOLS:
+            return "(noted)"
+        if tag in _REFUSED_TOOLS:
+            return "(not available: the eval sandbox is read-only and offline; answer from the task text)"
+        if tag == "LIST_DIR":
+            p = self._inside(arg)
+            if p is None:
+                return "(refused: path is outside the sandbox)"
+            if not os.path.isdir(p):
+                return f"(no such directory: {arg or '.'})"
+            names = sorted(os.listdir(p))
+            return "\n".join(names) if names else "(empty directory)"
+        if tag == "READ_FILE":
+            p = self._inside(arg)
+            if p is None:
+                return "(refused: path is outside the sandbox)"
+            if not os.path.isfile(p):
+                return f"(no such file: {arg})"
+            with open(p, errors="replace") as fh:
+                return fh.read(20000)
+        if tag == "GLOB":
+            import glob as _glob
+            hits = sorted(os.path.relpath(h, self.root) for h in
+                          _glob.glob(os.path.join(self.root, arg or "*"), recursive=True))
+            return "\n".join(hits) if hits else "(no matches)"
+        if tag == "GREP":
+            pattern = (arg.split("|", 1)[0] if arg else "").strip()
+            if not pattern:
+                return "(grep: empty pattern)"
+            hits = []
+            for dirpath, _, files in os.walk(self.root):
+                for f in files:
+                    fp = os.path.join(dirpath, f)
+                    try:
+                        with open(fp, errors="replace") as fh:
+                            for n, line in enumerate(fh, 1):
+                                if re.search(pattern, line):
+                                    hits.append(f"{os.path.relpath(fp, self.root)}:{n}: {line.rstrip()}")
+                    except OSError:
+                        continue
+            return "\n".join(hits[:200]) if hits else "(no matches)"
+        return "(unknown tool)"
+
+
+def _completion(server, headers, agent, messages, max_tokens):
     r = requests.post(
         f"{server}/v1/chat/completions", headers=headers, timeout=1800,
         json={"model": agent, "messages": messages,
               "max_tokens": max_tokens, "temperature": 0.0, "stream": False})
     r.raise_for_status()
     body = r.json()
+    return ((body.get("choices") or [{}])[0].get("message", {}).get("content", "") or "",
+            (body.get("usage") or {}).get("completion_tokens", 0))
+
+
+def ask_agent(server, headers, agent, prompt, max_tokens, system=None, tool_loop=0, sandbox=None):
+    """One answer through the real server path (system prompt, budget, RAG).
+
+    With tool_loop == 0 this is exactly one completion, judged as is. With
+    tool_loop == N, a completion that carries tool markers gets them answered
+    from the sandbox and is asked to continue, up to N rounds; the judged text
+    is the final completion with its markers stripped. Every answer records
+    how many rounds it used and whether the budget ran out mid-inspection.
+    """
+    t0 = time.time()
+    messages = ([{"role": "system", "content": system}] if system else []) \
+        + [{"role": "user", "content": prompt}]
+    tokens, rounds, calls = 0, 0, []
+    text, n = _completion(server, headers, agent, messages, max_tokens)
+    tokens += n
+    exhausted = False
+    while tool_loop:
+        markers = parse_markers(text)
+        if not markers:
+            break
+        if rounds >= tool_loop:
+            exhausted = True
+            break
+        rounds += 1
+        sandbox = sandbox or EvalSandbox()
+        lines = []
+        for tag, arg in markers:
+            calls.append(f"{tag} {arg}".strip())
+            lines.append(f"<<<{tag}>>>{arg}\n{sandbox.run(tag, arg)}")
+        messages.append({"role": "assistant", "content": text})
+        messages.append({"role": "user", "content":
+                         f"# TOOL RESULTS (round {rounds}/{tool_loop})\n\n" + "\n\n".join(lines)
+                         + "\n\nContinue. When you have what you need, write the complete final "
+                           "answer with no tool markers."})
+        text, n = _completion(server, headers, agent, messages, max_tokens)
+        tokens += n
     return {
-        "text": (body.get("choices") or [{}])[0].get("message", {}).get("content", ""),
-        "completion_tokens": (body.get("usage") or {}).get("completion_tokens", 0),
+        "text": strip_markers(text) if tool_loop else text,
+        "completion_tokens": tokens,
         "wall": time.time() - t0,
+        "tool_rounds": rounds,
+        "tool_calls": calls,
+        "tool_exhausted": exhausted,
     }
 
 
@@ -159,6 +318,11 @@ def main():
                     help="skip generation; load the `answers` block from a prior "
                          "--out file. Answers are deterministic (temp 0), so a "
                          "re-judge never needs to re-run the models.")
+    ap.add_argument("--tool-loop", type=int, default=0, metavar="N",
+                    help="answer tool markers (<<<LIST_DIR>>> etc.) from an empty "
+                         "read-only sandbox and let the model continue, up to N "
+                         "rounds, before judging (DEV-618). Default 0: single-turn, "
+                         "the baseline every prior eval was scored on.")
     ap.add_argument("--judge-interval", type=float, default=4.0,
                     help="min seconds between judge calls. The Gemini free tier "
                          "caps at 20 requests/min; 4s (=15/min) stays under it. "
@@ -177,7 +341,8 @@ def main():
         headers["Authorization"] = f"Bearer {k}"
 
     tasks = json.load(open(args.tasks))
-    print(f"{len(tasks)} tasks | {x} vs {y} | judge={args.judge}\n")
+    mode = f" | tool-loop={args.tool_loop}" if args.tool_loop else ""
+    print(f"{len(tasks)} tasks | {x} vs {y} | judge={args.judge}{mode}\n")
 
     # Phase 1 -- one model load per agent, not one per task. Answers are
     # deterministic (temp 0), so --reuse-answers skips regeneration entirely when
@@ -191,19 +356,26 @@ def main():
         print(f"### reusing saved answers for {x}, {y} (skipping generation)\n", flush=True)
     else:
         answers = {}
+        sandbox = EvalSandbox() if args.tool_loop else None
         for agent in (x, y):
             print(f"### {agent} answering (first call pays the model load)", flush=True)
             answers[agent] = {}
             for t in tasks:
                 a = ask_agent(args.server, headers, agent, t["prompt"],
-                              args.max_tokens, system=args.system)
+                              args.max_tokens, system=args.system,
+                              tool_loop=args.tool_loop, sandbox=sandbox)
                 answers[agent][t["id"]] = a
-                print(f"  {t['id']:16} {a['completion_tokens']:5d} tok  {a['wall']:6.1f}s", flush=True)
+                tools = ""
+                if args.tool_loop:
+                    tools = (f"  {a['tool_rounds']} tool round(s)"
+                             + ("  EXHAUSTED" if a["tool_exhausted"] else ""))
+                print(f"  {t['id']:16} {a['completion_tokens']:5d} tok  {a['wall']:6.1f}s{tools}", flush=True)
             print()
         # Checkpoint before judging: generation is the expensive, GPU-bound half,
         # and the judge is a flaky external API. Persist now so a judge failure
         # never costs the answers — re-run with --reuse-answers to judge only.
-        json.dump({"agents": [x, y], "judge": args.judge, "answers": answers},
+        json.dump({"agents": [x, y], "judge": args.judge, "tool_loop": args.tool_loop,
+                   "answers": answers},
                   open(args.out, "w"), indent=1)
         print(f"(answers checkpointed to {args.out})\n", flush=True)
 
@@ -247,7 +419,7 @@ def main():
         tok = sum(a["completion_tokens"] for a in answers[agent].values())
         print(f"{agent:14} {tok:6d} tok in {tot:6.1f}s")
 
-    json.dump({"agents": [x, y], "judge": args.judge, "results": results,
+    json.dump({"agents": [x, y], "judge": args.judge, "tool_loop": args.tool_loop, "results": results,
                "answers": answers, "transcripts": transcripts},
               open(args.out, "w"), indent=1)
     print(f"\nfull answers + judge reasoning: {args.out}")
