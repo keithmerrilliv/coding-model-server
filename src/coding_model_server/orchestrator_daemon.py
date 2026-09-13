@@ -2793,21 +2793,87 @@ def _consecutive_identical_failures(db, spec_id: str, current_notes: str,
     return count
 
 
-def _parse_cited_paths(rejection_notes: str, known_paths) -> set:
-    """Manifest file paths the reviewer cited in its rejection notes.
+# DEV-539: a citation has a POSITION. `X.swift` in a `path:line` diagnostic
+# and `X.swift` in the sentence "the bug is not in X.swift" used to be the
+# same substring match, so a note written to narrow the search regenerated
+# the files it ruled out — and regeneration of a spec-authored file is a
+# fresh attempt that can lose ground (run 8: CentipedeChain.swift compiled
+# at retry 4, came back missing its initialiser at retry 5).
+CITED_BY_DIAGNOSTIC = "diagnostic"   # `path:line` — the compiler named it
+CITED_BY_FENCE = "fenced"            # inside a ``` block the reviewer pasted
+CITED_BY_PROSE = "prose"             # a full path or `code span` in prose — weak
+_FENCE_RE = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
+_CODE_SPAN_RE = re.compile(r"`([^`\n]+)`")
 
-    Matches a known path in full (``ParamountDemo/server/resolver.ts``) or by
-    basename as a whole token (so ``resolver.ts:129`` resolves too)."""
-    cited = set()
-    for path in known_paths:
-        if path in rejection_notes:
-            cited.add(path)
-            continue
-        base = os.path.basename(path)
-        if base and re.search(r"(?<![\w./-])" + re.escape(base) + r"(?![\w])",
-                              rejection_notes):
-            cited.add(path)
-    return cited
+
+def _token_re(name: str) -> "re.Pattern":
+    return re.compile(r"(?<![\w./-])" + re.escape(name) + r"(?![\w])")
+
+
+def _positional_mentions(text: str, name: str) -> bool:
+    """*name* immediately followed by `:<line>` — a diagnostic position."""
+    return re.search(r"(?<![\w./-])" + re.escape(name) + r":\d+", text) is not None
+
+
+def _cite_paths(rejection_notes: str, known_paths) -> "dict[str, str]":
+    """Manifest paths the notes cite, each with WHY it counts (DEV-539).
+
+    Three tiers, strongest first, and a stronger tier present means the
+    weaker ones do not count at all:
+
+    1. ``diagnostic`` — the path or its basename at a ``path:line`` position.
+       This is the compiler's own list, and when it exists it is the whole
+       cited set; a file the compiler did not name is not regenerated
+       because a sentence mentioned it.
+    2. ``fenced`` — the path inside a ``` block the reviewer pasted (a
+       diagnostic the regex above did not recognise, a diff, a stack).
+    3. ``prose`` — only when nothing positional exists (a human review with
+       no build output): a full path, or a basename in a `code span`. A bare
+       basename in running prose never counts on its own.
+
+    ``resolver.ts:129`` resolves by basename as DEV-434 needs; the notes'
+    prose is free to say "not in X" without putting X at risk.
+    """
+    notes = rejection_notes or ""
+    known = [p for p in known_paths if p]
+    fenced = "\n".join(_FENCE_RE.findall(notes))
+    spans = " ".join(_CODE_SPAN_RE.findall(notes))
+    tiers: "list[tuple[str, callable]]" = [
+        (CITED_BY_DIAGNOSTIC, lambda p, b: _positional_mentions(notes, p)
+         or (b and _positional_mentions(notes, b))),
+        (CITED_BY_FENCE, lambda p, b: p in fenced
+         or (b and _token_re(b).search(fenced) is not None)),
+        (CITED_BY_PROSE, lambda p, b: (p in notes and "/" in p)
+         or (b and _token_re(b).search(spans) is not None)),
+    ]
+    for why, hit in tiers:
+        cited = {p: why for p in known if hit(p, os.path.basename(p))}
+        if cited:
+            return cited
+    return {}
+
+
+def _parse_cited_paths(rejection_notes: str, known_paths) -> set:
+    """Manifest file paths the reviewer cited in its rejection notes — the
+    keys of :func:`_cite_paths`."""
+    return set(_cite_paths(rejection_notes, known_paths))
+
+
+def _log_citations(spec_id: str, notes: str, cited: "dict[str, str]",
+                   known_paths) -> None:
+    """Why each file entered the cited set, and which mentioned files did
+    not — so an over-match is visible in the log rather than inferred three
+    failures later (DEV-539)."""
+    if cited:
+        logger.info("spec %s: cited for regeneration — %s", spec_id,
+                    "; ".join(f"{p} ({why})" for p, why in sorted(cited.items())))
+    mentioned = sorted(
+        p for p in known_paths if p not in cited
+        and (p in (notes or "") or _token_re(os.path.basename(p)).search(notes or "")))
+    if mentioned:
+        logger.info("spec %s: mentioned in the notes but NOT cited (no "
+                    "diagnostic or fenced position) — %s (DEV-539)",
+                    spec_id, ", ".join(mentioned))
 
 
 def _build_from_manifest(
@@ -2940,7 +3006,10 @@ def _generate_via_manifest(
             # still carry undeclared junk; filter it here too so a targeted
             # retry does not keep regenerating an invented file.
             entries = _drop_undeclared_manifest_entries(spec, entries)
-            cited = _parse_cited_paths(rejection_notes, {e.path for e in entries})
+            provenance = _cite_paths(rejection_notes, {e.path for e in entries})
+            _log_citations(spec.id, rejection_notes, provenance,
+                           {e.path for e in entries})
+            cited = set(provenance)
             widened = False
 
             # DEV-434: the cited files are the ones the compiler NAMED, which
@@ -2988,6 +3057,7 @@ def _generate_via_manifest(
                                          "agent": chosen_agent or executor.role_to_agent("implementer"),
                                          "model_call": False,
                                          "regenerated": sorted(cited),
+                                         "cited_by": provenance,  # DEV-539
                                          "reused": len(entries) - len(cited)})
                 result = _build_from_manifest(
                     db, spec, task, spec_md, design_md, entries, chosen_agent,
