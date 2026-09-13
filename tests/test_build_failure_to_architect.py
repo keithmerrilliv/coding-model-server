@@ -102,8 +102,11 @@ def test_the_architect_charge_reaches_the_classifier_stream(db, spec_with_roles)
     assert d._route_build_failure_to_architect(db, spec, impl, spec_dir,
                                                notes, DIAG) is True
 
+    # DEV-631: the prior build failure is itself a row in this stream now
+    # (that is how the router read it); the architect's charge is the other.
     ev = [e.payload for e in db.list_events_by_kind(
-              spec_id=spec.id, kind=d.EventKind.FAILURE_CLASSIFIED, limit=10)]
+              spec_id=spec.id, kind=d.EventKind.FAILURE_CLASSIFIED, limit=10)
+          if e.payload.get("role") == "architect"]
     assert len(ev) == 1
     assert ev[0]["cls"] == "build_failure"
     assert ev[0]["role"] == "architect"
