@@ -268,10 +268,14 @@ class JiraSync:
         target = _spec_status_to_jira(spec.status)
         try:
             landed = self.client.transition_issue(spec.jira_epic_key, target)
+            from coding_model_autonomous.jira_client import LOSSY_COLLAPSES
+            note = ""
+            if landed and landed != target:
+                note = (f" (landed on {landed}; see the mirror note on the epic)"
+                        if target in LOSSY_COLLAPSES else
+                        f" (landed on {landed}; the workflow has no {target!r})")
             logger.info("jira-sync: spec %s → epic %s status=%s%s",
-                        spec.id, spec.jira_epic_key, target,
-                        f" (landed on {landed}; see the mirror note on the epic)"
-                        if landed and landed != target else "")
+                        spec.id, spec.jira_epic_key, target, note)
         except Exception as e:
             logger.warning("jira-sync: failed to transition epic %s: %s",
                            spec.jira_epic_key, e)
