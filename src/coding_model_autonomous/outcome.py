@@ -122,6 +122,55 @@ _CAPS: dict[tuple[FailureClass, str], Optional[int]] = {
 
 _MISSING_MODULE_RE = re.compile(r"No module named '([\w.]+)'")
 
+# ── diagnostics: the stable text of a build or test failure ──────────────────
+# Moved here from the daemon (DEV-631): the failure_classified stream is the
+# one place a failure's identity lives, so the parsers that produce that
+# identity live beside it. Absolute worktree paths differ per dispatch
+# (…/worktrees/spec_x-7f8a8795/…) and line numbers move as the file is
+# rewritten; neither changes what the defect IS, so both are stripped.
+SIG_PATH_RE = re.compile(r"(/\S+?/)?([\w.+-]+\.\w+):\d+:\d+:")
+SIG_ERROR_RE = re.compile(r"error: (.+)")
+ATTRIBUTED_ERROR_RE = re.compile(r"^\s*\S.*?:\d+:\d+: error: ", re.MULTILINE)
+DIAGNOSTICS_ON_EVENT = 40
+
+
+def attributed_diagnostics(notes: str) -> list:
+    """Location-stripped message of every attributed diagnostic, in order.
+
+    One entry per diagnostic *occurrence*. Callers asking "which defects are
+    here?" build a set from this; callers asking "did the build get worse?"
+    count it. Those are different questions, and the gap between them is
+    wide: run 8's repair output carries 27 diagnostics drawn from 6 distinct
+    messages, so deduplicating first discards most of the magnitude. A set
+    comparison can therefore score a regression as an improvement whenever
+    the new errors repeat one message — which is exactly what a dropped
+    import does (DEV-541).
+
+    Only diagnostics that name a file:line say anything about the code. Bare
+    driver lines — `error: fatalError`, `error: emit-module command failed…`
+    — appear in essentially every failed build regardless of cause;
+    counting them made every pair of consecutive failures look like the
+    same unfixable defect (spec_cc7dd609).
+    """
+    if not notes:
+        return []
+    msgs = []
+    for line in notes.splitlines():
+        if not ATTRIBUTED_ERROR_RE.search(line):
+            continue
+        match = SIG_ERROR_RE.search(line)
+        if not match:
+            continue
+        msg = SIG_PATH_RE.sub(r"\2:", match.group(1).strip())
+        if msg:
+            msgs.append(msg)
+    return msgs
+
+
+def diagnostic_messages(notes: str) -> set:
+    """The distinct error messages in a failure report, location-stripped."""
+    return set(attributed_diagnostics(notes))
+
 
 @dataclass
 class Failure:
@@ -321,6 +370,82 @@ def _classified_events(db: Any, spec_id: str, task_id: str) -> list[dict]:
     return out
 
 
+def _implementer_task_ids(db: Any, spec_id: str) -> set:
+    try:
+        return {t.id for t in db.list_tasks_for_spec_by_role(spec_id, "implementer")}
+    except Exception:
+        return set()
+
+
+def verdict_diagnostics(db: Any, spec_id: str) -> list:
+    """Newest first: the diagnostics of every verdict charged to the
+    implementer (its own failures and the ones found at the reviewer
+    stage — dispose records both on the implementer task)."""
+    ids = _implementer_task_ids(db, spec_id)
+    try:
+        events = db.list_events_by_kind(spec_id=spec_id,
+                                        kind=EventKind.FAILURE_CLASSIFIED,
+                                        limit=500)
+    except Exception:
+        return []
+    out = []
+    for ev in events:  # newest first
+        if getattr(ev, "task_id", None) not in ids:
+            continue
+        p = _payload(ev)
+        if p.get("outcome") != Outcome.VERDICT.value:
+            continue
+        out.append(set(p.get("diagnostics") or []))
+    return out
+
+
+def consecutive_same_diagnostics(db: Any, spec_id: str, current: set, *,
+                                 already_recorded: bool = True) -> int:
+    """How many prior consecutive verdicts carried exactly *current*'s
+    diagnostics (DEV-434's repeat count, read from the stream).
+
+    ``already_recorded`` says whether the failure *current* describes has
+    itself been recorded yet. On the retry path it has — the notes were read
+    back off the latest rejected gate, whose verdict dispose recorded — so
+    the newest match is this same failure and must not be counted. On the
+    pre-gate build check it has not.
+    """
+    if not current:
+        return 0
+    history = verdict_diagnostics(db, spec_id)
+    if already_recorded and history and history[0] == current:
+        history = history[1:]
+    n = 0
+    for diags in history:
+        if diags == current:
+            n += 1
+        else:
+            break
+    return n
+
+
+def persistent_diagnostics(db: Any, spec_id: str, current: set, *,
+                           lookback: int) -> set:
+    """Diagnostics present in *current* AND in each of the previous
+    *lookback* verdicts (DEV-541's routing signal, read from the stream).
+
+    Whole-signature equality is too strict to detect an unfixable defect:
+    incidental errors come and go between attempts while the design-caused
+    one survives. So the signal is an individual message that outlives
+    repeated attempts, not a set that repeats verbatim.
+    """
+    if not current or lookback < 1:
+        return set()
+    prior = verdict_diagnostics(db, spec_id)[:lookback]
+    if len(prior) < lookback:
+        return set()  # not enough history to call anything persistent
+    for diags in prior:
+        current = current & diags
+        if not current:
+            return set()
+    return current
+
+
 def consecutive_no_verdicts(db: Any, spec_id: str, task) -> int:
     """No-verdict dispositions already recorded for this attempt."""
     n = 0
@@ -434,6 +559,11 @@ def _record(db: Any, spec: Any, task: Any, failure: Failure, action: str,
         # model change anything?" is unanswerable without them, which is also
         # what DEV-530's confound needs.
         "coarse_key": coarse_key(failure),
+        # DEV-631: the diagnostics of a verdict, so "the same failure again?"
+        # (DEV-434's widening, DEV-541's routing to the architect) is
+        # answered from this stream rather than by re-parsing gate notes.
+        "diagnostics": sorted(diagnostic_messages(
+            failure.feedback or failure.detail or ""))[:DIAGNOSTICS_ON_EVENT],
     }
     if "agent" not in failure.extra or not failure.extra.get("agent"):
         resolved = attempt_agent(db, getattr(spec, "id", ""), task)

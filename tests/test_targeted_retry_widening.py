@@ -14,7 +14,6 @@ import pytest
 
 import coding_model_server.orchestrator_daemon as d
 from coding_model_autonomous.db import Database
-from coding_model_autonomous.models import GateType
 
 
 @pytest.fixture
@@ -24,40 +23,48 @@ def db(tmp_path):
     database.close_all()
 
 
-# ── signature ────────────────────────────────────────────────────────────────
+# ── the same failure again? ──────────────────────────────────────────────────
+#
+# DEV-631: the repeat count reads the failure_classified stream, where dispose
+# records every verdict's diagnostics, instead of re-parsing gate notes. These
+# tests record verdicts the way the pipeline does.
 
-def test_same_defect_across_dispatches_has_one_signature():
-    """Worktree paths and line numbers move between attempts; the defect does not."""
-    a = ("/Users/youruser/Caches/worktrees/spec_x-7f8a8795/Tests/T.swift:7:17: "
+from coding_model_autonomous import outcome as _outcome
+
+
+def _reject(db, spec_id, notes, *, cls=None):
+    """A verdict charged to the implementer, as dispose records it."""
+    impls = db.list_tasks_for_spec_by_role(spec_id, "implementer")
+    task = impls[0] if impls else db.create_task(
+        spec_id=spec_id, agent="implementer", role="implementer", title="build")
+    first = notes.strip().splitlines()[0] if notes.strip() else ""
+    _outcome._record(db, db.get_spec(spec_id), task, _outcome.Failure(
+        cls or _outcome.FailureClass.BUILD_FAILURE, "implementer", "build_check",
+        first, feedback=notes), "charge", 0)
+
+
+def test_same_defect_across_dispatches_has_one_identity():
+    a = ("/tmp/wt-1/Sources/World.swift:7:17: "
          "error: cannot find 'World' in scope")
-    b = ("/Users/youruser/Caches/worktrees/spec_x-d14e1cfe/Tests/T.swift:12:9: "
+    b = ("/tmp/wt-2/Sources/World.swift:9:2: "
          "error: cannot find 'World' in scope")
-    assert d._failure_signature(a) == d._failure_signature(b) != ""
+    assert d._diagnostic_messages(a) == d._diagnostic_messages(b)
 
 
-def test_ordering_does_not_change_the_signature():
+def test_ordering_does_not_change_the_identity():
     a = "x.swift:1:1: error: alpha\ny.swift:2:2: error: beta\n"
     b = "y.swift:9:9: error: beta\nx.swift:8:8: error: alpha\n"
-    assert d._failure_signature(a) == d._failure_signature(b)
+    assert d._diagnostic_messages(a) == d._diagnostic_messages(b)
 
 
 def test_different_defects_differ():
     a = "x.swift:1:1: error: cannot find 'World' in scope"
     b = "x.swift:1:1: error: cannot convert value of type 'Int'"
-    assert d._failure_signature(a) != d._failure_signature(b)
+    assert d._diagnostic_messages(a) != d._diagnostic_messages(b)
 
 
-def test_no_errors_gives_an_empty_signature():
-    assert d._failure_signature("all good, 17 passed") == ""
-    assert d._failure_signature("") == ""
-
-
-# ── repeat counting ──────────────────────────────────────────────────────────
-
-def _reject(db, spec_id, notes, prompt="## Code review: demo"):
-    gate = db.create_gate(spec_id=spec_id, task_id=None,
-                          gate_type=GateType.CODE_REVIEW, prompt_md=prompt)
-    db.respond_to_gate(gate.id, "rejected", notes=notes)
+def test_no_errors_gives_no_identity():
+    assert d._diagnostic_messages("all good") == set()
 
 
 ERR_A = "T.swift:7:17: error: cannot find 'World' in scope"
@@ -98,11 +105,25 @@ def test_unparseable_notes_never_count_as_a_repeat(db):
     assert d._consecutive_identical_failures(db, spec.id, "something went wrong") == 0
 
 
-def test_approved_gates_are_ignored(db):
+def test_no_verdicts_are_ignored(db):
+    """A transport requeue between two identical verdicts is not a third
+    verdict, and it must not break the streak either."""
     spec = db.create_spec(title="demo", source_md_path="spec.md")
-    g = db.create_gate(spec_id=spec.id, task_id=None,
-                       gate_type=GateType.CODE_REVIEW, prompt_md="## Code review")
-    db.respond_to_gate(g.id, "approved", notes=ERR_A)
+    _reject(db, spec.id, ERR_A)
+    impl = db.list_tasks_for_spec_by_role(spec.id, "implementer")[0]
+    _outcome._record(db, db.get_spec(spec.id), impl, _outcome.Failure(
+        _outcome.FailureClass.TRANSPORT, "implementer", "model_call",
+        "ConnectionError", feedback=ERR_A), "requeue", 1)
+    _reject(db, spec.id, ERR_A)
+    assert d._consecutive_identical_failures(db, spec.id, ERR_A) == 1
+
+
+def test_the_architects_verdicts_do_not_count(db):
+    spec = db.create_spec(title="demo", source_md_path="spec.md")
+    arch = db.create_task(spec_id=spec.id, agent="architect", role="architect", title="d")
+    _outcome._record(db, db.get_spec(spec.id), arch, _outcome.Failure(
+        _outcome.FailureClass.REVIEW_REJECTED, "architect", "gate", "x",
+        feedback=ERR_A), "charge", 0)
     _reject(db, spec.id, ERR_A)
     assert d._consecutive_identical_failures(db, spec.id, ERR_A) == 0
 
