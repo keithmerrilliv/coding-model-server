@@ -467,7 +467,14 @@ def _overlay_operator_test_strategy(yaml_text: str, spec_md: str,
         return yaml_text
     strategy = plan.get("test_strategy")
     if not isinstance(strategy, dict):
-        return yaml_text  # no strategy at all is a different (non-Apple) shape
+        # DEV-630: the one shape the overlay cannot repair. Validation bounces
+        # it (below); say here, by name, that nothing was restored.
+        logger.warning(
+            "spec %s: the plan has no test_strategy mapping (%s) while the "
+            "spec declares operator key(s) %s — the DEV-573 overlay cannot "
+            "restore them and is NOT armed for this plan (DEV-630)",
+            spec_id, type(strategy).__name__, ", ".join(sorted(wanted)))
+        return yaml_text
     changed = [k for k, v in wanted.items() if strategy.get(k) != v]
     if not changed:
         return yaml_text
@@ -498,6 +505,20 @@ def _validate_test_strategy(yaml_text: str, spec_md: str) -> list[str]:
         return []
     strategy = plan.get("test_strategy")
     if not isinstance(strategy, dict):
+        # DEV-630: with no mapping at all, every rule below stood down at
+        # once, including the DEV-573 overlay. When the spec declared
+        # operator keys the planner dropped a whole block, and a round to
+        # copy it through is exactly what plan validation is for.
+        declared = _spec_declared_test_strategy(spec_md)
+        wanted = sorted(k for k in _OPERATOR_STRATEGY_KEYS if k in declared)
+        if wanted:
+            return [
+                "the plan has no `test_strategy` mapping, but the spec's own "
+                "test_strategy block declares "
+                + ", ".join(f"`{k}`" for k in wanted)
+                + ". Copy the block through as real YAML keys under "
+                "`test_strategy:` — the pipeline cannot enforce protection "
+                "metadata it cannot read."]
         return []  # no strategy at all is a different (non-Apple) shape
 
     problems: list[str] = []
@@ -2148,15 +2169,42 @@ def _verify_review_citations(review_md: str, spec_dir: Path) -> tuple[str, int, 
 
 # ── Implementation generation: single-call vs manifest/per-file (#4) ──────────
 
+# DEV-630: an agent name the config does not know used to get no window and
+# no reasoning reserve silently, which switches the DEV-633 fit check off for
+# that dispatch. Warn by name — once per name, the lookup runs per dispatch.
+_UNKNOWN_AGENTS_WARNED: set = set()
+
+
+def _agent_model_config(agent: str, what: str) -> "dict | None":
+    """*agent*'s model_config, or None (with one warning) when the config
+    has no such agent."""
+    from coding_model_server.config import Config
+    name = Config.AGENT_ALIASES.get(agent, agent)
+    try:
+        return Config.AGENTS[name]["model_config"]
+    except Exception as exc:
+        if agent not in _UNKNOWN_AGENTS_WARNED:
+            _UNKNOWN_AGENTS_WARNED.add(agent)
+            logger.warning("allocator: agent %r is not in the config (%s: %s) "
+                           "— its %s is unknown and the DEV-633 prompt fit "
+                           "check is NOT armed for dispatches to it (DEV-630)",
+                           agent, type(exc).__name__, exc, what)
+        return None
+
+
 def _agent_ctx_limit(agent: "str | None") -> "int | None":
     """Context window (n_ctx) for *agent*, or None when unknown."""
     if not agent:
         return None
+    cfg = _agent_model_config(agent, "context window")
+    if cfg is None:
+        return None
     try:
-        from coding_model_server.config import Config
-        name = Config.AGENT_ALIASES.get(agent, agent)
-        return int(Config.AGENTS[name]["model_config"]["n_ctx"])
-    except Exception:
+        return int(cfg["n_ctx"])
+    except Exception as exc:
+        logger.warning("allocator: agent %r has no readable n_ctx (%s) — the "
+                       "DEV-633 prompt fit check is NOT armed for it (DEV-630)",
+                       agent, exc)
         return None
 
 
@@ -2173,12 +2221,18 @@ def _agent_reasoning_reserve(agent: "str | None") -> int:
     """
     if not agent:
         return 0
+    cfg = _agent_model_config(agent, "reasoning reserve")
+    if cfg is None:
+        return 0
+    args = list(cfg.get("server_extra_args") or [])
+    if _REASONING_BUDGET_ARG not in args:
+        return 0  # no flag: nothing to reserve, the ordinary case
     try:
-        from coding_model_server.config import Config
-        name = Config.AGENT_ALIASES.get(agent, agent)
-        args = list(Config.AGENTS[name]["model_config"].get("server_extra_args") or [])
         return int(args[args.index(_REASONING_BUDGET_ARG) + 1])
-    except Exception:
+    except Exception as exc:
+        logger.warning("allocator: agent %r carries %s but its value could "
+                       "not be read (%s) — no reasoning reserve is taken "
+                       "(DEV-630)", agent, _REASONING_BUDGET_ARG, exc)
         return 0
 
 
@@ -4412,8 +4466,16 @@ def _route_missing_planned_outputs(db: Database, spec: Spec, task,
         view = _spec_context(db, spec, spec_md, role="implementer").select(
             "implementer", planned=planned)
         existing = set(view.existing_by_path)
-    except Exception:  # a fetch problem must not mask the verdict
-        existing = set()
+        unknown = set(view.unknown_files)
+    except Exception as exc:  # a fetch problem must not mask the verdict
+        # DEV-630: ...and must not turn every existing file into a creation
+        # either. Nothing is known about any planned path; say so, and
+        # tell the model neither EXISTS nor NEW for any of them.
+        logger.warning("spec %s: could not read the repository state for "
+                       "the missing-output feedback (%s) — every planned "
+                       "file is UNKNOWN; the DEV-638 file-mode guidance is "
+                       "NOT armed for this retry (DEV-630)", spec.id, exc)
+        existing, unknown = set(), set(planned)
     edit_mode = executor.DIFF_BASED_EDITS
 
     lines = [f"Your response is missing {len(missing)} of the {len(planned)} "
@@ -4437,6 +4499,15 @@ def _route_missing_planned_outputs(db: Database, spec: Spec, task,
                 f"Re-emit it whole as a complete `<<<FILE: {path}>>> ... "
                 f"<<<END_FILE>>>` block, preserving every declaration you were "
                 f"not asked to change.")
+        elif path in unknown:
+            # DEV-630: the repository read for this path failed, so it is
+            # not known whether it exists. "NEW — EMIT WHOLE" here aimed a
+            # retry at re-inventing a file that may be 147K lines.
+            lines.append(
+                f"- `{path}` — could NOT be read from the repository at "
+                f"base_ref, so it is not known whether it already exists. "
+                f"Emit your complete attempt for it; never anchor "
+                f"SEARCH/REPLACE blocks on content you have not been shown.")
         else:
             lines.append(
                 f"- `{path}` — is a NEW file. Emit it whole as a complete "
