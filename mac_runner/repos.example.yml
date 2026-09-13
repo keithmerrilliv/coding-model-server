@@ -7,16 +7,11 @@
 # runner at arbitrary filesystem locations.
 
 repos:
-  character-sync:
-    path: ~/Dev/OnePlanet/Character-SYNC
+  my-swift-app:
+    path: ~/Dev/MySwiftApp
 
-  scene-reconstruction:
-    path: ~/Dev/OnePlanet/SceneReconstruction
-
-  electric-sheep:
-    path: ~/Dev/Metal/ElectricSheep
-
-  llab:
-    path: ~/Dev/Metal/LLab
+  my-metal-library:
+    path: ~/Dev/MyMetalLibrary
 
   # Add one entry per project you want the orchestrator to be able to test.
+  # The symbolic name is what a spec's `test_strategy.repo` refers to.

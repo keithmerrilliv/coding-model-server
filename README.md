@@ -15,7 +15,19 @@ asked to review, routing a recurring diagnostic back to whoever actually caused
 it, rolling back a "repair" that made the build worse, and refusing to tell a
 model its code failed to compile when it did not.
 
+**Two things are not in this repository and you must supply them before
+anything runs:** a llama.cpp `llama-server` build (`tools/`, see
+[TUTORIAL §5.3](docs/TUTORIAL.md#53-updating-the-llama-server-binary)) and GGUF
+model weights. "Coding Model" is this project's name for the server and client
+together.
+
 [Results so far](#results-so-far), including the failures, are below.
+
+**Contents:** [Architecture](#architecture) · [Quick Start](#quick-start) ·
+[Agents](#agents) · [Client Commands](#client-commands) ·
+[Tool System](#tool-system) · [Context Management](#context-management) ·
+[Autonomous Mode](#autonomous-mode) · [API](#api) ·
+[Project Structure](#project-structure) · [License](#license)
 
 ## Architecture
 
@@ -66,9 +78,9 @@ will not start without them.
 | | |
 |---|---|
 | **OS / hardware** | Linux with an NVIDIA GPU for the server. The client runs on macOS or Linux. |
-| **Python** | 3.12 |
+| **Python** | 3.10 or newer; 3.12 is what CI and mypy run against |
 | **CUDA** | **12.8 — not 13.x.** CUDA 13.x has a compiler bug that silently disables MMQ kernels and costs roughly 7× on prefill (llama.cpp #18331, #18398). |
-| **`tools/llama-server`** | **You must supply this.** A llama.cpp build plus its shared libraries. It is the only inference backend, it is not in this repo, and `setup.sh` does not fetch it. See `docs/TUTORIAL.md` §5.3. |
+| **`tools/llama-server`** | **You must supply this.** A llama.cpp build plus its shared libraries. It is the only inference backend, it is not in this repo, and `setup.sh` does not fetch it. `docs/TUTORIAL.md` §5.3 says where to download one or how to build it. |
 | **Model weights** | **You must supply these.** No GGUF ships here. `.env.example` lists the model slots; every one is optional, so start with a single small model and add more later. |
 | **VRAM** | Whatever you have. Most agents run with expert offload (`--cpu-moe`), keeping attention on the GPU and MoE experts on CPU, so a 16 GB card runs models far larger than it could hold. |
 
@@ -145,7 +157,7 @@ Each agent maps to a model configuration and system prompt, both defined in
 `/agent <name>` or `@agent_name message`.
 
 Decode tok/s measured end-to-end on an RTX 5080, 2026-07-14 (see
-[TUTORIAL.md](docs/TUTORIAL.md#stage-6-token-generation-autoregressive-decoding)
+[TUTORIAL.md](docs/TUTORIAL.md#stage-5-prefill-gpu--cpu)
 for method, prefill figures, and the caveat about raw-vs-proxy numbers).
 
 | Agent | Role | Model | Active/Total | Context | KV | GPU offload | Decode tok/s |
@@ -511,7 +523,7 @@ coding-model-server/
 ├── systemd/                    # Service units (use `python -m coding_model_server.X` ExecStart)
 ├── polkit/                     # polkit rule: sudo-free restart of the units (redeploy.sh)
 ├── git-server/                 # git-shell wrapper + pre-receive hook for pipeline attempt branches
-├── tools/                      # llama-server binary + shared libs, appledeepdoc-mcp
+├── tools/                      # llama-server binary + shared libs, appledeepdoc-mcp (gitignored — you supply them)
 ├── scraping/                   # Apple documentation scraper
 ├── dashboard/                  # TypeScript React dashboard
 ├── mac_runner/                 # Separate Swift/Xcode test runner service
@@ -519,7 +531,10 @@ coding-model-server/
 │   ├── TUTORIAL.md             #   End-to-end pipeline tutorial
 │   ├── PIPELINE.md             #   Pipeline state machine + failure routing (the map)
 │   ├── CONFIGURATION.md        #   Env vars, agent-config knobs, systemd
-│   └── RAG_UPDATES.md          #   RAG database + agentic query layer
+│   ├── RAG_UPDATES.md          #   RAG database + agentic query layer
+│   ├── SECURITY_MIGRATION.md   #   The loopback + admin-key hardening, and how to undo it
+│   ├── specs/                  #   Specs the pipeline has been run against (author's projects)
+│   └── designs/                #   Design proposals that preceded larger tickets
 ├── var/                        # Runtime state, git-ignored: tasks_db/, memory_db/, server_stats.csv
 └── .archive/                   # Superseded backups, git-ignored
 ```

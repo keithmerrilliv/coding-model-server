@@ -14,29 +14,24 @@
      3. Replace LINUX_USER@LINUX_HOST below with your Linux user@host, and youruser
         with your macOS username.
 
-        Do NOT copy an address out of this file or an old ticket. This slot
-        held a hardcoded 192.168.1.64 that was already stale, and the Linux
-        box's address has churned repeatedly (Velop mesh removed, wired
-        NetGear, both a 10.x and a 192.168.1.x range live at once). Derive it
-        instead, on the MAC:
+        Do NOT copy an address out of this file or an old ticket: the
+        Linux box's address is derived, not remembered. On the MAC:
 
           ping -c1 LINUX_HOSTNAME.local     # if mDNS answers, prefer the name
           # otherwise, from the Linux box:  ip route get <this-mac-ip>
-          #   -> "10.0.0.198 dev wlp7s0 src 192.0.2.20" means use 192.0.2.20
+          #   -> "... dev wlp7s0 src 192.0.2.20" means use 192.0.2.20
 
-        The Linux box has TWO interfaces and only the one sharing the Mac's
-        subnet can carry this: as of 2026-07-25 that is 192.0.2.20 (wlp7s0),
-        while 192.0.2.11 (enp6s0) has no route to the Mac at all. Both of
-        those are DHCP, so pin them with router reservations or this breaks
-        again on the next lease. Confirm before installing:
+        If the Linux box has more than one interface, only the one that
+        shares the Mac's subnet can carry the tunnel; pin that address with
+        a DHCP reservation or this breaks on the next lease. Confirm before
+        installing:
 
           ssh -o BatchMode=yes LINUX_USER@LINUX_HOST true   # must exit 0
 
-        Two more things that make an address look wrong when it is not:
-        the Linux ufw allows port 22 only from specific subnets, so the Mac
-        must be inside one (a mismatch presents as a TIMEOUT, not a refusal);
-        and mDNS on that box currently publishes IPv6 only, so `.local` may
-        resolve to an address ssh cannot use over this LAN.
+        A firewall that allows port 22 only from specific subnets presents
+        as a TIMEOUT, not a refusal, and mDNS may resolve `.local` to an
+        IPv6 address ssh cannot use on your LAN — both look like a wrong
+        address when the address is fine.
      4. autossh is /opt/homebrew/bin/autossh on Apple Silicon, /usr/local/bin/autossh
         on Intel. ProgramArguments needs the absolute path — launchd does not
         search PATH for argv[0].

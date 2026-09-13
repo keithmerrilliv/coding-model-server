@@ -629,7 +629,23 @@ curl -s http://localhost:5000/v1/admin/gpu_stats -H "X-Admin-Key: $ADMIN_API_KEY
 
 `tools/llama-server` is a llama.cpp build **you supply**, dropped into `tools/`
 alongside its shared libraries (`libggml*.so`, `libllama*.so`, …). The directory
-is gitignored, so your build is not in the repo and survives pulls. Upgrading
+is gitignored, so your build is not in the repo and survives pulls.
+
+**Getting one.** Either download a CUDA build from the llama.cpp releases page
+(https://github.com/ggml-org/llama.cpp/releases — pick the `cuda` archive for
+your CUDA major version, unpack it, and copy `llama-server` plus every `.so`
+beside it into `tools/`), or build from source, which is what the numbers in
+this repo were measured with:
+
+```bash
+git clone https://github.com/ggml-org/llama.cpp && cd llama.cpp
+cmake -B build -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release -j --target llama-server
+cp build/bin/llama-server build/bin/*.so /path/to/coding-model-server/tools/
+```
+
+Check it before starting the server: `tools/llama-server --version` must run
+from the repo root (a missing `.so` fails here, not later). Upgrading
 means dropping in a new build and its libs; there is no pip package to update.
 Keep the previous build — a new binary can change VRAM behavior, and the
 June 2026 upgrade shifted footprints by ~2.7 GB, which invalidated every
