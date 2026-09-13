@@ -395,7 +395,7 @@ def invariant_agents(db: Any, spec_id: str, task: Any, failure: Failure) -> list
     """
     key = coarse_key(failure)
     agents = []
-    for p in _classified_events(db, spec_id, getattr(task, "id", None)):
+    for p in _classified_events(db, spec_id, getattr(task, "id", "") or ""):
         if p.get("coarse_key") != key:
             continue
         a = p.get("agent")
