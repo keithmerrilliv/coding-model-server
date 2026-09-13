@@ -15,11 +15,17 @@ cycle. This module has no edges back into the daemon.
 """
 from __future__ import annotations
 
+import json
 import logging
 import hashlib
+import os
+import random
 import shutil
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
+from typing import Any, Iterable, Optional
 
+from . import outcome as _outcome
 from . import supervisor as _supervisor
 from .db import Database
 from .executor import ALLOWED_IMPLEMENTER_AGENTS, TIER_TO_IMPLEMENTER
@@ -175,6 +181,212 @@ def _rotation_pick(initial_agent: "str | None", retry_count: int) -> "str | None
     else:
         chain = _IMPLEMENTER_ROTATION
     return chain[retry_count % len(chain)]
+
+
+# ── DEV-530 option 1: a stated fraction of attempts is assigned at random ────
+# Rotation is failure-triggered, so position in the rotation and attempt
+# difficulty are the same variable and per-agent rates rank agents
+# backwards. On this fraction of dispatches the agent is drawn uniformly
+# from the rotation instead, which decouples the two. 0 (the default) means
+# the shipped behaviour exactly; the assignment is recorded on the
+# ATTEMPT_PLANNED event either way, so stratified reads can tell them apart.
+ROTATION_RANDOM_FRACTION = float(
+    os.getenv("AUTONOMOUS_ROTATION_RANDOM_FRACTION", "0") or 0)
+_rng = random.Random()
+
+
+def random_rotation_pick() -> Optional[str]:
+    """An agent drawn uniformly from the rotation, on ROTATION_RANDOM_FRACTION
+    of calls; None otherwise (use the rotation)."""
+    if ROTATION_RANDOM_FRACTION <= 0 or not _IMPLEMENTER_ROTATION:
+        return None
+    if _rng.random() >= ROTATION_RANDOM_FRACTION:
+        return None
+    return _rng.choice(list(_IMPLEMENTER_ROTATION))
+
+
+# ── DEV-631: what will differ from the failed attempt? ───────────────────────
+#
+# The retry loop incremented retry_count, rotated the agent and re-dispatched;
+# it had no notion of a dispatch that cannot change the outcome. `AttemptPlan`
+# is what a dispatch is about to pull on — the agent, the prompt, the feedback
+# in it, the temperature, the environment — recorded BEFORE the call as an
+# ATTEMPT_PLANNED event with what changed since the previous attempt and why.
+# A plan identical to an earlier attempt's on every lever is a dispatch that
+# has already been tried; the loop injects a difference (the next agent in the
+# rotation) rather than spend an attempt re-proving it. The same record is
+# DEV-530's difficulty proxy: which failure preceded this attempt, produced by
+# which agent, with how many diagnostics — so per-agent outcomes can be read
+# at matched difficulty instead of confounded by rotation position.
+
+_PLAN_LEVERS = ("agent", "prompt_digest", "feedback_digest", "temperature",
+                "env_digest")
+_ENV_KEYS = ("repo", "base_ref", "framework", "execution_target", "destination")
+
+
+def _digest(*parts: Any) -> str:
+    h = hashlib.sha256()
+    for part in parts:
+        h.update(str(part or "").encode("utf-8", "replace"))
+        h.update(b"\0")
+    return h.hexdigest()[:16]
+
+
+@dataclass(frozen=True)
+class AttemptPlan:
+    role: str
+    retry: int
+    agent: Optional[str]
+    prompt_digest: str            # everything prompt-shaping: design, clarifications, feedback
+    feedback_digest: str          # the feedback alone ("" when none)
+    temperature: float
+    env_digest: str               # the test_strategy the attempt is judged in
+    assignment: str = "rotation"  # recommended | rotation | random | injected | fixed
+    # DEV-530 option 2 — the difficulty proxy
+    prior_cls: Optional[str] = None
+    prior_coarse_key: Optional[str] = None
+    prior_agent: Optional[str] = None
+    prior_outcome: Optional[str] = None
+    diagnostics: int = 0
+    feedback_chars: int = 0
+
+    def levers(self) -> dict:
+        return {k: getattr(self, k) for k in _PLAN_LEVERS}
+
+    def changed_from(self, previous: "dict | None") -> list:
+        if previous is None:
+            return []
+        return [k for k in _PLAN_LEVERS if previous.get(k) != getattr(self, k)]
+
+    def same_levers(self, other: dict) -> bool:
+        return all(other.get(k) == getattr(self, k) for k in _PLAN_LEVERS)
+
+
+def _classified_on_task(db: Database, spec_id: str, task_id: str) -> list:
+    try:
+        events = db.list_events_by_kind(spec_id=spec_id,
+                                        kind=EventKind.FAILURE_CLASSIFIED,
+                                        limit=500)
+    except Exception:
+        return []
+    return [_outcome._payload(ev) for ev in events
+            if getattr(ev, "task_id", None) == task_id]
+
+
+def plan_attempt(db: Database, spec_id: str, task, *, role: str,
+                 agent: Optional[str], feedback: Optional[str],
+                 prompt_inputs: Iterable[Any], strategy: "dict | None",
+                 temperature: float = 0.2,
+                 assignment: str = "rotation") -> AttemptPlan:
+    """What this dispatch is about to pull on, and what preceded it."""
+    fb = feedback or ""
+    strategy = strategy if isinstance(strategy, dict) else {}
+    prior: dict = {}
+    for p in _classified_on_task(db, spec_id, task.id):  # newest first
+        # The failure that caused attempt N was recorded at retry N-1; a
+        # no-verdict requeue on THIS attempt is newer but did not cause it.
+        if p.get("retry") == task.retry_count - 1:
+            prior = p
+            break
+    if not prior and task.retry_count > 0:
+        classified = _classified_on_task(db, spec_id, task.id)
+        prior = classified[0] if classified else {}
+    return AttemptPlan(
+        role=role, retry=task.retry_count, agent=agent,
+        prompt_digest=_digest(*prompt_inputs, fb),
+        feedback_digest=_digest(fb) if fb else "",
+        temperature=temperature,
+        env_digest=_digest(json.dumps({k: strategy.get(k) for k in _ENV_KEYS},
+                                      sort_keys=True, default=str)),
+        assignment=assignment,
+        prior_cls=prior.get("cls"), prior_coarse_key=prior.get("coarse_key"),
+        prior_agent=prior.get("agent"), prior_outcome=prior.get("outcome"),
+        diagnostics=len(_outcome.diagnostic_messages(fb)),
+        feedback_chars=len(fb))
+
+
+def previous_plans(db: Database, spec_id: str, task_id: str) -> list:
+    """Newest first: the ATTEMPT_PLANNED payloads recorded for *task_id*."""
+    try:
+        events = db.list_events_by_kind(spec_id=spec_id,
+                                        kind=EventKind.ATTEMPT_PLANNED,
+                                        limit=200)
+    except Exception:
+        return []
+    return [_outcome._payload(ev) for ev in events
+            if getattr(ev, "task_id", None) == task_id]
+
+
+def identical_earlier_attempt(plan: AttemptPlan, prior_plans: list) -> Optional[int]:
+    """The retry index of an earlier attempt with the same levers, or None."""
+    for p in prior_plans:
+        if p.get("retry") == plan.retry:
+            continue  # this attempt's own earlier dispatch (a requeue)
+        if plan.same_levers(p):
+            return p.get("retry")
+    return None
+
+
+def inject_difference(plan: AttemptPlan, prior_plans: list) -> Optional[AttemptPlan]:
+    """When *plan* repeats an earlier attempt on every lever, the first agent
+    along the rotation from *plan.agent* that makes it a dispatch nobody has
+    tried — the one lever the loop owns. None when the plan already differs,
+    or when every agent in the rotation has already had this exact dispatch
+    (then there is nothing left to inject and the caller says so)."""
+    if identical_earlier_attempt(plan, prior_plans) is None:
+        return None
+    if not plan.agent or len(_IMPLEMENTER_ROTATION) < 2:
+        return None
+    for step in range(1, len(_IMPLEMENTER_ROTATION)):
+        alternative = _rotation_pick(plan.agent, step)
+        if not alternative or alternative == plan.agent:
+            continue
+        candidate = replace(plan, agent=alternative, assignment="injected")
+        if identical_earlier_attempt(candidate, prior_plans) is None:
+            return candidate
+    return None
+
+
+def rationale_for(plan: AttemptPlan, previous: "dict | None",
+                  identical_to: Optional[int]) -> str:
+    if previous is None:
+        return "first attempt" if plan.retry == 0 else (
+            f"retry {plan.retry} with no earlier plan on record")
+    after = (f"after {plan.prior_cls or 'no classified failure'}"
+             + (f" ({plan.prior_coarse_key})" if plan.prior_coarse_key else "")
+             + (f" by {plan.prior_agent}" if plan.prior_agent else ""))
+    changed = plan.changed_from(previous)
+    if plan.assignment == "injected":
+        return (f"retry {plan.retry} {after}: the rotation's pick would have "
+                f"repeated an earlier attempt on every lever — injected "
+                f"agent {plan.agent!r} instead")
+    if identical_to is not None:
+        return (f"retry {plan.retry} {after}: identical to attempt "
+                f"{identical_to} on every lever and no untried agent is left "
+                f"in the rotation — this dispatch cannot change the outcome")
+    if not changed:
+        return (f"retry {plan.retry} {after}: NOTHING differs from the "
+                f"previous attempt — this dispatch cannot change the outcome")
+    return f"retry {plan.retry} {after}: changed {', '.join(changed)}"
+
+
+def record_attempt_plan(db: Database, spec_id: str, task, plan: AttemptPlan,
+                        prior_plans: "list | None" = None) -> dict:
+    """Write the ATTEMPT_PLANNED event; returns its payload."""
+    if prior_plans is None:
+        prior_plans = previous_plans(db, spec_id, task.id)
+    previous = next((p for p in prior_plans if p.get("retry") != plan.retry),
+                    None)
+    identical_to = identical_earlier_attempt(plan, prior_plans)
+    payload = asdict(plan)
+    payload.update({
+        "changed": plan.changed_from(previous),
+        "identical_to": identical_to,
+        "rationale": rationale_for(plan, previous, identical_to),
+    })
+    db.record_event(EventKind.ATTEMPT_PLANNED, spec_id=spec_id,
+                    task_id=task.id, payload=payload)
+    return payload
 
 
 def _latest_supervisor_feedback(db: Database, spec_id: str,

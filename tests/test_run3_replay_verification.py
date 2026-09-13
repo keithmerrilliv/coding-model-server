@@ -15,16 +15,27 @@ import pathlib
 import pytest
 
 import coding_model_server.orchestrator_daemon as d
+from coding_model_autonomous import outcome as _outcome
 from coding_model_autonomous.db import Database
-from coding_model_autonomous.models import (
-    GateType, SpecStatus, TaskStatus,
-)
+from coding_model_autonomous.models import SpecStatus, TaskStatus
 
 RUN3 = pathlib.Path("var/tasks_db/specs/spec_cc7dd609")
 RETRIES = RUN3 / "retry_history"
 
 pytestmark = pytest.mark.skipif(
     not RETRIES.is_dir(), reason="run 3 artifacts not present on this machine")
+
+
+def _reject(db, spec_id, notes):
+    """A build-failure verdict charged to the implementer, as dispose records
+    it (DEV-631: the routing signal reads the failure stream, not gates)."""
+    impls = db.list_tasks_for_spec_by_role(spec_id, "implementer")
+    task = impls[0] if impls else db.create_task(
+        spec_id=spec_id, agent="implementer", role="implementer", title="build")
+    first = notes.strip().splitlines()[0] if notes.strip() else ""
+    _outcome._record(db, db.get_spec(spec_id), task, _outcome.Failure(
+        _outcome.FailureClass.BUILD_FAILURE, "implementer", "build_check",
+        first, feedback=notes), "charge", 0)
 
 
 def _build_failures():
@@ -49,7 +60,7 @@ def db(tmp_path):
 
 def test_run3_had_no_two_consecutive_identical_signatures():
     """Pins why the first implementation was inert — this is the regression."""
-    sigs = [d._failure_signature(t) for _, t in _build_failures()]
+    sigs = [d._diagnostic_messages(t) for _, t in _build_failures()]
     assert len(sigs) >= 2
     assert all(a != b for a, b in zip(sigs, sigs[1:])), (
         "if this ever becomes false, whole-signature equality would work and "
@@ -75,10 +86,7 @@ def test_consecutive_pairs_share_a_persistent_diagnostic(db):
             persistent = d._persistent_diagnostics(db, spec.id, text, lookback=1)
             if persistent:
                 fired += 1
-        gate = db.create_gate(spec_id=spec.id, task_id=None,
-                              gate_type=GateType.CODE_REVIEW,
-                              prompt_md="## Automated build-failure retry (DEV-429)")
-        db.respond_to_gate(gate.id, "rejected", notes=text)
+        _reject(db, spec.id, text)
     assert fired >= 3, f"router would have fired on only {fired} of 4 transitions"
 
 
@@ -95,10 +103,7 @@ def test_router_fires_on_run3s_second_failure(db):
     spec_dir.mkdir(parents=True, exist_ok=True)
 
     # attempt 1 recorded exactly as the build-failure path records it
-    first = db.create_gate(spec_id=spec.id, task_id=None,
-                           gate_type=GateType.CODE_REVIEW,
-                           prompt_md="## Automated build-failure retry (DEV-429)")
-    db.respond_to_gate(first.id, "rejected", notes=failures[0][1])
+    _reject(db, spec.id, failures[0][1])
 
     # attempt 2 arrives; pick the next one sharing a diagnostic with attempt 1
     shared = None
@@ -130,9 +135,7 @@ def test_a_genuinely_new_failure_does_not_route(db):
                           role="implementer", title="b")
     spec_dir = db.spec_dir(spec.id)
     spec_dir.mkdir(parents=True, exist_ok=True)
-    g = db.create_gate(spec_id=spec.id, task_id=None,
-                       gate_type=GateType.CODE_REVIEW, prompt_md="## Automated")
-    db.respond_to_gate(g.id, "rejected", notes=_build_failures()[0][1])
+    _reject(db, spec.id, _build_failures()[0][1])
 
     assert d._route_build_failure_to_architect(
         db, db.get_spec(spec.id), db.get_task(impl.id), spec_dir,
@@ -167,7 +170,7 @@ def test_driver_noise_is_not_counted_as_a_diagnostic():
              "error: emit-module command failed with exit code 1 "
              "(use -v to see invocation)\n")
     assert d._diagnostic_messages(noise) == set()
-    assert d._failure_signature(noise) == ""
+    assert d._attributed_diagnostics(noise) == []
 
 
 def test_two_failures_sharing_only_driver_noise_do_not_route(db):
@@ -182,10 +185,7 @@ def test_two_failures_sharing_only_driver_noise_do_not_route(db):
 
     first = ("A.swift:1:1: error: alpha only here\nerror: fatalError\n")
     second = ("B.swift:9:9: error: beta only here\nerror: fatalError\n")
-    g = db.create_gate(spec_id=spec.id, task_id=None,
-                       gate_type=GateType.CODE_REVIEW,
-                       prompt_md="## Automated build-failure retry (DEV-429)")
-    db.respond_to_gate(g.id, "rejected", notes=first)
+    _reject(db, spec.id, first)
 
     assert d._route_build_failure_to_architect(
         db, db.get_spec(spec.id), db.get_task(impl.id), spec_dir,

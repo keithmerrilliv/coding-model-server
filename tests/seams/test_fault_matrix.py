@@ -1338,3 +1338,45 @@ class TestUnknownIsNotAbsent:
         assert f"`{TEST_PATH}` — could NOT be read from the repository" in retry_prompt
         assert f"`{TEST_PATH}` — is a NEW file" not in retry_prompt
 
+
+# ── DEV-631 / DEV-530: every dispatch is planned before it is made ───────────
+
+class TestAttemptPlans:
+    def test_every_implementer_attempt_is_planned_with_its_rationale(self, db, model, runner, edit_mode):
+        """One ATTEMPT_PLANNED per dispatch, before the call: what changed,
+        after which failure by which agent — the difficulty proxy DEV-530
+        needs and the invariance record DEV-631 asked for."""
+        spec = _impl_ready(db, model, runner)
+        model.script("implementer",
+                     Reply(implementer_edit_reply(BAD_EDITS, {TEST_PATH: TEST_FILE})),
+                     Reply(implementer_edit_reply(GOOD_EDITS, {TEST_PATH: TEST_FILE})))
+
+        out = drive(db, spec.id, model, wait_at(GateType.CODE_REVIEW), runner=runner)
+
+        assert out.reason == "waiting"
+        plans = events(db, spec.id, EventKind.ATTEMPT_PLANNED, role="implementer")
+        assert [p["retry"] for p in plans] == [0, 1]
+        first, second = plans
+        assert first["rationale"] == "first attempt" and first["prior_cls"] is None
+        assert first["agent"] == "implementer"
+        assert first["assignment"] == "recommended"  # complexity.json names it
+        assert second["agent"] == "deep_implementer" and second["assignment"] == "rotation"
+        assert second["prior_cls"] == "unappliable_edits"
+        assert second["prior_agent"] == "implementer"
+        assert second["prior_coarse_key"].startswith("unappliable_edits|")
+        assert set(second["changed"]) >= {"agent", "feedback_digest"}
+        assert second["identical_to"] is None
+        assert second["rationale"].startswith("retry 1 after unappliable_edits")
+
+    def test_the_architects_pass_is_planned_too(self, db, model, runner):
+        spec = make_executing_spec(db)
+        model.script("architect", Reply(architect_reply()))
+        model.script("design_review", Reply(design_review_reply("PASS")))
+
+        out = drive(db, spec.id, model, wait_at(GateType.DESIGN_APPROVAL), runner=runner)
+
+        assert out.reason == "waiting"
+        arch = events(db, spec.id, EventKind.ATTEMPT_PLANNED, role="architect")
+        assert [p["retry"] for p in arch] == [0]
+        assert arch[0]["assignment"] == "fixed" and arch[0]["rationale"] == "first attempt"
+

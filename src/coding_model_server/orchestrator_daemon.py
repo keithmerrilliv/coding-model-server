@@ -105,6 +105,11 @@ from coding_model_autonomous.retry_policy import (
     _select_implementer_agent,
     _snapshot_retry,
     _IMPLEMENTER_ROTATION,
+    inject_difference,
+    plan_attempt,
+    previous_plans,
+    random_rotation_pick,
+    record_attempt_plan,
 )
 from coding_model_autonomous.executor import (
     ImplementerResult,
@@ -1651,6 +1656,24 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
     # regenerating the same document.
     rejection_notes = (_latest_architect_feedback(db, spec, spec_dir)
                        if task.retry_count > 0 else None)
+    # DEV-631/DEV-530: the architect has one agent, so its levers are the
+    # feedback and the prompt; the record says whether a revision round
+    # actually carries anything new.
+    try:
+        planned = record_attempt_plan(db, spec.id, task, plan_attempt(
+            db, spec.id, task, role="architect",
+            agent=executor.role_to_agent("architect"), feedback=rejection_notes,
+            prompt_inputs=(spec_md,),
+            strategy=_load_plan(spec).get("test_strategy"), assignment="fixed"))
+        if task.retry_count > 0 and not planned["changed"]:
+            logger.warning("spec %s: architect retry %d — %s (DEV-631)",
+                           spec.id, task.retry_count, planned["rationale"])
+        else:
+            logger.info("spec %s: architect attempt %d planned — %s", spec.id,
+                        task.retry_count, planned["rationale"])
+    except Exception as exc:
+        logger.warning("spec %s: architect attempt plan not recorded (%s: %s)",
+                       spec.id, type(exc).__name__, exc)
     # The approved plan carries decisions (language, framework, dependency
     # policy, operator clarifications) that override any ambiguity left in
     # spec.md — without it the architect re-derives them from the spec alone
@@ -2495,53 +2518,11 @@ def _load_prior_manifest_run(spec_dir, retry_count: int):
 TARGETED_RETRY_MAX_REPEATS = int(
     os.getenv("AUTONOMOUS_TARGETED_RETRY_MAX_REPEATS", "1"))
 
-# Absolute worktree paths differ per dispatch (…/worktrees/spec_x-7f8a8795/…),
-# and line numbers move as the file is rewritten. Neither changes what the
-# defect IS, so both are stripped before comparing two failures.
-_SIG_PATH_RE = re.compile(r"(/\S+?/)?([\w.+-]+\.\w+):\d+:\d+:")
-_SIG_ERROR_RE = re.compile(r"error: (.+)")
-
-
-def _attributed_diagnostics(notes: str) -> list:
-    """Location-stripped message of every attributed diagnostic, in order.
-
-    One entry per diagnostic *occurrence*. Callers asking "which defects are
-    here?" build a set from this; callers asking "did the build get worse?"
-    count it. Those are different questions, and the gap between them is wide:
-    run 8's repair output carries 27 diagnostics drawn from 6 distinct
-    messages, so deduplicating first discards most of the magnitude. A set
-    comparison can therefore score a regression as an improvement whenever the
-    new errors repeat one message — which is exactly what a dropped import
-    does (DEV-541).
-
-    Worktree paths and line numbers move between dispatches without changing
-    what the defect is, so both are removed.
-    """
-    if not notes:
-        return []
-    msgs = []
-    for line in notes.splitlines():
-        # Only diagnostics that name a file:line say anything about the code.
-        # Bare driver lines — `error: fatalError`, `error: emit-module command
-        # failed…` — appear in essentially every failed build regardless of
-        # cause: "fatalError" was present in 5 of 5 of spec_cc7dd609's build
-        # failures. Counting them made every pair of consecutive failures look
-        # like the same unfixable defect, which sent a perfectly good design
-        # back for revision on no evidence at all.
-        if not _ATTRIBUTED_ERROR_RE.search(line):
-            continue
-        match = _SIG_ERROR_RE.search(line)
-        if not match:
-            continue
-        msg = _SIG_PATH_RE.sub(r"\2:", match.group(1).strip())
-        if msg:
-            msgs.append(msg)
-    return msgs
-
-
-def _diagnostic_messages(notes: str) -> set:
-    """The distinct error messages in a failure report, location-stripped."""
-    return set(_attributed_diagnostics(notes))
+# The diagnostics parsers live beside the failure stream now (DEV-631).
+_SIG_PATH_RE = _outcome.SIG_PATH_RE
+_SIG_ERROR_RE = _outcome.SIG_ERROR_RE
+_attributed_diagnostics = _outcome.attributed_diagnostics
+_diagnostic_messages = _outcome.diagnostic_messages
 
 
 # ── Compiler warnings as signal (DEV-547) ────────────────────────────────────
@@ -2716,81 +2697,31 @@ def _build_warning_feedback(warnings: "list[BuildWarning]") -> str:
     )
 
 
-def _failure_signature(notes: str) -> str:
-    """Order- and location-independent fingerprint of a failure's diagnostics.
-
-    Two attempts that produce the same set of error messages have the same
-    signature even if the paths, line numbers and ordering differ.
-    """
-    return "|".join(sorted(_diagnostic_messages(notes)))
-
-
 def _persistent_diagnostics(db, spec_id: str, current_notes: str,
                             *, lookback: int) -> set:
-    """Diagnostics present in this failure AND each of the previous *lookback*.
-
-    Whole-signature equality is too strict to detect an unfixable defect.
+    """Diagnostics present in this failure AND each of the previous *lookback*
+    verdicts — DEV-541's routing signal. Read from the failure_classified
+    stream (DEV-631), where dispose records every verdict's diagnostics; the
+    gates used to be re-parsed for this and were the only place it lived.
     Verified against spec_cc7dd609's five real build failures: no two
-    consecutive attempts had identical error *sets*, because incidental errors
-    came and went — yet `'mutating' is not valid on instance methods in
-    classes` was present in four of the five, and `cannot assign to property:
-    'type' is a 'let' constant` in four. Those are the design-caused ones, and
-    they are exactly what survives a full regeneration.
-
-    So the signal is an individual message that outlives repeated attempts,
-    not a set that repeats verbatim.
-    """
-    current = _diagnostic_messages(current_notes)
-    if not current or lookback < 1:
-        return set()
-    prior = [g for g in db.list_gates_for_spec(spec_id, GateType.CODE_REVIEW)
-             if g.status is GateStatus.REJECTED and g.reviewer_notes]
-    prior = list(reversed(prior))[:lookback]
-    if len(prior) < lookback:
-        return set()  # not enough history to call anything persistent
-    for gate in prior:
-        current &= _diagnostic_messages(gate.reviewer_notes)
-        if not current:
-            return set()
-    return current
+    consecutive attempts had identical error SETS, yet `'mutating' is not
+    valid on instance methods in classes` was present in four of five."""
+    return _outcome.persistent_diagnostics(
+        db, spec_id, _diagnostic_messages(current_notes), lookback=lookback)
 
 
 def _consecutive_identical_failures(db, spec_id: str, current_notes: str,
                                     *, already_recorded: bool = True) -> int:
-    """How many prior consecutive attempts failed with the same diagnostics.
-
-    `already_recorded` says whether *current_notes* has itself been written to
-    a gate yet. On the retry path it has — the notes were read back off the
-    latest rejected gate — so the newest match is this same failure and must
-    not be counted. On the pre-gate build check it has not: the failure is in
-    hand and nothing has recorded it, so every match is a genuine prior
-    occurrence.
-
-    Targeted retry regenerates only the files the compiler *cited*. When the
-    fix lies outside those files — access control, a missing `@testable`, a
-    signature mismatch — the cited files get rewritten forever and the defect
-    never moves. Repetition is the signal that the selection is wrong, not the
-    generation.
-    """
-    sig = _failure_signature(current_notes)
-    if not sig:
-        return 0
-    gates = [g for g in db.list_gates_for_spec(spec_id, GateType.CODE_REVIEW)
-             if g.status is GateStatus.REJECTED and g.reviewer_notes]
-    newest_first = list(reversed(gates))
-    # Skip at most ONE gate — the one carrying the notes we were handed.
-    # Skipping every gate whose text matches would discard the repeats
-    # themselves, since a repeated failure is byte-identical by definition.
-    if (already_recorded and newest_first
-            and newest_first[0].reviewer_notes == current_notes):
-        newest_first = newest_first[1:]
-    count = 0
-    for gate in newest_first:
-        if _failure_signature(gate.reviewer_notes) == sig:
-            count += 1
-        else:
-            break
-    return count
+    """How many prior consecutive verdicts failed with the same diagnostics
+    (DEV-434's widening signal), read from the failure_classified stream
+    (DEV-631). Targeted retry regenerates only the files the compiler
+    cited; when the fix lies outside them the cited files get rewritten
+    forever and the defect never moves. Repetition is the signal that the
+    selection is wrong, not the generation. See
+    outcome.consecutive_same_diagnostics for ``already_recorded``."""
+    return _outcome.consecutive_same_diagnostics(
+        db, spec_id, _diagnostic_messages(current_notes),
+        already_recorded=already_recorded)
 
 
 # DEV-539: a citation has a POSITION. `X.swift` in a `path:line` diagnostic
@@ -2840,7 +2771,7 @@ def _cite_paths(rejection_notes: str, known_paths) -> "dict[str, str]":
     notes = rejection_notes or ""
     known = [p for p in known_paths if p]
     fenced = "\n".join(_FENCE_RE.findall(notes))
-    tiers: "list[tuple[str, callable]]" = [
+    tiers: "list[tuple[str, Any]]" = [
         (CITED_BY_DIAGNOSTIC, lambda p, b: _positional_mentions(notes, p)
          or (b and _positional_mentions(notes, b))),
         (CITED_BY_FENCE, lambda p, b: p in fenced
@@ -3668,7 +3599,8 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
     # `clarifications:` YAML embedding: even if the planner is sloppy or the
     # implementer skips that section of the plan, the orchestrator-supplied
     # list still lands at the top of the prompt with hard-requirement framing.
-    raw_clar = _load_plan(spec).get("clarifications")
+    plan_dict = _load_plan(spec)
+    raw_clar = plan_dict.get("clarifications")
     clarifications: list[str] = (
         [str(c) for c in raw_clar if c] if isinstance(raw_clar, list) else []
     )
@@ -3698,6 +3630,49 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
     # the budget.
     chosen_agent = _rotation_pick(
         initial_agent, task.retry_count + rotation_offset(db, spec.id, task))
+    assignment = ("recommended" if task.retry_count == 0
+                  and _select_implementer_agent(spec_dir) else "rotation")
+    random_agent = random_rotation_pick()  # DEV-530 option 1; off by default
+    if random_agent:
+        logger.info("spec %s: attempt %d assigned at random: %r (was %r; "
+                    "AUTONOMOUS_ROTATION_RANDOM_FRACTION, DEV-530)", spec.id,
+                    task.retry_count, random_agent, chosen_agent)
+        chosen_agent, assignment = random_agent, "random"
+
+    # DEV-631: what will differ from the failed attempt? Recorded before the
+    # call, with the rationale; a plan identical to an earlier attempt's on
+    # every lever gets the one difference this loop owns — the next agent.
+    try:
+        plan = plan_attempt(
+            db, spec.id, task, role="implementer", agent=chosen_agent,
+            feedback=rejection_notes,
+            prompt_inputs=(design_md, "\n".join(clarifications)),
+            strategy=plan_dict.get("test_strategy"), assignment=assignment)
+        prior_plans = previous_plans(db, spec.id, task.id)
+        injected = inject_difference(plan, prior_plans)
+        if injected is not None:
+            logger.warning(
+                "spec %s: attempt %d would repeat an earlier attempt on every "
+                "lever (agent %r, same prompt, feedback, temperature and "
+                "environment) — injecting a difference: agent %r → %r "
+                "(DEV-631)", spec.id, task.retry_count, chosen_agent,
+                chosen_agent, injected.agent)
+            plan, chosen_agent = injected, injected.agent
+        planned = record_attempt_plan(db, spec.id, task, plan, prior_plans)
+        if planned["identical_to"] is not None or (
+                task.retry_count > 0 and not planned["changed"]):
+            logger.warning("spec %s: attempt %d — %s (DEV-631)", spec.id,
+                           task.retry_count, planned["rationale"])
+        else:
+            logger.info("spec %s: attempt %d planned — %s", spec.id,
+                        task.retry_count, planned["rationale"])
+    except Exception as exc:
+        # Instrumentation: decides nothing but the injection above, which
+        # is then simply not offered. Say so by name (DEV-630).
+        logger.warning("spec %s: attempt plan not recorded (%s: %s) — the "
+                       "DEV-631 identical-dispatch check is NOT armed for "
+                       "attempt %d", spec.id, type(exc).__name__, exc,
+                       task.retry_count)
     if chosen_agent and chosen_agent != task.agent:
         if task.retry_count == 0:
             logger.info("spec %s: architect recommendation overrides implementer agent: %r → %r",
@@ -4169,7 +4144,7 @@ _BUILD_FAILURE_RES["python"] = _BUILD_FAILURE_RES["pytest"]
 # act on that: the retry's file selection keys off cited paths and finds none,
 # so it attributes the failure entirely to whatever cascade errors DID carry a
 # location — usually the test files that can no longer see the module.
-_ATTRIBUTED_ERROR_RE = re.compile(r"^\s*\S.*?:\d+:\d+: error: ", re.MULTILINE)
+_ATTRIBUTED_ERROR_RE = _outcome.ATTRIBUTED_ERROR_RE
 _BARE_ERROR_RE = re.compile(r"^error: (.+)$", re.MULTILINE)
 
 

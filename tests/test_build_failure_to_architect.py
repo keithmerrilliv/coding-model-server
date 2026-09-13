@@ -16,7 +16,7 @@ import pytest
 import coding_model_server.orchestrator_daemon as d
 from coding_model_autonomous.db import Database
 from coding_model_autonomous.models import (
-    GateStatus, GateType, SpecStatus, TaskStatus,
+    GateStatus, SpecStatus, TaskStatus,
 )
 
 DIAG = ("World.swift:57:5: error: 'mutating' is not valid on instance methods "
@@ -44,10 +44,18 @@ def spec_with_roles(db):
 
 
 def _prior_build_failure(db, spec_id, notes):
-    gate = db.create_gate(spec_id=spec_id, task_id=None,
-                          gate_type=GateType.CODE_REVIEW,
-                          prompt_md="## Automated build-failure retry (DEV-429)")
-    db.respond_to_gate(gate.id, "rejected", notes=notes)
+    """A build-failure verdict charged to the implementer, as dispose records
+    it — DEV-631: the routing signal reads the failure stream, not gates."""
+    from coding_model_autonomous import outcome as _outcome
+    impls = db.list_tasks_for_spec_by_role(spec_id, "implementer")
+    task = impls[0] if impls else db.create_task(
+        spec_id=spec_id, agent="implementer", role="implementer", title="build")
+    first = notes.strip().splitlines()[0] if notes.strip() else ""
+    _outcome._record(db, db.get_spec(spec_id), task, _outcome.Failure(
+        _outcome.FailureClass.BUILD_FAILURE, "implementer", "build_check",
+        first, feedback=notes), "charge", 0)
+
+
 
 
 def test_first_build_failure_stays_with_the_implementer(db, spec_with_roles):

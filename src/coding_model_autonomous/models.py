@@ -89,6 +89,11 @@ class EventKind(str, Enum):
     # (no_verdict / verdict / terminal) and what was done about it. This is
     # the queryable failure taxonomy DEV-529 asked for.
     FAILURE_CLASSIFIED = "failure_classified"
+    # DEV-631/DEV-530: one record per dispatch, written BEFORE the call —
+    # the levers this attempt pulls (agent, prompt, feedback, temperature,
+    # environment), what changed since the previous attempt, why, and the
+    # difficulty proxy (what failure preceded it, how many diagnostics).
+    ATTEMPT_PLANNED = "attempt_planned"
 
 
 # ── Records ──────────────────────────────────────────────────────────────────
