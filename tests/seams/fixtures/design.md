@@ -42,6 +42,8 @@ None added. `_fetch_existing_files_for_spec` still returns `list[tuple[str, str]
 - [ ] R4: `inspect.signature` shows `role` keyword-only with default `"implementer"`
 
 ## Criterion Seams
+Shared setup for all seams: `import inspect, logging, types; from coding_model_server import orchestrator_daemon as d`
+
 - R1 | setup: `monkeypatch.setattr(d, "_load_plan", lambda s: {"test_strategy": {"repo": "coding-model-server"}}); monkeypatch.setattr(d.test_runner, "fetch_repo_files", lambda repo, paths, ref: ([("src/x.py", "content")], [])); caplog.set_level(logging.INFO, logger="orchestrator")` | act: `result = d._fetch_existing_files_for_spec(types.SimpleNamespace(id="spec_t"), "md", extra_paths=["src/x.py"], role="architect")` | assert: `assert "supplied 1 existing file(s) to the architect:" in caplog.text; assert "to the implementer" not in caplog.text; assert result == [("src/x.py", "content")]`
 - R2 | setup: `same as R1` | act: `result = d._fetch_existing_files_for_spec(types.SimpleNamespace(id="spec_t"), "md", extra_paths=["src/x.py"])` | assert: `assert "supplied 1 existing file(s) to the implementer:" in caplog.text`
 - R3 | setup: `monkeypatch.setattr(d, "_load_plan", lambda s: {"test_strategy": {"repo": "coding-model-server"}}); def boom(repo, paths, ref): raise RuntimeError("runner down"); monkeypatch.setattr(d.test_runner, "fetch_repo_files", boom); caplog.set_level(logging.INFO, logger="orchestrator")` | act: `result = d._fetch_existing_files_for_spec(types.SimpleNamespace(id="spec_t"), "md", extra_paths=["src/x.py"], role="architect")` | assert: `assert "the architect will not see the files it must modify" in caplog.text; assert result == []`

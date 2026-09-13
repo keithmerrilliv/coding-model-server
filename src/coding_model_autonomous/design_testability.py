@@ -50,6 +50,9 @@ KIND_ELIDED_STEP = "elided_step"
 # DEV-525: a collection of tuples on a type declaring Equatable. Unlike the
 # rules above this needs no seam — it is wrong in the declaration itself.
 KIND_TUPLE_CONFORMANCE = "tuple_conformance"
+# DEV-661: a Python seam that calls the code under test without ever importing
+# it leaves the implementer to guess the import root — run 24 guessed `src.`.
+KIND_SEAM_NO_IMPORT = "seam_no_import"
 
 FILE_STRUCTURE_HEADING = "File Structure"
 
@@ -58,6 +61,10 @@ CHECKLIST_HEADING = "Acceptance Criteria Checklist"
 DATA_MODELS_HEADING = "Data Models"
 
 _LABELS = ("setup", "act", "assert")
+_IMPORT_RE = re.compile(r"\b(?:from\s+[\w.]+\s+import\s+\w|import\s+[\w.]+)")
+_SRC_IMPORT_RE = re.compile(r"\b(?:from|import)\s+src\.")
+_BARE_CALL_RE = re.compile(r"(?<![\w.])([A-Za-z_]\w*)\s*\(")
+_PY_BUILTINS = frozenset("len isinstance list dict set str int float bool tuple range sorted any all print repr type getattr hasattr open enumerate zip map filter min max sum abs round".split())
 
 
 @dataclass(frozen=True)
@@ -166,6 +173,11 @@ def parse_seams(design_md: str) -> list[Seam]:
                           act=found.get("act", ""),
                           assert_=found.get("assert", "")))
     return seams
+
+
+def is_python_design(design_md: str) -> bool:
+    """True when the File Structure allocates a `.py` path (DEV-661)."""
+    return ".py" in _section(design_md, FILE_STRUCTURE_HEADING)
 
 
 def _clean_criterion(text: str) -> str:
@@ -585,6 +597,37 @@ def _check_names_a_call(seam: Seam) -> list[Finding]:
     return findings
 
 
+def _check_seam_imports(design_md: str, seams: list[Seam]) -> list[Finding]:
+    """DEV-661: a Python design's seams must import the code under test —
+    and never through `src.`. Swift designs are out of scope (module-level
+    visibility, no import in a seam)."""
+    if not is_python_design(design_md):
+        return []
+    body = _section(design_md, SEAMS_HEADING)
+    if _SRC_IMPORT_RE.search(body):
+        return [Finding(
+            kind=KIND_SEAM_NO_IMPORT, criterion="",
+            detail=("the Criterion Seams import through `src.`. There is no `src` "
+                    "package: in the test sandbox the repository's `src/` directory is "
+                    "the package root on `sys.path`. Import the code under test by its "
+                    "package name — `from <pkg>.<module> import <name>` — and never "
+                    "through `src.`."))]
+    if _IMPORT_RE.search(body):
+        return []
+    for seam in seams:
+        for name in _BARE_CALL_RE.findall(seam.act + " " + seam.assert_):
+            if name not in _PY_BUILTINS:
+                return [Finding(
+                    kind=KIND_SEAM_NO_IMPORT, criterion="",
+                    detail=("the Criterion Seams call the code under test but never "
+                            "import it. Quote the package-name import line as shared "
+                            "setup above the seams — `from <pkg>.<module> import "
+                            "<name>`. In the test sandbox the repository's `src/` "
+                            "directory is the package root on `sys.path`; it is not a "
+                            "package, so never import through `src.`."))]
+    return []
+
+
 def check_design_testability(design_md: str) -> list[Finding]:
     """Findings for a design whose checklist its own API cannot carry out.
 
@@ -665,6 +708,7 @@ def check_design_testability(design_md: str) -> list[Finding]:
         findings.extend(_check_equatable(labelled, types, members, design_md))
         findings.extend(_check_untyped_comparison(labelled, members))
         findings.extend(_check_readonly(labelled, readonly))
+    findings.extend(_check_seam_imports(design_md, seams))
     return findings
 
 
