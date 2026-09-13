@@ -238,6 +238,30 @@ def _status_color(status: str) -> str:
 
 # ── Argument parser ──────────────────────────────────────────────────────────
 
+def cmd_cancel(args: argparse.Namespace) -> int:
+    body = {"reason": args.reason} if args.reason else {}
+    result = _request("POST", f"/v1/autonomous/specs/{args.spec_id}/cancel", json=body)
+    print(_color(f"cancelled {result['spec_id']} (was {result['previous_status']})", _C.BOLD))
+    if result.get("gates_cancelled"):
+        print(f"  gates cancelled: {', '.join(result['gates_cancelled'])}")
+    if result.get("tasks_closed"):
+        print(f"  tasks closed:    {len(result['tasks_closed'])}")
+    if result.get("in_flight"):
+        print(_color(f"  an in-flight {', '.join(result['in_flight'])} pass will finish "
+                     f"and be discarded; a leaked model slot is reaped automatically "
+                     f"(or run `swap-reset`)", _C.DIM))
+    return 0
+
+
+def cmd_swap_reset(args: argparse.Namespace) -> int:
+    path = "/v1/admin/swap/reset" + ("?force=true" if args.force else "")
+    result = _request("POST", path)
+    print(_color(f"swap state reset: cleared {result['active_requests_cleared']} "
+                 f"reservation(s), {result['live_proxies']} proxy(ies) were executing"
+                 f"{' (forced)' if result.get('forced') else ''}", _C.BOLD))
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="coding-model-autonomous",
@@ -270,6 +294,17 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("spec_id")
     p.add_argument("--limit", type=int, default=50)
     p.set_defaults(func=cmd_events)
+
+    p = sub.add_parser("cancel", help="cancel a running spec (DEV-583)")
+    p.add_argument("spec_id")
+    p.add_argument("--reason", help="why — recorded on the spec's events and its Jira epic")
+    p.set_defaults(func=cmd_cancel)
+
+    p = sub.add_parser("swap-reset",
+                       help="clear a wedged model swap on the server without a restart")
+    p.add_argument("--force", action="store_true",
+                   help="reap even while a proxy is executing (you know better)")
+    p.set_defaults(func=cmd_swap_reset)
 
     # `logs` is a friendly alias for `events`
     p = sub.add_parser("logs", help="alias for `events`")

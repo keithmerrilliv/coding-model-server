@@ -367,7 +367,7 @@ def classify_exception(exc: BaseException, *, role: str,
                        source: str = "model_call", phase: str = "") -> Failure:
     """Sort an exception out of a runner into a Failure."""
     name = type(exc).__name__
-    if name == "ShutdownRequested":
+    if name in ("ShutdownRequested", "SpecCancelled"):
         return Failure(FailureClass.SHUTDOWN, role, "daemon", str(exc),
                        exc_type=name, phase=phase)
     if isinstance(exc, (requests.ConnectionError, requests.Timeout)):

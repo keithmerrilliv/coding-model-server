@@ -275,6 +275,25 @@ class JiraSync:
         except Exception as e:
             logger.warning("jira-sync: failed to transition epic %s: %s",
                            spec.jira_epic_key, e)
+        # DEV-493: an operator cancel says why, on the epic, in words.
+        payload = self._payload(event)
+        if payload.get("cancelled_by"):
+            try:
+                self.client.add_comment(
+                    spec.jira_epic_key,
+                    f"**Cancelled by {payload['cancelled_by']}**: "
+                    f"{payload.get('reason') or 'no reason given'}.")
+            except Exception as e:
+                logger.warning("jira-sync: failed to note the cancellation on "
+                               "epic %s: %s", spec.jira_epic_key, e)
+
+    @staticmethod
+    def _payload(event: Event) -> dict:
+        import json
+        try:
+            return json.loads(event.payload_json) if event.payload_json else {}
+        except (ValueError, TypeError):
+            return {}
 
     def _handle_gate_created(self, event: Event) -> None:
         if event.gate_id is None:

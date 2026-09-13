@@ -307,6 +307,11 @@ class GateRespondRequest(BaseModel):
     notes: Optional[str] = None
 
 
+class CancelSpecRequest(BaseModel):
+    """POST /v1/autonomous/specs/{id}/cancel body (DEV-583)."""
+    reason: Optional[str] = None
+
+
 class SpecSummary(BaseModel):
     """Compact view of a spec for list/status endpoints."""
     spec: Spec

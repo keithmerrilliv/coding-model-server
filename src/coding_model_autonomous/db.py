@@ -92,6 +92,14 @@ def _parse_iso_required(s: str) -> datetime:
     return datetime.fromisoformat(s)
 
 
+class SpecAlreadyTerminal(RuntimeError):
+    """cancel_spec on a spec that already ended (DEV-583)."""
+
+    def __init__(self, spec):
+        self.spec = spec
+        super().__init__(f"spec {spec.id} is already {spec.status.value}")
+
+
 class GateAlreadyDecidedError(Exception):
     """A gate response lost the compare-and-set: the gate was no longer
     pending when the UPDATE ran. Carries the standing gate so callers can
@@ -298,6 +306,61 @@ class Database:
                 payload={"new_status": status.value},
             )
             return True
+
+    def cancel_spec(self, spec_id: str, *, reason: Optional[str] = None,
+                    by: str = "operator") -> dict:
+        """The operator cancel (DEV-583, DEV-493): one call that leaves the
+        store consistent.
+
+        Sets CANCELLED (terminal against concurrent writers — DEV-567's
+        compare-and-swap means a pass still in flight cannot resurrect the
+        spec), cancels every open gate so nothing is left for a human to
+        answer, closes every task row that is not already terminal, and
+        records the reason on the spec's event history. Returns what it did.
+        Raises ValueError for an unknown spec and SpecAlreadyTerminal for one
+        that already ended.
+
+        What it cannot do is interrupt a model call the daemon has already
+        issued: that call runs to completion (bounded by its own timeout)
+        and its result is discarded at the next status write; a manifest
+        build stops between files (the daemon checks). The model server's
+        orphan-slot reap (DEV-582) frees a leaked slot within
+        LLAMA_ORPHAN_SLOT_REAP_S.
+        """
+        spec = self.get_spec(spec_id)
+        if spec is None:
+            raise ValueError(f"unknown spec {spec_id}")
+        if spec.status in (SpecStatus.DONE, SpecStatus.FAILED, SpecStatus.CANCELLED):
+            raise SpecAlreadyTerminal(spec)
+        running = [t for t in self.list_tasks_for_spec(spec_id)
+                   if t.status is TaskStatus.RUNNING]
+        self.update_spec_status(spec_id, SpecStatus.CANCELLED)
+        gates = self.list_open_gates(spec_id)
+        for gate in gates:
+            self.cancel_gate(gate.id)
+        closed = []
+        for task in self.list_tasks_for_spec(spec_id):
+            if task.status not in (TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.SKIPPED):
+                self.update_task_status(task.id, TaskStatus.SKIPPED)
+                closed.append(task.id)
+        summary = {
+            "spec_id": spec_id, "status": SpecStatus.CANCELLED.value,
+            "previous_status": spec.status.value, "reason": reason, "by": by,
+            "gates_cancelled": [g.id for g in gates], "tasks_closed": closed,
+            "in_flight": [t.role for t in running],
+        }
+        self.record_event(EventKind.SPEC_STATUS_CHANGED, spec_id=spec_id,
+                          payload={"new_status": SpecStatus.CANCELLED.value,
+                                   "cancelled_by": by, "reason": reason,
+                                   "gates_cancelled": len(gates),
+                                   "tasks_closed": len(closed),
+                                   "in_flight": [t.role for t in running]})
+        logger.warning("spec %s: CANCELLED by %s (%s) — %d gate(s) cancelled, "
+                       "%d task(s) closed%s", spec_id, by, reason or "no reason given",
+                       len(gates), len(closed),
+                       f"; in-flight {', '.join(t.role for t in running)} pass will "
+                       f"finish and be discarded" if running else "")
+        return summary
 
     def set_spec_jira_epic(self, spec_id: str, epic_key: str) -> None:
         with self.transaction() as conn:
@@ -529,6 +592,17 @@ class Database:
                     task_id: Optional[str] = None) -> ReviewGate:
         gate_id = _new_id("gate")
         now = utc_now()
+        # DEV-567 item 2 / DEV-583: a gate on a cancelled spec is an orphan by
+        # construction — a pass that was in flight when the operator cancelled
+        # still reaches this call. It is recorded (the pass's output is real
+        # evidence) but born CANCELLED, so nothing waits on a human.
+        spec = self.get_spec(spec_id)
+        born = (GateStatus.CANCELLED if spec is not None
+                and spec.status is SpecStatus.CANCELLED else GateStatus.PENDING)
+        if born is GateStatus.CANCELLED:
+            logger.warning("spec %s: %s gate opened after cancellation — "
+                           "recorded as cancelled, not offered (DEV-583)",
+                           spec_id, gate_type.value)
         with self.transaction() as conn:
             conn.execute(
                 """
@@ -536,9 +610,10 @@ class Database:
                                           prompt_md, status, reviewer_decision,
                                           reviewer_notes, jira_issue_key,
                                           created_at, responded_at)
-                VALUES (?, ?, ?, ?, ?, 'pending', NULL, NULL, NULL, ?, NULL)
+                VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, NULL)
                 """,
-                (gate_id, spec_id, task_id, gate_type.value, prompt_md, _iso(now)),
+                (gate_id, spec_id, task_id, gate_type.value, prompt_md,
+                 born.value, _iso(now)),
             )
             self._record_event(
                 conn,
@@ -550,7 +625,7 @@ class Database:
             )
         return ReviewGate(
             id=gate_id, spec_id=spec_id, task_id=task_id, gate_type=gate_type,
-            prompt_md=prompt_md, status=GateStatus.PENDING,
+            prompt_md=prompt_md, status=born,
             reviewer_decision=None, reviewer_notes=None, jira_issue_key=None,
             created_at=now, responded_at=None,
         )

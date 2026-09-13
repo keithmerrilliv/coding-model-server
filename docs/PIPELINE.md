@@ -534,7 +534,15 @@ leaves no event is a decision nobody can audit later.
 coding-model-autonomous status <spec_id>   # where it is now
 coding-model-autonomous events <spec_id>   # every transition, with payloads
 coding-model-autonomous gates              # what is waiting on you
+coding-model-autonomous cancel <spec_id> --reason "…"   # stop it (DEV-583)
+coding-model-autonomous swap-reset         # clear a wedged model swap, no restart
 ```
+
+`cancel` is the only sanctioned way to stop a run: it sets CANCELLED (which
+a pass still in flight cannot overwrite, DEV-567), cancels the open gates,
+closes the task rows and records the reason on the events and the Jira
+epic. A model call already issued runs to completion and is discarded; a
+manifest build stops between files.
 
 The `events` table is the audit trail: every agent call, every test dispatch,
 every gate, with the payload that drove the decision. When a run ends somewhere

@@ -1228,6 +1228,28 @@ class LlamaServerManager:
         )
         return True
 
+    def reset_swap_state(self, *, force: bool = False) -> dict:
+        """Clear leaked in-flight reservations (DEV-583's admin endpoint).
+
+        The orphan-slot reap (DEV-582) does this on its own after
+        ORPHAN_SLOT_REAP_S; this is the operator doing it now. Refuses while
+        a proxy is executing unless *force*. Returns what it found and did.
+        """
+        with self.lock:
+            live = self._live_proxies
+            active = self._active_requests
+            if live > 0 and not force:
+                return {"reset": False, "live_proxies": live,
+                        "active_requests": active, "forced": False}
+            self._active_requests = 0
+            self._orphan_slot_since = None
+        logger.warning(
+            "[swap-reset] operator cleared %d in-flight reservation(s) (%d "
+            "proxy(ies) executing, force=%s) — the next swap proceeds (DEV-583)",
+            active, live, force)
+        return {"reset": True, "live_proxies": live,
+                "active_requests_cleared": active, "forced": bool(force)}
+
     def release_slot(self):
         """Release a slot reserved by ``ensure_running(reserve_slot=True)``.
 

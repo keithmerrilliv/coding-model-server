@@ -1022,6 +1022,11 @@ class _ShutdownFlag:
 _shutdown_flag = _ShutdownFlag()
 
 
+class SpecCancelled(RuntimeError):
+    """The operator cancelled the spec while a pass was in flight (DEV-583).
+    Classified like a shutdown: the work stops, nothing is judged."""
+
+
 class ShutdownRequested(RuntimeError):
     """Raised between per-file manifest calls when SIGTERM arrived; the
     task is reset to PENDING so the next daemon start re-runs it."""
@@ -2861,6 +2866,12 @@ def _build_from_manifest(
         if _shutdown_flag.set:
             raise ShutdownRequested(
                 f"shutdown requested after {generated} of {len(entries)} files")
+        # DEV-583: the operator's cancel is honoured at the same granularity
+        # — between files — rather than after every remaining call.
+        current = db.get_spec(spec.id)
+        if current is not None and current.status is SpecStatus.CANCELLED:
+            raise SpecCancelled(
+                f"spec cancelled after {generated} of {len(entries)} files")
         if only is not None and entry.path not in only and prior_files \
                 and entry.path in prior_files:
             content = prior_files[entry.path]  # reuse prior — not cited
