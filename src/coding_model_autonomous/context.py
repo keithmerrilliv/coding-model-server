@@ -135,6 +135,57 @@ def change_surface_path_rows(spec_md: str) -> list[str]:
     return list(seen)
 
 
+# DEV-630: any markdown table row that is not a separator. The change-surface
+# parsers above answer "which paths?"; this answers the prior question "was
+# there a table to read at all?" — without it, a spec with NO table and a spec
+# with a table the parsers could not read both come back as [], and every
+# guard keyed on that list disarms the same way for "nothing to do" as for
+# "could not tell" (DEV-621 was exactly this, on run 19).
+_ANY_TABLE_ROW = re.compile(r"^\|(?![\s:\-|]*\|\s*$).*\|\s*$", re.MULTILINE)
+
+
+@dataclass(frozen=True)
+class ChangeSurface:
+    """What the spec's change-surface table said, and whether it said it.
+
+    ``kind`` is the part the guards care about:
+
+    * ``"absent"``       — no table rows at all. Nothing declared; a greenfield
+                           spec. Guards may stand down.
+    * ``"unrecognised"`` — table rows exist but neither tier read a path from
+                           them. The spec SAID something and we could not tell
+                           what. Guards must arm — warn by name at minimum —
+                           not stand down.
+    * ``"recognised"``   — at least one path read. Business as usual.
+    """
+    rows: int
+    declared: list[str]
+    paths: list[str]
+
+    @property
+    def kind(self) -> str:
+        if self.declared or self.paths:
+            return "recognised"
+        return "unrecognised" if self.rows else "absent"
+
+    @property
+    def any(self) -> bool:
+        """The truthiness the two consumers used before DEV-630 — unchanged."""
+        return bool(self.declared or self.paths)
+
+
+def change_surface(spec_md: str) -> ChangeSurface:
+    """The typed reading of the change-surface table (DEV-630).
+
+    The list-returning helpers above are kept exactly as DEV-621 pinned them;
+    this wraps them with the one fact they could not express.
+    """
+    md = spec_md or ""
+    return ChangeSurface(rows=len(_ANY_TABLE_ROW.findall(md)),
+                         declared=declared_modifications(md),
+                         paths=change_surface_path_rows(md))
+
+
 def planned_outputs(plan: dict) -> list[str]:
     """File paths the plan's implement phase says it will write (DEV-571).
 
