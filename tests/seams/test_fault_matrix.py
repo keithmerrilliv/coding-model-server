@@ -876,10 +876,11 @@ class TestContextStage:
             prompt = model.calls_for(role)[0].messages[-1]["content"]
             assert "fixture stand-in for the daemon" in prompt
         assert "context.json" in workspace_files(db, spec.id)
-        recorded = events(db, spec.id, EventKind.AGENT_RAN, role="context")
-        assert len(recorded) == 1
-        assert recorded[0]["model_call"] is False
+        recorded = events(db, spec.id, EventKind.CONTEXT_ASSEMBLED)
+        assert len(recorded) == 1  # DEV-669: its own kind, one row per fetch
+        assert not events(db, spec.id, EventKind.AGENT_RAN, role="context")
         assert recorded[0]["trigger"] == "plan probe"
+        assert recorded[0]["unknown"] == []
         assert recorded[0]["editable"] == [DAEMON_PATH]
         assert any(o.startswith(f"{TEST_PATH} (editable)") for o in recorded[0]["omitted"])
 

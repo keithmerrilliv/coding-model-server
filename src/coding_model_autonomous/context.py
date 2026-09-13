@@ -413,6 +413,8 @@ class SpecContext:
             "protected": list(self.protected),
             "omitted": [f"{o.path} ({o.section}): {o.reason[:120]}"
                         for o in self.omitted],
+            "unknown": [o.path for o in self.omitted
+                        if omission_status(o.reason) == STATUS_UNKNOWN],
             "editable_chars": sum(len(c) for c in self.editable.values()),
             "protected_chars": sum(len(c) for c in self.protected.values()),
         }

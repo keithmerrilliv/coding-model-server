@@ -306,8 +306,8 @@ question it asks is whether the model's output was ever evaluated:
 | **verdict** | `parse_failure`, `unappliable_edits`, `build_failure`, `tests_failed`, `review_rejected` | Charged against `MAX_RETRIES` with a synthetic rejected `code_review` gate carrying the feedback (the diagram below); at exhaustion every verdict class reaches synthesis. A reviewer parse failure is charged to the reviewer's own re-run budget first, then to the implementer. An attempt missing a file the plan's implement phase declares is a `parse_failure` too, decided before the build check (DEV-645). |
 | **terminal** | `synthesis_failed`, `design_exhausted`, `aborted` | The only branch that fails a spec. It closes every task row with it, so a terminal spec never leaves a task claiming to be RUNNING (DEV-532). |
 
-Each disposition is one `failure_classified` event (`cls`, `outcome`,
-`disposition`, `retry`, `consecutive`, `signature`) — the queryable taxonomy.
+Each disposition is one `failure_classified` event — the queryable taxonomy;
+its fields are fixed and listed in section 11.
 The supervisor, when enabled, is consulted inside `dispose` for rejected
 gates and failed test runs only, and only its own decisions bypass the table.
 
@@ -540,3 +540,34 @@ The `events` table is the audit trail: every agent call, every test dispatch,
 every gate, with the payload that drove the decision. When a run ends somewhere
 surprising, the answer is almost always a budget in section 7 or a branch in
 diagram 5 — in that order.
+
+---
+
+## 11. Events with a fixed schema
+
+Most event kinds carry whatever their writer put in the payload. Three are
+different: they are the kinds queries and scripts are written against, so
+their payloads are a contract — `models.EVENT_PAYLOAD_SCHEMAS` lists every
+key with its meaning, and `tests/test_event_schemas.py` fails the build when
+a writer emits a key that is not listed or omits one that is required. Add
+the key to the schema before emitting it.
+
+| Kind | Written by | One row per | The keys that matter first |
+|---|---|---|---|
+| `failure_classified` | `outcome.dispose` / `record_local_charge` (DEV-629) | failed attempt | `cls`, `outcome`, `disposition`, `retry`, `agent`, `coarse_key` (DEV-631), `diagnostics`, `diagnostic_classes`, `cited_files`, `symbols` (DEV-529) |
+| `attempt_planned` | `retry_policy.record_attempt_plan` (DEV-631) | dispatch, before the call | `retry`, `agent`, `assignment`, `changed`, `identical_to`, `rationale`, `prior_cls`, `prior_agent` (the DEV-530 difficulty proxy) |
+| `context_assembled` | `_spec_context` (DEV-632, DEV-669) | runner fetch | `trigger`, `base_ref`, `editable`, `protected`, `omitted`, `unknown` (DEV-630) |
+
+Two things the shapes let you ask without reading a log. *Did changing the
+model change anything?* — join `attempt_planned` to the `failure_classified`
+row at the same `retry`; two agents on one `coarse_key` is the invariance
+DEV-631 hands to synthesis on. *What kind of failure preceded this attempt,
+and does it recur by agent?* — `scripts/failure_taxonomy.py --by agent`,
+which reads `diagnostic_classes` and says on its face that the per-agent
+table is confounded by rotation position until `assignment` is read beside
+it (DEV-530).
+
+`context_assembled` replaced an `agent_ran` row with `role: context` on
+2026-09-13; per-agent queries over older runs still have to filter that
+role out.
+
