@@ -521,6 +521,31 @@ def _provision_node_modules(spec_dir: Path) -> tuple[bool, str]:
 _SERVER_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+def _extract_committed_src(repo_root: Path, into: Path) -> None:
+    """`git archive HEAD src` extracted under *into* (yielding into/src).
+
+    Raises on any failure — a missing git, a directory that is not a
+    checkout, an unborn HEAD — so the caller can fall back loudly.
+    """
+    import io
+    import tarfile
+    out = subprocess.run(["git", "-C", str(repo_root), "archive", "--format=tar",
+                          "HEAD", "src"], capture_output=True, check=True, timeout=60)
+    into.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(fileobj=io.BytesIO(out.stdout)) as tar:
+        tar.extractall(path=into, filter="data")
+
+
+def _src_tree_state(repo_root: Path) -> tuple[str, list[str]]:
+    """(short HEAD sha, paths under src/ with uncommitted changes)."""
+    sha = subprocess.run(["git", "-C", str(repo_root), "rev-parse", "--short", "HEAD"],
+                         capture_output=True, text=True, timeout=30).stdout.strip()
+    status = subprocess.run(["git", "-C", str(repo_root), "status", "--porcelain",
+                             "--", "src"], capture_output=True, text=True, timeout=30)
+    dirty = [line[3:].strip() for line in status.stdout.splitlines() if line.strip()]
+    return sha, dirty
+
+
 def _materialize_local_repo_overlay(spec_dir: Path, repo: Optional[str]) -> Optional[Path]:
     """Make a self-target repo's package importable inside the sandbox (DEV-626).
 
@@ -550,8 +575,41 @@ def _materialize_local_repo_overlay(spec_dir: Path, repo: Optional[str]) -> Opti
     overlay_src = spec_dir / _REPO_OVERLAY_DIR / "src"
     if overlay_src.exists():
         shutil.rmtree(overlay_src)  # rebuilt fresh each run — never stale
-    shutil.copytree(repo_src, overlay_src,
-                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    # DEV-654: the overlay is the COMMITTED tree, not the working tree. This
+    # checkout is the one a human (or another Claude instance) edits while a
+    # run is in flight; copying it meant an uncommitted edit to a file the
+    # spec never touched became what the candidate was tested against — a
+    # half-finished daemon edit reds an executor.py spec, and an uncommitted
+    # fix can green a candidate that fails at HEAD. Nothing recorded which.
+    # `git archive HEAD src` is exactly the state the spec was planned
+    # against; the working tree is an explicit opt-in.
+    if os.getenv("AUTONOMOUS_OVERLAY_FROM_WORKING_TREE", "") == "1":
+        shutil.copytree(repo_src, overlay_src,
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        logger.warning("repo overlay built from the WORKING TREE by explicit "
+                       "opt-in (AUTONOMOUS_OVERLAY_FROM_WORKING_TREE=1) — the "
+                       "sandbox sees uncommitted edits (DEV-654)")
+    else:
+        try:
+            _extract_committed_src(_SERVER_REPO_ROOT, overlay_src.parent)
+        except Exception as exc:  # not a git checkout, or git missing
+            logger.warning("repo overlay: could not read the committed src/ "
+                           "(%s) — falling back to the working tree (DEV-654)",
+                           exc)
+            if overlay_src.exists():
+                shutil.rmtree(overlay_src)
+            shutil.copytree(repo_src, overlay_src,
+                            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        else:
+            sha, dirty = _src_tree_state(_SERVER_REPO_ROOT)
+            if dirty:
+                logger.warning(
+                    "repo overlay built from HEAD %s; the working tree has %d "
+                    "uncommitted change(s) under src/ that the sandbox will "
+                    "NOT see: %s (DEV-654)", sha, len(dirty),
+                    ", ".join(dirty[:6]) + (" …" if len(dirty) > 6 else ""))
+            else:
+                logger.info("repo overlay built from HEAD %s (working tree clean)", sha)
     workspace_src = spec_dir / "src"
     if workspace_src.is_dir():
         for src_file in sorted(workspace_src.rglob("*")):
