@@ -252,7 +252,7 @@ def main():
         # Auto-discover all framework directories under output/
         output_base = "output"
         if not os.path.isdir(output_base):
-            print(f"No output/ directory found. Run scrapers first.")
+            print("No output/ directory found. Run scrapers first.")
             return
         frameworks = sorted([
             d for d in os.listdir(output_base)
