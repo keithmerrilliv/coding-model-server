@@ -94,6 +94,21 @@ class TestAttemptAgent:
                                  "anomaly": "unappliable_edits"})
         assert attempt_agent(db, spec.id, task) == "implementer"
 
+    def test_another_roles_event_on_the_task_does_not_win(self, db, spec_task):
+        """Run 30: the design review records its AGENT_RAN against the
+        architect's task, so the newest event was `reviewer` and the
+        architect's own charge was attributed to it. Only the task's own
+        role's generations count."""
+        spec, _ = spec_task
+        arch = db.create_task(spec_id=spec.id, agent="architect",
+                              role="architect", title="design")
+        arch = db.get_task(arch.id)
+        db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=arch.id,
+                        payload={"role": "architect", "agent": "q36_architect"})
+        db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=arch.id,
+                        payload={"role": "design_review", "agent": "reviewer"})
+        assert attempt_agent(db, spec.id, arch) == "q36_architect"
+
     def test_no_generation_event_is_empty_not_an_error(self, db, spec_task):
         spec, task = spec_task
         assert attempt_agent(db, spec.id, task) == ""
