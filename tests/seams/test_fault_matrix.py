@@ -27,7 +27,8 @@ from seam_fakes import (
     PytestPass, Refuse, Reply, Truncated, UnclosedThink, Unreachable,
 )
 from seam_harness import (
-    BAD_EDITS, DAEMON_PATH, DAEMON_STUB, DESIGN_MD, GOOD_EDITS, PLAN_YAML,
+    BAD_EDITS, DAEMON_PATH, DAEMON_STUB, DAEMON_STUB_IMPLEMENTED, DESIGN_MD,
+    GOOD_EDITS, PLAN_YAML,
     SPEC_MD,
     TEST_FILE, TEST_PATH,
     approve_all, approve_design, architect_reply, design_review_reply, drive, file_blocks,
@@ -1237,3 +1238,103 @@ class TestDesignRevision:
                          anomaly="design_write_refused")
         assert refused and refused[0]["action"] == "refused_placeholder"
         assert db.get_spec(spec.id).status is not SpecStatus.DONE
+
+
+# ── DEV-630, second pass: absence and ignorance at every boundary ────────────
+
+# The fixture spec's change-surface table with its paths written as bare
+# cells and a descriptive second column — a table neither tier can read.
+_UNREAD_TABLE_SPEC = "\n".join(
+    f"| {DAEMON_PATH} | Gains a role parameter and three reworded log lines |"
+    if line.startswith(f"| `{DAEMON_PATH}`") else
+    f"| {TEST_PATH} | Covers R1 through R4 |"
+    if line.startswith(f"| `{TEST_PATH}`") else line
+    for line in SPEC_MD.splitlines()) + "\n"
+
+
+class TestUnknownIsNotAbsent:
+    """The plan's phase-4 proof: an unrecognised table and a manifest build
+    arm the guards, and a path the runner could not read is never NEW."""
+
+    def test_an_unrecognised_table_arms_the_plan_guard_by_name(self, db, model, runner, caplog):
+        """Run 19's shape (DEV-621): the table is there and no path reads
+        from it. The guard used to stand down silently; it now says so."""
+        import logging
+        assert "| Covers R1 through R4 |" in _UNREAD_TABLE_SPEC  # the rows are still there
+        assert d._change_surface(_UNREAD_TABLE_SPEC).kind == "unrecognised"
+        spec = make_pending_plan_spec(db, spec_md=_UNREAD_TABLE_SPEC)
+        model.script("planner", Reply(planner_reply()))
+
+        with caplog.at_level(logging.WARNING):
+            out = drive(db, spec.id, model, wait_at(GateType.PLAN_APPROVAL), runner=runner)
+
+        assert out.status == SpecStatus.PLAN_REVIEW  # a warning, not a bounce
+        armed = [r.getMessage() for r in caplog.records
+                 if "DEV-492 repo-key check" in r.getMessage()]
+        assert len(armed) == 1 and "NOT armed" in armed[0] and "3 row(s)" in armed[0]  # header counts, as the unit tests pin
+
+    def test_a_manifest_build_reads_the_existing_file(self, db, model, runner, monkeypatch):
+        """DEV-604 at the seam tier: the manifest's entries are dataclasses,
+        and the per-file call for an existing path is shown that file."""
+        monkeypatch.setattr(executor, "MANIFEST_FILE_THRESHOLD", 1)
+        spec = _impl_ready(db, model, runner)
+        model.script("manifest", Reply(
+            f"<<<MANIFEST>>>\n{DAEMON_PATH} | the daemon slice | _fetch_existing_files_for_spec\n"
+            f"{TEST_PATH} | tests for R1-R4 |\n<<<END_MANIFEST>>>\n"))
+        model.script("per_file",
+                     Reply(file_blocks({DAEMON_PATH: DAEMON_STUB_IMPLEMENTED})),
+                     Reply(file_blocks({TEST_PATH: TEST_FILE})))
+
+        out = drive(db, spec.id, model, wait_at(GateType.CODE_REVIEW), runner=runner)
+
+        assert out.reason == "waiting"
+        assert any(DAEMON_PATH in paths for _, paths, _ in runner.fetch_calls)
+        calls = model.calls_for("per_file")
+        assert len(calls) == 2
+        daemon_call = "\n".join(m["content"] for m in calls[0].messages)
+        test_call = "\n".join(m["content"] for m in calls[1].messages)
+        assert f"Current content of {DAEMON_PATH} — this file ALREADY EXISTS" in daemon_call
+        assert "def _fetch_existing_files_for_spec(spec, spec_md, extra_paths=()):" in daemon_call
+        assert "ALREADY EXISTS" not in test_call
+        files = workspace_files(db, spec.id)
+        assert set(files) >= {DAEMON_PATH, TEST_PATH}
+
+    def test_an_unreadable_planned_path_is_not_told_it_is_new(self, db, model, runner, edit_mode, caplog):
+        """The runner answers for the test path with a read error, not
+        'does not exist'. Before: NEW — EMIT WHOLE. Now: neither row."""
+        import logging
+        runner.repo_files[TEST_PATH] = "# an older version exists\n"
+        runner.unreadable.add(TEST_PATH)
+        spec = _impl_ready(db, model, runner)
+        model.script("implementer", Reply(implementer_edit_reply(GOOD_EDITS, {TEST_PATH: TEST_FILE})))
+
+        with caplog.at_level(logging.WARNING):
+            out = drive(db, spec.id, model, wait_at(GateType.CODE_REVIEW), runner=runner)
+
+        assert out.reason == "waiting"
+        prompt = "\n".join(m["content"] for m in model.calls_for("implementer")[0].messages)
+        from coding_model_autonomous.executor import _render_file_modes
+        assert _render_file_modes([DAEMON_PATH], []) in prompt         # the edit row
+        assert _render_file_modes([DAEMON_PATH], [TEST_PATH]) not in prompt  # no NEW row
+        assert TEST_PATH in prompt  # named as not shown, with the runner's reason
+        armed = [r.getMessage() for r in caplog.records if "DEV-638 file-mode guidance" in r.getMessage()]
+        assert armed and f"NOT armed for {TEST_PATH}" in armed[0]
+
+    def test_missing_output_feedback_never_calls_an_unread_file_new(self, db, model, runner, edit_mode):
+        """DEV-645's feedback read the same set. A retry aimed at a file the
+        pipeline could not read is told so, not told to invent it."""
+        runner.repo_files[TEST_PATH] = "# an older version exists\n"
+        runner.unreadable.add(TEST_PATH)
+        spec = _impl_ready(db, model, runner)
+        model.script("implementer",
+                     Reply(implementer_edit_reply(GOOD_EDITS, {})),                # test file missing
+                     Reply(implementer_edit_reply(GOOD_EDITS, {TEST_PATH: TEST_FILE})))
+
+        out = drive(db, spec.id, model, wait_at(GateType.CODE_REVIEW), runner=runner)
+
+        assert out.reason == "waiting"
+        assert out.task("implementer").retry_count == 1
+        retry_prompt = "\n".join(m["content"] for m in model.calls_for("implementer")[1].messages)
+        assert f"`{TEST_PATH}` — could NOT be read from the repository" in retry_prompt
+        assert f"`{TEST_PATH}` — is a NEW file" not in retry_prompt
+

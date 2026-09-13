@@ -229,6 +229,26 @@ class Omission:
     reason: str
 
 
+# DEV-630: a path that did not read is one of two different things. The runner
+# said it is not there — a creation, the prompt may say EMIT WHOLE (DEV-638) —
+# or the runner could not tell (a read error, a transport problem on that
+# chunk, a daemon-side failure before any answer), in which case NOTHING may
+# be inferred about it: it may well be a 147K file the implementer must not
+# re-invent. The reasons the runner gives for the first shape are git's own
+# words; everything else is the second.
+STATUS_FOUND = "found"
+STATUS_ABSENT = "absent"
+STATUS_UNKNOWN = "unknown"
+_ABSENT_RE = re.compile(r"does not exist|not found|no such file|exists on disk, "
+                        r"but not in", re.IGNORECASE)
+
+
+def omission_status(reason: str) -> str:
+    """``absent`` when the runner positively said the path is not at base_ref,
+    ``unknown`` for every other reason (including "not returned")."""
+    return STATUS_ABSENT if _ABSENT_RE.search(reason or "") else STATUS_UNKNOWN
+
+
 @dataclass
 class RoleContext:
     """What one role selects from the spec context — the prompt builders'
@@ -239,6 +259,7 @@ class RoleContext:
     new_files: list[str]                      # planned outputs that did not read
     omitted: list[Omission]
     stale: bool = False                       # a refresh failed; this is the last good fetch
+    unknown_files: list[str] = field(default_factory=list)  # planned, could not be read (DEV-630)
 
     @property
     def existing_by_path(self) -> dict[str, str]:
@@ -300,11 +321,37 @@ class SpecContext:
         exist there (a creation) or was never a candidate."""
         return self.editable.get(path)
 
+    def status(self, path: str) -> str:
+        """``found`` / ``absent`` / ``unknown`` for *path* (DEV-630).
+
+        ``absent`` needs the runner to have SAID the path is not at base_ref.
+        A read that failed for any other reason, or a path this context never
+        got an answer about, is ``unknown``. With no registered repo there is
+        nothing to read from and every path is a creation by construction, as
+        the local-framework prompts always assumed.
+        """
+        if path in self.editable or path in self.protected:
+            return STATUS_FOUND
+        if self.repo is None:
+            return STATUS_ABSENT
+        for o in self.omitted:
+            if o.path == path:
+                return omission_status(o.reason)
+        return STATUS_UNKNOWN
+
     def new_files(self, planned: Iterable[str]) -> list[str]:
-        """Planned paths that did not read at base_ref — the ones a prompt
-        must mark EMIT WHOLE (DEV-638)."""
+        """Planned paths the runner said are NOT at base_ref — the ones a
+        prompt must mark EMIT WHOLE (DEV-638). A path that could not be read
+        is not here: telling a model a file is new when it is merely unread
+        is how a retry is aimed at re-inventing an existing file (DEV-630).
+        """
         return [p for p in dict.fromkeys(planned)
-                if p not in self.editable and p not in self.protected]
+                if self.status(p) == STATUS_ABSENT]
+
+    def unknown_files(self, planned: Iterable[str]) -> list[str]:
+        """Planned paths this context can say nothing about (DEV-630)."""
+        return [p for p in dict.fromkeys(planned)
+                if self.status(p) == STATUS_UNKNOWN]
 
     def select(self, role: str, *, planned: Iterable[str] = ()) -> RoleContext:
         """The role's view, with the journal lines that say what it saw."""
@@ -327,10 +374,20 @@ class SpecContext:
                            "context fetch (%s) — the runner did not answer "
                            "the refresh", self.spec_id, role,
                            _stamp(self.fetched_at))
+        unknown = self.unknown_files(planned)
+        if unknown:
+            # DEV-630: these used to be listed as NEW. Say what is true — the
+            # file-mode guidance (DEV-638) is not armed for them — by name.
+            logger.warning("spec %s: %d planned file(s) could not be read at "
+                           "%s and are neither EXISTING nor NEW to the %s — "
+                           "the DEV-638 file-mode guidance is NOT armed for "
+                           "%s (DEV-630)", self.spec_id, len(unknown),
+                           self.base_ref, role, ", ".join(unknown))
         return RoleContext(role=role, existing_files=existing,
                            reference_files=reference,
                            new_files=self.new_files(planned),
-                           omitted=list(self.omitted), stale=self.stale)
+                           omitted=list(self.omitted), stale=self.stale,
+                           unknown_files=unknown)
 
     # ── reuse policy ────────────────────────────────────────────────────────
 
@@ -498,10 +555,19 @@ def assemble(
         if reusable and stored is not None:
             stored.stale = True
             return stored, False
-        return SpecContext(spec_id=spec_id, repo=repo, base_ref=base_ref,
-                           candidates=candidates, declared=declared,
-                           protected_paths=protected, fetched_at=now,
-                           fetched_by=role), False
+        # DEV-630: an empty context with no omissions read as "every path is
+        # a creation" downstream. Record why each path is missing so its
+        # status is ``unknown``, not ``absent``.
+        ctx = SpecContext(spec_id=spec_id, repo=repo, base_ref=base_ref,
+                          candidates=candidates, declared=declared,
+                          protected_paths=protected, fetched_at=now,
+                          fetched_by=role)
+        protected_set = set(protected)
+        ctx.omitted = [
+            Omission(p, SECTION_PROTECTED if p in protected_set
+                     else SECTION_EDITABLE, f"read failed: {exc}")
+            for p in paths]
+        return ctx, False
 
     got = dict(files)
     protected_set = set(protected)

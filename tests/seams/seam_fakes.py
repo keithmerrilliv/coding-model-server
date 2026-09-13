@@ -272,6 +272,9 @@ class FakeRunner:
     def __init__(self, repo_files: dict[str, str] | None = None) -> None:
         self.repo_files: dict[str, str] = dict(repo_files or {})
         self.fetch_mode: Any = "ok"
+        # DEV-630: paths the runner answers for with a read error that is
+        # NOT "does not exist" — the unknown shape, distinct from absent.
+        self.unreadable: set[str] = set()
         self.fetch_calls: list[tuple[str, list[str], str]] = []
         self.tests: deque = deque()
         self.default_test: TestOutcome | Callable = PytestPass()
@@ -294,9 +297,12 @@ class FakeRunner:
             raise requests.ConnectionError("fake runner: connection refused")
         if mode == "down":
             return [], [self.DOWN_PROBLEM]
-        files = [(p, self.repo_files[p]) for p in paths if p in self.repo_files]
-        problems = [f"{p}: fatal: path '{p}' does not exist in '{base_ref}'"
-                    for p in paths if p not in self.repo_files]
+        files = [(p, self.repo_files[p]) for p in paths
+                 if p in self.repo_files and p not in self.unreadable]
+        problems = [f"{p}: error: read failed (fake runner: I/O error)"
+                    if p in self.unreadable else
+                    f"{p}: fatal: path '{p}' does not exist in '{base_ref}'"
+                    for p in paths if p not in self.repo_files or p in self.unreadable]
         return files, problems
 
     def run_tests(self, spec_dir, framework="pytest", timeout=None, **opts):
