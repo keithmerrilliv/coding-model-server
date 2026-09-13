@@ -58,6 +58,26 @@ STATUS_FALLBACKS: dict[str, list[str]] = {
     STATUS_CANCELLED: [STATUS_CANCELLED, STATUS_DONE],
 }
 
+# DEV-482: the one collapse that lies. "Cancelled" (a FAILED or cancelled
+# spec) and "Rejected" (a rejected gate) both fall back onto "Done" on a
+# stock Jira Cloud workflow, and Done with resolution Done asserts success.
+# When either lands on Done, the resolution carries the real outcome and a
+# comment says so in words, so the audit trail can be read — and queried
+# (`resolution = "Won't Do"`) — without knowing the fallback rules.
+RESOLUTION_WONT_DO = "Won't Do"
+LOSSY_COLLAPSES: frozenset = frozenset({STATUS_REJECTED, STATUS_CANCELLED})
+
+
+def collapse_note(target_status: str, landed_status: str) -> str:
+    """The comment left on an issue whose logical status the workflow
+    cannot represent."""
+    meaning = ("the spec FAILED or was cancelled" if target_status == STATUS_CANCELLED
+               else "the review was REJECTED")
+    return (f"**Mirror note:** {meaning}. This project's workflow has no "
+            f"'{target_status}' status, so the issue is closed as "
+            f"'{landed_status}' with resolution '{RESOLUTION_WONT_DO}'. "
+            f"Do not read '{landed_status}' here as success (DEV-482).")
+
 # Issue types
 ISSUE_TYPE_EPIC = "Epic"
 ISSUE_TYPE_STORY = "Story"
@@ -82,6 +102,7 @@ class JiraIssue:
     status: str
     assignee: Optional[str] = None
     parent_key: Optional[str] = None  # epic key for stories under an epic
+    resolution: Optional[str] = None  # DEV-482: "Won't Do" marks a lossy collapse
     comments: list[str] = field(default_factory=list)
     created_at: datetime = field(default_factory=utc_now)
     updated_at: datetime = field(default_factory=utc_now)
@@ -114,8 +135,10 @@ class JiraClient(ABC):
         """
 
     @abstractmethod
-    def transition_issue(self, issue_key: str, target_status: str) -> None:
-        """Move an issue to a new workflow state."""
+    def transition_issue(self, issue_key: str, target_status: str) -> Optional[str]:
+        """Move an issue to a new workflow state. Returns the status the
+        issue actually landed on — which differs from *target_status* when
+        the workflow lacks it and a fallback was used (DEV-482)."""
 
     @abstractmethod
     def add_comment(self, issue_key: str, body: str) -> None:
@@ -142,8 +165,14 @@ class FakeJiraClient(JiraClient):
     Jira UI) by calling ``transition_issue`` directly.
     """
 
-    def __init__(self, project_key: str = "AUTO"):
+    def __init__(self, project_key: str = "AUTO",
+                 statuses: "Optional[list[str]]" = None):
         self.project_key = project_key
+        # DEV-482: the workflow's real statuses. None means every logical
+        # status exists (the historical fake); a stock Jira Cloud workflow
+        # is [To Do, In Progress, Done], and then Cancelled and Rejected
+        # collapse exactly as they do against the real API.
+        self.statuses: Optional[set[str]] = set(statuses) if statuses is not None else None
         self._issues: dict[str, JiraIssue] = {}
         self._next_id = 1
         # Audit log for tests — every API call appends here.
@@ -201,12 +230,28 @@ class FakeJiraClient(JiraClient):
         )
         return key
 
-    def transition_issue(self, issue_key: str, target_status: str) -> None:
+    def transition_issue(self, issue_key: str, target_status: str) -> Optional[str]:
         if issue_key not in self._issues:
             raise KeyError(f"unknown issue {issue_key}")
-        self._issues[issue_key].status = target_status
-        self._issues[issue_key].updated_at = utc_now()
-        self._log("transition_issue", key=issue_key, target_status=target_status)
+        issue = self._issues[issue_key]
+        landed = target_status
+        if self.statuses is not None and target_status not in self.statuses:
+            candidates = [c for c in STATUS_FALLBACKS.get(target_status, [target_status])
+                          if c in self.statuses]
+            if not candidates:
+                raise RuntimeError(f"no usable transition for {target_status!r} on {issue_key}")
+            landed = candidates[0]
+        issue.status = landed
+        issue.updated_at = utc_now()
+        self._log("transition_issue", key=issue_key, target_status=target_status,
+                  landed=landed)
+        if landed != target_status and target_status in LOSSY_COLLAPSES:
+            issue.resolution = RESOLUTION_WONT_DO
+            self.add_comment(issue_key, collapse_note(target_status, landed))
+            logger.warning("jira: %s has no %r status — %s closed as %r with "
+                           "resolution %r (DEV-482)", self.project_key,
+                           target_status, issue_key, landed, RESOLUTION_WONT_DO)
+        return landed
 
     def add_comment(self, issue_key: str, body: str) -> None:
         if issue_key not in self._issues:
@@ -302,7 +347,7 @@ class AtlassianApiJiraClient(JiraClient):
         result = self._jira.create_issue(fields=fields)
         return result["key"]
 
-    def transition_issue(self, issue_key: str, target_status: str) -> None:
+    def transition_issue(self, issue_key: str, target_status: str) -> Optional[str]:
         # `set_issue_status` resolves target names to transition IDs by
         # walking available transitions, but returns None for names the
         # workflow doesn't define — then the library explodes trying to
@@ -312,22 +357,66 @@ class AtlassianApiJiraClient(JiraClient):
         current = self._jira.get_issue_status(issue_key)
         candidates = STATUS_FALLBACKS.get(target_status, [target_status])
         if current in candidates:
-            return
+            if current != target_status and target_status in LOSSY_COLLAPSES:
+                # Already sitting on the fallback (a Done from an earlier
+                # mirror): the status cannot move, the resolution still can.
+                self._mark_collapsed(issue_key, target_status, current, transition_id=None)
+            return current
 
         transitions = self._jira.get_issue_transitions(issue_key)
         by_target = {t["to"]: t["id"] for t in transitions}
         for candidate in candidates:
             if candidate in by_target:
-                self._jira.set_issue_status_by_transition_id(
-                    issue_key, by_target[candidate]
-                )
-                return
+                if candidate != target_status and target_status in LOSSY_COLLAPSES:
+                    self._mark_collapsed(issue_key, target_status, candidate,
+                                         transition_id=by_target[candidate])
+                else:
+                    self._jira.set_issue_status_by_transition_id(
+                        issue_key, by_target[candidate]
+                    )
+                return candidate
 
         raise RuntimeError(
             f"no usable transition for '{target_status}' "
             f"(current={current}) on {issue_key}. "
             f"Workflow offers: {sorted(by_target)}"
         )
+
+    def _mark_collapsed(self, issue_key: str, target_status: str,
+                        landed: str, *, transition_id: Optional[str]) -> None:
+        """DEV-482: land on *landed* with resolution Won't Do, say so in a
+        comment, and log it. The resolution is set on the transition itself
+        where the workflow allows (that is the screen it lives on); when it
+        does not, the transition still happens and the resolution is tried
+        as a field edit, best-effort — the comment carries the truth either
+        way."""
+        fields = {"resolution": {"name": RESOLUTION_WONT_DO}}
+        resolution_set = False
+        if transition_id is not None:
+            try:
+                self._jira.set_issue_status(issue_key, landed, fields=fields)
+                resolution_set = True
+            except Exception as e:
+                logger.warning("jira: transition of %s to %r with resolution "
+                               "failed (%s); transitioning without it",
+                               issue_key, landed, e)
+                self._jira.set_issue_status_by_transition_id(issue_key, transition_id)
+        if not resolution_set:
+            try:
+                self._jira.edit_issue(issue_key, fields, notify_users=False)
+                resolution_set = True
+            except Exception as e:
+                logger.warning("jira: could not set resolution %r on %s (%s) — "
+                               "the comment is the only marker", RESOLUTION_WONT_DO,
+                               issue_key, e)
+        try:
+            self.add_comment(issue_key, collapse_note(target_status, landed))
+        except Exception as e:
+            logger.warning("jira: could not leave the collapse note on %s: %s",
+                           issue_key, e)
+        logger.warning("jira: workflow has no %r status — %s closed as %r with "
+                       "resolution %s (DEV-482)", target_status, issue_key, landed,
+                       RESOLUTION_WONT_DO if resolution_set else "UNSET")
 
     def add_comment(self, issue_key: str, body: str) -> None:
         self._jira.issue_add_comment(issue_key, body)
@@ -340,9 +429,11 @@ class AtlassianApiJiraClient(JiraClient):
         if not data:
             return None
         fields = data.get("fields", {})
+        resolution = fields.get("resolution") or {}
         return JiraIssue(
             key=data["key"],
             issue_type=fields.get("issuetype", {}).get("name", ""),
+            resolution=resolution.get("name") if isinstance(resolution, dict) else None,
             summary=fields.get("summary", ""),
             description=fields.get("description") or "",
             status=fields.get("status", {}).get("name", ""),
