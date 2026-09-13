@@ -1,8 +1,8 @@
 # Changelog
 
-## v0.2.0 — unreleased (main since v0.1.0, 2026-08-19)
+## v0.2.0 — 2026-09-13
 
-The Pipeline Kernel Refactor ([DEV-628](https://keith-merrill4.atlassian.net/browse/DEV-628)): the decisions that kept killing runs moved out of a 6,300-line daemon into five typed kernel modules — `workspace.py`, `outcome.py`, `context.py`, `retry_policy.py` and the event schemas — behind a fault-injecting seam tier. Seven phases, one ticket each; every line below links the ticket that carries the evidence and the live proof. A dagger (†) marks a ticket merged and In Review: it awaits live proof on a run before it moves to Done.
+The Pipeline Kernel Refactor ([DEV-628](https://keith-merrill4.atlassian.net/browse/DEV-628)): the decisions that kept killing runs moved out of a 6,300-line daemon into five typed kernel modules — `workspace.py`, `outcome.py`, `context.py`, `retry_policy.py` and the event schemas — behind a fault-injecting seam tier. Seven phases, one ticket each; every line below links the ticket that carries the evidence and the live proof. A dagger (†) marks a ticket merged and In Review: it awaits live proof on a run before it moves to Done. Run 31 (Centipede logic core slice 7, `spec_c1e1c9ac`, 2026-09-13) was the proving run for phases 4–6: it delivered on the Mac runner with 52 tests green after one build-failure retry, and every ticket without a dagger below that names a run-time behaviour was moved to Done on its events.
 
 ### Phase 0 — the seam tier ([DEV-662](https://keith-merrill4.atlassian.net/browse/DEV-662))
 
@@ -37,10 +37,10 @@ Every failed attempt is classified as no-verdict, verdict or terminal in one pla
 - [DEV-620](https://keith-merrill4.atlassian.net/browse/DEV-620) † — A runner outage at implement time silently empties the existing-file fetch and the implementer proceeds blind — run 19's retry regenerated an 8.5K-line surface from priors with no warning logged
 - [DEV-622](https://keith-merrill4.atlassian.net/browse/DEV-622) † — Latent AttributeError in the DEV-538 requeue counters: Event has no `payload` accessor, so the second unreachable-runner requeue would crash the daemon loop
 - [DEV-538](https://keith-merrill4.atlassian.net/browse/DEV-538) † — An inconclusive pre-gate build check opens a human gate instead of retrying, so one unreachable runner stalls the pipeline indefinitely
-- [DEV-543](https://keith-merrill4.atlassian.net/browse/DEV-543) † — The architect burns its whole 8000-token budget and returns EMPTY content on half its generations — and the artifact we keep for diagnosis is empty by construction
+- [DEV-543](https://keith-merrill4.atlassian.net/browse/DEV-543) — The architect burns its whole 8000-token budget and returns EMPTY content on half its generations — and the artifact we keep for diagnosis is empty by construction
 - [DEV-624](https://keith-merrill4.atlassian.net/browse/DEV-624) † — Implementer rotation is context-blind and a dispatch exception is terminal — a 152K-token prompt was rotated onto moe_implementer's 116K context and the spec died in 46 seconds
 - [DEV-651](https://keith-merrill4.atlassian.net/browse/DEV-651) † — Phase-2 residual: the synthesis REPAIR call swallows a transport failure and returns it as a failing test run, so a dead server is charged to the implementer as a verdict
-- [DEV-652](https://keith-merrill4.atlassian.net/browse/DEV-652) † — Phase-2 residual: five sites still charge a retry and twelve still fail a spec outside the classifier, and the runner-unreachable requeue is a parallel re-implementation of dispose's no-verdict branch
+- [DEV-652](https://keith-merrill4.atlassian.net/browse/DEV-652) — Phase-2 residual: five sites still charge a retry and twelve still fail a spec outside the classifier, and the runner-unreachable requeue is a parallel re-implementation of dispose's no-verdict branch
 
 ### Phase 3 — one context stage, one prompt budget ([DEV-665](https://keith-merrill4.atlassian.net/browse/DEV-665))
 
@@ -64,21 +64,21 @@ The runner is read once per spec and every role selects from it; every prompt se
 
 Every parser and fetch a guard keys on distinguishes "nothing there" from "could not tell", and a guard fed the second arms by name.
 
-- [DEV-630](https://keith-merrill4.atlassian.net/browse/DEV-630) † — Parse and fetch helpers return unknown, not empty — downstream guards refuse or warn on unknown instead of silently disarming together
-- [DEV-536](https://keith-merrill4.atlassian.net/browse/DEV-536) † — The runner's overwrite/reconstruction signal is produced and never consumed
+- [DEV-630](https://keith-merrill4.atlassian.net/browse/DEV-630) — Parse and fetch helpers return unknown, not empty — downstream guards refuse or warn on unknown instead of silently disarming together
+- [DEV-536](https://keith-merrill4.atlassian.net/browse/DEV-536) — The runner's overwrite/reconstruction signal is produced and never consumed
 - [DEV-621](https://keith-merrill4.atlassian.net/browse/DEV-621) † — The change-surface parser only matches rows whose second column starts with "modif…" — run 19's descriptive table parsed as zero declared modifications, disarming the DEV-492 plan guard and the working-blind warning
 - [DEV-573](https://keith-merrill4.atlassian.net/browse/DEV-573) — The planner silently drops test_strategy.protected_paths from the normalized plan — every protection keyed to it disarms at once
 - [DEV-625](https://keith-merrill4.atlassian.net/browse/DEV-625) † — A plan missing test_strategy.repo is terminally failed by the DEV-492 guard at acceptance — before any gate — though a planner round with a note demonstrably fixes it
 - [DEV-654](https://keith-merrill4.atlassian.net/browse/DEV-654) † — The self-target sandbox overlay copies the live working tree, not a git ref — an uncommitted edit on the dev box silently becomes what a dogfood run's tests are judged against
-- [DEV-655](https://keith-merrill4.atlassian.net/browse/DEV-655) † — DEV-638's \"File modes — MANDATORY\" prompt section renders a syntactically valid <<<FILE:>>> block, so a model that echoes the instruction writes a junk file — runs 28 and 29 both landed `{p}` containing `...`
+- [DEV-655](https://keith-merrill4.atlassian.net/browse/DEV-655) — DEV-638's \"File modes — MANDATORY\" prompt section renders a syntactically valid <<<FILE:>>> block, so a model that echoes the instruction writes a junk file — runs 28 and 29 both landed `{p}` containing `...`
 
 ### Phase 5 — a retry must differ ([DEV-667](https://keith-merrill4.atlassian.net/browse/DEV-667))
 
 Every dispatch is planned before the call; a failure two agents produced identically goes to synthesis; citations have a position; the failure stream is the identity.
 
 - [DEV-631](https://keith-merrill4.atlassian.net/browse/DEV-631) † — Retry loop recognises invariant failures — a retry must change something (prompt, agent, temperature, environment) or classify the failure as environmental and stop spending the rotation
-- [DEV-539](https://keith-merrill4.atlassian.net/browse/DEV-539) † — Targeted retry treats any filename mentioned in rejection notes as a citation, so saying "the bug is not in X.swift" regenerates X.swift and can destroy a file that compiled
-- [DEV-530](https://keith-merrill4.atlassian.net/browse/DEV-530) † — Rotation is failure-triggered, so per-agent outcomes are confounded by construction — the current data ranks agents backwards
+- [DEV-539](https://keith-merrill4.atlassian.net/browse/DEV-539) — Targeted retry treats any filename mentioned in rejection notes as a citation, so saying "the bug is not in X.swift" regenerates X.swift and can destroy a file that compiled
+- [DEV-530](https://keith-merrill4.atlassian.net/browse/DEV-530) — Rotation is failure-triggered, so per-agent outcomes are confounded by construction — the current data ranks agents backwards
 - [DEV-640](https://keith-merrill4.atlassian.net/browse/DEV-640) † — Implementer rotation re-anchors on the previous pick when complexity.json is absent — retries 3 and 4 both dispatch to fast_implementer, breaking the "never repeat a model" contract
 - [DEV-619](https://keith-merrill4.atlassian.net/browse/DEV-619) † — Colon-rich clarification notes poison the planner's YAML — a Python signature in gate notes failed spec_27b1959f terminally after two identical unparseable attempts
 
@@ -86,16 +86,16 @@ Every dispatch is planned before the call; a failure two agents produced identic
 
 Three event kinds with fixed schemas, a diagnostic taxonomy, an honest Jira mirror, a first-class operator cancel, and documentation that describes the kernel.
 
-- [DEV-529](https://keith-merrill4.atlassian.net/browse/DEV-529) † — Build failures are recorded as prose, so the failure taxonomy exists only in Jira comments and cannot be queried
-- [DEV-669](https://keith-merrill4.atlassian.net/browse/DEV-669) † — CONTEXT_ASSEMBLED event kind and fixed, tested payload schemas for the three taxonomy events
+- [DEV-529](https://keith-merrill4.atlassian.net/browse/DEV-529) — Build failures are recorded as prose, so the failure taxonomy exists only in Jira comments and cannot be queried
+- [DEV-669](https://keith-merrill4.atlassian.net/browse/DEV-669) — CONTEXT_ASSEMBLED event kind and fixed, tested payload schemas for the three taxonomy events
 - [DEV-482](https://keith-merrill4.atlassian.net/browse/DEV-482) † — Jira mirror records a FAILED spec as Done/Done, so failed runs are indistinguishable from successful ones
 - [DEV-583](https://keith-merrill4.atlassian.net/browse/DEV-583) † — No safe operator cancel: cutting a run needs a raw DB write, and nothing drains the in-flight request or resets a wedged swap
 - [DEV-493](https://keith-merrill4.atlassian.net/browse/DEV-493) † — No way to cancel a running spec — the operator can only kill the daemon, and crash recovery resumes it
 - [DEV-567](https://keith-merrill4.atlassian.net/browse/DEV-567) † — Spec cancellation loses the race with an in-flight phase pass — the pass's completion write overwrites CANCELLED
 - [DEV-582](https://keith-merrill4.atlassian.net/browse/DEV-582) † — Cancelling a spec with an in-flight model call leaks active_requests and deadlocks every subsequent model swap
 - [DEV-609](https://keith-merrill4.atlassian.net/browse/DEV-609) † — scraping/ has 10 ruff errors invisible to CI (lint scope is src tests scripts)
-- [DEV-611](https://keith-merrill4.atlassian.net/browse/DEV-611) † — Post-release doc polish backlog from the DEV-607 audit (non-blocking WARN/NIT items)
-- [DEV-670](https://keith-merrill4.atlassian.net/browse/DEV-670) † — PIPELINE.md and CONFIGURATION.md rewrite for v0.2.0 — routing as the kernel does it, every AUTONOMOUS_* knob documented, .env.example matching
+- [DEV-611](https://keith-merrill4.atlassian.net/browse/DEV-611) — Post-release doc polish backlog from the DEV-607 audit (non-blocking WARN/NIT items)
+- [DEV-670](https://keith-merrill4.atlassian.net/browse/DEV-670) — PIPELINE.md and CONFIGURATION.md rewrite for v0.2.0 — routing as the kernel does it, every AUTONOMOUS_* knob documented, .env.example matching
 
 ### Before the plan — August fixes and evaluations
 
@@ -116,7 +116,7 @@ Instances fixed one by one between v0.1.0 and the refactor, plus the model evalu
 - [DEV-558](https://keith-merrill4.atlassian.net/browse/DEV-558) — Crash recovery caps on retry_count, which human gate rejections also increment — a well-reviewed spec has ZERO crash budget and dies on the first restart
 - [DEV-560](https://keith-merrill4.atlassian.net/browse/DEV-560) — A reviewer FAIL verdict over a green test run silently discards the implementation — tests are canonical in one direction only
 - [DEV-563](https://keith-merrill4.atlassian.net/browse/DEV-563) — A reviewer test file that fails to PARSE still counts as a red run when other tests passed — the implementer is charged for the reviewer's SyntaxError
-- [DEV-581](https://keith-merrill4.atlassian.net/browse/DEV-581) † — Pipeline: apply implementer edits as diffs/anchored replacements, not whole-file re-emission
+- [DEV-581](https://keith-merrill4.atlassian.net/browse/DEV-581) — Pipeline: apply implementer edits as diffs/anchored replacements, not whole-file re-emission
 - [DEV-610](https://keith-merrill4.atlassian.net/browse/DEV-610) — Pre-flip doc accuracy blockers: scraping/ docs describe a fictional program; SECURITY_MIGRATION uses --user against system units; TUTORIAL contradicts README on llama-server and documents removed /cupertino
 - [DEV-614](https://keith-merrill4.atlassian.net/browse/DEV-614) — Install Qwen3.8-27B and profile it on the RTX 5080 (bring-up + sweep, eval-only registration)
 - [DEV-615](https://keith-merrill4.atlassian.net/browse/DEV-615) — Eval: Qwen3.8-27B vs dense_architect (Qwen3.6-27B MTP) for the architect/supervisor slots — DEV-99 method
