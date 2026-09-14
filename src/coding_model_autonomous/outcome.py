@@ -747,6 +747,27 @@ def invariant_agents(db: Any, spec_id: str, task: Any, failure: Failure) -> list
     return agents
 
 
+def sole_fit_repeats(db: Any, spec_id: str, task: Any, failure: Failure) -> int:
+    """How many times this failure's coarse key has been produced on a task
+    whose latest attempt was a rotation of one (assignment ``sole_fit``),
+    counting the failure being disposed. 0 when the latest plan is not a
+    sole fit. DEV-676: with one eligible agent there is no second model to
+    pull, so the second identical failure is as final as two agents agreeing.
+    """
+    try:
+        plans = db.list_events_by_kind(spec_id=spec_id, kind=EventKind.ATTEMPT_PLANNED, limit=200)
+    except Exception:
+        return 0
+    task_id = getattr(task, "id", "") or ""
+    latest = next((_payload(ev) for ev in plans
+                   if getattr(ev, "task_id", None) == task_id), None)
+    if not latest or latest.get("assignment") != "sole_fit":
+        return 0
+    key = coarse_key(failure)
+    return 1 + sum(1 for p in _classified_events(db, spec_id, task_id)
+                   if p.get("coarse_key") == key)
+
+
 def _record(db: Any, spec: Any, task: Any, failure: Failure, action: str,
             consecutive: int, detail: str = "") -> None:
     msgs: list = sorted(diagnostic_messages(
@@ -975,6 +996,10 @@ def dispose(db: Any, spec: Any, task: Any, failure: Failure, hooks: Hooks,
     if INVARIANT_AGENTS > 0 and hooks.synthesize is not None:
         seen = invariant_agents(db, spec.id, impl_task, failure)
         if len(seen) >= INVARIANT_AGENTS:
+            invariant = seen
+        elif sole_fit_repeats(db, spec.id, impl_task, failure) >= 2:
+            # DEV-676: a rotation of one cannot pull the model lever; two
+            # identical failures on the only agent that fits are invariant.
             invariant = seen
 
     if impl_task.retry_count >= max_retries or invariant:

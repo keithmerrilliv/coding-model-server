@@ -16,7 +16,8 @@ import pytest
 from coding_model_autonomous.db import Database
 from coding_model_autonomous.models import EventKind, SpecStatus
 from coding_model_autonomous.outcome import (
-    Failure, FailureClass, attempt_agent, coarse_key, invariant_agents,
+    Failure, FailureClass, Hooks, _record, attempt_agent, coarse_key, dispose,
+    invariant_agents, sole_fit_repeats,
 )
 
 # verbatim from run 29, retries 2 and 4 — one defect, two labels
@@ -214,3 +215,52 @@ def test_every_classification_records_the_key_and_the_agent(db, spec_task):
     assert p["coarse_key"] == (
         "unappliable_edits|apply|src/coding_model_autonomous/executor.py")
     assert p["signature"].startswith("unappliable_edits:")  # kept for diagnostics
+
+
+# ── DEV-676: a rotation of one — the second identical failure is invariant ──
+
+class TestSoleFit:
+    def _sole_fit_plan(self, db, spec, task, agent="deep_implementer"):
+        from coding_model_autonomous import retry_policy as rp
+        plan = rp.plan_attempt(db, spec.id, task, role="implementer", agent=agent,
+                               feedback="fb", prompt_inputs=("d", ""), strategy={},
+                               assignment="sole_fit")
+        rp.record_attempt_plan(db, spec.id, task, plan)
+
+    def _fail(self, agent="deep_implementer"):
+        return Failure(FailureClass.PARSE_FAILURE, "implementer", "parse",
+                       "1 planned implement output(s) not produced: tests/test_x.py",
+                       phase="", extra={"agent": agent})
+
+    def test_counts_repeats_only_when_the_latest_plan_is_a_sole_fit(self, db, spec_task):
+        spec, task = spec_task
+        db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
+                        payload={"role": "implementer", "agent": "deep_implementer"})
+        assert sole_fit_repeats(db, spec.id, task, self._fail()) == 0      # no plan
+        self._sole_fit_plan(db, spec, task)
+        assert sole_fit_repeats(db, spec.id, task, self._fail()) == 1      # first time
+        _record(db, spec, task, self._fail(), "charge", 0)
+        assert sole_fit_repeats(db, spec.id, task, self._fail()) == 2      # the repeat
+        other = Failure(FailureClass.BUILD_FAILURE, "implementer", "build_check",
+                        "src/x.py:1:1: error: boom", phase="build_check",
+                        extra={"agent": "deep_implementer"})
+        assert sole_fit_repeats(db, spec.id, task, other) == 1             # a different key
+
+    def test_dispose_hands_a_sole_fit_repeat_to_synthesis(self, db, spec_task):
+        spec, task = spec_task
+        rev = db.create_task(spec_id=spec.id, agent="reviewer", role="reviewer", title="test")
+        db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
+                        payload={"role": "implementer", "agent": "deep_implementer"})
+        calls = []
+        hooks = Hooks(max_retries=lambda: 5,
+                      synthesize=lambda *a: calls.append(a) or None,
+                      supervisor=None, reviewer_parse_retries=lambda: 1)
+        # attempt 0 fails; attempt 1 is a sole fit on the same agent and fails identically
+        d0 = dispose(db, spec, db.get_task(task.id), self._fail(), hooks, reviewer_task=rev)
+        assert d0.action == "charge"
+        task1 = db.get_task(task.id)
+        self._sole_fit_plan(db, spec, task1)
+        d1 = dispose(db, spec, task1, self._fail(), hooks, reviewer_task=rev)
+        assert d1.action == "synthesize", d1
+        assert len(calls) == 1
+        assert db.get_task(task.id).retry_count == 1   # not spent to the cap

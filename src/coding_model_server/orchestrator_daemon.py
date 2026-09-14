@@ -109,8 +109,7 @@ from coding_model_autonomous.retry_policy import (
     plan_attempt,
     previous_plans,
     random_rotation_pick,
-    record_attempt_plan,
-)
+    record_attempt_plan, eligible_agents, previous_prompt_tokens, record_reroute,)
 from coding_model_autonomous.executor import (
     ImplementerResult,
     MAX_RETRIES,
@@ -2324,6 +2323,25 @@ def _ctx_capable_agent(spec_id: str, agent: "str | None", messages: list,
                           candidates=_IMPLEMENTER_ROTATION).agent
 
 
+def _note_reroute(db: Database, spec: Spec, task, planned: "str | None",
+                  dispatched: "str | None") -> None:
+    """The fit check moved the dispatch: amend the attempt's record so the
+    agent on ATTEMPT_PLANNED is the one that ran (DEV-676). Instrumentation —
+    a failure here changes nothing about the dispatch, and says so."""
+    if not dispatched or task is None:
+        return
+    try:
+        payload = record_reroute(db, spec.id, task, dispatched)
+        if payload is not None:
+            db.update_task_agent(task.id, dispatched)
+            logger.info("spec %s: attempt %d rerouted — %s", spec.id,
+                        task.retry_count, payload["rationale"])
+    except Exception as exc:
+        logger.warning("spec %s: reroute not recorded (%s: %s) — ATTEMPT_PLANNED "
+                       "still names the planned agent for attempt %d (DEV-676)",
+                       spec.id, type(exc).__name__, exc, task.retry_count)
+
+
 def _generate_implementation(
     db: Database, spec: Spec, task, spec_dir,
     spec_md: str, design_md: str, chosen_agent: "str | None",
@@ -2395,6 +2413,8 @@ def _generate_implementation(
                              executor.PROTECTED_FILES_MAX_CHARS),
         ],
         candidates=_IMPLEMENTER_ROTATION)
+    if alloc.agent != chosen_agent:
+        _note_reroute(db, spec, task, chosen_agent, alloc.agent)
     chosen_agent = alloc.agent
     existing_files = alloc.files(_context.SECTION_EDITABLE)
     # DEV-581: emit anchored SEARCH/REPLACE edits for existing files instead of
@@ -3319,6 +3339,8 @@ def _generate_one_file(
                                    list(reference_files or []),
                                    executor.PROTECTED_FILES_MAX_CHARS)],
         candidates=_IMPLEMENTER_ROTATION)
+    if file_alloc.agent != chosen_agent:
+        _note_reroute(db, spec, task, chosen_agent, file_alloc.agent)
     chosen_agent = file_alloc.agent
     reference_files = file_alloc.files(_context.SECTION_PROTECTED)
     omitted_reference = file_alloc.dropped(_context.SECTION_PROTECTED)
@@ -3640,10 +3662,31 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
     # DEV-629: a no-verdict that asked for a different agent (a 413, a
     # truncation, an empty completion) advances the pick without spending
     # the budget.
+    # DEV-676: rotate only among the agents whose window can hold this
+    # prompt. The previous attempt's prompt_tokens is the estimate; on the
+    # first attempt there is none and the fit check alone decides.
+    eligible = None
+    if task.retry_count > 0:
+        needed = previous_prompt_tokens(db, spec.id, "implementer")
+        if needed:
+            needed += executor.implementer_max_tokens_for(design_md)
+            eligible = eligible_agents(needed, _agent_ctx_limit)
+            if eligible is None:
+                logger.warning("spec %s: no agent's known window holds ~%d "
+                               "tokens — rotating over the full chain and "
+                               "leaving the fit check to escalate (DEV-676)",
+                               spec.id, needed)
     chosen_agent = _rotation_pick(
-        initial_agent, task.retry_count + rotation_offset(db, spec.id, task))
+        initial_agent, task.retry_count + rotation_offset(db, spec.id, task),
+        eligible=eligible)
     assignment = ("recommended" if task.retry_count == 0
                   and _select_implementer_agent(spec_dir) else "rotation")
+    if eligible is not None and len(eligible) == 1:
+        assignment = "sole_fit"
+        logger.warning("spec %s: attempt %d — %r is the only agent whose window "
+                       "holds ~%d tokens; the rotation is one agent and a "
+                       "second identical failure on it is invariant (DEV-676)",
+                       spec.id, task.retry_count, chosen_agent, needed)
     random_agent = random_rotation_pick()  # DEV-530 option 1; off by default
     if random_agent:
         logger.info("spec %s: attempt %d assigned at random: %r (was %r; "
