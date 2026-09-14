@@ -165,6 +165,7 @@ again can help (`docs/PIPELINE.md` sections 6 and 8):
 | `AUTONOMOUS_SHRINK_MIN_BASELINE_LINES` | `40` | Baselines smaller than this are never shrink-checked. |
 | `AUTONOMOUS_BLOCK_ON_BUILD_WARNINGS` | `1` | Treat a blocking compiler warning (a defined-but-unused binding, unreachable code) as a failed attempt (DEV-547). `0` records them without blocking. |
 | `AUTONOMOUS_OVERLAY_FROM_WORKING_TREE` | *(unset)* | Self-target runs sandbox the *committed* `src/` (`git archive HEAD`), so editing the tree during a run is safe (DEV-654). `1` overlays the working tree instead — an explicit opt-in that a warning names. |
+| `AUTONOMOUS_SELF_TARGET_EXISTING_TESTS` | `imports` | Which of this repository's own tests the self-target pre-gate check runs beside the spec's new tests (DEV-675): `imports` — every `tests/` file that imports an edited module; `all` — the whole `tests/` tree; `off` — only the spec's tests, as before. Existing tests run from the committed tree (`git archive HEAD`, everything but `src/`, which the overlay already carries; the working tree only under `AUTONOMOUS_OVERLAY_FROM_WORKING_TREE=1`), with the workspace's edits to tracked files outside `src/` shadowing it; a test file the spec itself modified runs only in its workspace version. A red existing test is a `tests_failed` verdict naming the test ids, charged before any human gate; the gate line and the `TEST_RAN` payload carry the new/existing counts. |
 
 **Delivery** — pushing a delivered spec to a `pipeline/<spec>` branch:
 

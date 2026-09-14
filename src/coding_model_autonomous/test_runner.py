@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -17,8 +18,9 @@ import sys
 import time
 
 import requests
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Collection, Iterable, Optional
 
 from . import seccomp_filter
 
@@ -622,6 +624,335 @@ def _materialize_local_repo_overlay(spec_dir: Path, repo: Optional[str]) -> Opti
     return overlay_src
 
 
+# ── DEV-675: existing tests that import an edited module ────────────────────
+#
+# The self-target pre-gate check ran the spec's NEW test files and nothing
+# else, so an artifact that reverted merged behaviour reached the code-review
+# gate under "compiled and the suite passed" — run 32 reverted DEV-672's
+# `repo_relative()` with 8/8 green, and only a hand diff at the gate caught
+# it. The repository's own tests are the cheapest reviewer there is: the ones
+# that import an edited module run alongside the new ones, in ONE pytest
+# invocation, and the output says which set each result belongs to.
+EXISTING_TESTS_MODE_ENV = "AUTONOMOUS_SELF_TARGET_EXISTING_TESTS"
+EXISTING_TESTS_MODES = ("imports", "all", "off")
+EXISTING_TESTS_MARKER = "[self-target existing tests]"
+_EXISTING_TESTS_HEADER_RE = re.compile(
+    re.escape(EXISTING_TESTS_MARKER) + r" mode=(?P<mode>\w+) selected=(?P<n>\d+)")
+_TEST_FILE_RE = re.compile(r"(?:^|/)(?:test_[^/]*|[^/]*_test)\.py$")
+# pytest -v result lines ("tests/test_x.py::test_a PASSED") and the short
+# summary ("FAILED tests/test_x.py::test_a - AssertionError").
+_PYTEST_VERBOSE_RE = re.compile(
+    r"^(?P<id>\S+\.py::\S+)\s+(?P<res>PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS)\b", re.M)
+_PYTEST_SHORT_RE = re.compile(r"^(?P<res>FAILED|ERROR)\s+(?P<id>\S+\.py::\S+)", re.M)
+
+
+def existing_tests_mode() -> str:
+    """imports (default): run the repository tests that import an edited
+    module; all: the whole tests/ tree; off: only the spec's own tests."""
+    mode = (os.getenv(EXISTING_TESTS_MODE_ENV, "imports") or "imports").strip().lower()
+    if mode not in EXISTING_TESTS_MODES:
+        logger.warning("%s=%r is not one of %s — using 'imports' (DEV-675)",
+                       EXISTING_TESTS_MODE_ENV, mode, "/".join(EXISTING_TESTS_MODES))
+        return "imports"
+    return mode
+
+
+def edited_modules(spec_dir: Path) -> list[str]:
+    """Dotted names of the workspace's non-test modules under src/.
+
+    `src/coding_model_autonomous/outcome.py` → `coding_model_autonomous.outcome`;
+    a package `__init__.py` names the package itself. Test files are the
+    spec's own suite, not modules anything imports.
+    """
+    ws = spec_dir / "src"
+    if not ws.is_dir():
+        return []
+    out: list[str] = []
+    for path in sorted(ws.rglob("*.py")):
+        rel = path.relative_to(ws).as_posix()
+        if "tests/" in rel or _TEST_FILE_RE.search(rel):
+            continue
+        parts = rel[:-3].split("/")
+        if parts[-1] == "__init__":
+            parts = parts[:-1]
+        if parts:
+            out.append(".".join(parts))
+    return out
+
+
+def test_imports_module(text: str, module: str) -> bool:
+    """Does a test module import *module* directly?
+
+    Matches `from pkg.mod import …`, `from pkg.mod.sub import …`,
+    `import pkg.mod` / `import pkg.mod as m`, and `from pkg import mod`
+    (bare, aliased, or inside a parenthesised list). Indirect imports — a
+    helper that imports the module — are not followed; `all` mode is the
+    answer when that matters.
+    """
+    esc = re.escape(module)
+    if re.search(rf"^\s*from\s+{esc}(?:[.\s]|$)", text, re.M):
+        return True
+    if re.search(rf"^\s*import\s+{esc}(?:[.\s,]|$)", text, re.M):
+        return True
+    pkg, _, name = module.rpartition(".")
+    if not pkg:
+        return False
+    for m in re.finditer(rf"^\s*from\s+{re.escape(pkg)}\s+import\s+"
+                         rf"(?:\(([^)]*)\)|([^\n]*))", text, re.M):
+        names = re.findall(r"\b\w+\b", m.group(1) or m.group(2) or "")
+        if name in names:
+            return True
+    return False
+
+
+def existing_tests_importing(edited: Iterable[str], tests_root: Path,
+                             exclude: Collection[str] = ()) -> list[str]:
+    """Test files under *tests_root* that import any module in *edited*.
+
+    Returns paths relative to tests_root's parent (`tests/test_x.py`), so
+    they compare directly with workspace paths. *exclude* names such paths
+    the caller will run from the workspace instead — a test file the spec
+    itself modified must not also run in its base_ref version.
+    """
+    modules = [m for m in edited if m]
+    if not modules or not tests_root.is_dir():
+        return []
+    excluded = {str(e).strip().lstrip("./") for e in exclude}
+    selected: list[str] = []
+    for path in sorted(tests_root.rglob("*.py")):
+        rel = path.relative_to(tests_root.parent).as_posix()
+        if not _TEST_FILE_RE.search(rel) or rel in excluded:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if any(test_imports_module(text, m) for m in modules):
+            selected.append(rel)
+    return selected
+
+
+def _all_tests_under(tests_root: Path, exclude: Collection[str] = ()) -> list[str]:
+    excluded = {str(e).strip().lstrip("./") for e in exclude}
+    out = []
+    for path in sorted(tests_root.rglob("*.py")):
+        rel = path.relative_to(tests_root.parent).as_posix()
+        if _TEST_FILE_RE.search(rel) and rel not in excluded:
+            out.append(rel)
+    return out
+
+
+def _collection_targets(spec_dir: Path) -> list[str]:
+    """spec_dir's top-level entries as explicit pytest arguments — the set
+    `pytest <spec_dir>` would walk: no dot-directories, none of the dirs the
+    run ignores, and top-level .py files."""
+    out = []
+    for entry in sorted(spec_dir.iterdir()):
+        if entry.name.startswith(".") or entry.name in _SPEC_SKIP_PATTERNS:
+            continue
+        if entry.is_dir() or entry.suffix == ".py":
+            out.append(str(entry))
+    return out
+
+
+def _workspace_test_files(spec_dir: Path) -> list[str]:
+    """Test files the spec itself wrote or modified (workspace-relative)."""
+    out = []
+    for path in sorted(spec_dir.rglob("*.py")):
+        rel = path.relative_to(spec_dir).as_posix()
+        if any(skip in rel.split("/") for skip in _SPEC_SKIP_PATTERNS):
+            continue
+        if _TEST_FILE_RE.search(rel):
+            out.append(rel)
+    return out
+
+
+def _extract_committed_tree(repo_root: Path, into: Path,
+                            skip: tuple[str, ...] = ("src/",)) -> None:
+    """`git archive HEAD` extracted under *into*, minus the members under
+    *skip* (src/ is the DEV-626 overlay's business). Raises on failure."""
+    import io
+    import tarfile
+    out = subprocess.run(["git", "-C", str(repo_root), "archive", "--format=tar",
+                          "HEAD"], capture_output=True, check=True, timeout=60)
+    into.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(fileobj=io.BytesIO(out.stdout)) as tar:
+        members = [m for m in tar.getmembers()
+                   if not any(m.name.startswith(s) for s in skip)]
+        tar.extractall(path=into, members=members, filter="data")
+
+
+def _copy_working_tree(repo_root: Path, into: Path,
+                       skip: tuple[str, ...] = ("src/",)) -> None:
+    """The tracked files as the working tree has them, minus *skip* — the
+    AUTONOMOUS_OVERLAY_FROM_WORKING_TREE=1 opt-in's version of the above."""
+    listed = subprocess.run(["git", "-C", str(repo_root), "ls-files", "-z"],
+                            capture_output=True, check=True, timeout=60).stdout
+    for rel in filter(None, listed.decode("utf-8", "replace").split("\0")):
+        if any(rel.startswith(s) for s in skip):
+            continue
+        src = repo_root / rel
+        if not src.is_file():
+            continue
+        dst = into / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+
+
+def _shadow_workspace_edits(spec_dir: Path, overlay_root: Path) -> list[str]:
+    """Workspace files that edit a tracked file OUTSIDE src/ replace the
+    committed copy in the overlay — the same rule the src/ overlay applies,
+    so an existing test that reads `docs/PIPELINE.md` or `.env.example` sees
+    the candidate's edit, not HEAD's. Only files that already exist in the
+    overlay are shadowed: the workspace's own artifacts (design.md, plan.json,
+    manifest.json …) are not repository files and stay out. Returns the
+    shadowed paths."""
+    shadowed: list[str] = []
+    for top in sorted(spec_dir.iterdir()):
+        if top.name in ("src", _REPO_OVERLAY_DIR, "retry_history") or \
+                top.name in _SPEC_SKIP_PATTERNS or top.name.startswith("."):
+            continue
+        for path in ([top] if top.is_file() else sorted(top.rglob("*"))):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(spec_dir).as_posix()
+            if any(skip in rel.split("/") for skip in _SPEC_SKIP_PATTERNS):
+                continue
+            target = overlay_root / rel
+            if target.is_file():
+                shutil.copy2(path, target)
+                shadowed.append(rel)
+    return shadowed
+
+
+def _materialize_committed_tree(spec_dir: Path, overlay_root: Path) -> Optional[Path]:
+    """The repository's committed tree — everything but src/, which the
+    DEV-626 overlay already carries — under the overlay (DEV-675), with the
+    workspace's edits to tracked files shadowing it.
+
+    The whole tree, not just tests/: existing tests read the repository by
+    path (`docs/PIPELINE.md` for the event-kind docs check, `.env.example`
+    for knob coverage, README.md …), and a tests-only overlay reds them
+    with FileNotFoundError on a correct attempt. Same source rule as the
+    src/ overlay (DEV-654): the committed tree, the working tree only by
+    the same explicit opt-in. Returns the tests dir, or None (with a
+    warning) when the tree cannot be read.
+    """
+    if not (_SERVER_REPO_ROOT / "tests").is_dir():
+        return None
+    overlay_root.mkdir(parents=True, exist_ok=True)
+    for entry in overlay_root.iterdir():
+        if entry.name == "src":
+            continue
+        shutil.rmtree(entry) if entry.is_dir() else entry.unlink()
+    try:
+        if os.getenv("AUTONOMOUS_OVERLAY_FROM_WORKING_TREE", "") == "1":
+            _copy_working_tree(_SERVER_REPO_ROOT, overlay_root)
+        else:
+            _extract_committed_tree(_SERVER_REPO_ROOT, overlay_root)
+    except Exception as exc:
+        logger.warning("repo overlay: could not read the committed tree (%s) "
+                       "— existing tests will NOT run against this attempt "
+                       "(DEV-675)", exc)
+        return None
+    shadowed = _shadow_workspace_edits(spec_dir, overlay_root)
+    if shadowed:
+        logger.info("repo overlay: %d workspace edit(s) outside src/ shadow the "
+                    "committed copy: %s (DEV-675)", len(shadowed),
+                    ", ".join(shadowed[:8]) + (" …" if len(shadowed) > 8 else ""))
+    overlay_tests = overlay_root / "tests"
+    return overlay_tests if overlay_tests.is_dir() else None
+
+
+def select_existing_tests(spec_dir: Path, overlay_root: Path) -> tuple[str, list[str]]:
+    """(mode, repo-relative test files) to run beside the spec's own tests."""
+    mode = existing_tests_mode()
+    if mode == "off":
+        return mode, []
+    tests_root = _materialize_committed_tree(spec_dir, overlay_root)
+    if tests_root is None:
+        return mode, []
+    exclude = _workspace_test_files(spec_dir)
+    if mode == "all":
+        return mode, _all_tests_under(tests_root, exclude)
+    return mode, existing_tests_importing(edited_modules(spec_dir), tests_root, exclude)
+
+
+def existing_tests_header(mode: str, selected: list[str],
+                          edited: Collection[str] = ()) -> str:
+    """The line that heads the test output, naming what ran beside the new
+    tests. Short on purpose: it shares the first 2000 chars of the output
+    with the DEV-536 reconstruction marker."""
+    shown = ", ".join(selected[:12]) + (f", … (+{len(selected) - 12} more)"
+                                        if len(selected) > 12 else "")
+    edited_note = (f" for edited {', '.join(list(edited)[:6])}"
+                   if edited and mode == "imports" else "")
+    return (f"{EXISTING_TESTS_MARKER} mode={mode} selected={len(selected)}"
+            f"{edited_note}: {shown or 'none'}")
+
+
+@dataclass
+class TestSplit:
+    """New-vs-existing results parsed from a self-target pytest run."""
+    mode: str
+    selected: int
+    new_passed: int = 0
+    new_failed: int = 0
+    existing_passed: int = 0
+    existing_failed: int = 0
+    new_failed_ids: list[str] = field(default_factory=list)
+    existing_failed_ids: list[str] = field(default_factory=list)
+
+    @property
+    def new_total(self) -> int:
+        return self.new_passed + self.new_failed
+
+    @property
+    def existing_total(self) -> int:
+        return self.existing_passed + self.existing_failed
+
+    def payload(self) -> dict:
+        return {"existing_tests_mode": self.mode,
+                "existing_tests_selected": self.selected,
+                "new_tests": {"passed": self.new_passed, "failed": self.new_failed},
+                "existing_tests": {"passed": self.existing_passed,
+                                   "failed": self.existing_failed},
+                "existing_failed": self.existing_failed_ids[:20]}
+
+
+def parse_test_split(output: str) -> Optional[TestSplit]:
+    """Split a self-target run's results into the spec's tests and the
+    repository's, by the overlay path in each node id. None when the run
+    carried no DEV-675 header (a foreign repo, or a faked run)."""
+    m = _EXISTING_TESTS_HEADER_RE.search(output or "")
+    if m is None:
+        return None
+    split = TestSplit(mode=m.group("mode"), selected=int(m.group("n")))
+    results: dict[str, str] = {}
+    for hit in _PYTEST_VERBOSE_RE.finditer(output):
+        results[hit.group("id")] = hit.group("res")
+    for hit in _PYTEST_SHORT_RE.finditer(output):
+        results[hit.group("id")] = hit.group("res")
+    marker = _REPO_OVERLAY_DIR + "/"
+    for node_id, res in results.items():
+        existing = marker in node_id.split("::", 1)[0]
+        if res in ("SKIPPED", "XFAIL"):
+            continue
+        failed = res in ("FAILED", "ERROR", "XPASS")
+        if existing:
+            if failed:
+                split.existing_failed += 1
+                split.existing_failed_ids.append(node_id)
+            else:
+                split.existing_passed += 1
+        elif failed:
+            split.new_failed += 1
+            split.new_failed_ids.append(node_id)
+        else:
+            split.new_passed += 1
+    return split
+
+
 def _run_local_tests(spec_dir: Path, framework: str, timeout: int,
                      repo: Optional[str] = None) -> tuple[bool, str]:
     """Run pytest/jest/vitest/node_test locally (bwrap sandbox on Linux).
@@ -639,6 +970,7 @@ def _run_local_tests(spec_dir: Path, framework: str, timeout: int,
             return False, install_output
 
     extra_env: Optional[dict[str, str]] = None
+    existing_header = ""
     if framework == "jest":
         # The local binary, not `npx jest`: npx would try to FETCH jest when
         # it isn't installed, and the test sandbox has no network, so that
@@ -714,16 +1046,44 @@ def _run_local_tests(spec_dir: Path, framework: str, timeout: int,
             "--import-mode=importlib",
             "--ignore", str(spec_dir / "retry_history"),
             "--ignore", str(spec_dir / _REPO_OVERLAY_DIR),
-            str(spec_dir),
         ]
+        targets = [str(spec_dir)]
         overlay_src = _materialize_local_repo_overlay(spec_dir, repo)
         if overlay_src is not None:
             extra_env = {"PYTHONPATH": str(overlay_src)}
+            # DEV-675: the repository's own tests for the modules this
+            # attempt edited run in the same invocation, as explicit paths.
+            mode, selected = select_existing_tests(spec_dir, overlay_src.parent)
+            if selected:
+                # Named beside spec_dir's top-level entries, not beside
+                # spec_dir itself: when the directory is an argument, pytest
+                # meets `.repo_overlay` on that walk, never recurses into a
+                # dot-directory, and then silently drops the explicit file
+                # under it as already visited. The entries are what the
+                # directory walk collected anyway. `--rootdir` keeps every
+                # node id relative to the workspace, so the overlay prefix
+                # is what tells the two sets apart.
+                targets = _collection_targets(spec_dir) + [
+                    str(overlay_src.parent / p) for p in selected]
+                raw_cmd += ["--rootdir", str(spec_dir)]
+                # Each selected file's own directory joins PYTHONPATH: that
+                # is what pytest's default prepend mode does for a conftest's
+                # sibling imports (tests/seams/conftest.py imports seam_fakes)
+                # and importlib mode does not.
+                test_dirs = sorted({str((overlay_src.parent / p).parent) for p in selected})
+                extra_env["PYTHONPATH"] = os.pathsep.join([str(overlay_src), *test_dirs])
+            existing_header = existing_tests_header(mode, selected,
+                                                    edited_modules(spec_dir))
+            logger.info("spec %s: %s (DEV-675)", spec_dir.name, existing_header)
+        raw_cmd += targets
 
     # No share_net: the test run itself is always offline, for every
     # framework. Only _provision_node_modules above opens the network.
-    return _run_confined(raw_cmd, spec_dir, timeout, what="tests",
-                         extra_env=extra_env)
+    passed, output = _run_confined(raw_cmd, spec_dir, timeout, what="tests",
+                                   extra_env=extra_env)
+    if existing_header:
+        output = existing_header + "\n" + output
+    return passed, output
 
 
 def _collect_patch_files(spec_dir: Path) -> tuple[list[dict], Optional[str]]:
