@@ -103,6 +103,7 @@ The three self-target proving runs and the Centipede run each found defects in w
 
 - [DEV-660](https://keith-merrill4.atlassian.net/browse/DEV-660) — Build-failure feedback for `No module named 'src.<pkg>'` names the cause — the import root — not the missing module (pipeline-written on run 32)
 - [DEV-661](https://keith-merrill4.atlassian.net/browse/DEV-661) — The testability check requires a Python design's Criterion Seams to import the code under test, never through `src.` (pipeline-written on run 34)
+- [DEV-676](https://keith-merrill4.atlassian.net/browse/DEV-676) † — The implementer rotation is restricted to the agents whose window fits; a rotation of one is recorded as `sole_fit` and its second identical failure is invariant; a fit-check reroute is recorded with `planned_agent`
 - [DEV-674](https://keith-merrill4.atlassian.net/browse/DEV-674) — Self-target context is read from this repository's own HEAD, never from the Mac runner's clone of it
 - [DEV-672](https://keith-merrill4.atlassian.net/browse/DEV-672) † — coarse_key keys on the repository-relative path, so Mac build failures can match across attempts
 - [DEV-618](https://keith-merrill4.atlassian.net/browse/DEV-618) † — eval_agents.py `--tool-loop N`: inspection markers answered from an empty sandbox before judging

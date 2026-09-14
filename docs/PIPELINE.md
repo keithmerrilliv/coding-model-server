@@ -513,7 +513,7 @@ previous pick, so six retries walk six different models (DEV-640).
 
 The same record carries the difficulty proxy DEV-530 needs: which failure
 caused this attempt, produced by which agent, with how many diagnostics, and
-how the agent was assigned (`recommended`, `rotation`, `random`, `injected`).
+how the agent was assigned (`recommended`, `rotation`, `random`, `injected`, `sole_fit`, `rerouted`). From retry 1 the rotation is restricted to the agents whose context window holds the previous attempt's prompt plus the completion budget (DEV-676); with one eligible agent the plan says `sole_fit` and the second identical failure on it is invariant — synthesis, not the cap. When the fit check still moves a dispatch, a second `attempt_planned` for the same retry records `rerouted` with `planned_agent`, so the agent on the record is the one that ran.
 Per-agent rates read without it rank agents backwards, because an agent gets
 attempt N only because attempt N−1 failed.
 
