@@ -4129,6 +4129,15 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
     # human must look at — the file list above only shows what landed.
     ledger_block = ArtifactLedger.outcomes_block(
         write_outcomes, "ARTIFACT WRITES REFUSED OR REDIRECTED")
+    # DEV-678: the spec may have ended while this pass was in flight (an
+    # operator cancel). The gate would be born cancelled (DEV-583) but the
+    # task row — closed as SKIPPED by the cancel — would be flipped back to
+    # BLOCKED_ON_REVIEW here. Leave the store as the cancel left it.
+    ended = _outcome.spec_is_terminal(db, spec)
+    if ended is not None:
+        logger.info("spec %s: in-flight implementer pass discarded after %s — "
+                    "no code_review gate opened (DEV-678)", spec.id, ended.value)
+        return
     db.update_task_status(task.id, TaskStatus.BLOCKED_ON_REVIEW)
     db.create_gate(
         spec_id=spec.id,

@@ -1381,3 +1381,52 @@ class TestAttemptPlans:
         assert [p["retry"] for p in arch] == [0]
         assert arch[0]["assignment"] == "fixed" and arch[0]["rationale"] == "first attempt"
 
+
+
+# ── an operator cancel during an in-flight pass ──────────────────────────────
+
+class TestCancelMidPass:
+    def test_the_in_flight_pass_is_discarded_whole(self, db, model, runner):
+        """DEV-678 (run 33's cancel drill): the cancel lands while the
+        implementer's model call is out. The pass finishes on its own — its
+        files land, its build check runs — and then everything it concludes
+        is discarded: no gate, no charge, no requeue, no failure_classified
+        row, and the task rows stay as the cancel closed them."""
+        spec = _impl_ready(db, model, runner)
+
+        def cancel_then_answer(messages):
+            db.cancel_spec(spec.id, reason="DEV-583 drill", by="operator")
+            return Reply(implementer_reply())
+        model.script("implementer", cancel_then_answer)
+
+        out = drive(db, spec.id, model, wait_at(GateType.CODE_REVIEW), runner=runner)
+
+        assert out.reason == "terminal" and out.status == SpecStatus.CANCELLED
+        assert {t.status for t in out.tasks} <= {TaskStatus.SKIPPED, TaskStatus.DONE}
+        assert out.task("implementer").status == TaskStatus.SKIPPED
+        assert out.task("implementer").retry_count == 0
+        assert db.list_open_gates(spec.id) == []
+        assert db.list_gates_for_spec(spec.id, GateType.CODE_REVIEW) == []
+        assert events(db, spec.id, EventKind.FAILURE_CLASSIFIED) == []
+        assert len(model.calls_for("implementer")) == 1
+
+    def test_a_charge_after_the_cancel_is_discarded_too(self, db, model, runner):
+        """The run-33 shape exactly: the pass reaches a verdict (here a parse
+        failure) after the cancel, and the charge that used to open a
+        born-cancelled gate and then raise out of respond_to_gate is simply
+        not made."""
+        spec = _impl_ready(db, model, runner)
+
+        def cancel_then_garbage(messages):
+            db.cancel_spec(spec.id, reason="DEV-583 drill")
+            return Reply("Here is the code:\n```python\nprint(1)\n```")
+        model.script("implementer", cancel_then_garbage)
+
+        out = drive(db, spec.id, model, wait_at(GateType.CODE_REVIEW), runner=runner)
+
+        assert out.status == SpecStatus.CANCELLED
+        assert out.task("implementer").status == TaskStatus.SKIPPED
+        assert out.task("implementer").retry_count == 0
+        assert rejected_gates(db, spec.id) == []
+        assert events(db, spec.id, EventKind.FAILURE_CLASSIFIED) == []
+        assert not any(t.status == TaskStatus.PENDING for t in out.tasks)
