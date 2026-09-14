@@ -267,8 +267,14 @@ class Database:
 
     def update_spec_status(self, spec_id: str, status: SpecStatus,
                            normalized_yaml: Optional[str] = None,
-                           force: bool = False) -> bool:
+                           force: bool = False,
+                           event_payload: Optional[dict] = None) -> bool:
         """Set the spec's status. Returns True when the row actually changed.
+
+        ``event_payload`` adds fields to the one SPEC_STATUS_CHANGED event
+        this write records (DEV-679: a caller with more to say — the cancel's
+        reason and counts — says it on that row rather than recording a
+        second status event for jira-sync to mirror twice).
 
         DEV-567: CANCELLED is terminal against concurrent writers. A phase
         pass that was already in flight when an operator cancelled used to
@@ -303,7 +309,7 @@ class Database:
                 conn,
                 EventKind.SPEC_STATUS_CHANGED,
                 spec_id=spec_id,
-                payload={"new_status": status.value},
+                payload={**(event_payload or {}), "new_status": status.value},
             )
             return True
 
@@ -332,29 +338,33 @@ class Database:
             raise ValueError(f"unknown spec {spec_id}")
         if spec.status in (SpecStatus.DONE, SpecStatus.FAILED, SpecStatus.CANCELLED):
             raise SpecAlreadyTerminal(spec)
-        running = [t for t in self.list_tasks_for_spec(spec_id)
-                   if t.status is TaskStatus.RUNNING]
-        self.update_spec_status(spec_id, SpecStatus.CANCELLED)
+        tasks = self.list_tasks_for_spec(spec_id)
+        running = [t for t in tasks if t.status is TaskStatus.RUNNING]
+        open_tasks = [t for t in tasks if t.status not in
+                      (TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.SKIPPED)]
         gates = self.list_open_gates(spec_id)
+        # DEV-679: ONE status event carries the reason and the counts. The
+        # rows it counts are the ones cancelled and closed just below —
+        # listed first so the status write (which must come first, so a
+        # concurrent pass sees CANCELLED at once — DEV-567) can name them.
+        self.update_spec_status(
+            spec_id, SpecStatus.CANCELLED,
+            event_payload={"cancelled_by": by, "reason": reason,
+                           "gates_cancelled": len(gates),
+                           "tasks_closed": len(open_tasks),
+                           "in_flight": [t.role for t in running]})
         for gate in gates:
             self.cancel_gate(gate.id)
         closed = []
-        for task in self.list_tasks_for_spec(spec_id):
-            if task.status not in (TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.SKIPPED):
-                self.update_task_status(task.id, TaskStatus.SKIPPED)
-                closed.append(task.id)
+        for task in open_tasks:
+            self.update_task_status(task.id, TaskStatus.SKIPPED)
+            closed.append(task.id)
         summary = {
             "spec_id": spec_id, "status": SpecStatus.CANCELLED.value,
             "previous_status": spec.status.value, "reason": reason, "by": by,
             "gates_cancelled": [g.id for g in gates], "tasks_closed": closed,
             "in_flight": [t.role for t in running],
         }
-        self.record_event(EventKind.SPEC_STATUS_CHANGED, spec_id=spec_id,
-                          payload={"new_status": SpecStatus.CANCELLED.value,
-                                   "cancelled_by": by, "reason": reason,
-                                   "gates_cancelled": len(gates),
-                                   "tasks_closed": len(closed),
-                                   "in_flight": [t.role for t in running]})
         logger.warning("spec %s: CANCELLED by %s (%s) — %d gate(s) cancelled, "
                        "%d task(s) closed%s", spec_id, by, reason or "no reason given",
                        len(gates), len(closed),
