@@ -2,6 +2,7 @@
 a verdict on real output, and only the terminal branch ends a spec."""
 from __future__ import annotations
 
+import logging
 import json
 
 import pytest
@@ -299,7 +300,8 @@ class TestDisposeAfterTheSpecEnded:
         f = classify_exception(GateAlreadyDecidedError("gate g already cancelled"),
                                role="implementer")
         assert f.cls is FailureClass.UNKNOWN_EXCEPTION  # still a daemon fault on a live spec
-        d = dispose(db, spec, impl, f, hooks())
+        with caplog.at_level(logging.INFO, logger="orchestrator.outcome"):
+            d = dispose(db, spec, impl, f, hooks())
         assert d.action == "discarded" and "cancelled" in d.detail
         assert db.get_task(impl.id).status == TaskStatus.SKIPPED
         assert db.get_spec(spec.id).status == SpecStatus.CANCELLED
