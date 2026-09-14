@@ -117,3 +117,113 @@ def test_a_plan_with_no_implement_outputs_requires_nothing(db):
     spec_dir = db.spec_dir(s.id)
     spec_dir.mkdir(parents=True, exist_ok=True)
     assert d._missing_planned_outputs(db.get_spec(s.id), spec_dir) == []
+
+
+# ── DEV-677: what a targeted retry was told to leave alone ───────────────────
+
+@pytest.fixture
+def retry_task(db, spec):
+    """An implementer task on its first retry, with attempt 0's workspace
+    snapshotted the way _clean_spec_dir_for_retry leaves it."""
+    task = db.create_task(spec_id=spec.id, agent="implementer",
+                          role="implementer", title="implement")
+    db.increment_task_retry(task.id)
+    spec_dir = db.spec_dir(spec.id)
+    _write(spec_dir, "retry_history/retry_0/src/pkg/mod.py", "old = 1\n")
+    _write(spec_dir, "retry_history/retry_0/tests/test_mod.py", "def test(): pass\n")
+    return db.get_task(task.id)
+
+
+NOTES_CITING_MOD = ("## The code does not compile\n\n"
+                    "    src/pkg/mod.py:3: error: name 'x' is not defined\n")
+
+
+def test_an_uncited_planned_file_comes_forward_from_the_previous_attempt(
+        db, spec, retry_task, caplog):
+    """Run 32 retry 2: the feedback cited outcome.py only, the retry edited
+    outcome.py only, and the test file it was told to leave alone was
+    charged as missing."""
+    spec_dir = db.spec_dir(spec.id)
+    _write(spec_dir, "src/pkg/mod.py", "new = 1\n")
+    with caplog.at_level("INFO"):
+        carried = d._carry_forward_uncited_outputs(
+            db, spec, retry_task, spec_dir, NOTES_CITING_MOD)
+    assert carried == [("tests/test_mod.py", "def test(): pass\n")]
+    assert (spec_dir / "tests/test_mod.py").read_text() == "def test(): pass\n"
+    assert d._missing_planned_outputs(spec, spec_dir) == []
+    assert "carried forward" in caplog.text and "DEV-677" in caplog.text
+    ev = [json.loads(e.payload_json) for e in db.list_events_by_kind(
+        spec_id=spec.id, kind=d.EventKind.AGENT_RAN)]
+    anomaly = [e for e in ev if e.get("anomaly") == "outputs_carried_forward"]
+    assert anomaly and anomaly[0]["carried"] == ["tests/test_mod.py"]
+    assert anomaly[0]["cited"] == ["src/pkg/mod.py"]
+    # The restore is on the ledger, attributed to this retry.
+    from coding_model_autonomous.workspace import ACTION_RESTORED, ArtifactLedger
+    rows = [e for e in ArtifactLedger.open(db, spec, spec_dir).entries
+            if e.path == "tests/test_mod.py"]
+    assert rows and rows[-1].action == ACTION_RESTORED and rows[-1].retry == 1
+
+
+def test_a_cited_file_that_was_not_re_emitted_is_still_missing(db, spec, retry_task):
+    """Asked for, not produced: DEV-645's verdict stands."""
+    spec_dir = db.spec_dir(spec.id)
+    _write(spec_dir, "tests/test_mod.py")
+    carried = d._carry_forward_uncited_outputs(
+        db, spec, retry_task, spec_dir, NOTES_CITING_MOD)
+    assert carried == []
+    assert d._missing_planned_outputs(spec, spec_dir) == ["src/pkg/mod.py"]
+
+
+def test_a_file_no_attempt_ever_produced_is_still_missing(db, spec, retry_task):
+    spec_dir = db.spec_dir(spec.id)
+    (spec_dir / "retry_history/retry_0/tests/test_mod.py").unlink()
+    _write(spec_dir, "src/pkg/mod.py")
+    assert d._carry_forward_uncited_outputs(
+        db, spec, retry_task, spec_dir, NOTES_CITING_MOD) == []
+    assert d._missing_planned_outputs(spec, spec_dir) == ["tests/test_mod.py"]
+
+
+def test_nothing_cited_carries_every_omitted_planned_file(db, spec, retry_task):
+    """A human rejection that names no file ("tighten the error handling")
+    tells the model to fix what it names and leave the rest; the rest comes
+    forward."""
+    spec_dir = db.spec_dir(spec.id)
+    carried = d._carry_forward_uncited_outputs(
+        db, spec, retry_task, spec_dir, "Please tighten the error handling.")
+    assert sorted(p for p, _ in carried) == ["src/pkg/mod.py", "tests/test_mod.py"]
+    assert d._missing_planned_outputs(spec, spec_dir) == []
+
+
+def test_attempt_zero_has_nothing_to_carry(db, spec):
+    spec_dir = db.spec_dir(spec.id)
+    task = db.create_task(spec_id=spec.id, agent="implementer",
+                          role="implementer", title="implement")
+    _write(spec_dir, "retry_history/retry_0/tests/test_mod.py")
+    assert d._carry_forward_uncited_outputs(db, spec, task, spec_dir, None) == []
+    assert d._missing_planned_outputs(spec, spec_dir) == [
+        "src/pkg/mod.py", "tests/test_mod.py"]
+
+
+def test_manifest_mode_keeps_its_own_restore(db, spec, retry_task):
+    spec_dir = db.spec_dir(spec.id)
+    (spec_dir / "manifest.json").write_text(json.dumps(
+        [{"path": "src/pkg/mod.py", "purpose": "x"}]))
+    assert d._carry_forward_uncited_outputs(
+        db, spec, retry_task, spec_dir, NOTES_CITING_MOD) == []
+    assert not (spec_dir / "tests/test_mod.py").exists()
+
+
+def test_the_feedback_no_longer_claims_the_workspace_is_reset(db, spec, retry_task, monkeypatch):
+    """The two texts the model reads must agree (DEV-677): the retry prompt
+    says leave uncited files untouched, so the missing-output feedback must
+    not say every file has to come back."""
+    captured = {}
+    monkeypatch.setattr(d, "_dispose", lambda db_, s, t, f, **k: captured.setdefault("f", f))
+
+    def no_fetch(*a, **k):
+        raise RuntimeError("no fetch")
+    monkeypatch.setattr(d, "_spec_context", no_fetch)
+    d._route_missing_planned_outputs(db, spec, retry_task, "# spec", ["tests/test_mod.py"])
+    fb = captured["f"].feedback
+    assert "workspace is reset" not in fb
+    assert "carried forward" in fb and "tests/test_mod.py" in fb

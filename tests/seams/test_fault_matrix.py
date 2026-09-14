@@ -1430,3 +1430,47 @@ class TestCancelMidPass:
         assert rejected_gates(db, spec.id) == []
         assert events(db, spec.id, EventKind.FAILURE_CLASSIFIED) == []
         assert not any(t.status == TaskStatus.PENDING for t in out.tasks)
+
+
+# ── a targeted retry leaves uncited files alone ──────────────────────────────
+
+class TestTargetedRetryOutputs:
+    def test_an_uncited_planned_file_survives_the_retry(self, db, model, runner):
+        """DEV-677 (run 32 retry 2): the rejection cites the daemon file at a
+        position; the retry re-emits that file only, exactly as the prompt
+        asks. The test file it was told to leave alone comes forward from
+        attempt 0 instead of being charged as a missing planned output, and
+        the pass goes on to its build check and a fresh gate."""
+        spec = _impl_ready(db, model, runner)
+        model.script("implementer",
+                     Reply(implementer_reply()),
+                     Reply(file_blocks({DAEMON_PATH: DAEMON_STUB_IMPLEMENTED})))
+        notes = (f"{DAEMON_PATH}:7: error: name the role, not 'the implementer'\n"
+                 "Fix the log line; the test file is fine.")
+
+        out = drive(db, spec.id, model,
+                    scripted({GateType.CODE_REVIEW: [("rejected", notes)]},
+                             default=wait_at(GateType.CODE_REVIEW)),
+                    runner=runner)
+
+        assert out.reason == "waiting"
+        assert out.waiting_on[0].gate_type == GateType.CODE_REVIEW
+        assert out.task("implementer").retry_count == 1
+        # One charge: the human rejection. Nothing for a "missing" output.
+        ev = events(db, spec.id, EventKind.FAILURE_CLASSIFIED)
+        assert [e["cls"] for e in ev] == ["review_rejected"]
+        assert events(db, spec.id, EventKind.AGENT_RAN,
+                      anomaly="missing_planned_outputs") == []
+        carried = events(db, spec.id, EventKind.AGENT_RAN,
+                         anomaly="outputs_carried_forward")
+        assert carried == [{"role": "implementer", "model_call": False,
+                            "anomaly": "outputs_carried_forward",
+                            "carried": [TEST_PATH], "cited": [DAEMON_PATH],
+                            "unrecoverable": [], "retry": 1}]
+        files = workspace_files(db, spec.id)
+        assert files[TEST_PATH] == TEST_FILE
+        assert 'role="implementer"' in files[DAEMON_PATH]
+        # The build check ran on the carried-forward workspace, and the gate
+        # lists the carried file among the attempt's outputs.
+        assert len(runner.test_calls) == 2
+        assert TEST_PATH in out.waiting_on[0].prompt_md
