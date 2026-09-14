@@ -161,7 +161,48 @@ _IMPLEMENTER_ROTATION = [
 ]
 
 
-def _rotation_pick(initial_agent: "str | None", retry_count: int) -> "str | None":
+def eligible_agents(needed_tokens: int, window_of: Any,
+                    chain: "list[str] | None" = None) -> "list[str] | None":
+    """The rotation agents whose KNOWN window holds *needed_tokens*, in
+    rotation order — or None when no known window does (the caller keeps the
+    full chain and says so; DEV-633's fit check still escalates at dispatch).
+
+    DEV-676: the fit check used to run AFTER the rotation had picked, so a
+    prompt that fit only one window was "rotated" five times onto that one
+    agent while every plan recorded a different one. Runs 32 and 34 each
+    spent six attempts that way.
+    """
+    fits = []
+    for a in (chain or _IMPLEMENTER_ROTATION):
+        try:
+            w = window_of(a)
+        except Exception:
+            w = None
+        if w is not None and int(w) >= int(needed_tokens):
+            fits.append(a)
+    return fits or None
+
+
+def previous_prompt_tokens(db: Database, spec_id: str, role: str) -> Optional[int]:
+    """prompt_tokens of the newest AGENT_RAN for *role* on this spec, or None.
+    The next attempt's prompt is the same spec, the same design and a little
+    more feedback: the last one is the best estimate there is."""
+    try:
+        events = db.list_events_by_kind(spec_id=spec_id, kind=EventKind.AGENT_RAN, limit=200)
+    except Exception:
+        return None
+    for ev in events:  # newest first
+        p = _outcome._payload(ev)
+        if p.get("role") == role and p.get("prompt_tokens"):
+            try:
+                return int(p["prompt_tokens"])
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
+def _rotation_pick(initial_agent: "str | None", retry_count: int,
+                   eligible: "list[str] | None" = None) -> "str | None":
     """Advance to the next implementer in the rotation chain on retry.
 
     Retry 0 returns ``initial_agent`` unchanged — the architect's complexity
@@ -180,6 +221,11 @@ def _rotation_pick(initial_agent: "str | None", retry_count: int) -> "str | None
         chain = [initial_agent] + [a for a in _IMPLEMENTER_ROTATION if a != initial_agent]
     else:
         chain = _IMPLEMENTER_ROTATION
+    if eligible:
+        # DEV-676: rotate only among the agents whose window holds the
+        # prompt, in the same order, so every retry is a real change of
+        # model — or, with one eligible agent, an honest repeat.
+        chain = [a for a in chain if a in eligible] or list(eligible)
     return chain[retry_count % len(chain)]
 
 
@@ -241,7 +287,11 @@ class AttemptPlan:
     feedback_digest: str          # the feedback alone ("" when none)
     temperature: float
     env_digest: str               # the test_strategy the attempt is judged in
-    assignment: str = "rotation"  # recommended | rotation | random | injected | fixed
+    assignment: str = "rotation"  # recommended | rotation | random | injected | fixed | sole_fit | rerouted
+    # DEV-676: when the dispatch was rerouted by the fit check, the agent the
+    # rotation had planned; None otherwise. Not a lever — the levers describe
+    # the call that was made.
+    planned_agent: Optional[str] = None
     # DEV-530 option 2 — the difficulty proxy
     prior_cls: Optional[str] = None
     prior_coarse_key: Optional[str] = None
@@ -349,6 +399,13 @@ def inject_difference(plan: AttemptPlan, prior_plans: list) -> Optional[AttemptP
 
 def rationale_for(plan: AttemptPlan, previous: "dict | None",
                   identical_to: Optional[int]) -> str:
+    if plan.assignment == "rerouted":
+        # DEV-676: amends an existing record, so it needs no earlier plan.
+        changed = plan.changed_from(previous)
+        return (f"retry {plan.retry}: planned {plan.planned_agent!r} but the "
+                f"prompt does not fit its window — dispatched to {plan.agent!r} "
+                f"instead (DEV-633); the agent lever is "
+                f"{'changed' if 'agent' in changed else 'unchanged'}")
     if previous is None:
         return "first attempt" if plan.retry == 0 else (
             f"retry {plan.retry} with no earlier plan on record")
@@ -356,6 +413,11 @@ def rationale_for(plan: AttemptPlan, previous: "dict | None",
              + (f" ({plan.prior_coarse_key})" if plan.prior_coarse_key else "")
              + (f" by {plan.prior_agent}" if plan.prior_agent else ""))
     changed = plan.changed_from(previous)
+    if plan.assignment == "sole_fit":
+        return (f"retry {plan.retry} {after}: {plan.agent!r} is the only agent "
+                f"whose window holds this prompt — a rotation of one; a second "
+                f"identical failure on it is invariant (DEV-676)"
+                + (f"; changed {', '.join(changed)}" if changed else ""))
     if plan.assignment == "injected":
         return (f"retry {plan.retry} {after}: the rotation's pick would have "
                 f"repeated an earlier attempt on every lever — injected "
@@ -387,6 +449,23 @@ def record_attempt_plan(db: Database, spec_id: str, task, plan: AttemptPlan,
     db.record_event(EventKind.ATTEMPT_PLANNED, spec_id=spec_id,
                     task_id=task.id, payload=payload)
     return payload
+
+
+def record_reroute(db: Database, spec_id: str, task, dispatched_agent: str) -> Optional[dict]:
+    """The fit check sent this attempt to *dispatched_agent* instead of the
+    agent its plan named: write a second ATTEMPT_PLANNED for the same retry
+    that says so, so the recorded agent is the one that ran (DEV-676).
+    Returns the payload, or None when there is no plan on record to amend."""
+    prior_plans = previous_plans(db, spec_id, task.id)
+    latest = next((p for p in prior_plans if p.get("retry") == task.retry_count), None)
+    if latest is None or latest.get("agent") == dispatched_agent:
+        return None
+    fields = {k: latest.get(k) for k in AttemptPlan.__dataclass_fields__ if k in latest}
+    plan = replace(AttemptPlan(**fields), agent=dispatched_agent,
+                   assignment="rerouted", planned_agent=latest.get("agent"))
+    # Compare against the attempt BEFORE this retry, as the original record did.
+    return record_attempt_plan(db, spec_id, task, plan,
+                               [p for p in prior_plans if p.get("retry") != task.retry_count])
 
 
 def _latest_supervisor_feedback(db: Database, spec_id: str,

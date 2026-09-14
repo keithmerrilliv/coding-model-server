@@ -198,3 +198,79 @@ class TestRandomFraction:
         monkeypatch.setattr(rp, "_rng", rp.random.Random(1))
         n = sum(1 for _ in range(1000) if rp.random_rotation_pick() is not None)
         assert 400 < n < 600
+
+
+# ── DEV-676: rotate among the agents that fit; record what actually ran ─────
+
+_WINDOWS = {"implementer": 65536, "deep_implementer": 262144,
+            "moe_implementer": 118784, "fast_implementer": 65536}
+
+
+def _window(agent):
+    return _WINDOWS.get(agent)
+
+
+class TestRotateAmongFits:
+    def test_eligible_agents_keeps_rotation_order_and_drops_small_windows(self):
+        assert rp.eligible_agents(70_000, _window) == ["deep_implementer", "moe_implementer"]
+        assert rp.eligible_agents(10_000, _window) == rp._IMPLEMENTER_ROTATION
+
+    def test_no_known_window_fits_means_none_not_empty(self):
+        assert rp.eligible_agents(300_000, _window) is None
+        assert rp.eligible_agents(70_000, lambda a: None) is None
+
+    def test_a_rotation_of_one_repeats_the_only_fit_every_retry(self):
+        for retry in (1, 2, 3, 4):
+            assert rp._rotation_pick("fast_implementer", retry,
+                                     eligible=["deep_implementer"]) == "deep_implementer"
+
+    def test_two_eligible_agents_alternate_in_rotation_order(self):
+        picks = [rp._rotation_pick("fast_implementer", r, eligible=["deep_implementer", "moe_implementer"])
+                 for r in (1, 2, 3, 4)]
+        assert picks == ["moe_implementer", "deep_implementer", "moe_implementer", "deep_implementer"]
+
+    def test_without_eligibility_the_rotation_is_unchanged(self):
+        assert rp._rotation_pick("implementer", 1) == "deep_implementer"
+        assert rp._rotation_pick("implementer", 1, eligible=None) == "deep_implementer"
+
+    def test_previous_prompt_tokens_reads_the_newest_implementer_generation(self, db, spec_task):
+        spec, task = spec_task
+        assert rp.previous_prompt_tokens(db, spec.id, "implementer") is None
+        db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
+                        payload={"role": "implementer", "agent": "implementer", "prompt_tokens": 40_000})
+        db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
+                        payload={"role": "reviewer", "agent": "deep_reviewer", "prompt_tokens": 9_000})
+        db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
+                        payload={"role": "implementer", "agent": "deep_implementer", "prompt_tokens": 66_000})
+        assert rp.previous_prompt_tokens(db, spec.id, "implementer") == 66_000
+
+    def test_a_reroute_amends_the_record_to_the_agent_that_ran(self, db, spec_task):
+        spec, task = spec_task
+        task = _at_retry(db, task, 1)
+        rp.record_attempt_plan(db, spec.id, task, _plan(db, spec, task, "fast_implementer"))
+        payload = rp.record_reroute(db, spec.id, task, "deep_implementer")
+        assert payload["agent"] == "deep_implementer"
+        assert payload["assignment"] == "rerouted"
+        assert payload["planned_agent"] == "fast_implementer"
+        assert payload["retry"] == 1
+        assert "does not fit its window" in payload["rationale"]
+        latest = rp.previous_plans(db, spec.id, task.id)[0]
+        assert latest["agent"] == "deep_implementer"
+        from coding_model_autonomous.models import check_event_payload
+        assert check_event_payload(EventKind.ATTEMPT_PLANNED, latest) == []
+
+    def test_a_reroute_to_the_planned_agent_records_nothing(self, db, spec_task):
+        spec, task = spec_task
+        rp.record_attempt_plan(db, spec.id, task, _plan(db, spec, task, "implementer"))
+        assert rp.record_reroute(db, spec.id, task, "implementer") is None
+        assert len(rp.previous_plans(db, spec.id, task.id)) == 1
+
+    def test_sole_fit_rationale_names_the_rotation_of_one(self, db, spec_task):
+        spec, task = spec_task
+        rp.record_attempt_plan(db, spec.id, task, _plan(db, spec, task, "deep_implementer"))
+        task = _at_retry(db, task, 1)
+        payload = rp.record_attempt_plan(
+            db, spec.id, task, _plan(db, spec, task, "deep_implementer", feedback="fix it",
+                                     assignment="sole_fit"))
+        assert "only agent whose window holds this prompt" in payload["rationale"]
+        assert payload["assignment"] == "sole_fit" and payload["planned_agent"] is None
