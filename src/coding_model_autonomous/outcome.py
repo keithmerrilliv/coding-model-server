@@ -386,7 +386,7 @@ class Failure:
 
 @dataclass
 class Disposition:
-    action: str      # requeue | rotate | charge | synthesize | park | terminal | handled | discarded
+    action: str      # requeue | rotate | charge | synthesize | park | terminal | handled
     failure: Failure
     detail: str = ""
     consecutive: int = 0
@@ -524,22 +524,6 @@ def classify_test_run(output: str, *, role: str, passed: bool,
 
 _ROLE_ORDER = {"architect": 0, "implementer": 1, "reviewer": 2}
 _TERMINAL_TASK = (TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.SKIPPED)
-_TERMINAL_SPEC = (SpecStatus.DONE, SpecStatus.FAILED, SpecStatus.CANCELLED)
-
-
-def spec_is_terminal(db: Any, spec: Any) -> "SpecStatus | None":
-    """The spec's LIVE terminal status, or None while it is still running.
-
-    Re-read from the store, not from the object a runner was handed: that
-    object was fetched before the pass started, and an operator cancel
-    (DEV-583) lands while the pass is in flight. Unreadable reads as live —
-    a store fault must not silently discard a real verdict."""
-    try:
-        fresh = db.get_spec(spec.id)
-    except Exception:
-        return None
-    status = getattr(fresh, "status", None)
-    return status if status in _TERMINAL_SPEC else None
 
 
 def _payload(ev: Any) -> dict:
@@ -918,19 +902,6 @@ def _park(db: Any, spec: Any, task: Any, failure: Failure, consecutive: int) -> 
 def dispose(db: Any, spec: Any, task: Any, failure: Failure, hooks: Hooks,
             *, reviewer_task: Any = None) -> Disposition:
     """Act on a classified failure. See the module docstring."""
-    # DEV-678: a pass that was in flight when the spec ended (an operator
-    # cancel, DEV-583) finishes on its own and everything it concludes is
-    # about a spec that no longer exists. Run 33's in-flight implementer
-    # tried to charge itself, hit the born-cancelled gate, raised
-    # GateAlreadyDecidedError, and the daemon fault that produced was
-    # requeued — a PENDING task under a CANCELLED spec. Nothing is recorded:
-    # no charge, no requeue, no failure_classified row, no gate.
-    ended = spec_is_terminal(db, spec)
-    if ended is not None:
-        logger.info("spec %s: in-flight %s pass discarded after %s — %s "
-                    "(%s) not recorded (DEV-678)", spec.id, failure.role,
-                    ended.value, failure.cls.value, failure.source)
-        return Disposition("discarded", failure, f"spec {ended.value}")
     outcome = failure.outcome
     if outcome is Outcome.TERMINAL:
         return terminate(db, spec, task, failure)

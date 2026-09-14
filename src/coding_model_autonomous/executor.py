@@ -636,10 +636,7 @@ IMPLEMENTER_SYSTEM_PROMPT = textwrap.dedent("""\
        to fix the cited issues. For every other file, output it BYTE-FOR-BYTE
        identical to your previous attempt — do not rewrite, refactor, or
        "improve" untouched files. Output ALL files again (the daemon
-       overwrites previous versions). The one exception: a file the
-       approved plan declares that the feedback did NOT cite is carried
-       forward from your previous attempt if you omit it; any other omitted
-       file is a deleted file.
+       overwrites previous versions; an omitted file is a deleted file).
     9. If the plan or spec includes a `clarifications:` block (or an
        "Operator clarifications" section), every item there is a hard
        requirement at the same authority as the spec itself. Apply each

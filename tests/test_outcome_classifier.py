@@ -2,7 +2,6 @@
 a verdict on real output, and only the terminal branch ends a spec."""
 from __future__ import annotations
 
-import logging
 import json
 
 import pytest
@@ -278,59 +277,3 @@ class TestDisposeVerdict:
                 Failure(FailureClass.PARSE_FAILURE, "implementer", "parse", "no"), h)
         assert seen == ["gate"]
         assert db.get_task(impl.id).retry_count == 1  # the parse verdict took the default path
-
-
-class TestDisposeAfterTheSpecEnded:
-    """DEV-678: a pass in flight when the operator cancelled finishes on its
-    own; whatever it concludes is discarded — no requeue, no charge, no
-    failure_classified row, no gate. Run 33's in-flight implementer had its
-    GateAlreadyDecidedError requeued as a daemon fault, leaving a PENDING task
-    under a CANCELLED spec."""
-
-    def _cancelled(self, db, spec_tasks):
-        spec, impl, rev = spec_tasks
-        db.update_task_status(impl.id, TaskStatus.RUNNING)
-        db.cancel_spec(spec.id, reason="drill")
-        assert db.get_task(impl.id).status == TaskStatus.SKIPPED
-        return spec, db.get_task(impl.id), db.get_task(rev.id)
-
-    def test_a_no_verdict_is_not_requeued(self, db, spec_tasks, caplog):
-        spec, impl, _ = self._cancelled(db, spec_tasks)
-        class GateAlreadyDecidedError(Exception): ...
-        f = classify_exception(GateAlreadyDecidedError("gate g already cancelled"),
-                               role="implementer")
-        assert f.cls is FailureClass.UNKNOWN_EXCEPTION  # still a daemon fault on a live spec
-        with caplog.at_level(logging.INFO, logger="orchestrator.outcome"):
-            d = dispose(db, spec, impl, f, hooks())
-        assert d.action == "discarded" and "cancelled" in d.detail
-        assert db.get_task(impl.id).status == TaskStatus.SKIPPED
-        assert db.get_spec(spec.id).status == SpecStatus.CANCELLED
-        assert classified(db, spec.id) == []
-        assert "discarded after cancelled" in caplog.text
-
-    def test_a_verdict_is_not_charged_and_opens_no_gate(self, db, spec_tasks):
-        spec, impl, _ = self._cancelled(db, spec_tasks)
-        before = len(db.list_gates_for_spec(spec.id))
-        d = dispose(db, spec, impl, Failure(
-            FailureClass.PARSE_FAILURE, "implementer", "parse", "1 planned output missing",
-            feedback="emit it"), hooks())
-        assert d.action == "discarded"
-        assert db.get_task(impl.id).status == TaskStatus.SKIPPED
-        assert db.get_task(impl.id).retry_count == 0
-        assert len(db.list_gates_for_spec(spec.id)) == before
-        assert classified(db, spec.id) == []
-
-    def test_a_terminal_failure_does_not_touch_a_cancelled_spec(self, db, spec_tasks):
-        spec, impl, _ = self._cancelled(db, spec_tasks)
-        d = dispose(db, spec, impl, Failure(
-            FailureClass.ABORTED, "daemon", "daemon", "structural"), hooks())
-        assert d.action == "discarded"
-        assert db.get_spec(spec.id).status == SpecStatus.CANCELLED
-        assert db.get_task(impl.id).status == TaskStatus.SKIPPED
-
-    def test_a_live_spec_is_untouched_by_the_guard(self, db, spec_tasks):
-        spec, impl, _ = spec_tasks
-        db.update_task_status(impl.id, TaskStatus.RUNNING)
-        d = dispose(db, spec, db.get_task(impl.id),
-                    classify_exception(requests.Timeout("t"), role="implementer"), hooks())
-        assert d.action == "requeue"
