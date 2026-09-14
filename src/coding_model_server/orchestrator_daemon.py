@@ -3866,6 +3866,17 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
     # synthesis corpus — run 26's merge recovered from six of them), and
     # before the build check, which cannot say anything useful about a
     # workspace that is missing a file the plan promised.
+    #
+    # DEV-677: but first, what a targeted retry was TOLD to leave alone. The
+    # retry prompt says "leave every file you are not changing untouched"
+    # while the workspace was wiped for the retry, so on run 32 a test file
+    # the feedback never cited — correct and untouched since attempt 0 — was
+    # charged as a missing output. Uncited planned files come forward from
+    # the previous attempt's snapshot before anything is judged missing.
+    carried = _carry_forward_uncited_outputs(db, spec, task, spec_dir,
+                                             rejection_notes)
+    if carried:
+        result.files = list(result.files) + carried
     missing_planned = _missing_planned_outputs(spec, spec_dir)
     if missing_planned:
         _route_missing_planned_outputs(db, spec, task, spec_md, missing_planned)
@@ -4129,6 +4140,15 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
     # human must look at — the file list above only shows what landed.
     ledger_block = ArtifactLedger.outcomes_block(
         write_outcomes, "ARTIFACT WRITES REFUSED OR REDIRECTED")
+    # DEV-678: the spec may have ended while this pass was in flight (an
+    # operator cancel). The gate would be born cancelled (DEV-583) but the
+    # task row — closed as SKIPPED by the cancel — would be flipped back to
+    # BLOCKED_ON_REVIEW here. Leave the store as the cancel left it.
+    ended = _outcome.spec_is_terminal(db, spec)
+    if ended is not None:
+        logger.info("spec %s: in-flight implementer pass discarded after %s — "
+                    "no code_review gate opened (DEV-678)", spec.id, ended.value)
+        return
     db.update_task_status(task.id, TaskStatus.BLOCKED_ON_REVIEW)
     db.create_gate(
         spec_id=spec.id,
@@ -4529,6 +4549,90 @@ def _route_unappliable_edits(db: Database, spec: Spec, task,
         extra={"blocks": len(errors)}))
 
 
+def _newest_snapshot_content(spec_dir, rel_path: str) -> "str | None":
+    """*rel_path* as the newest ``retry_history/retry_<N>/`` snapshot has it,
+    or None when no snapshot holds it."""
+    hist = spec_dir / "retry_history"
+    if not hist.is_dir():
+        return None
+
+    def _index(p):
+        try:
+            return int(p.name.rsplit("_", 1)[1])
+        except (IndexError, ValueError):
+            return -1
+
+    for snap in sorted(hist.glob("retry_*"), key=_index, reverse=True):
+        fp = snap / rel_path
+        if fp.is_file():
+            try:
+                return fp.read_text()
+            except OSError:
+                continue
+    return None
+
+
+def _carry_forward_uncited_outputs(db: Database, spec: Spec, task, spec_dir,
+                                   rejection_notes: "str | None"
+                                   ) -> "list[tuple[str, str]]":
+    """Planned implement outputs a retry was told to leave alone, restored
+    from the previous attempt (DEV-677). Returns the ``(path, content)``
+    pairs that came forward.
+
+    The retry contract has two halves that used to contradict each other
+    from the model's side. The prompt (DEV-539's targeted regeneration, the
+    edit-mode task line, `_reemit_instruction`) says: fix the files the
+    feedback cites, leave every other file untouched. The workspace, though,
+    is wiped for every retry (`_clean_spec_dir_for_retry`), so "untouched"
+    meant "gone", and DEV-645's planned-output check then charged the model
+    for the file it had been told not to emit. Run 32 lost retries 2 and 4
+    to exactly this, and the feedback it produced ("re-emit all files")
+    pushed retry 3 into a 32,000-token truncation.
+
+    A planned output is missing only when it exists NOWHERE, or when the
+    feedback cited it for regeneration and the retry did not re-emit it. The
+    cited set is the same positional/fenced/prose ladder manifest mode uses
+    (`_cite_paths`); the source is the newest snapshot that has the file
+    (the previous attempt's workspace, which already includes anything IT
+    carried forward). The write goes through the ledger's `restore` so the
+    row says where the bytes came from. Manifest mode keeps its own DEV-106
+    restore; attempt 0 has nothing to carry.
+    """
+    if task.retry_count == 0 or (spec_dir / "manifest.json").is_file():
+        return []
+    planned = _planned_implement_outputs(spec)
+    absent = [p for p in planned if not (spec_dir / p).is_file()]
+    if not absent:
+        return []
+    cited = _parse_cited_paths(rejection_notes or "", planned)
+    carried: "list[tuple[str, str]]" = []
+    unrecoverable: "list[str]" = []
+    for rel in absent:
+        if rel in cited:
+            continue   # asked for, not produced — DEV-645's verdict stands
+        content = _newest_snapshot_content(spec_dir, rel)
+        if content is None:
+            unrecoverable.append(rel)
+            continue
+        ArtifactLedger.open(db, spec, spec_dir).restore(
+            rel, content, role="implementer", task_id=task.id,
+            retry=task.retry_count)
+        carried.append((rel, content))
+    if carried:
+        logger.info("spec %s: retry %d — %d planned output(s) the feedback did "
+                    "not cite carried forward from the previous attempt: %s "
+                    "(DEV-677)", spec.id, task.retry_count, len(carried),
+                    ", ".join(p for p, _ in carried))
+        db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
+                        payload={"role": "implementer", "model_call": False,
+                                 "anomaly": "outputs_carried_forward",
+                                 "carried": [p for p, _ in carried],
+                                 "cited": sorted(cited),
+                                 "unrecoverable": unrecoverable,
+                                 "retry": task.retry_count})
+    return carried
+
+
 def _missing_planned_outputs(spec: Spec, spec_dir) -> "list[str]":
     """Planned implement outputs the workspace does not actually have (DEV-645).
 
@@ -4620,8 +4724,14 @@ def _route_missing_planned_outputs(db: Database, spec: Spec, task,
                 f"- `{path}` — is a NEW file. Emit it whole as a complete "
                 f"`<<<FILE: {path}>>> ... <<<END_FILE>>>` block; never "
                 f"SEARCH/REPLACE blocks, there is no content to search.")
-    lines.append("\nRe-emit the complete attempt, including any file you got "
-                 "right last time — the workspace is reset between attempts.")
+    # DEV-677: the sentence and the check now agree. A file listed above
+    # exists nowhere, or the feedback cited it and this attempt did not
+    # re-emit it; planned files the feedback did not cite come forward from
+    # the previous attempt on their own.
+    lines.append("\nEmit every file listed above. A file the feedback did not "
+                 "cite is carried forward from your previous attempt by the "
+                 "daemon; a file listed here exists nowhere, or was cited for "
+                 "regeneration and not re-emitted.")
 
     logger.error("spec %s: attempt produced %d of %d planned implement "
                  "output(s) — missing %s; charging the implementer without a "
