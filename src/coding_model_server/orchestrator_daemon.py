@@ -3886,6 +3886,7 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
     build_framework = ""
     build_warnings: list = []
     blocking_warnings: list = []
+    test_split = None
     ts_for_build = _load_plan(spec).get("test_strategy")
     if isinstance(ts_for_build, dict) and ts_for_build.get("framework"):
         fw = build_framework = ts_for_build["framework"]
@@ -3952,6 +3953,12 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
                              "test_process_crashed":
                                  _detect_test_process_crash(build_output),
                              "retry": task.retry_count}
+            # DEV-675: which results were the spec's own tests and which
+            # were the repository's, so "the suite passed" is a count the
+            # gate and the event both carry.
+            test_split = test_runner.parse_test_split(build_output)
+            if test_split is not None:
+                build_payload.update(test_split.payload())
             # DEV-602 split B: a passing check records exactly what it
             # verified, into the same payload this event carries. A failing
             # check records nothing and leaves any prior manifest untouched.
@@ -4002,6 +4009,16 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
             if test_runner.is_runner_unreachable(build_output):
                 if _requeue_for_unreachable_runner(db, spec, task):
                     return
+
+    # DEV-675: a repository test that passes at base_ref and fails on this
+    # attempt is a verdict on the attempt — it broke behaviour that was
+    # working — not a question for a reviewer. Run 32 reverted DEV-672 and
+    # reached the gate "compiled and the suite passed" on eight new tests.
+    if (build_passed is False and build_reason is None
+            and test_split is not None and test_split.existing_failed_ids):
+        _route_existing_test_regression(db, spec, task, spec_dir, build_output,
+                                        build_framework, test_split)
+        return
 
     if build_reason is not None or blocking_warnings:
         # DEV-629 / DEV-626: a sandbox that cannot import the repository's
@@ -4639,6 +4656,48 @@ def _route_missing_planned_outputs(db: Database, spec: Spec, task,
         feedback="\n".join(lines), extra={"missing": missing}))
 
 
+def _route_existing_test_regression(db: Database, spec: Spec, task, spec_dir,
+                                    build_output: str, framework: str,
+                                    split: "test_runner.TestSplit") -> None:
+    """An attempt that reds a repository test which passes at base_ref broke
+    behaviour the repository already relies on (DEV-675). Charged as a
+    TESTS_FAILED verdict with the failing test ids named, before any human
+    gate — the reviewer has nothing to decide about a regression the
+    repository's own suite has already decided.
+    """
+    overlay = test_runner._REPO_OVERLAY_DIR + "/"
+    ids = split.existing_failed_ids
+    named = [i.split(overlay, 1)[-1] if overlay in i else i for i in ids]
+    ArtifactLedger.open(db, spec, spec_dir).note(
+        "existing_test_failures.txt", build_output)
+    listed = "\n".join(f"- `{i}`" for i in named[:20])
+    if len(named) > 20:
+        listed += f"\n- … and {len(named) - 20} more"
+    feedback = (
+        "## Your change broke existing tests\n\n"
+        f"{len(ids)} test(s) that already exist in the repository and pass at "
+        f"base_ref fail on this attempt ({split.existing_passed} other existing "
+        f"test(s) passed; {split.new_passed} of {split.new_total} of the spec's "
+        f"own tests passed). These tests pin behaviour the repository relies "
+        f"on, so the attempt reverted or altered something that was working. "
+        f"Restore that behaviour while keeping the planned change. Do NOT edit "
+        f"or delete the failing tests — they are not yours to change.\n\n"
+        f"{listed}\n\n"
+        f"```\n{_extract_actionable_test_output(build_output, framework)}\n```\n"
+    )
+    logger.error("spec %s: attempt broke %d existing repository test(s) — %s; "
+                 "charging the implementer (DEV-675)", spec.id, len(ids),
+                 ", ".join(named[:5]) + (" …" if len(named) > 5 else ""))
+    _dispose(db, spec, task, Failure(
+        FailureClass.TESTS_FAILED, "implementer", "tests",
+        f"{len(ids)} existing test(s) failed: "
+        + ", ".join(named[:3]) + (" …" if len(named) > 3 else ""),
+        feedback=feedback, phase="pre_gate_build_check",
+        extra={"existing_failed": named[:20],
+               "existing_passed": split.existing_passed,
+               "new_passed": split.new_passed, "new_total": split.new_total}))
+
+
 def _route_build_failure_to_architect(db: Database, spec: Spec, task, spec_dir,
                                       feedback: str, build_reason: str) -> bool:
     """Send a recurring build failure to the architect. True if it was routed.
@@ -4758,6 +4817,19 @@ def _observed_a_test_run(output: str, framework: str) -> bool:
     return True
 
 
+def _test_split_suffix(build_output: str) -> str:
+    """" — N new + M existing tests (…)" for a self-target run (DEV-675), so
+    the gate says how many of each set the check actually ran; "" otherwise."""
+    split = test_runner.parse_test_split(build_output or "")
+    if split is None:
+        return ""
+    what = {"imports": "repository tests importing the edited modules",
+            "all": "the whole repository suite",
+            "off": "existing tests off"}.get(split.mode, split.mode)
+    return (f" — {split.new_total} new + {split.existing_total} existing "
+            f"test(s) ({what})")
+
+
 def _build_check_line(build_passed: bool | None, build_output: str = "",
                       framework: str = "") -> str:
     """One-line build status for the code_review gate prompt (DEV-429).
@@ -4778,10 +4850,12 @@ def _build_check_line(build_passed: bool | None, build_output: str = "",
     if build_passed is None:
         return "Build check: not run (no test framework in the plan).\n"
     if build_passed:
-        return "Build check: **compiled and the suite passed.**\n"
+        return ("Build check: **compiled and the suite passed"
+                f"{_test_split_suffix(build_output)}.**\n")
     if _observed_a_test_run(build_output, framework):
         return ("Build check: **compiled**, but the suite has failing tests — "
-                "the failures are behaviour, not a build error.\n")
+                "the failures are behaviour, not a build error"
+                f"{_test_split_suffix(build_output)}.\n")
     # DEV-538: a gate reached this way has already been requeued to the cap, so
     # say what is actually wrong. Naming it a code review invites someone to
     # review the code, when the code is not the thing that failed and no

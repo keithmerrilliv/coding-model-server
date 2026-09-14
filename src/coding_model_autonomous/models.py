@@ -143,6 +143,10 @@ EVENT_PAYLOAD_SCHEMAS: dict = {
             "needed_tokens": "prompt_too_large: what the prompt needs (DEV-633)",
             "allowed_tokens": "prompt_too_large: what the largest window allows",
             "max_tokens": "prompt_too_large: the completion reserve that was budgeted",
+            "existing_failed": "tests_failed at the pre-gate check: repository tests the attempt reds, at most 20 (DEV-675)",
+            "existing_passed": "how many repository tests still passed (DEV-675)",
+            "new_passed": "how many of the spec's own tests passed (DEV-675)",
+            "new_total": "how many of the spec's own tests ran (DEV-675)",
         },
     },
     EventKind.ATTEMPT_PLANNED: {

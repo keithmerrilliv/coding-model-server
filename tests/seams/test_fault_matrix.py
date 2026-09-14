@@ -1381,3 +1381,86 @@ class TestAttemptPlans:
         assert [p["retry"] for p in arch] == [0]
         assert arch[0]["assignment"] == "fixed" and arch[0]["rationale"] == "first attempt"
 
+
+# ── existing tests beside the new ones (DEV-675) ─────────────────────────────
+
+class TestExistingTestRegression:
+    """Run 32's shape: the attempt reverted merged behaviour and the eight new
+    tests passed, so the gate read "compiled and the suite passed". The
+    repository's own tests now run beside the new ones; a red one is a
+    verdict before any gate, and a green run is counted at the gate."""
+
+    EXISTING = ".repo_overlay/tests/test_existing.py::test_kept"
+
+    def _outcome(self, existing_failed: bool):
+        from seam_fakes import TestOutcome
+        header = (f"{d.test_runner.EXISTING_TESTS_MARKER} mode=imports selected=1 "
+                  "for edited pkg.mod: tests/test_existing.py")
+        lines = [header, "collected 3 items", "",
+                 f"{TEST_PATH}::test_a PASSED", f"{TEST_PATH}::test_b PASSED",
+                 f"{self.EXISTING} {'FAILED' if existing_failed else 'PASSED'}", ""]
+        if existing_failed:
+            lines += ["=========================== short test summary info ============================",
+                      f"FAILED {self.EXISTING} - AssertionError: reverted",
+                      "========================= 1 failed, 2 passed in 0.20s ========================="]
+        else:
+            lines += ["============================== 3 passed in 0.20s =============================="]
+        return TestOutcome(not existing_failed, "\n".join(lines) + "\n", "existing")
+
+    def test_a_red_existing_test_is_charged_before_the_gate(self, db, model, runner):
+        spec = _impl_ready(db, model, runner)
+        model.script("implementer", Reply(implementer_reply()), Reply(implementer_reply()))
+        runner.then(self._outcome(existing_failed=True), PytestPass())
+
+        out = drive(db, spec.id, model, wait_at(GateType.CODE_REVIEW), runner=runner)
+
+        assert out.reason == "waiting"
+        assert out.task("implementer").retry_count == 1
+        ev = events(db, spec.id, EventKind.FAILURE_CLASSIFIED, cls="tests_failed")
+        assert len(ev) == 1
+        assert (ev[0]["role"], ev[0]["disposition"], ev[0]["phase"]) == (
+            "implementer", "charge", "pre_gate_build_check")
+        assert "tests/test_existing.py::test_kept" in ev[0]["detail"]
+        check = events(db, spec.id, EventKind.TEST_RAN, phase="pre_gate_build_check")[0]
+        assert check["passed"] is False and check["build_failed"] is False
+        assert check["new_tests"] == {"passed": 2, "failed": 0}
+        assert check["existing_tests"] == {"passed": 0, "failed": 1}
+        assert check["existing_failed"] == [self.EXISTING]
+        # The feedback names the test and says what kind of failure it is.
+        notes = rejected_gates(db, spec.id)[0].reviewer_notes or ""
+        assert "broke existing tests" in notes
+        assert "tests/test_existing.py::test_kept" in notes
+        assert "Do NOT edit or delete the failing tests" in notes
+        # Only the second attempt reached a human.
+        assert len(runner.test_calls) == 2
+        # The note survives the retry wipe in the attempt snapshot.
+        assert any(p.name == "existing_test_failures.txt"
+                   for p in db.spec_dir(spec.id).rglob("existing_test_failures.txt"))
+
+    def test_a_green_run_is_counted_at_the_gate(self, db, model, runner):
+        spec = _impl_ready(db, model, runner)
+        model.script("implementer", Reply(implementer_reply()))
+        runner.then(self._outcome(existing_failed=False))
+
+        out = drive(db, spec.id, model, wait_at(GateType.CODE_REVIEW), runner=runner)
+
+        assert out.reason == "waiting"
+        assert out.task("implementer").retry_count == 0
+        assert ("compiled and the suite passed — 2 new + 1 existing test(s) "
+                "(repository tests importing the edited modules)") in out.waiting_on[0].prompt_md
+        check = events(db, spec.id, EventKind.TEST_RAN, phase="pre_gate_build_check")[0]
+        assert check["passed"] is True
+        assert check["existing_tests_mode"] == "imports"
+        assert check["existing_tests"] == {"passed": 1, "failed": 0}
+        assert check["existing_failed"] == []
+
+    def test_a_run_without_the_header_is_unchanged(self, db, model, runner):
+        """A foreign repo, or a faked run: no split, no counts, the old line."""
+        spec = _impl_ready(db, model, runner)
+        model.script("implementer", Reply(implementer_reply()))
+
+        out = drive(db, spec.id, model, wait_at(GateType.CODE_REVIEW), runner=runner)
+
+        assert "compiled and the suite passed.**" in out.waiting_on[0].prompt_md
+        check = events(db, spec.id, EventKind.TEST_RAN, phase="pre_gate_build_check")[0]
+        assert "existing_tests" not in check
