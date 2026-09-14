@@ -66,16 +66,32 @@ STATUS_FALLBACKS: dict[str, list[str]] = {
 # (`resolution = "Won't Do"`) — without knowing the fallback rules.
 RESOLUTION_WONT_DO = "Won't Do"
 LOSSY_COLLAPSES: frozenset = frozenset({STATUS_REJECTED, STATUS_CANCELLED})
+# DEV-680: the resolution field is not always writable (a stock Done
+# transition has no resolution screen, and AUTO-975 landed as Done/Done while
+# the note claimed Won't Do). A label is writable on every workflow and JQL
+# can see it: `labels = pipeline-failed`.
+LABEL_PIPELINE_FAILED = "pipeline-failed"
 
 
-def collapse_note(target_status: str, landed_status: str) -> str:
+def collapse_note(target_status: str, landed_status: str, *,
+                  resolution_set: bool = True, label_set: bool = False) -> str:
     """The comment left on an issue whose logical status the workflow
-    cannot represent."""
+    cannot represent. It describes what actually landed (DEV-680): a
+    resolution the workflow refused is not claimed, and the label is named
+    when it went on."""
     meaning = ("the spec FAILED or was cancelled" if target_status == STATUS_CANCELLED
                else "the review was REJECTED")
+    if resolution_set:
+        landed = (f"so the issue is closed as '{landed_status}' with resolution "
+                  f"'{RESOLUTION_WONT_DO}'")
+    else:
+        landed = (f"so the issue is closed as '{landed_status}'; this workflow "
+                  f"did not accept resolution '{RESOLUTION_WONT_DO}' (the "
+                  f"resolution field reads whatever the transition set)")
+    marker = (f" The label '{LABEL_PIPELINE_FAILED}' marks it for JQL."
+              if label_set else "")
     return (f"**Mirror note:** {meaning}. This project's workflow has no "
-            f"'{target_status}' status, so the issue is closed as "
-            f"'{landed_status}' with resolution '{RESOLUTION_WONT_DO}'. "
+            f"'{target_status}' status, {landed}.{marker} "
             f"Do not read '{landed_status}' here as success (DEV-482).")
 
 # Issue types
@@ -103,6 +119,7 @@ class JiraIssue:
     assignee: Optional[str] = None
     parent_key: Optional[str] = None  # epic key for stories under an epic
     resolution: Optional[str] = None  # DEV-482: "Won't Do" marks a lossy collapse
+    labels: list[str] = field(default_factory=list)  # DEV-680: pipeline-failed
     comments: list[str] = field(default_factory=list)
     created_at: datetime = field(default_factory=utc_now)
     updated_at: datetime = field(default_factory=utc_now)
@@ -166,13 +183,19 @@ class FakeJiraClient(JiraClient):
     """
 
     def __init__(self, project_key: str = "AUTO",
-                 statuses: "Optional[list[str]]" = None):
+                 statuses: "Optional[list[str]]" = None,
+                 resolution_writable: bool = True):
         self.project_key = project_key
         # DEV-482: the workflow's real statuses. None means every logical
         # status exists (the historical fake); a stock Jira Cloud workflow
         # is [To Do, In Progress, Done], and then Cancelled and Rejected
         # collapse exactly as they do against the real API.
         self.statuses: Optional[set[str]] = set(statuses) if statuses is not None else None
+        # DEV-680: whether the resolution field accepts a write on this
+        # workflow. False simulates the stock Done transition, which has no
+        # resolution screen — the collapse then lands Done with the
+        # resolution untouched, and the note must say so.
+        self.resolution_writable = resolution_writable
         self._issues: dict[str, JiraIssue] = {}
         self._next_id = 1
         # Audit log for tests — every API call appends here.
@@ -246,11 +269,21 @@ class FakeJiraClient(JiraClient):
         self._log("transition_issue", key=issue_key, target_status=target_status,
                   landed=landed)
         if landed != target_status and target_status in LOSSY_COLLAPSES:
-            issue.resolution = RESOLUTION_WONT_DO
-            self.add_comment(issue_key, collapse_note(target_status, landed))
+            resolution_set = self.resolution_writable
+            if resolution_set:
+                issue.resolution = RESOLUTION_WONT_DO
+            if LABEL_PIPELINE_FAILED not in issue.labels:
+                issue.labels.append(LABEL_PIPELINE_FAILED)
+            self._log("edit_issue", key=issue_key, labels=list(issue.labels),
+                      resolution=issue.resolution)
+            self.add_comment(issue_key, collapse_note(
+                target_status, landed, resolution_set=resolution_set,
+                label_set=True))
             logger.warning("jira: %s has no %r status — %s closed as %r with "
-                           "resolution %r (DEV-482)", self.project_key,
-                           target_status, issue_key, landed, RESOLUTION_WONT_DO)
+                           "resolution %s, label %r (DEV-482)", self.project_key,
+                           target_status, issue_key, landed,
+                           repr(RESOLUTION_WONT_DO) if resolution_set else "UNSET",
+                           LABEL_PIPELINE_FAILED)
         return landed
 
     def add_comment(self, issue_key: str, body: str) -> None:
@@ -402,21 +435,43 @@ class AtlassianApiJiraClient(JiraClient):
                                issue_key, landed, e)
                 self._jira.set_issue_status_by_transition_id(issue_key, transition_id)
         if not resolution_set:
+            # The library's edit_issue sends its argument as the request's
+            # `update` block, so the field takes the operation form (DEV-680:
+            # the plain `{"resolution": {...}}` shape was never a valid
+            # update and failed on every workflow).
             try:
-                self._jira.edit_issue(issue_key, fields, notify_users=False)
+                self._jira.edit_issue(
+                    issue_key,
+                    {"resolution": [{"set": {"name": RESOLUTION_WONT_DO}}]},
+                    notify_users=False)
                 resolution_set = True
             except Exception as e:
                 logger.warning("jira: could not set resolution %r on %s (%s) — "
-                               "the comment is the only marker", RESOLUTION_WONT_DO,
-                               issue_key, e)
+                               "the label and the comment are the markers",
+                               RESOLUTION_WONT_DO, issue_key, e)
+        # DEV-680: a label is writable on every workflow and queryable
+        # (`labels = pipeline-failed`) where the collapse note is not.
+        label_set = False
         try:
-            self.add_comment(issue_key, collapse_note(target_status, landed))
+            self._jira.edit_issue(
+                issue_key, {"labels": [{"add": LABEL_PIPELINE_FAILED}]},
+                notify_users=False)
+            label_set = True
+        except Exception as e:
+            logger.warning("jira: could not add label %r to %s (%s)",
+                           LABEL_PIPELINE_FAILED, issue_key, e)
+        try:
+            self.add_comment(issue_key, collapse_note(
+                target_status, landed, resolution_set=resolution_set,
+                label_set=label_set))
         except Exception as e:
             logger.warning("jira: could not leave the collapse note on %s: %s",
                            issue_key, e)
         logger.warning("jira: workflow has no %r status — %s closed as %r with "
-                       "resolution %s (DEV-482)", target_status, issue_key, landed,
-                       RESOLUTION_WONT_DO if resolution_set else "UNSET")
+                       "resolution %s, label %s (DEV-482)", target_status,
+                       issue_key, landed,
+                       repr(RESOLUTION_WONT_DO) if resolution_set else "UNSET",
+                       repr(LABEL_PIPELINE_FAILED) if label_set else "UNSET")
 
     def add_comment(self, issue_key: str, body: str) -> None:
         self._jira.issue_add_comment(issue_key, body)
@@ -434,6 +489,7 @@ class AtlassianApiJiraClient(JiraClient):
             key=data["key"],
             issue_type=fields.get("issuetype", {}).get("name", ""),
             resolution=resolution.get("name") if isinstance(resolution, dict) else None,
+            labels=list(fields.get("labels") or []),
             summary=fields.get("summary", ""),
             description=fields.get("description") or "",
             status=fields.get("status", {}).get("name", ""),
@@ -474,5 +530,6 @@ class AtlassianApiJiraClient(JiraClient):
                 status=f.get("status", {}).get("name", ""),
                 assignee=(f.get("assignee") or {}).get("displayName"),
                 parent_key=(f.get("parent") or {}).get("key"),
+                labels=list(f.get("labels") or []),
             ))
         return out

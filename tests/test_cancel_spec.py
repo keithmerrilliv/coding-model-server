@@ -83,6 +83,38 @@ class TestCancelSpec:
         assert db.get_gate(late.id).status is GateStatus.CANCELLED
         assert db.list_open_gates(spec.id) == []
 
+    def test_exactly_one_status_event_carries_the_cancellation(self, db, running):
+        """DEV-679: the cancel used to write a bare status event and then a
+        rich one — jira-sync mirrored both and the epic got two identical
+        mirror notes. One row, carrying the status AND the reason."""
+        spec, impl, rev, gate = running
+        before = len(db.list_events_by_kind(spec_id=spec.id,
+                                            kind=EventKind.SPEC_STATUS_CHANGED))
+        db.cancel_spec(spec.id, reason="doomed")
+        evs = db.list_events_by_kind(spec_id=spec.id, kind=EventKind.SPEC_STATUS_CHANGED)
+        assert len(evs) == before + 1, [e.payload for e in evs]
+        new = [e.payload for e in evs if e.payload.get("new_status") == "cancelled"]
+        assert len(new) == 1, new
+        p = new[0]
+        assert p["new_status"] == "cancelled"
+        assert p["cancelled_by"] == "operator" and p["reason"] == "doomed"
+        assert p["gates_cancelled"] == 1 and p["tasks_closed"] == 2
+        assert p["in_flight"] == ["implementer"]
+
+    def test_the_epic_gets_one_mirror_note_on_a_stock_workflow(self, db, running):
+        """DEV-679 through jira-sync: a stock workflow collapses Cancelled onto
+        Done with a mirror note (DEV-482) — exactly one of them."""
+        spec, *_ = running
+        client = FakeJiraClient(statuses=["To Do", "In Progress", "Done"])
+        sync = JiraSync(db, client)
+        sync.tick()
+        db.cancel_spec(spec.id, reason="duplicate submission")
+        sync.tick()
+        epic = client.get_issue(db.get_spec(spec.id).jira_epic_key)
+        assert epic.status == "Done"
+        assert sum("Mirror note" in c for c in epic.comments) == 1, epic.comments
+        assert sum("Cancelled by operator" in c for c in epic.comments) == 1
+
     def test_the_reason_reaches_the_jira_epic(self, db, running):
         spec, *_ = running
         client = FakeJiraClient()
