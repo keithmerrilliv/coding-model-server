@@ -110,6 +110,10 @@ class GateAlreadyDecidedError(Exception):
         super().__init__(f"gate {gate.id} already {gate.status.value}")
 
 
+# DEV-653: A spec in one of these statuses can never act on a gate again.
+TERMINAL_SPEC_STATUSES = (SpecStatus.DONE, SpecStatus.FAILED, SpecStatus.CANCELLED)
+
+
 # ── Database ──────────────────────────────────────────────────────────────────
 
 class Database:
@@ -282,6 +286,10 @@ class Database:
         resurrecting the spec and opening orphan gates. The write is now a
         compare-and-swap — a cancelled spec keeps its status unless the caller
         passes force=True (the operator resurrection path, e.g. run 12).
+
+        DEV-653: When the new status is terminal (DONE/FAILED/CANCELLED), every
+        still-open gate on the spec is retired automatically so nothing lingers
+        for reverse-sync to act on.
         """
         now = utc_now()
         guard = "" if force or status is SpecStatus.CANCELLED \
@@ -311,7 +319,12 @@ class Database:
                 spec_id=spec_id,
                 payload={**(event_payload or {}), "new_status": status.value},
             )
-            return True
+
+        # DEV-653: when a terminal status lands, retire every open gate.
+        if status in TERMINAL_SPEC_STATUSES:
+            self.retire_open_gates(spec_id)
+
+        return True
 
     def cancel_spec(self, spec_id: str, *, reason: Optional[str] = None,
                     by: str = "operator") -> dict:
@@ -353,7 +366,10 @@ class Database:
                            "gates_cancelled": len(gates),
                            "tasks_closed": len(open_tasks),
                            "in_flight": [t.role for t in running]})
-        for gate in gates:
+        # DEV-653: the status write above already retired the open gates;
+        # cancel only what is still open (normally nothing) so no gate
+        # gets a second GATE_RESPONDED event.
+        for gate in self.list_open_gates(spec_id):
             self.cancel_gate(gate.id)
         closed = []
         for task in open_tasks:
@@ -751,6 +767,24 @@ class Database:
                 gate_id=gate_id,
                 payload={"decision": "cancelled"},
             )
+
+    def retire_open_gates(self, spec_id: str) -> list[str]:
+        """Cancel every still-pending gate on a spec.
+
+        Called by update_spec_status when the new status is terminal.
+        Returns the list of cancelled gate IDs (empty if none were open).
+        """
+        gates = self.list_open_gates(spec_id)
+        retired_ids = []
+        for gate in gates:
+            self.cancel_gate(gate.id)
+            retired_ids.append(gate.id)
+        if retired_ids:
+            logger.warning(
+                "spec %s: %d open gate(s) retired on terminal status: %s (DEV-653)",
+                spec_id, len(retired_ids), ", ".join(retired_ids),
+            )
+        return retired_ids
 
     # ── events ───────────────────────────────────────────────────────────────
 
