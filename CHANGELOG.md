@@ -97,17 +97,22 @@ Three event kinds with fixed schemas, a diagnostic taxonomy, an honest Jira mirr
 - [DEV-611](https://keith-merrill4.atlassian.net/browse/DEV-611) — Post-release doc polish backlog from the DEV-607 audit (non-blocking WARN/NIT items)
 - [DEV-670](https://keith-merrill4.atlassian.net/browse/DEV-670) — PIPELINE.md and CONFIGURATION.md rewrite for v0.2.0 — routing as the kernel does it, every AUTONOMOUS_* knob documented, .env.example matching
 
-### After the proving runs — found by runs 31–34 (2026-09-13)
+### After the proving runs — found by runs 31–37 (2026-09-13/14)
 
-The three self-target proving runs and the Centipede run each found defects in what they were proving; these are fixed and In Review, the rest are filed.
+Every proving run found defects in what it was proving. Runs 35–37 (2026-09-14) were the second wave: a cancel drill and two self-target runs. A dagger (†) still marks a ticket awaiting live proof.
 
 - [DEV-660](https://keith-merrill4.atlassian.net/browse/DEV-660) — Build-failure feedback for `No module named 'src.<pkg>'` names the cause — the import root — not the missing module (pipeline-written on run 32)
 - [DEV-661](https://keith-merrill4.atlassian.net/browse/DEV-661) — The testability check requires a Python design's Criterion Seams to import the code under test, never through `src.` (pipeline-written on run 34)
 - [DEV-676](https://keith-merrill4.atlassian.net/browse/DEV-676) † — The implementer rotation is restricted to the agents whose window fits; a rotation of one is recorded as `sole_fit` and its second identical failure is invariant; a fit-check reroute is recorded with `planned_agent`
 - [DEV-674](https://keith-merrill4.atlassian.net/browse/DEV-674) — Self-target context is read from this repository's own HEAD, never from the Mac runner's clone of it
-- [DEV-675](https://keith-merrill4.atlassian.net/browse/DEV-675) † — The self-target pre-gate check runs the repository's own tests that import an edited module beside the spec's new tests; the gate says "N new + M existing", and a red existing test is a `tests_failed` verdict naming the test ids before any human gate (run 32 reverted DEV-672 with 8/8 green)
+- [DEV-675](https://keith-merrill4.atlassian.net/browse/DEV-675) — The self-target pre-gate check runs the repository's own tests that import an edited module beside the spec's new tests; the gate says "N new + M existing", and a red existing test is a `tests_failed` verdict naming the test ids before any human gate (run 32 reverted DEV-672 with 8/8 green)
 - [DEV-672](https://keith-merrill4.atlassian.net/browse/DEV-672) † — coarse_key keys on the repository-relative path, so Mac build failures can match across attempts
 - [DEV-618](https://keith-merrill4.atlassian.net/browse/DEV-618) † — eval_agents.py `--tool-loop N`: inspection markers answered from an empty sandbox before judging
+- [DEV-653](https://keith-merrill4.atlassian.net/browse/DEV-653) † — A terminal spec status retires the spec's open gates, so no gate outlives the spec it belongs to and a stale AUTO issue can no longer reverse-sync as approval of dead work (pipeline-written on run 36)
+- [DEV-677](https://keith-merrill4.atlassian.net/browse/DEV-677) — A targeted retry's planned outputs that the feedback did not cite are carried forward from the previous attempt rather than charged as missing
+- [DEV-678](https://keith-merrill4.atlassian.net/browse/DEV-678) — A pass still in flight when the spec ends is discarded whole: no charge, no requeue, no gate, and the store is left exactly as the cancel left it
+- [DEV-679](https://keith-merrill4.atlassian.net/browse/DEV-679) — `cancel_spec` writes one status event carrying the reason and the counts, so the Jira epic gets one mirror note instead of two
+- [DEV-680](https://keith-merrill4.atlassian.net/browse/DEV-680) — A lossy Jira collapse tells the truth: the resolution write uses the operation form (so `Won't Do` now lands on a stock workflow), the note's wording matches the resolution actually set, and a `pipeline-failed` label makes the collapse queryable
 
 ### Before the plan — August fixes and evaluations
 
