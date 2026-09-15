@@ -387,3 +387,89 @@ struct Position: Hashable { let col: Int }
 """
         assert dt.top_level_type_counts(design)["Position"] == 1
         assert dt.KIND_DUPLICATE_TYPE not in _kinds(design)
+
+
+# ── DEV-687: both directions are Swift-only ──────────────────────────────────
+
+PY_DESIGN_TYPE_IN_MODULE = """\
+# Architecture: Overlay ref
+
+## File Structure
+```text
+src/coding_model_autonomous/test_runner.py   # Modified: add OverlayRef
+tests/test_overlay_ref_on_test_ran.py        # New
+```
+
+## Data Models
+
+### OverlayRef
+Defined in `test_runner.py`.
+
+```python
+@dataclass
+class OverlayRef:
+    source: str
+    head: str
+    dirty: int
+```
+
+## Acceptance Criteria Checklist
+- [ ] T1 — the header round-trips
+
+## Criterion Seams
+Shared setup: ``from coding_model_autonomous import test_runner as tr``
+
+- T1 | setup: ``ref = tr.OverlayRef("committed", "abc1234", 0)`` | act: ``got = tr.parse_overlay_ref(ref.header())`` | assert: ``got == ref``
+"""
+
+
+class TestPythonDesignsAreOutOfScope:
+    """DEV-687. Both directions of this check compare declared type names with
+    FILE BASENAMES. That is Swift's one-type-per-eponymous-file convention; a
+    Python module holds many classes and is named for the module, so the
+    comparison can only ever produce noise. Runs 37 and 38 each burned a
+    revision round on it."""
+
+    def test_a_type_declared_inside_a_python_module_is_not_flagged(self):
+        assert dt.check_design_completeness(PY_DESIGN_TYPE_IN_MODULE) == []
+
+    def test_the_same_shape_in_swift_is_still_flagged(self):
+        swift = PY_DESIGN_TYPE_IN_MODULE.replace(
+            "src/coding_model_autonomous/test_runner.py   # Modified: add OverlayRef",
+            "Sources/Core/TestRunner.swift").replace(
+            "tests/test_overlay_ref_on_test_ran.py        # New",
+            "Tests/CoreTests/OverlayRefTests.swift")
+        assert any(f.kind == dt.KIND_TYPE_WITHOUT_FILE
+                   for f in dt.check_design_completeness(swift))
+
+    def test_a_python_dataclass_comparison_needs_no_equatable(self):
+        """The seam compares two OverlayRef values. Python generates __eq__;
+        there is no conformance to declare and the architect cannot satisfy
+        the finding."""
+        assert [f.kind for f in dt.check_design_testability(PY_DESIGN_TYPE_IN_MODULE)
+                if f.kind == dt.KIND_MISSING_EQUATABLE] == []
+
+    def test_a_swift_comparison_without_equatable_is_still_flagged(self):
+        swift = """\
+# Architecture: Demo
+
+## File Structure
+```text
+Sources/Core/Mushroom.swift
+```
+
+## Data Models
+
+### Mushroom
+```swift
+struct Mushroom { var hits: Int }
+```
+
+## Acceptance Criteria Checklist
+- [ ] T1 — a damaged mushroom compares equal to its expected value
+
+## Criterion Seams
+- T1 | setup: ``var m = Mushroom(hits: 0)`` | act: ``m.hit()`` | assert: ``m == Mushroom(hits: 1)``
+"""
+        assert any(f.kind == dt.KIND_MISSING_EQUATABLE
+                   for f in dt.check_design_testability(swift))
