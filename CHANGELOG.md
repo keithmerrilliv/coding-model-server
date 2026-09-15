@@ -113,6 +113,8 @@ Every proving run found defects in what it was proving. Runs 35–37 (2026-09-14
 - [DEV-678](https://keith-merrill4.atlassian.net/browse/DEV-678) — A pass still in flight when the spec ends is discarded whole: no charge, no requeue, no gate, and the store is left exactly as the cancel left it
 - [DEV-679](https://keith-merrill4.atlassian.net/browse/DEV-679) — `cancel_spec` writes one status event carrying the reason and the counts, so the Jira epic gets one mirror note instead of two
 - [DEV-680](https://keith-merrill4.atlassian.net/browse/DEV-680) — A lossy Jira collapse tells the truth: the resolution write uses the operation form (so `Won't Do` now lands on a stock workflow), the note's wording matches the resolution actually set, and a `pipeline-failed` label makes the collapse queryable
+- [DEV-688](https://keith-merrill4.atlassian.net/browse/DEV-688) † — The pre-gate sandbox never collects the attempt's own `src/` tree, and everything under it counts as a module: a source file named `test_*.py` (this repository ships `test_runner.py`) was imported as a test module and red every attempt at collection, while being dropped from the edited-module list left DEV-675's guard silently disarmed for it
+- [DEV-689](https://keith-merrill4.atlassian.net/browse/DEV-689) † — A repository test that spawns its own sandbox, git checkout or npm install declares `PREGATE_SANDBOX_UNSAFE` and the existing-tests selection skips it, so it never reds an attempt for something the model did not do
 
 ### Before the plan — August fixes and evaluations
 
