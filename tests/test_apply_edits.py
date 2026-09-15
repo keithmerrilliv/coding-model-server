@@ -264,3 +264,54 @@ def test_resolve_edit_for_unknown_file_is_error():
     assert res.errors
     assert "mystery.py" in res.errors[0]
     assert "not among the existing files" in res.errors[0]
+
+
+# ── DEV-690: the prompt's own example path is not a new file ─────────────────
+
+class TestPlaceholderEditBlocks:
+    """Run 38 attempt 0 emitted a SEARCH/REPLACE block for `path/to/File.ext`,
+    the placeholder in its own instructions. The feedback told it to emit that
+    path as a whole file — which the ledger refuses (DEV-646, DEV-656). Two
+    guards contradicting each other from the model's side, the DEV-677 shape."""
+
+    EDIT = ("### path/to/File.ext\n"
+            "<<<<<<< SEARCH\n"
+            "old line\n"
+            "=======\n"
+            "new line\n"
+            ">>>>>>> REPLACE\n")
+
+    def _resolve(self, edit_text, existing=None):
+        return resolve_edits(whole_files=[], edit_text=edit_text,
+                             existing=existing or {})
+
+    def test_it_is_not_called_a_new_file_to_emit(self):
+        out = self._resolve(self.EDIT)
+        joined = " ".join(out.errors)
+        assert "PLACEHOLDER" in joined
+        assert "EMIT WHOLE" not in joined
+        assert "<<<FILE:" not in joined
+
+    def test_it_says_to_drop_the_block(self):
+        out = self._resolve(self.EDIT)
+        joined = " ".join(out.errors)
+        assert "Drop this block" in joined
+        assert "refused when written" in joined
+
+    def test_the_failure_is_labelled(self):
+        out = self._resolve(self.EDIT)
+        assert [f.reason for f in out.failures] == ["placeholder_path"]
+        assert out.failures[0].path == "path/to/File.ext"
+
+    def test_nothing_is_written_for_it(self):
+        out = self._resolve(self.EDIT)
+        assert "path/to/File.ext" not in dict(out.files)
+
+    def test_a_genuinely_new_planned_file_still_gets_emit_whole(self):
+        """The DEV-638 instruction is untouched for a real path."""
+        edit = self.EDIT.replace("path/to/File.ext", "tests/test_thing.py")
+        out = self._resolve(edit)
+        joined = " ".join(out.errors)
+        assert "EMIT WHOLE" in joined
+        assert "PLACEHOLDER" not in joined
+        assert [f.reason for f in out.failures] == ["no_base"]

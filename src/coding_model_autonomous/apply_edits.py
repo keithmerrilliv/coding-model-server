@@ -130,7 +130,8 @@ class EditFailure:
     """
     path: str
     block: int
-    reason: str      # "not_found" | "ambiguous" | "empty_search" | "no_base" | "malformed"
+    reason: str      # "not_found" | "ambiguous" | "empty_search" | "no_base"
+                     # | "malformed" | "placeholder_path" (DEV-690)
     search: str
     detail: str      # the same human-readable text that appears in ``errors``
 
@@ -506,6 +507,18 @@ def apply_search_replace(current: str, blocks: list[EditBlock]) -> ApplyResult:
     return ApplyResult(ok=True, content=content, applied=applied)
 
 
+def _is_placeholder_path(path: str) -> bool:
+    """Is this one of the prompt's own example paths (DEV-690)?
+
+    Deferred import on purpose: this module is pure and imports nothing from
+    the package at load time, while `workspace` pulls in the executor chain.
+    The predicate itself is pure, and sharing it is the point — a second copy
+    of the placeholder vocabulary here would drift from DEV-646/DEV-656.
+    """
+    from .workspace import is_placeholder_path
+    return is_placeholder_path(path)
+
+
 def resolve_edits(
     whole_files: list[tuple[str, str]],
     edit_text: str,
@@ -559,6 +572,24 @@ def resolve_edits(
                 put(fe.path, fe.blocks[0].replace)
                 applied.append(EditApplied(fe.path, 1,
                                            TIER_WHOLE_FROM_EMPTY_SEARCH, 1.0, None))
+                continue
+            # DEV-690: a placeholder path from the prompt's OWN edit-block
+            # example is not a new file at all. The ledger refuses to write
+            # one (DEV-646, DEV-656), so "EMIT WHOLE" would send the model to
+            # a door that is closed — the two guards would contradict each
+            # other, which is the DEV-677 shape. Say what is actually wrong.
+            if _is_placeholder_path(fe.path):
+                detail = (
+                    f"`{fe.path}` is a PLACEHOLDER path from the edit-block "
+                    "example in your instructions, not a file this spec "
+                    "declares. Drop this block entirely and emit only the "
+                    "planned outputs. Do NOT emit it as a whole file either: "
+                    "a placeholder path is refused when written.")
+                errors.append(detail)
+                failures.append(EditFailure(
+                    path=fe.path, block=0, reason="placeholder_path",
+                    search=fe.blocks[0].search if fe.blocks else "",
+                    detail=detail))
                 continue
             # Otherwise the model emitted edit blocks for a file we never showed
             # it — there is no base content to apply against. Never invent one.
