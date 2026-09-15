@@ -92,7 +92,7 @@ changes.
 - `src/coding_model_autonomous/models.py`
 - `src/coding_model_autonomous/outcome.py`
 - `src/coding_model_autonomous/jira_sync.py`
-- `src/coding_model_server/` (all of it)
+- `src/coding_model_server/orchestrator_daemon.py` (read-only; it is NOT supplied as context — the change does not need it)
 - All existing tests.
 
 ## Test scaffolding
@@ -150,5 +150,4 @@ protected_paths:
   - src/coding_model_autonomous/models.py
   - src/coding_model_autonomous/outcome.py
   - src/coding_model_autonomous/jira_sync.py
-  - src/coding_model_server/
 ```
