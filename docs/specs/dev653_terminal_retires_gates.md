@@ -126,7 +126,7 @@ dict, and `.gate_id`).
 - **T2** — on a spec with two open gates, `db.update_spec_status(spec.id, SpecStatus.FAILED)` returns True; afterwards `db.list_open_gates(spec.id) == []`, `db.get_gate(g.id).status is GateStatus.CANCELLED` for both, and `cancelled_events` has exactly two entries whose `gate_id`s are the two gate ids.
 - **T3** — the same with `SpecStatus.CANCELLED` (one open gate → one cancelled event).
 - **T4** — the same with `SpecStatus.DONE` (one open gate → retired).
-- **T5** — a NON-terminal write (`SpecStatus.REVIEWING` on a spec with one open gate) leaves the gate PENDING (`db.get_gate(g.id).status is GateStatus.PENDING`) and records no cancelled event.
+- **T5** — a NON-terminal write (`SpecStatus.PLAN_REVIEW` on a spec with one open gate) leaves the gate PENDING (`db.get_gate(g.id).status is GateStatus.PENDING`) and records no cancelled event.
 - **T6** — `db.retire_open_gates(spec.id)` on a spec whose gates were already retired returns `[]`, and the total number of cancelled events does not change.
 - **T7** — isolation: two specs A and B each with one open gate; `update_spec_status(A, FAILED)` leaves B's gate PENDING.
 - **T8** — `db.cancel_spec(spec.id, reason="drill")` on a spec with one open gate leaves exactly ONE cancelled event for that gate (the hook does not double-cancel).
