@@ -951,6 +951,13 @@ def call_agent(
             fr = ""
         meta["finish_reason"] = fr or None
         meta["truncated"] = fr == "length"
+        # DEV-657 part 2: the server reports what retrieval did for this call.
+        # Absent on a server that predates it, and absent when retrieval never
+        # ran at all — both of which must stay distinguishable from a recorded
+        # "skipped", so nothing is synthesised here.
+        rag = data.get("rag")
+        if isinstance(rag, dict) and rag:
+            meta["rag"] = rag
         if meta["truncated"]:
             logger.warning(
                 "agent=%s role=%s OUTPUT TRUNCATED (finish_reason=length) at "
@@ -986,6 +993,19 @@ def agent_event_fields(meta: Optional[dict]) -> dict:
     # a budget failure, not a model failure, and the two should not pool.
     if meta.get("truncated"):
         out["truncated"] = True
+    # DEV-691: `truncated` alone cannot tell "the model stopped early" from
+    # "the call died" — both arrive as a parse failure with truncated absent.
+    # Run 39's architect ended its turn at 5,361 and 3,352 completion tokens
+    # against a 10,000 budget; without finish_reason the record could not say
+    # that was a premature stop rather than a budget overrun, and the retry
+    # pulled the wrong lever. call_agent already computes it; carry it.
+    if meta.get("finish_reason"):
+        out["finish_reason"] = meta["finish_reason"]
+    # DEV-657 part 2: retrieval outcome, so "how useful is RAG" is a query
+    # over events rather than a 50-entry ring that every restart erases.
+    rag = meta.get("rag")
+    if isinstance(rag, dict) and rag:
+        out["rag"] = rag
     return out
 
 

@@ -118,8 +118,38 @@ class TestAgentEventFields:
         })
         assert out == {"agent": "deep_implementer", "duration_ms": 900,
                        "prompt_tokens": 10, "completion_tokens": 20,
-                       "total_tokens": 30, "calls": 4}
-        assert "finish_reason" not in out  # not a telemetry axis
+                       "total_tokens": 30, "calls": 4,
+                       "finish_reason": "stop"}
+
+    def test_finish_reason_is_carried(self):
+        """REVERSES a DEV-528 decision. This assertion used to read
+        `assert "finish_reason" not in out  # not a telemetry axis`, on the
+        view that the cost axes were agent/duration/tokens/calls and that
+        `truncated` covered the rest.
+
+        DEV-691 and run 39 (2026-09-15) showed the boolean is lossy. It is
+        `finish_reason == "length"`, so it collapses three different causes
+        into two states:
+
+          stop      -> the model ended its turn early. Run 39's architect did
+                       this five times at 5,361 and 3,352 completion tokens
+                       against a 10,000 budget.
+          length    -> the budget was genuinely too small.
+          (neither) -> the call died in transport.
+
+        All three reach the failure classifier as an undifferentiated parse
+        failure with `truncated` absent, and all three get the same
+        disposition — so the retry pulls a lever unrelated to the cause. The
+        true cause of run 39's failures took hand-inspection of persisted
+        response files to find. It is a telemetry axis after all."""
+        assert ex.agent_event_fields(
+            {"agent": "x", "finish_reason": "stop"})["finish_reason"] == "stop"
+        assert ex.agent_event_fields(
+            {"agent": "x", "finish_reason": "length"})["finish_reason"] == "length"
+        # Unreported stays unreported — call_agent writes `fr or None`.
+        assert "finish_reason" not in ex.agent_event_fields({"agent": "x"})
+        assert "finish_reason" not in ex.agent_event_fields(
+            {"agent": "x", "finish_reason": None})
 
     def test_truncated_is_carried_only_when_true(self):
         assert ex.agent_event_fields({"truncated": True})["truncated"] is True
