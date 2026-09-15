@@ -458,7 +458,17 @@ def _check_equatable(seam: Seam, types: set[str], members: dict[str, str],
 
     Run 4 (`HitOutcome`) and run 6 (`Mushroom`) both died here, one word short
     each time.
+
+    Swift only (DEV-687). Python has no conformance to declare: `==` works on
+    any object, and a `@dataclass` generates `__eq__` for free. Run 37 and run
+    38 both drew this finding on a design comparing dataclass instances, and
+    an architect cannot satisfy it — run 37's revision added
+    `@dataclass(frozen=True, eq=True)` and an Implementation Note explaining
+    that "the previous design failed because OverlayRef was not declared
+    Equatable", which is not a defect the design had.
     """
+    if is_python_design(design_md):
+        return []
     if not re.search(r"[=!]=", seam.assert_):
         return []
     candidates = (_compared_types(seam.assert_, types, members)
@@ -774,7 +784,18 @@ def check_design_completeness(design_md: str) -> list[Finding]:
 
     Fail-open: a name is only reported when the design commits to it in BOTH a
     file and a signature, or declares it outright. Ambiguity stays silent.
+
+    Swift only (DEV-687). Both directions compare declared type names against
+    FILE BASENAMES, which is meaningful under Swift's one-type-per-eponymous-
+    file convention and meaningless in Python, where one module holds many
+    classes and is named for the module: `test_runner.py` declaring
+    `OverlayRef` is correct and ordinary, and there will never be an
+    `OverlayRef.py`. Runs 37 and 38 each spent a revision round on that
+    finding, and the architect can only satisfy it by inventing a file the
+    spec does not want.
     """
+    if is_python_design(design_md):
+        return []
     declared = declared_types(design_md)
     files = allocated_files(design_md)
     findings: list[Finding] = []
