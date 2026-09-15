@@ -66,9 +66,27 @@ changes.
    existing text stay as they are. Add one sentence to the docstring naming
    DEV-653.
 
-4. `cancel_spec` is unchanged. It already cancels the open gates before it
-   calls `update_spec_status(..., CANCELLED)`, so the new hook finds none and
-   records nothing extra — exactly one `GATE_RESPONDED` per gate, as today.
+4. In `cancel_spec`, the status write (`self.update_spec_status(spec_id,
+   SpecStatus.CANCELLED, event_payload=...)`) comes BEFORE the gate loop
+   (DEV-567/DEV-679 ordering), so the new hook has already retired the open
+   gates by the time the loop runs. Replace the loop
+   ```python
+           for gate in gates:
+               self.cancel_gate(gate.id)
+   ```
+   with
+   ```python
+           # DEV-653: the status write above already retired the open gates;
+           # cancel only what is still open (normally nothing) so no gate
+           # gets a second GATE_RESPONDED event.
+           for gate in self.list_open_gates(spec_id):
+               self.cancel_gate(gate.id)
+   ```
+   Everything else in `cancel_spec` is unchanged: the `gates` list computed
+   before the status write still feeds `gates_cancelled` in the event payload
+   and the returned summary. (Run 36's first artifact found this: the spec
+   originally claimed the loop ran before the write, and T8 recorded two
+   cancelled events per gate.)
 
 5. The test file imports the code under test by its PACKAGE name, and the
    design's Criterion Seams quote the import lines they rely on as shared
@@ -136,7 +154,7 @@ dict, and `.gate_id`).
 ## Constraints
 
 - No new dependencies. No change to `cancel_gate`, `list_open_gates`,
-  `cancel_spec`, `create_gate` or any model.
+  `create_gate` or any model; `cancel_spec` changes only as step 4 says.
 - The plan must carry the `repo` and `protected_paths` keys exactly as written
   below, so the existing file is fetched at `base_ref`.
 
