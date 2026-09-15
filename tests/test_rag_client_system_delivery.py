@@ -72,7 +72,12 @@ class TestClientSuppliedSystemMessage:
 
     def test_retrieval_runs(self, monkeypatch):
         memory, result, _, _ = self._run(monkeypatch)
-        assert result == {"id": "ok", "choices": []}, "request must still succeed"
+        # The OpenAI-shaped payload must be intact. Not an exact-dict compare:
+        # DEV-657 part 2 adds an additive top-level "rag" key carrying the
+        # retrieval outcome, and this test is about the request succeeding
+        # while retrieval runs, not about the key set.
+        assert result["id"] == "ok" and result["choices"] == [], (
+            "request must still succeed")
         memory.get_context_string.assert_called_once()
 
     def test_the_block_actually_ships(self, monkeypatch):
@@ -127,7 +132,8 @@ class TestAgentPromptRequests:
             ChatMessage(role="user", content="hello"),
         ], memory=memory)
 
-        assert result == {"id": "ok", "choices": []}
+        # See the note above: additive "rag" key from DEV-657 part 2.
+        assert result["id"] == "ok" and result["choices"] == []
         memory.get_context_string.assert_called_once()
         assert MEMORY_TEXT in system, (
             "with no client system message the block rides the agent prompt")

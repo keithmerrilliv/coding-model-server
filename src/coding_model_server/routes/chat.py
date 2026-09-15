@@ -10,7 +10,7 @@ import logging
 import os
 import threading
 import time
-from typing import List
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -65,10 +65,42 @@ def _maybe_inject_few_shot(request: ChatCompletionRequest, agent_config: dict) -
     request.messages = few_shot_msgs + list(request.messages)
 
 
+def _record_rag(outcome: Optional[dict], kind: str, *, agent: Optional[str] = None,
+                query: Optional[str] = None, hits: Optional[int] = None,
+                best_distance: Optional[float] = None) -> None:
+    """Record a retrieval outcome to the in-process ring AND, when the caller
+    supplied one, to ``outcome`` so it can ride the response (DEV-657 part 2).
+
+    One function so the two records can never disagree: the ring and the event
+    are the same numbers by construction, not by two call sites staying in
+    step. ``query`` is truncated identically to the ring's own cap so a spec
+    paragraph never lands in an event payload.
+    """
+    rag_metrics.record(kind, query=query, agent=agent, hits=hits,
+                       best_distance=best_distance)
+    if outcome is None:
+        return
+    outcome["outcome"] = kind
+    if agent is not None:
+        outcome["agent"] = agent
+    if hits is not None:
+        outcome["hits"] = hits
+    if best_distance is not None:
+        outcome["best_distance"] = best_distance
+
+
 async def _maybe_inject_rag_context(
-    system_prompt: str, request: ChatCompletionRequest
+    system_prompt: str, request: ChatCompletionRequest,
+    outcome: Optional[dict] = None,
 ) -> tuple[str, str]:
     """Append memory-service retrievals to the system prompt, fenced as untrusted.
+
+    ``outcome``, when given, is filled with the same fields handed to
+    ``rag_metrics`` so the caller can put them on the wire (DEV-657 part 2).
+    The metrics ring is per-process and 50 entries deep, so every restart
+    erases the record: between 2026-09-08 and 2026-09-15 retrieval ran 116
+    times and not one outcome survived to be queried. A field on the response
+    lets the orchestrator persist it on AGENT_RAN, where it is durable.
 
     Returns ``(augmented_prompt, rag_suffix)`` — the second element is exactly
     the text appended (empty when nothing was injected). The caller tokenizes
@@ -89,7 +121,7 @@ async def _maybe_inject_rag_context(
         # where retrieval never runs looks identical to a healthy one if both
         # report zero injections. That is exactly how DEV-488 hid (DEV-501).
         if memory_service and request.skip_memory:
-            rag_metrics.record("skipped", agent=request.model)
+            _record_rag(outcome, "skipped", agent=request.model)
         return system_prompt, ""
     last_user_msg = next(
         (m.content for m in reversed(request.messages) if m.role == 'user'), None
@@ -130,23 +162,23 @@ async def _maybe_inject_rag_context(
                             "(wasted CPU during prefill)")
 
         retrieval.add_done_callback(_log_late_completion)
-        rag_metrics.record("timeout", query=query, agent=request.model)
+        _record_rag(outcome, "timeout", query=query, agent=request.model)
         return system_prompt, ""
     except Exception as e:
         logger.error("Memory retrieval failed: %s", e)
-        rag_metrics.record("error", query=query, agent=request.model)
+        _record_rag(outcome, "error", query=query, agent=request.model)
         return system_prompt, ""
     if not context:
         # Ran, matched nothing above the ceiling. A healthy state — it is what
         # a centipede spec should get from a corpus of Apple API docs — but
         # only if it is visibly different from "never ran" (DEV-494).
-        rag_metrics.record("empty", query=query, agent=request.model,
-                           hits=rag_stats.get("hits"),
-                           best_distance=rag_stats.get("best_distance"))
+        _record_rag(outcome, "empty", query=query, agent=request.model,
+                    hits=rag_stats.get("hits"),
+                    best_distance=rag_stats.get("best_distance"))
         return system_prompt, ""
-    rag_metrics.record("injected", query=query, agent=request.model,
-                       hits=rag_stats.get("hits"),
-                       best_distance=rag_stats.get("best_distance"))
+    _record_rag(outcome, "injected", query=query, agent=request.model,
+                hits=rag_stats.get("hits"),
+                best_distance=rag_stats.get("best_distance"))
     logger.info("Injecting memory context for query: %s...", query[:50])
     rag_suffix = (
         "\n\n"
@@ -447,8 +479,12 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
         # its latency serially instead of hiding it under the
         # tens-of-seconds model load (DEV-150). Start it now, await it after
         # ensure_running: the two overlap on worker threads.
+        # DEV-657 part 2: the retrieval outcome rides the response so the
+        # orchestrator can persist it on AGENT_RAN. The metrics ring it also
+        # feeds is per-process and dies on every restart.
+        rag_outcome: dict = {}
         rag_task = asyncio.ensure_future(
-            _maybe_inject_rag_context(system_prompt, request)
+            _maybe_inject_rag_context(system_prompt, request, rag_outcome)
         )
         # ensure_running holds _swap_lock across a SIGTERM wait, a VRAM-release
         # poll, and a /health loop that time.sleeps — up to ~140s of blocking
@@ -603,7 +639,7 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
                 background=BackgroundTask(release_once),
             )
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
+        completion = await loop.run_in_executor(
             None,
             lambda: llama_server_manager.proxy_sync(
                 request.messages, augmented_system, request.model,
@@ -613,6 +649,14 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
                 chat_template_kwargs=chat_template_kwargs,
                 req_id=req_id, reserved=True)
         )
+        # Attach the retrieval outcome as a non-standard top-level key. OpenAI
+        # clients ignore unknown keys, and the autonomous executor reads it
+        # into the AGENT_RAN payload. Only attached when retrieval actually
+        # ran: an absent key and a recorded "skipped" must not read alike,
+        # which is the same distinction DEV-488/DEV-501 turned on.
+        if rag_outcome and isinstance(completion, dict):
+            completion["rag"] = dict(rag_outcome)
+        return completion
 
     except HTTPException:
         raise
