@@ -296,6 +296,15 @@ _REPO_OVERLAY_DIR = ".repo_overlay"
 
 _SPEC_SKIP_PATTERNS = (".pytest_cache", "__pycache__", ".DS_Store",
                        "test_output.txt", "retry_history", _REPO_OVERLAY_DIR)
+# DEV-688: the workspace's own source tree. Never a pytest collection
+# target — the overlay puts it on PYTHONPATH instead.
+_WORKSPACE_SRC_DIR = "src"
+# DEV-689: a repository test that spawns its own bwrap sandbox, git checkout
+# or npm install cannot run INSIDE the pre-gate sandbox — no network, and the
+# nested confinement fails. Such a file declares this identifier at module
+# level and the existing-tests selection skips it, so it never reds an
+# attempt for something the model did not do.
+NOT_IN_SANDBOX_MARKER = "PREGATE_SANDBOX_UNSAFE"
 
 
 # Cap on captured output. Without this, a runaway test that prints a
@@ -664,13 +673,16 @@ def edited_modules(spec_dir: Path) -> list[str]:
     a package `__init__.py` names the package itself. Test files are the
     spec's own suite, not modules anything imports.
     """
-    ws = spec_dir / "src"
+    ws = spec_dir / _WORKSPACE_SRC_DIR
     if not ws.is_dir():
         return []
     out: list[str] = []
     for path in sorted(ws.rglob("*.py")):
         rel = path.relative_to(ws).as_posix()
-        if "tests/" in rel or _TEST_FILE_RE.search(rel):
+        # Everything under src/ is a module, including one whose name happens
+        # to match `test_*.py` — this repository ships `test_runner.py`
+        # (DEV-688). Only a tests/ subtree inside the package is test code.
+        if "tests/" in rel:
             continue
         parts = rel[:-3].split("/")
         if parts[-1] == "__init__":
@@ -727,6 +739,10 @@ def existing_tests_importing(edited: Iterable[str], tests_root: Path,
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
+        if NOT_IN_SANDBOX_MARKER in text:
+            logger.info("existing tests: %s declares %s — not run inside the "
+                        "sandbox (DEV-689)", rel, NOT_IN_SANDBOX_MARKER)
+            continue
         if any(test_imports_module(text, m) for m in modules):
             selected.append(rel)
     return selected
@@ -737,18 +753,36 @@ def _all_tests_under(tests_root: Path, exclude: Collection[str] = ()) -> list[st
     out = []
     for path in sorted(tests_root.rglob("*.py")):
         rel = path.relative_to(tests_root.parent).as_posix()
-        if _TEST_FILE_RE.search(rel) and rel not in excluded:
-            out.append(rel)
+        if not _TEST_FILE_RE.search(rel) or rel in excluded:
+            continue
+        try:
+            if NOT_IN_SANDBOX_MARKER in path.read_text(encoding="utf-8",
+                                                       errors="replace"):
+                continue   # DEV-689
+        except OSError:
+            continue
+        out.append(rel)
     return out
 
 
 def _collection_targets(spec_dir: Path) -> list[str]:
     """spec_dir's top-level entries as explicit pytest arguments — the set
     `pytest <spec_dir>` would walk: no dot-directories, none of the dirs the
-    run ignores, and top-level .py files."""
+    run ignores, not `src/`, and top-level .py files.
+
+    `src/` is excluded because it holds the attempt's SOURCE, which the
+    overlay puts on PYTHONPATH for the tests to import — it is never a test
+    target. Collecting it is not merely wasteful: a source file whose name
+    matches `test_*.py` (this repository has `test_runner.py`) is imported as
+    a test module under a synthesized `src.<pkg>` namespace package, its own
+    relative imports fail, and every attempt reds identically at collection
+    with a failure no model can fix (DEV-688).
+    """
     out = []
     for entry in sorted(spec_dir.iterdir()):
         if entry.name.startswith(".") or entry.name in _SPEC_SKIP_PATTERNS:
+            continue
+        if entry.name == _WORKSPACE_SRC_DIR:
             continue
         if entry.is_dir() or entry.suffix == ".py":
             out.append(str(entry))
@@ -1046,6 +1080,11 @@ def _run_local_tests(spec_dir: Path, framework: str, timeout: int,
             "--import-mode=importlib",
             "--ignore", str(spec_dir / "retry_history"),
             "--ignore", str(spec_dir / _REPO_OVERLAY_DIR),
+            # DEV-688: and never the attempt's own source tree. This covers
+            # the whole-directory target below; an --ignore does not override
+            # an explicitly passed path, which is why _collection_targets
+            # drops it as well.
+            "--ignore", str(spec_dir / _WORKSPACE_SRC_DIR),
         ]
         targets = [str(spec_dir)]
         overlay_src = _materialize_local_repo_overlay(spec_dir, repo)
