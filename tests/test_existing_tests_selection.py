@@ -7,6 +7,11 @@ run in the same pytest invocation, the output says which set each result
 belongs to, and a red existing test is a TESTS_FAILED verdict before any
 human gate.
 """
+# DEV-689: this file spawns its own bwrap sandbox / git checkout / npm
+# install, so it cannot run INSIDE the pre-gate sandbox. The
+# existing-tests selection skips any file declaring this.
+PREGATE_SANDBOX_UNSAFE = True
+
 import os
 import shutil
 import subprocess
@@ -36,12 +41,18 @@ def test_edited_modules_are_dotted_from_the_workspace_src(tmp_path):
     assert tr.edited_modules(tmp_path) == ["pkg.mod", "pkg.sub", "pkg.sub.deep"]
 
 
-def test_edited_modules_skip_test_files_and_missing_src(tmp_path):
+def test_edited_modules_include_a_module_named_like_a_test(tmp_path):
+    """DEV-688: everything under src/ is a module. `test_runner.py` is a
+    source file in this repository, and treating it as a test file left a
+    spec that edits it with NO existing tests selected — DEV-675's guard
+    silently off. Only a tests/ subtree inside the package is test code."""
     ws = tmp_path / "src" / "pkg"
     ws.mkdir(parents=True)
-    (ws / "test_mod.py").write_text("")
+    (ws / "test_runner.py").write_text("")
     (ws / "mod_test.py").write_text("")
-    assert tr.edited_modules(tmp_path) == []
+    (ws / "tests").mkdir()
+    (ws / "tests" / "helper.py").write_text("")
+    assert tr.edited_modules(tmp_path) == ["pkg.mod_test", "pkg.test_runner"]
     assert tr.edited_modules(tmp_path / "nowhere") == []
 
 
@@ -229,6 +240,50 @@ def test_workspace_edits_outside_src_shadow_the_committed_copy(self_repo, spec_d
     assert selected == []
 
 
+def test_the_workspace_src_is_never_a_collection_target(spec_dir):
+    """DEV-688: src/ holds the attempt's source, which the overlay puts on
+    PYTHONPATH. Collecting it imports a source file named test_*.py as a test
+    module under a synthesized `src.<pkg>` package, and its relative imports
+    then fail — a collection error no model can fix."""
+    (spec_dir / "src" / "pkg" / "test_runner.py").write_text("from . import sibling\n")
+    targets = tr._collection_targets(spec_dir)
+    assert str(spec_dir / "src") not in targets
+    assert str(spec_dir / "tests") in targets
+
+
+def test_a_source_file_named_like_a_test_is_not_collected(self_repo, spec_dir, monkeypatch):
+    """The same guard on the command line: the run ignores the workspace's
+    src/ whichever target shape it uses."""
+    monkeypatch.setenv(tr.EXISTING_TESTS_MODE_ENV, "off")
+    (spec_dir / "src" / "pkg" / "test_runner.py").write_text("from . import sibling\n")
+    captured = {}
+    with mock.patch.object(tr, "_run_confined", _capture_confined(captured)):
+        tr._run_local_tests(spec_dir, "pytest", 60, repo=self_repo.name)
+    cmd = captured["raw_cmd"]
+    ignored = {cmd[i + 1] for i, a in enumerate(cmd) if a == "--ignore"}
+    assert str(spec_dir / "src") in ignored
+
+
+def test_a_file_that_cannot_run_nested_is_never_selected(self_repo, spec_dir, monkeypatch):
+    """DEV-689: a repository test that spawns its own sandbox, git checkout or
+    npm install cannot run inside the pre-gate sandbox. It declares
+    PREGATE_SANDBOX_UNSAFE and the selection skips it, so it never reds an
+    attempt for something the model did not do."""
+    monkeypatch.delenv(tr.EXISTING_TESTS_MODE_ENV, raising=False)
+    (self_repo / "tests" / "test_nested.py").write_text(
+        "PREGATE_SANDBOX_UNSAFE = True\nfrom pkg.mod import VALUE\n")
+    _git(self_repo, "-c", "user.email=t@t", "-c", "user.name=t",
+         "add", "tests/test_nested.py")
+    _git(self_repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "nested")
+
+    _, selected = tr.select_existing_tests(spec_dir, spec_dir / tr._REPO_OVERLAY_DIR)
+    assert selected == ["tests/test_mod.py"]          # imports mode
+
+    monkeypatch.setenv(tr.EXISTING_TESTS_MODE_ENV, "all")
+    _, every = tr.select_existing_tests(spec_dir, spec_dir / tr._REPO_OVERLAY_DIR)
+    assert "tests/test_nested.py" not in every        # and in all mode
+
+
 # ── the command line and the output header ───────────────────────────────────
 
 def _capture_confined(captured):
@@ -253,7 +308,9 @@ def test_selected_existing_tests_are_on_the_pytest_command_line(self_repo, spec_
     # spec_dir's entries stand in for spec_dir (a directory argument would
     # make pytest drop the explicit file under the dot-directory overlay).
     assert cmd.count(str(spec_dir)) == 1 and cmd[cmd.index(str(spec_dir)) - 1] == "--rootdir"
-    assert cmd[-3:-1] == [str(spec_dir / "src"), str(spec_dir / "tests")]
+    # DEV-688: the workspace's src/ is NOT a collection target.
+    assert cmd[-2] == str(spec_dir / "tests")
+    assert str(spec_dir / "src") not in cmd[cmd.index("--rootdir"):]
     assert cmd[cmd.index("--rootdir") + 1] == str(spec_dir)
     assert str(overlay_root) in cmd[cmd.index("--ignore"):]
     # The overlay src first, then the selected file's own directory — what
