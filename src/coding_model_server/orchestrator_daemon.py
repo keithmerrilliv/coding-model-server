@@ -113,6 +113,7 @@ from coding_model_autonomous.retry_policy import (
 from coding_model_autonomous.executor import (
     ImplementerResult,
     MAX_RETRIES,
+    ManifestResult,
     ParseError,
     build_architect_message,
     build_implementer_message,
@@ -3047,30 +3048,55 @@ def _generate_via_manifest(
     # a fit check (DEV-633).
     chosen_agent = _ctx_capable_agent(spec.id, chosen_agent, manifest_messages,
                                       executor.MANIFEST_MAX_TOKENS)
-    manifest_raw = call_agent(
-        "implementer", manifest_messages,
-        agent=chosen_agent, max_tokens=executor.MANIFEST_MAX_TOKENS, meta=meta,
-    )
-    _note_truncation(db, spec, task, "manifest", meta, executor.MANIFEST_MAX_TOKENS)
-    # Before the ParseError return: a manifest call that failed to parse still
-    # cost the attempt a full generation, and rotating away from it is exactly
-    # the case a cost-per-attempt query wants to see.
-    if tally is not None:
-        executor.accumulate_agent_fields(tally, meta)
-        if meta.get("truncated"):
-            tally["truncated"] = True
-            tally["max_tokens"] = executor.MANIFEST_MAX_TOKENS
-    manifest = parse_manifest_response(manifest_raw)
-    if isinstance(manifest, ParseError):
+    # DEV-507: a manifest parse failure buys a re-call of the manifest, not one
+    # of the implementer's MAX_RETRIES attempts. An unreadable response says
+    # nothing about whether this agent can do the work (DEV-431), so rotating
+    # down a tier over a corrupted delimiter — which is what run 6 of DEV-102
+    # did, moe_implementer -> fast_implementer — spends capability to fix a
+    # typo. Only an exhausted parse budget propagates to the caller.
+    manifest: ManifestResult | ParseError | None = None
+    for parse_attempt in range(executor.MANIFEST_PARSE_RETRIES + 1):
+        meta = {}
+        manifest_raw = call_agent(
+            "implementer", manifest_messages,
+            agent=chosen_agent, max_tokens=executor.MANIFEST_MAX_TOKENS,
+            meta=meta,
+        )
+        _note_truncation(db, spec, task, "manifest", meta,
+                         executor.MANIFEST_MAX_TOKENS)
+        # Before any ParseError return: a manifest call that failed to parse
+        # still cost the attempt a full generation, and that is exactly the
+        # case a cost-per-attempt query wants to see.
+        if tally is not None:
+            executor.accumulate_agent_fields(tally, meta)
+            if meta.get("truncated"):
+                tally["truncated"] = True
+                tally["max_tokens"] = executor.MANIFEST_MAX_TOKENS
+        manifest = parse_manifest_response(manifest_raw)
+        if not isinstance(manifest, ParseError):
+            break
         # DEV-507: keep the evidence, as the architect path always has.
         try:
-            (spec_dir / f"manifest_failed_response_attempt{task.retry_count}.txt"
+            (spec_dir / f"manifest_failed_response_attempt"
+                        f"{task.retry_count}_{parse_attempt + 1}.txt"
              ).write_text(f"# parse error: {manifest.reason}\n\n{manifest_raw}")
         except OSError as e:
             logger.warning("spec %s: could not persist failed manifest "
                            "response: %s", spec.id, e)
-        logger.warning("spec %s: manifest parse failed (%s)", spec.id,
-                       manifest.reason)
+        remaining = executor.MANIFEST_PARSE_RETRIES - parse_attempt
+        logger.warning(
+            "spec %s: manifest parse failed (%s) — %s", spec.id, manifest.reason,
+            f"re-calling the manifest ({remaining} parse "
+            f"{'retry' if remaining == 1 else 'retries'} left)"
+            if remaining else "parse budget exhausted",
+        )
+        db.record_event(
+            EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
+            payload={"role": "manifest", "parse_failed": True,
+                     "parse_attempt": parse_attempt + 1,
+                     "reason": manifest.reason,
+                     **executor.agent_event_fields(meta)})
+    if isinstance(manifest, ParseError):
         return manifest  # the caller classifies it
     manifest.entries = _drop_undeliverable_manifest_entries(spec, manifest.entries)
     db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
