@@ -3904,7 +3904,39 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
     if carried:
         result.files = list(result.files) + carried
     missing_planned = _missing_planned_outputs(spec, spec_dir)
+    if missing_planned and tally.get("truncated"):
+        # DEV-691: the outputs are missing because OUR budget cut the response
+        # off, not because the model chose not to emit them. DEV-623 closed
+        # this on the unappliable-edits path above; DEV-645's check was added
+        # later, runs before the build check, and never consulted the flag —
+        # so a newer guard reopened the hole on a different path. Run 38's
+        # retry 2 was charged parse_failure in the same second the daemon
+        # logged "output truncated at max_tokens=32000".
+        #
+        # TRUNCATED is a no-verdict: requeue, rotate, charge nothing. The
+        # missing paths ride along as context, never as the verdict.
+        # AUTONOMOUS_NO_VERDICT_CAP still bounds a model that truncates
+        # forever, so this cannot loop.
+        logger.warning(
+            "spec %s: attempt produced %d of %d planned implement output(s), "
+            "but the response was TRUNCATED at max_tokens=%s (agent=%s) — "
+            "no-verdict, not charged (DEV-691); missing %s",
+            spec.id, len(_planned_implement_outputs(spec)) - len(missing_planned),
+            len(_planned_implement_outputs(spec)), tally.get("max_tokens", "?"),
+            tally.get("agent", "?"), ", ".join(missing_planned))
+        _dispose(db, spec, task, Failure(
+            FailureClass.TRUNCATED, "implementer", "model_call",
+            f"finish_reason=length at max_tokens={tally.get('max_tokens', '?')} "
+            f"(agent={tally.get('agent', '?')}); "
+            f"{len(missing_planned)} planned output(s) were cut off: "
+            + ", ".join(missing_planned), rotate=True,
+            extra={"agent": tally.get("agent"),
+                   "max_tokens": tally.get("max_tokens"),
+                   "missing": missing_planned}))
+        return
     if missing_planned:
+        # Not truncated: the model finished and chose not to emit them. That
+        # is a verdict on real output, which is exactly what DEV-645 is for.
         _route_missing_planned_outputs(db, spec, task, spec_md, missing_planned)
         return
 

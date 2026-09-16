@@ -1558,3 +1558,93 @@ class TestTargetedRetryOutputs:
         # lists the carried file among the attempt's outputs.
         assert len(runner.test_calls) == 2
         assert TEST_PATH in out.waiting_on[0].prompt_md
+
+
+class TestTruncatedPlannedOutputs:
+    """DEV-691: our budget cutting a response off is not the model's verdict.
+
+    Run 38's retry 2 logged "output truncated at max_tokens=32000
+    (finish_reason=length)" and, in the same second, charged the implementer
+    `parse_failure` for the two files the truncation had prevented. One of five
+    attempts spent on a harness budget failure.
+
+    DEV-623 closed exactly this on the unappliable-edits path. DEV-645's
+    planned-output check was added later, runs earlier, and never consulted the
+    truncation flag — a newer guard reopening a closed hole on a different
+    path. Both shapes are pinned here so the next guard cannot do it again.
+    """
+
+    def test_a_truncated_attempt_with_missing_outputs_is_not_charged(
+            self, db, model, runner):
+        # The plan promises two implement outputs; the cut-off response
+        # carries only one.
+        spec = _impl_ready(db, model, runner)
+        model.script("implementer",
+                     Truncated(file_blocks({TEST_PATH: TEST_FILE})),
+                     Reply(implementer_reply()))
+
+        out = drive(db, spec.id, model, wait_at(GateType.CODE_REVIEW), runner=runner)
+
+        assert out.reason == "waiting" and out.status == SpecStatus.EXECUTING
+        assert out.task("implementer").retry_count == 0, (
+            "a truncation is a harness budget failure and must not spend an attempt")
+        assert rejected_gates(db, spec.id) == []
+        ev = events(db, spec.id, EventKind.FAILURE_CLASSIFIED)
+        assert [(e["cls"], e["outcome"], e["disposition"]) for e in ev] == [
+            ("truncated", "no_verdict", "rotate")]
+
+    def test_the_missing_paths_are_context_on_the_event_not_the_verdict(
+            self, db, model, runner):
+        spec = _impl_ready(db, model, runner)
+        model.script("implementer",
+                     Truncated(file_blocks({TEST_PATH: TEST_FILE})),
+                     Reply(implementer_reply()))
+
+        drive(db, spec.id, model, wait_at(GateType.CODE_REVIEW), runner=runner)
+
+        ev = events(db, spec.id, EventKind.FAILURE_CLASSIFIED)[0]
+        assert ev["cls"] == "truncated"
+        # the path that was cut off is still recorded — the diagnosis survives
+        assert DAEMON_PATH in (ev.get("missing") or [])
+
+    def test_it_rotates_so_a_wider_agent_gets_the_next_try(
+            self, db, model, runner):
+        spec = _impl_ready(db, model, runner)
+        model.script("implementer",
+                     Truncated(file_blocks({TEST_PATH: TEST_FILE})),
+                     Reply(implementer_reply()))
+
+        drive(db, spec.id, model, wait_at(GateType.CODE_REVIEW), runner=runner)
+
+        assert [c.model for c in model.calls_for("implementer")] == [
+            "implementer", "deep_implementer"]
+
+    def test_an_untruncated_attempt_missing_an_output_is_still_charged(
+            self, db, model, runner):
+        # DEV-645 must survive intact: a response that finished and chose not
+        # to emit a planned file IS a verdict on real output.
+        spec = _impl_ready(db, model, runner)
+        model.script("implementer",
+                     Reply(file_blocks({TEST_PATH: TEST_FILE})),
+                     Reply(implementer_reply()))
+
+        out = drive(db, spec.id, model, wait_at(GateType.CODE_REVIEW), runner=runner)
+
+        assert out.task("implementer").retry_count == 1, (
+            "DEV-645 still charges a complete response that omitted a planned file")
+        ev = events(db, spec.id, EventKind.FAILURE_CLASSIFIED)
+        assert [(e["cls"], e["outcome"], e["disposition"]) for e in ev] == [
+            ("parse_failure", "verdict", "charge")]
+
+    def test_a_truncated_attempt_that_produced_everything_is_untouched(
+            self, db, model, runner):
+        # Truncation only matters here when it cost an output. A response cut
+        # off after the last file still produced everything planned, and must
+        # not be re-routed as a no-verdict on the strength of the flag alone.
+        spec = _impl_ready(db, model, runner)
+        model.script("implementer", Truncated(implementer_reply()))
+
+        out = drive(db, spec.id, model, wait_at(GateType.CODE_REVIEW), runner=runner)
+
+        assert out.task("implementer").retry_count == 0
+        assert [e["cls"] for e in events(db, spec.id, EventKind.FAILURE_CLASSIFIED)] == []
