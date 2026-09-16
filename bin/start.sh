@@ -32,9 +32,21 @@ if ss -lnt "sport = :$PORT" | grep -q ":$PORT"; then
     exit 1
 fi
 
-# Set CUDA environment if available
-if [ -d "/usr/local/cuda" ]; then
+# Set CUDA environment if available.
+#
+# DEV-703: prefer the same explicit version the systemd unit pins. /usr/local/cuda
+# is an update-alternatives symlink in AUTO mode, so it moves on its own when a
+# higher-priority CUDA package is installed — which would silently make a manual
+# start run against a different CUDA than the service does. Fall back to the
+# symlink so this still works on a host without 13.2.
+CUDA_PINNED=/usr/local/cuda-13.2
+if [ -d "$CUDA_PINNED" ]; then
+    export CUDA_HOME="$CUDA_PINNED"
+elif [ -d "/usr/local/cuda" ]; then
     export CUDA_HOME=/usr/local/cuda
+fi
+if [ -n "${CUDA_HOME:-}" ]; then
+    export PATH=${CUDA_HOME}/bin:${PATH}
     export LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}
 fi
 
