@@ -102,3 +102,31 @@ class TestWritersFit:
         assert fetched
         assert check_event_payload(EventKind.CONTEXT_ASSEMBLED,
                                    {"trigger": "implementer", **ctx.summary()}) == []
+
+    def test_a_context_fetch_from_a_runner_that_reports_its_commit(self, tmp_path):
+        """The shape PRODUCTION emits, which the case above cannot reach.
+
+        Its `fetch` takes three positional args, so `_fetch_all`'s ref_state
+        keyword falls back and the key never appears. The real
+        `fetch_repo_files` accepts it and fills it, so every live
+        CONTEXT_ASSEMBLED carries `ref_state` — and when DEV-701 added it, this
+        suite stayed green while the contract was broken. A schema test whose
+        fake is a version behind is not testing the contract.
+        """
+        plan = {"test_strategy": {"repo": "r", "base_ref": "main"},
+                "phases": [{"name": "implement", "role": "implementer", "outputs": ["src/a.py"]}]}
+
+        def fetch(repo, paths, ref, ref_state=None):
+            if ref_state is not None:
+                ref_state.update({"ref": ref, "local_sha": "c" * 40,
+                                  "remote": "origin", "remote_sha": "c" * 40,
+                                  "in_sync": True, "source": "runner"})
+            return [("src/a.py", "x")], []
+
+        ctx, fetched = c.assemble(
+            spec_id="s", spec_dir=tmp_path, plan=plan, spec_md="",
+            role="implementer", fetch=fetch)
+        assert fetched
+        assert ctx.ref_state.get("in_sync") is True, "precondition: the key is set"
+        assert check_event_payload(EventKind.CONTEXT_ASSEMBLED,
+                                   {"trigger": "implementer", **ctx.summary()}) == []

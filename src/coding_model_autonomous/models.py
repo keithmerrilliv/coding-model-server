@@ -186,7 +186,12 @@ EVENT_PAYLOAD_SCHEMAS: dict = {
             "editable_chars": "total chars of the editable section",
             "protected_chars": "total chars of the protected section",
         },
-        "optional": {},
+        "optional": {
+            "ref_state": "which commit served the read and whether that clone "
+                         "is current (DEV-701): {ref, local_sha, remote, "
+                         "remote_sha, in_sync, source, note}. ABSENT when the "
+                         "runner predates the field — unknown, not in sync.",
+        },
     },
 }
 
