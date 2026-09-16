@@ -65,11 +65,17 @@ def test_manifest_enforces_canonical_path_over_model_drift(db, spec_task):
 
 
 def test_manifest_parse_failure_propagates_as_parse_error(db, spec_task):
+    # DEV-507: a parse failure now buys MANIFEST_PARSE_RETRIES re-calls of the
+    # manifest before it propagates, so an unparseable response has to repeat
+    # itself the whole way through the budget to reach the caller.
     spec, task, spec_dir = spec_task
-    with mock.patch.object(d, "call_agent", side_effect=["no markers at all"]):
-        res = d._generate_via_manifest(db, spec, task, spec_dir, "S", "D",
-                                       "implementer", [], None)
+    with mock.patch.object(executor, "MANIFEST_PARSE_RETRIES", 2):
+        with mock.patch.object(d, "call_agent",
+                               side_effect=["no markers at all"] * 3) as ca:
+            res = d._generate_via_manifest(db, spec, task, spec_dir, "S", "D",
+                                           "implementer", [], None)
     assert isinstance(res, ParseError)
+    assert ca.call_count == 3  # the initial call + 2 parse retries
 
 
 def test_per_file_retry_then_success(db, spec_task):

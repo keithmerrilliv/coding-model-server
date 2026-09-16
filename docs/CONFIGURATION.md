@@ -206,6 +206,7 @@ markers) gets re-asked rather than failing the spec:
 | `AUTONOMOUS_ARCHITECT_PARSE_RETRIES` | `2` |
 | `AUTONOMOUS_REVIEWER_PARSE_RETRIES` | `1` |
 | `AUTONOMOUS_PER_FILE_PARSE_RETRIES` | `2` |
+| `AUTONOMOUS_MANIFEST_PARSE_RETRIES` | `2` |
 
 **Daemon and storage**
 

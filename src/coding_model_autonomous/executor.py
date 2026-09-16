@@ -187,6 +187,13 @@ def whole_file_emission_tokens(files: "list[tuple[str, str]]") -> int:
 # for post-mortem.
 ARCHITECT_PARSE_RETRIES = int(os.getenv("AUTONOMOUS_ARCHITECT_PARSE_RETRIES", "2"))
 
+# Manifest parse-retry (DEV-507): same idea, same default. A delimiter typo
+# says nothing about whether the agent can do the work (DEV-431), so it buys a
+# re-call of the manifest rather than spending one of the implementer's
+# MAX_RETRIES attempts and rotating down a tier. Each failed response is
+# persisted as manifest_failed_response_attempt<N>.txt.
+MANIFEST_PARSE_RETRIES = int(os.getenv("AUTONOMOUS_MANIFEST_PARSE_RETRIES", "2"))
+
 ROLE_TO_AGENT = {
     "architect": ARCHITECT_AGENT,
     "implementer": IMPLEMENTER_AGENT,
@@ -2154,6 +2161,18 @@ _MANIFEST_RE = re.compile(
     r"<{1,3}MANIFEST>{1,3}\s*(.*?)\s*<{1,3}END_MANIFEST>{1,3}",
     re.DOTALL | re.IGNORECASE,
 )
+# DEV-507: the same one-token delimiter corruption DEV-498 found in the
+# architect also lands on the manifest, where it costs more — the architect
+# gets ARCHITECT_PARSE_RETRIES before anything else is spent, while a manifest
+# parse failure used to propagate straight to the caller's rotation retry and
+# burn one of MAX_RETRIES. Accept an opening delimiter that starts with MAN and
+# is followed by the usual structure. END_MANIFEST starts with END, so the
+# closing delimiter can never be mistaken for an opener and there is no
+# ambiguity about where the block ends.
+_MANIFEST_FUZZY_RE = re.compile(
+    r"<{1,3}MAN[A-Z_]*>{1,3}\s*(.*?)\s*<{1,3}END_MANIFEST>{1,3}",
+    re.DOTALL | re.IGNORECASE,
+)
 # Leading list markers ("1.", "- ", "* ") the model sometimes prefixes.
 _LIST_MARKER_RE = re.compile(r"^\s*(?:\d+[.)]|[-*])\s*")
 # Interface-bearing lines (imports + declarations) for the written-file summary.
@@ -2199,7 +2218,23 @@ def parse_manifest_response(text: str) -> ManifestResult | ParseError:
     cleaned = _strip_thinking(text)
     m = _MANIFEST_RE.search(cleaned)
     if not m:
-        return ParseError("No <<<MANIFEST>>>…<<<END_MANIFEST>>> block found", text)
+        # DEV-507: fall back to a near-miss opening delimiter before giving up,
+        # exactly as the architect path does for <<<DESIGN>>>.
+        m = _MANIFEST_FUZZY_RE.search(cleaned)
+        if m:
+            logger.warning(
+                "manifest opening delimiter was %r, not <<<MANIFEST>>> — "
+                "recovered the block anyway (DEV-507)",
+                m.group(0)[:m.group(0).find(">") + 3],
+            )
+    if not m:
+        # Name what delimiters were actually present: "no block found" reads as
+        # "the model produced nothing", which is rarely what happened.
+        seen_delims = _ANY_DELIMITER_RE.findall(cleaned)
+        detail = (f" — delimiters present: {', '.join(sorted(set(seen_delims))[:6])}"
+                  if seen_delims else "")
+        return ParseError(
+            f"No <<<MANIFEST>>>…<<<END_MANIFEST>>> block found{detail}", text)
     entries: list[ManifestEntry] = []
     seen: set[str] = set()
     for line in m.group(1).splitlines():
