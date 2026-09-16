@@ -630,15 +630,16 @@ Update these after each retrieval step. They help you stay organized and efficie
     # n_cpu_moe=18 (86.80 tok/s @ 1,544 MiB free) is in the DEV-90 removal commit.
 
     # Qwen3.6-27B Q4_K_M — DENSE 27B model, ~16.8 GB. Released 2026-04-22.
-    # 64 attention layers; dense (no cpu_moe possible). 16 GB VRAM forces
-    # partial GPU offload. Per-layer cost ~280 MiB (245 weight + 36 KV at
-    # 131K Q4_0). Pushed ngl 20→36→40 across two iterations.
+    # 65 blocks (GGUF qwen35.block_count), hybrid: full_attention_interval=4, so
+    # only ~16 of them keep a growing KV cache and the other 49 hold constant SSM
+    # state. Dense (no cpu_moe possible). 16 GB VRAM forces partial GPU offload.
+    # Pushed ngl 20→36→40 across two iterations.
     # Measured 2026-04-24 at ngl=36: 13,513 MiB used, 2,297 free.
     #
     # MTP wired 2026-06-05: model -> unsloth/Qwen3.6-27B-MTP-GGUF (Q4_K_M with the
     # native multi-token-prediction head embedded, +0.29 GB) + `--spec-type
-    # draft-mtp --spec-draft-n-max 2`. The dense 27B decodes slowly (~24 of 64
-    # layers on CPU); MTP ~doubles it. Measured on build 5343f45 with the prod
+    # draft-mtp --spec-draft-n-max 2`. The dense 27B decodes slowly (29 of its 65
+    # layers ran on CPU at the old ngl=36); MTP ~doubles it. Measured on build 5343f45 with the prod
     # global flags (lookup-cache + cache-reuse, no conflict): baseline 8.3 tok/s
     # -> MTP 14.1 tok/s decode = ~1.7x, ~85% draft acceptance on structured output.
     # ngl=36 (was 40->38->36): 1,754 free / 13.5 tok/s decode. ngl=40 OOM-tight
@@ -647,12 +648,35 @@ Update these after each retrieval step. They help you stay organized and efficie
     # (design + review feedback ~4.6K tok) OOM'd the prefill compute buffer
     # (SIGABRT rc=-6; spec_b956e1c9, 2026-06-13 — see [[project_model_swap_oom]]).
     # 36 restores the headroom that pass needs (~−0.6 tok/s decode is worth it).
-    # Quality lossless (verified tokens == base model). Used by dense_architect +
-    # supervisor. See [[project_mtp_test_scope]] / [[project_llama_server_upgrade]].
+    #
+    # DEV-707, 2026-09-16 — ngl 36→46 and n_ctx 131072→65536, Keith's call. The
+    # window is the ONLY thing tradeable for layers on a 16 GB card whose weights
+    # are 15.93 GiB, and halving it buys ten. Measured on the live box, same
+    # 400-token architect-style prose generation each time:
+    #   ngl=36 @ 131072   13.69 tok/s decode @ 1,488 MiB free   (the old default)
+    #   ngl=41 @ 131072   16.24                @   191 MiB free
+    #   ngl=46 @  65536   18.72                @   884 MiB free   <- this config
+    #   ngl=53 @  32768   25.27                @   554 MiB free (b/ub 1024)
+    # At realistic depth (a 52,818-token prompt) it is 8.27 → 11.33 tok/s, and the
+    # prefill compute buffer survived that prompt with 684 MiB still free — the
+    # case the ngl=38 note above did NOT have. Two-point fit: ~259 MiB per layer,
+    # ~31 KiB per context token (so the 131K KV was ~4.0 GB).
+    # The ngl=38 crash above happened at 1,287 MiB free, which is MORE headroom
+    # than this config has; the difference is that its 2 GB of reclaimed KV is not
+    # available to the prefill buffer. If an architect revision pass SIGABRTs,
+    # back off to ngl=44 (~1.4 GB free) before blaming anything else.
+    # Note `--swa-full` is a no-op here: llama-server logs "swa_full is not
+    # supported by this model, it will be disabled" on every load. Left in place
+    # so this change is only the two numbers.
+    # Quality lossless (verified tokens == base model). Used by dense_architect,
+    # its nothink eval arm and supervisor — all three move together ON PURPOSE, so
+    # the DEV-556 arms still differ in exactly one variable
+    # (test_both_arms_are_the_same_model_and_the_same_prompt).
+    # See [[project_mtp_test_scope]] / [[project_llama_server_upgrade]].
     _DENSE_27B = _create_model_config(
         'MODEL_PATH_27B',
         f'{_MODELS_ROOT}/unsloth/Qwen3.6-27B-MTP-GGUF/Qwen3.6-27B-Q4_K_M.gguf',
-        36, 131072, 2048,
+        46, 65536, 2048,
         server_extra_args=['--jinja', '--reasoning-format', 'none', '--swa-full',
                            '--spec-type', 'draft-mtp', '--spec-draft-n-max', '2'],
         type_k=2, type_v=2,
@@ -924,7 +948,7 @@ Update these after each retrieval step. They help you stay organized and efficie
         ),
         # ── Qwen3.6 agents (replaced retired Qwen3.5 architect tier) ──
         'dense_architect': _create_agent_config(
-            'Architect — Qwen3.6-27B MTP Q4_K_M (27B dense, 128K Q4_0 ctx, ngl=36 + MTP spec-decode, default planner + interactive architect — the `architect` alias)',
+            'Architect — Qwen3.6-27B MTP Q4_K_M (27B dense, 64K Q4_0 ctx, ngl=46 + MTP spec-decode, default planner + interactive architect — the `architect` alias)',
             _ARCHITECT_SYSTEM_PROMPT,
             _DENSE_27B,
             executor=True
