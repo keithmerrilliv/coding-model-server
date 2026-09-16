@@ -120,17 +120,20 @@ cat <<'NOTES'
 ==> still yours to confirm
 
 1. VERIFY FROM OUTSIDE — this cannot be tested from inside the network.
-   From a phone on CELLULAR (not wifi). Connected = still exposed; refused or
-   timed out = correct:
 
-       nc -6 -vz -w5 2601:646:8685:4f70:9141:3686:18d1:8d9 3389
+   First get this host's current global IPv6 addresses (NOT committed here:
+   this repository is public, and publishing them would hand an attacker the
+   exact targets these rules exist to protect):
 
-   NOTE: the address in the Jira ticket (::9021) is STALE. This host's current
-   global v6 addresses are:
-       2601:646:8685:4f70::a5cb
-       2601:646:8685:4f70:9141:3686:18d1:8d9
-       2601:646:8685:4f70:2094:fcf4:f8af:5b21
-   Test whichever is stable; the ::a5cb /128 is the likeliest to persist.
+       ip -6 addr show scope global | grep -oE 'inet6 [0-9a-f:]+'
+
+   Prefer a /128 if there is one; the /64 SLAAC addresses rotate. The address
+   recorded in the Jira ticket is stale and will give a false pass.
+
+   Then, from a phone on CELLULAR (not wifi). Connected = still exposed;
+   refused or timed out = correct:
+
+       nc -6 -vz -w5 <that-address> 3389
 
 2. CONFIRM RDP STILL WORKS from the LAN, and over Tailscale if you use it
    remotely (this script allows 100.64.0.0/10 by default — set
