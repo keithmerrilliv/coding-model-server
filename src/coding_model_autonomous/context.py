@@ -277,6 +277,10 @@ class SpecContext:
     protected_paths: list[str]
     editable: dict[str, str] = field(default_factory=dict)
     protected: dict[str, str] = field(default_factory=dict)
+    # DEV-701: which commit the read was served from, and whether the clone
+    # that served it is current. Empty when the runner predates the field —
+    # unknown, which is not the same as in sync.
+    ref_state: dict = field(default_factory=dict)
     omitted: list[Omission] = field(default_factory=list)
     fetched_at: float = 0.0
     fetched_by: str = ""            # the role whose call ran the fetch
@@ -417,6 +421,10 @@ class SpecContext:
                         if omission_status(o.reason) == STATUS_UNKNOWN],
             "editable_chars": sum(len(c) for c in self.editable.values()),
             "protected_chars": sum(len(c) for c in self.protected.values()),
+            # DEV-701: the commit this context was built from. Without it,
+            # working out which tree a delivered branch was written against
+            # is forensics; with it, it is one glance at the event.
+            **({"ref_state": self.ref_state} if self.ref_state else {}),
         }
 
     def save(self, spec_dir: Path) -> Path:
@@ -451,14 +459,28 @@ def _stamp(epoch: float) -> str:
 # ── assembly ─────────────────────────────────────────────────────────────────
 
 def _fetch_all(fetch: FetchFn, repo: str, paths: list[str], base_ref: str,
+               ref_state: Optional[dict] = None,
                ) -> tuple[list[tuple[str, str]], list[str]]:
     """Every path, in runner-sized chunks. Raises RunnerOutage on a
-    transport-class answer (one unprefixed problem, no files)."""
+    transport-class answer (one unprefixed problem, no files).
+
+    *ref_state*, when given, is filled with which commit served the read
+    (DEV-701). Every chunk resolves the same ref against the same clone, so
+    the first answer that carries one is the answer; later chunks would only
+    restate it. Passed as a keyword so a *fetch* that predates the parameter
+    still works — the seam fakes take ``(repo, paths, base_ref)``.
+    """
     files: list[tuple[str, str]] = []
     problems: list[str] = []
     for i in range(0, len(paths), FETCH_CHUNK):
         chunk = paths[i:i + FETCH_CHUNK]
-        got, bad = fetch(repo, chunk, base_ref)
+        if ref_state is None or ref_state:
+            got, bad = fetch(repo, chunk, base_ref)
+        else:
+            try:
+                got, bad = fetch(repo, chunk, base_ref, ref_state=ref_state)
+            except TypeError:
+                got, bad = fetch(repo, chunk, base_ref)
         if not got and test_runner.problems_indicate_runner_outage(bad, chunk):
             raise RunnerOutage(bad[0])
         files.extend(got)
@@ -539,8 +561,9 @@ def assemble(
                           fetched_by=role)
         return ctx, False
 
+    ref_state: dict = {}
     try:
-        files, problems = _fetch_all(fetch, repo, paths, base_ref)
+        files, problems = _fetch_all(fetch, repo, paths, base_ref, ref_state)
     except RunnerOutage as exc:
         if reusable and stored is not None:
             # DEV-544: a transient outage on a refresh must not strip the
@@ -580,7 +603,15 @@ def assemble(
         protected={p: got[p] for p in protected if p in got},
         fetched_at=now, fetched_by=role,
         fetches=(stored.fetches if stored is not None else 0) + 1,
+        ref_state=ref_state,
     )
+    if ref_state.get("in_sync") is False:
+        # DEV-701: loud at the point the context is built, because this is
+        # the last moment before model calls start spending on a tree that
+        # is not the one the spec meant.
+        logger.warning("spec %s: context for the %s was built from a STALE "
+                       "clone of %s — %s", spec_id, role, repo,
+                       ref_state.get("note") or "local ref is not the remote")
     for p in paths:
         if p in got:
             continue

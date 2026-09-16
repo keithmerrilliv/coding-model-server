@@ -104,8 +104,33 @@ class ReadFileResult(BaseModel):
     error: Optional[str] = None
 
 
+class RepoRefState(BaseModel):
+    """Which commit a read was actually served from, and whether the clone
+    that served it is current (DEV-701).
+
+    Run 39 built Centipede slice 8 on a clone that predated slice 7. Every
+    stage was internally consistent and externally wrong: the architect
+    designed against 26 tests, the suite passed, the release gate approved,
+    and the branch only read as destructive when compared against origin.
+    `base_ref: main` had resolved to a main, just not the one anyone meant.
+
+    Nothing anywhere compared the local clone to its remote, so this reports
+    both. Every field is optional because none of it may be knowable — a repo
+    with no remote, or no network — and a read must never fail over its own
+    telemetry.
+    """
+    ref: str
+    local_sha: Optional[str] = None
+    remote: Optional[str] = None
+    remote_sha: Optional[str] = None
+    # None = could not be determined, which is NOT the same as in sync.
+    in_sync: Optional[bool] = None
+    note: Optional[str] = None
+
+
 class ReadFilesResponse(BaseModel):
     files: list[ReadFileResult] = []
+    ref_state: Optional[RepoRefState] = None
 
 
 # Caps exist to protect the *implementer's* token budget, not the runner's
@@ -143,6 +168,85 @@ def _git_show(repo: Path, ref: str, rel: str) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["git", "-C", str(repo), "show", f"{ref}:{rel}"],
         capture_output=True, check=False,
+    )
+
+
+def _git_text(repo: Path, *args: str, timeout: int = 15) -> Optional[str]:
+    """`git <args>` as stripped text, or None on any failure at all.
+
+    Swallows OSError and timeouts as well as a non-zero exit, because every
+    caller below is telemetry on the dispatch path: a missing git binary or a
+    hung network call must not cost a read that would otherwise have answered.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo), *args],
+            capture_output=True, text=True, check=False, timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip() or None
+
+
+def _resolve_ref(repo: Path, ref: str) -> Optional[str]:
+    """The commit *ref* names in this clone, or None if it does not resolve."""
+    return _git_text(repo, "rev-parse", f"{ref}^{{commit}}")
+
+
+def _tracking_remote(repo: Path, ref: str) -> str:
+    """The remote *ref* tracks, defaulting to origin. A detached sha or a tag
+    tracks nothing, and origin is the right guess for the repos we serve."""
+    return _git_text(repo, "config", "--get", f"branch.{ref}.remote") or "origin"
+
+
+# ls-remote is a network round trip and read_files is called once per chunk,
+# so a spec's context assembly would otherwise pay for it several times over.
+_REMOTE_CACHE: dict[tuple[str, str], tuple[float, Optional[str]]] = {}
+_REMOTE_CACHE_TTL = 60.0
+
+
+def _remote_sha(repo: Path, remote: str, ref: str) -> Optional[str]:
+    """What *remote* says *ref* is, without fetching. None when unknowable.
+
+    Deliberately NOT read from refs/remotes/<remote>/<ref>: that tracking ref
+    is only as fresh as the last fetch, and a clone being stale is precisely
+    the condition this exists to catch — it would agree with the stale local
+    ref and report all clear.
+    """
+    key = (str(repo), f"{remote}/{ref}")
+    hit = _REMOTE_CACHE.get(key)
+    now = time.monotonic()
+    if hit and now - hit[0] < _REMOTE_CACHE_TTL:
+        return hit[1]
+    out = _git_text(repo, "ls-remote", "--exit-code", "--", remote, ref)
+    sha = out.split()[0].strip() if out else None
+    _REMOTE_CACHE[key] = (now, sha or None)
+    return sha or None
+
+
+def _ref_state(repo: Path, ref: str) -> RepoRefState:
+    """Best-effort. Never raises: a read must not fail over its telemetry."""
+    local = _resolve_ref(repo, ref)
+    if local is None:
+        return RepoRefState(ref=ref, note="ref does not resolve in this clone")
+    remote = _tracking_remote(repo, ref)
+    rsha = _remote_sha(repo, remote, ref)
+    if rsha is None:
+        return RepoRefState(
+            ref=ref, local_sha=local, remote=remote,
+            note="could not read the remote — staleness is UNKNOWN, not clear",
+        )
+    in_sync = (rsha == local)
+    return RepoRefState(
+        ref=ref, local_sha=local, remote=remote, remote_sha=rsha,
+        in_sync=in_sync,
+        note=None if in_sync else (
+            f"this clone's {ref} is NOT {remote}/{ref} — it is serving "
+            f"{local[:12]} while the remote is at {rsha[:12]}; every file read "
+            f"here predates whatever landed since"
+        ),
     )
 
 
@@ -235,9 +339,18 @@ def read_files_endpoint(req: ReadFilesRequest) -> ReadFilesResponse:
         results.append(ReadFileResult(path=rel, content=text))
 
     found = sum(1 for r in results if r.content is not None)
-    logger.info("read_files: repo=%s ref=%s requested=%d returned=%d",
-                req.repo, req.base_ref, len(req.paths), found)
-    return ReadFilesResponse(files=results)
+    state = _ref_state(repo_path, req.base_ref)
+    logger.info("read_files: repo=%s ref=%s sha=%s requested=%d returned=%d",
+                req.repo, req.base_ref, (state.local_sha or "?")[:12],
+                len(req.paths), found)
+    if state.in_sync is False:
+        # Loud on purpose. This is the condition that cost run 39 a whole
+        # campaign while every check reported success.
+        logger.warning("read_files: STALE CLONE — %s", state.note)
+    elif state.in_sync is None and state.local_sha:
+        logger.info("read_files: repo=%s staleness unknown (%s)",
+                    req.repo, state.note)
+    return ReadFilesResponse(files=results, ref_state=state)
 
 
 @app.post(

@@ -1404,6 +1404,7 @@ def fetch_repo_files(
     paths: list[str],
     base_ref: str = "HEAD",
     timeout: int = 30,
+    ref_state: Optional[dict] = None,
 ) -> tuple[list[tuple[str, str]], list[str]]:
     """Read *paths* from the Mac runner at *base_ref* (DEV-492).
 
@@ -1420,6 +1421,18 @@ def fetch_repo_files(
     The timeout is short on purpose. This is a git read, not a build — if it
     has not answered in 30s the link is in trouble, and stalling the whole
     execution pass behind it buys nothing.
+
+    *ref_state*, when given, is FILLED IN with which commit the read was
+    actually served from and whether the serving clone is current (DEV-701).
+    A caller-owned dict rather than a third return value, because this is
+    telemetry riding along with the answer and every existing caller unpacks
+    a 2-tuple. Deliberately NOT folded into *problems*: a stale clone is not
+    a per-path failure, and adding an unprefixed entry there would make
+    :func:`problems_indicate_runner_outage` read a healthy runner as an
+    outage.
+
+    An older runner returns no ``ref_state`` at all, in which case the dict
+    is left with ``in_sync`` absent — unknown, which is not the same as clear.
     """
     if not paths:
         return [], []
@@ -1430,8 +1443,14 @@ def fetch_repo_files(
         # Run 32 edited a pre-DEV-672 outcome.py fetched from the Mac and its
         # artifact reverted the merged fix with every new test green.
         local_files, local_problems = _read_local_repo_files(_SERVER_REPO_ROOT, paths, base_ref)
+        head = _local_head(_SERVER_REPO_ROOT)
+        if ref_state is not None:
+            # A self-target read is served from this repository's own working
+            # tree, so it cannot lag a remote the way the Mac's clone can.
+            ref_state.update({"ref": base_ref, "local_sha": head,
+                              "source": "local", "in_sync": True})
         logger.info("read_files: repo=%s source=local sha=%s ref=%s requested=%d got=%d problems=%d",
-                    repo, _local_head(_SERVER_REPO_ROOT), base_ref, len(paths),
+                    repo, head, base_ref, len(paths),
                     len(local_files), len(local_problems))
         return local_files, local_problems
     url = f"{MAC_RUNNER_URL.rstrip('/')}/v1/read_files"
@@ -1461,8 +1480,26 @@ def fetch_repo_files(
             problems.append(f"{path}: {item.get('error') or 'unreadable'}")
         else:
             files.append((path, content))
-    logger.info("read_files: repo=%s ref=%s requested=%d got=%d problems=%d",
-                repo, base_ref, len(paths), len(files), len(problems))
+    state = data.get("ref_state")
+    if isinstance(state, dict):
+        if ref_state is not None:
+            ref_state.update(state)
+            ref_state.setdefault("source", "runner")
+        if state.get("in_sync") is False:
+            # DEV-701: run 39 built a whole Centipede slice on a clone that
+            # predated the previous one. Every stage passed; the branch only
+            # read as destructive when compared against origin, after the
+            # compute was spent. This is the warning that was missing.
+            logger.warning(
+                "read_files: STALE CLONE serving repo=%s — %s",
+                repo, state.get("note") or "local ref is not the remote ref")
+        elif state.get("in_sync") is None:
+            logger.info("read_files: repo=%s staleness UNKNOWN (%s)",
+                        repo, state.get("note") or "no remote comparison")
+    logger.info("read_files: repo=%s ref=%s sha=%s requested=%d got=%d problems=%d",
+                repo, base_ref,
+                str((state or {}).get("local_sha") or "?")[:12] if isinstance(state, dict) else "?",
+                len(paths), len(files), len(problems))
     return files, problems
 
 
