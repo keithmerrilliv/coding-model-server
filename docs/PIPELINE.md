@@ -306,7 +306,7 @@ question it asks is whether the model's output was ever evaluated:
 | Outcome | Classes | What happens |
 |---|---|---|
 | **no-verdict** | `transport`, `http_refusal`, `server_malformed`, `empty_completion`, `truncated`, `runner_outage`, `prompt_too_large`, `sandbox_provisioning`, `shutdown`, `unknown_exception` | The task goes back to PENDING with `retry_count` untouched. A 4xx, a truncation or an empty completion also advances the rotation (the next dispatch reaches a different agent) without spending the budget. After `AUTONOMOUS_NO_VERDICT_CAP` (5) consecutive no-verdicts on one attempt the task is parked behind a task-bound clarification gate that names the infrastructure; approve to re-run, reject to abort. Fetch-time runner outages are uncapped (DEV-620); the build-check outage keeps DEV-538's cap of three; `prompt_too_large` is capped at one, because nothing about the prompt changes between attempts (DEV-633). |
-| **verdict** | `parse_failure`, `unappliable_edits`, `build_failure`, `tests_failed`, `review_rejected` | Charged against `MAX_RETRIES` with a synthetic rejected `code_review` gate carrying the feedback (the diagram below); at exhaustion every verdict class reaches synthesis. A reviewer parse failure is charged to the reviewer's own re-run budget first, then to the implementer. An attempt missing a file the plan's implement phase declares is a `parse_failure` too, decided before the build check (DEV-645). On a self-target spec the build check also runs the repository's own tests that import an edited module (`AUTONOMOUS_SELF_TARGET_EXISTING_TESTS`); one of them going red is a `tests_failed` verdict naming the test ids, decided before the gate (DEV-675). |
+| **verdict** | `parse_failure`, `unappliable_edits`, `build_failure`, `tests_failed`, `review_rejected` | Charged against `MAX_RETRIES` with a synthetic rejected `code_review` gate carrying the feedback (the diagram below); at exhaustion every verdict class reaches synthesis. A reviewer parse failure is charged to the reviewer's own re-run budget first, then to the implementer. An attempt missing a file the plan's implement phase declares is a `parse_failure` too, decided before the build check (DEV-645) — but only if the response finished: when it was cut off at `max_tokens` the missing files are our budget's doing, so it is a `truncated` no-verdict instead and the paths ride on the event as context (DEV-691). On a self-target spec the build check also runs the repository's own tests that import an edited module (`AUTONOMOUS_SELF_TARGET_EXISTING_TESTS`); one of them going red is a `tests_failed` verdict naming the test ids, decided before the gate (DEV-675). |
 | **terminal** | `synthesis_failed`, `design_exhausted`, `aborted` | The only branch that fails a spec. It closes every task row with it, so a terminal spec never leaves a task claiming to be RUNNING (DEV-532). |
 
 Each disposition is one `failure_classified` event — the queryable taxonomy;
@@ -382,12 +382,11 @@ table to read first when a run ends somewhere surprising.
 | Crash recoveries | 5 | — | Recoveries of one task from RUNNING after a daemon restart, counted from recovery's own records rather than `retry_count` (DEV-558). |
 | Synthesis repair rounds | 1 | — | Hard-coded. One repair, then the run ends. |
 | Repair pass-rate floor | 0.8 | `AUTONOMOUS_SYNTHESIS_REPAIR_MIN_RATE` | Below this, a repair call is not worth making. |
-| Parse retries | 2 / 2 | `AUTONOMOUS_ARCHITECT_PARSE_RETRIES`, `AUTONOMOUS_PER_FILE_PARSE_RETRIES` | Malformed agent output before giving up. |
+| Parse retries | 2 / 2 / 2 / 1 / 1 | `AUTONOMOUS_ARCHITECT_PARSE_RETRIES`, `AUTONOMOUS_PER_FILE_PARSE_RETRIES`, `AUTONOMOUS_MANIFEST_PARSE_RETRIES`, `AUTONOMOUS_PLANNER_PARSE_RETRIES`, `AUTONOMOUS_REVIEWER_PARSE_RETRIES` | Malformed agent output before giving up. Each buys a re-call of that one step, never one of `MAX_RETRIES`: a corrupted delimiter says nothing about whether the agent can do the work (DEV-507, DEV-431). |
 | Warning blocking | on | `AUTONOMOUS_BLOCK_ON_BUILD_WARNINGS` | The whole WARNING BLOCK intercept in diagram 5. `0` disables it. |
 | Targeted-retry repeats | 1 | `AUTONOMOUS_TARGETED_RETRY_MAX_REPEATS` | Identical targeted failures before the retry widens to a full regeneration. |
 | Manifest threshold | 8 | `AUTONOMOUS_MANIFEST_FILE_THRESHOLD` | Files (or declared units) a design enumerates before the implementer forks to manifest mode (diagram 4). |
 | Context refresh window | 600 s | `AUTONOMOUS_CONTEXT_REFRESH_SECONDS` | How old a context fetched at a *symbolic* `base_ref` may be before the next role re-verifies it against the runner (section 8). `0` re-verifies at every role boundary; a pinned commit is never re-verified. |
-| No-verdict cap | 5 | `AUTONOMOUS_NO_VERDICT_CAP` | Consecutive no-verdict failures on one attempt (section 6) before a task is parked behind an infrastructure gate. |
 | Collision policy | rename | `AUTONOMOUS_COLLISION_POLICY` | What the artifact ledger does with a cross-role write at a produced path (section 4): `rename` or `refuse`. |
 | Shrink refusal | 0.25 / 40 | `AUTONOMOUS_SHRINK_REFUSE_RATIO`, `AUTONOMOUS_SHRINK_MIN_BASELINE_LINES` | A write under this fraction of the repository file's lines and declarations is refused; baselines smaller than the line floor are never checked. |
 | Supervisor transitions | 8 | `AUTONOMOUS_MAX_SUPERVISOR_TRANSITIONS` | Budget for the supervisor, which is **off by default** (`AUTONOMOUS_SUPERVISOR=0`). When enabled, it replaces the fixed rejection edges in diagram 3 with an agent decision; nothing else in this document changes. |
@@ -447,6 +446,18 @@ last good fetch and says so in the prompt's journal line. Every fetch is one
 omitted and — separately — what is *unknown*, so a design or attempt
 generated without a file is identifiable from the event stream, not only from
 a WARNING.
+
+**Which tree it was read from.** The event also carries `ref_state`: the
+commit `base_ref` actually resolved to, and whether the clone that served it
+matches its remote (DEV-701). `base_ref: main` names a *local* ref, and run
+39 built a whole Centipede slice on a clone two slices behind origin — every
+stage internally consistent, externally wrong, and only visible when the
+delivered branch was diffed against origin after the compute was spent. The
+runner compares the two with `ls-remote` (one round trip, no fetch) rather
+than with `refs/remotes/...`, which is only as fresh as the last fetch and so
+agrees with a stale local ref. `in_sync: null` means the comparison could not
+be made — which is not the same as in sync, and is what an older runner
+reports by omitting the key entirely.
 
 **Absent is not unknown.** A path that did not read is one of two things: the
 runner said it is not at `base_ref` (a creation — the prompt marks it "new,
@@ -563,7 +574,7 @@ parse reached a human gate labelled "implementer done".
 
 ## 9. Invariants worth knowing before you change anything
 
-Four rules that are not visible in any diagram and that the code depends on.
+Six rules that are not visible in any diagram and that the code depends on.
 
 **Feedback channels are consumed exactly once.** A design rejection is written
 to `design_review_feedback.md`, read by the next architect run, and **deleted on
@@ -651,7 +662,7 @@ the key to the schema before emitting it.
 |---|---|---|---|
 | `failure_classified` | `outcome.dispose` / `record_local_charge` (DEV-629) | failed attempt | `cls`, `outcome`, `disposition`, `retry`, `agent`, `coarse_key` (DEV-631), `diagnostics`, `diagnostic_classes`, `cited_files`, `symbols` (DEV-529) |
 | `attempt_planned` | `retry_policy.record_attempt_plan` (DEV-631) | dispatch, before the call | `retry`, `agent`, `assignment`, `changed`, `identical_to`, `rationale`, `prior_cls`, `prior_agent` (the DEV-530 difficulty proxy) |
-| `context_assembled` | `_spec_context` (DEV-632, DEV-669) | runner fetch | `trigger`, `base_ref`, `editable`, `protected`, `omitted`, `unknown` (DEV-630) |
+| `context_assembled` | `_spec_context` (DEV-632, DEV-669) | runner fetch | `trigger`, `base_ref`, `editable`, `protected`, `omitted`, `unknown` (DEV-630), `ref_state` (DEV-701 — the commit served and whether that clone is current; optional, absent from an older runner) |
 
 Two things the shapes let you ask without reading a log. *Did changing the
 model change anything?* — join `attempt_planned` to the `failure_classified`
