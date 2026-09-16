@@ -1544,3 +1544,142 @@ def run_tests(
     return passed, (output or "").strip()
 
 
+# ── DEV-700: count test declarations per framework ───────────────────────────
+
+
+def count_test_declarations(source: str, framework: str) -> int:
+    """Count test declarations in *source* for the given *framework*.
+
+    Returns an integer count of test function declarations found. This is a
+    pure helper that does not perform any I/O and has no side effects.
+
+    Frameworks supported:
+      - "pytest": counts lines matching `def test_...(` pattern (indented or
+        top-level), excluding commented-out lines (`# def test_x(`).
+      - "swift_test": counts both XCTest (`func testFoo(`) and swift-testing
+        (`@Test` attribute line followed by a function declaration).
+
+    Unknown frameworks or empty/whitespace-only sources return 0.
+    """
+    source = source.strip()
+    if not source:
+        return 0
+
+    # Normalize framework name using existing aliases
+    normalized_framework = _APPLE_FRAMEWORK_ALIASES.get(framework.lower(), framework.lower())
+
+    if normalized_framework == "pytest":
+        return _count_pytest_tests(source)
+    elif normalized_framework in ("swift_test", "xcodebuild_test"):
+        return _count_swift_tests(source)
+    else:
+        return 0
+
+
+_PYTEST_TEST_RE = re.compile(r'^\s*def\s+test_\w+\s*\(')
+
+
+def _count_pytest_tests(source: str) -> int:
+    """Count pytest-style test functions in Python source."""
+    count = 0
+    in_multiline_string = False
+    
+    for line in source.splitlines():
+        stripped = line.lstrip()
+        
+        # Skip comment lines entirely
+        if stripped.startswith('#'):
+            continue
+        
+        # Handle triple-quote state tracking
+        if '"""' in line or "'''" in line:
+            # Count occurrences of triple quotes on this line
+            double_quotes = line.count('"""')
+            single_quotes = line.count("'''")
+            
+            # If odd number of triple quotes, toggle state
+            total_triple_quotes = double_quotes + single_quotes
+            if total_triple_quotes % 2 == 1:
+                in_multiline_string = not in_multiline_string
+            
+            # If we're now inside a multiline string, skip this line
+            if in_multiline_string:
+                continue
+        
+        # Skip if currently inside a multiline string
+        if in_multiline_string:
+            continue
+        
+        # Check for pytest test pattern
+        if _PYTEST_TEST_RE.match(line):
+            count += 1
+    
+    return count
+
+
+_SWIFT_FUNC_TEST_RE = re.compile(r'\bfunc\s+test[A-Z]\w*\s*\(')
+_SWIFT_ATTRIBUTE_RE = re.compile(r'^\s*@Test\b')
+
+
+def _count_swift_tests(source: str) -> int:
+    """Count Swift test functions (XCTest and swift-testing).
+
+    Counts @Test attribute lines immediately without lookahead. Each @Test
+    contributes exactly 1. Also counts func testFoo( declarations separately.
+    A line matching both (@Test func testFoo()) counts as ONE, not two.
+    """
+    count = 0
+    lines = source.splitlines()
+    
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        
+        # Skip comment lines
+        stripped = line.lstrip()
+        if stripped.startswith('//'):
+            i += 1
+            continue
+        
+        # Check for @Test attribute - count it immediately on its own line
+        if _SWIFT_ATTRIBUTE_RE.match(line):
+            count += 1
+            i += 1
+            continue
+        
+        # Check for XCTest-style func testFoo( pattern
+        if _SWIFT_FUNC_TEST_RE.search(line):
+            count += 1
+        
+        i += 1
+    
+    return count
+
+
+def declaration_delta(
+    before: dict[str, str],
+    after: dict[str, str],
+    framework: str,
+) -> dict[str, int]:
+    """Compute per-file delta of test declarations between two snapshots.
+
+    Takes two dictionaries mapping file paths to source text (before/after),
+    counts test declarations using *framework*'s rules, and returns a dictionary
+    mapping only those paths where the count changed. A path present in `after`
+    but not `before` contributes its full count; unchanged paths are absent.
+
+    This function is pure — it does not mutate inputs and performs no I/O.
+    """
+    result: dict[str, int] = {}
+    
+    all_paths = set(before.keys()) | set(after.keys())
+    
+    for path in all_paths:
+        before_count = count_test_declarations(before.get(path, ""), framework)
+        after_count = count_test_declarations(after.get(path, ""), framework)
+        
+        delta = after_count - before_count
+        if delta != 0:
+            result[path] = delta
+    
+    return result
