@@ -23,7 +23,56 @@ together.
 
 [Results so far](#results-so-far), including the failures, are below.
 
-**Contents:** [Architecture](#architecture) · [Quick Start](#quick-start) ·
+## What changed since v0.1.0
+
+**v0.1.0 (2026-08-19) was a proof of concept.** It worked: two specs had gone
+from markdown to an approved, test-passing patch against a real macOS app with
+no human writing code. But it worked on two specs, and what it proved was that
+the shape was right — not that the thing was reliable. Everything since has
+been finding out why two was not enough.
+
+**v0.2.0 is the same idea with a kernel under it.** 213 commits, 104 tickets.
+The decisions that kept killing runs moved out of the daemon's catch sites into
+four typed modules (~3,300 lines) with their own tests, behind a fault-injecting
+test tier. To be accurate about it: the daemon did not shrink — it is larger
+than it was. What moved was the *deciding*, not the line count. It is still the
+dispatch loop, and it is still the biggest file here:
+
+| | What it owns | Why it exists |
+|---|---|---|
+| `workspace.py` | One door for every artifact write | A reviewer overwrote the implementer's file at the same path and delivery shipped the overwrite — a 6-line stub in place of a 419-line suite, past a green gate ([DEV-602](https://keith-merrill4.atlassian.net/browse/DEV-602)) |
+| `outcome.py` | One classifier, one disposition | Sixteen catch sites each decided for themselves whether a failure was the model's fault. A dead server was charged to the implementer ([DEV-629](https://keith-merrill4.atlassian.net/browse/DEV-629)) |
+| `context.py` | One repository read, one prompt budget | Seven per-role fetches with seven outage behaviours; per-section limits that nothing summed, until a prompt passed 1 MB into an HTTP 413 ([DEV-632](https://keith-merrill4.atlassian.net/browse/DEV-632), [DEV-633](https://keith-merrill4.atlassian.net/browse/DEV-633)) |
+| `retry_policy.py` | A retry must differ from the attempt before it | Five attempts, four agents, six distinct signatures for what were two defects ([DEV-631](https://keith-merrill4.atlassian.net/browse/DEV-631)) |
+
+Underneath them, a **seam tier** ([DEV-634](https://keith-merrill4.atlassian.net/browse/DEV-634)):
+83 tests that inject one fault each — a dead runner, a truncated completion, a
+413, a sandbox that will not provision — through the *real* dispatch loop. Those
+faults used to be found by live runs, hours at a time.
+
+**The pipeline now works on itself.** From run 17 the target became this
+repository: specs that modify the daemon, run in its own sandbox, land on a
+`pipeline/` branch. Run 17 was the first time it changed its own daemon and
+delivered with nobody editing the code. Run 39 was the first Swift suite it
+wrote and ran to green end to end. Most of the tickets above were found that
+way, by the thing being fixed.
+
+**What has not changed:**
+
+- **No per-agent success rates.** Rotation is failure-triggered, so an agent's
+  position in it confounds its rate ([DEV-530](https://keith-merrill4.atlassian.net/browse/DEV-530)).
+  Every dispatch now records what preceded it; the comparison itself is not run.
+- **Delivery lands a branch, not a merge.** A human reviews and merges, always.
+- **The Mac runner is a single point of truth that can lag.** A run once built a
+  whole feature slice on a clone two slices behind origin, and every stage
+  reported success ([DEV-701](https://keith-merrill4.atlassian.net/browse/DEV-701));
+  a read now reports which commit served it, but nothing yet refuses to dispatch.
+- **It still needs a human at the gates.** That is the design, not a gap.
+
+Full ticket-by-ticket detail: [CHANGELOG.md](CHANGELOG.md).
+
+
+**Contents:** [What changed since v0.1.0](#what-changed-since-v010) · [Architecture](#architecture) · [Quick Start](#quick-start) ·
 [Agents](#agents) · [Client Commands](#client-commands) ·
 [Tool System](#tool-system) · [Context Management](#context-management) ·
 [Autonomous Mode](#autonomous-mode) · [API](#api) ·
