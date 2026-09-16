@@ -11,6 +11,9 @@ because reloading rebinds module-scope objects that other modules already hold
 references to. The parsing is tested through _parse_memory_roles and the
 behaviour through monkeypatching the module attribute.
 """
+import os
+import subprocess
+import sys
 from unittest import mock
 
 import pytest
@@ -44,9 +47,32 @@ class TestParsing:
 
 class TestDefaultStaysOff:
     def test_shipped_default_is_empty(self):
-        """The module constant as actually imported, with no env set."""
-        assert ex._parse_memory_roles(__import__("os").getenv(
-            "AUTONOMOUS_MEMORY_ROLES", "")) == ex.AUTONOMOUS_MEMORY_ROLES
+        """A deployment with no override gets no RAG for any role.
+
+        Asked in a clean subprocess on purpose. The previous form compared the
+        module constant against a live ``os.getenv`` — but the constant is a
+        snapshot taken at import, while ``.env`` is loaded into ``os.environ``
+        by whichever module imports first (DEV-508). Whether the two agreed
+        depended on test collection order, so this was the suite's one
+        permanent red and everyone learned to pass ``--deselect``. A red that
+        is always there stops being read, which is how a real regression walks
+        through a merge gated on the suite's exit code.
+
+        The subprocess imports only ``executor``, which does not call
+        ``load_dotenv``, so what it prints is the genuine shipped default —
+        the ``os.getenv("AUTONOMOUS_MEMORY_ROLES", "")`` fallback itself, not
+        a literal restated here.
+        """
+        env = {k: v for k, v in os.environ.items()
+               if k != "AUTONOMOUS_MEMORY_ROLES"}
+        out = subprocess.run(
+            [sys.executable, "-c",
+             "from coding_model_autonomous import executor as ex;"
+             "print(sorted(ex.AUTONOMOUS_MEMORY_ROLES))"],
+            env=env, capture_output=True, text=True, timeout=60)
+        assert out.returncode == 0, out.stderr
+        assert out.stdout.strip() == "[]", (
+            f"shipped default is {out.stdout.strip()}, not empty")
 
     def test_every_role_skips_memory_when_set_is_empty(self, monkeypatch):
         monkeypatch.setattr(ex, "AUTONOMOUS_MEMORY_ROLES", set())
