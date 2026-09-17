@@ -110,9 +110,19 @@ def test_the_prompt_no_longer_demands_tests_slash_universally():
 
 
 def test_the_prompt_tells_swift_reviewers_where_tests_go():
-    assert "Tests/<Target>Tests/" in REVIEWER_SYSTEM_PROMPT
     assert "SwiftPM" in REVIEWER_SYSTEM_PROMPT
     assert "swift_test" in REVIEWER_SYSTEM_PROMPT
+
+
+def test_the_prompt_does_not_assert_one_swift_layout():
+    """Electric Sheep is an Xcode project: its tests live at the repo root in
+    `ElectricSheepTests/`, NOT under `Tests/`. The first wording of this
+    guidance asserted the SwiftPM layout as if it were universal, which would
+    have pointed the reviewer at a directory the Xcode target does not
+    contain — the DEV-601 failure mode, from the guidance meant to prevent it.
+    """
+    assert "do NOT guess one" in REVIEWER_SYSTEM_PROMPT
+    assert "plan's declared output path always wins" in REVIEWER_SYSTEM_PROMPT
 
 
 def test_the_prompt_forbids_a_placeholder():

@@ -779,10 +779,15 @@ REVIEWER_SYSTEM_PROMPT = textwrap.dedent("""\
       implementer deliverables. The orchestrator rewrites a bare
       `test_*.py` to `tests/test_*.py` defensively; emit the correct
       path yourself.
-    - Swift (`swift_test` / `xcodebuild_test`): put them where the
-      package already puts its tests — typically
-      `Tests/<Target>Tests/<Name>.swift`. A `tests/` directory means
-      nothing to SwiftPM or to an Xcode scheme.
+    - Swift (`swift_test` / `xcodebuild_test`): there is no single
+      correct directory, so do NOT guess one. A SwiftPM package uses
+      `Tests/<Target>Tests/`; an Xcode project usually puts the test
+      target at the repository root, e.g. `<Target>Tests/`. Put your
+      file beside the test files the repository already has, at the
+      path the PLAN declares. `tests/` means nothing to either.
+
+    The plan's declared output path always wins over any convention
+    named here. If the plan gives a path, use it exactly (DEV-601).
 
     When the spec directs tests into an EXISTING test file, add them to
     that file and emit it as your test block. Do not invent a second
