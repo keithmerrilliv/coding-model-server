@@ -285,3 +285,46 @@ class TestCandidates:
     def test_protected_paths_are_deduplicated_and_stripped(self):
         assert c.protected_paths({"test_strategy": {"protected_paths": [" a ", "a", "", None, "b"]}}) == ["a", "b"]
         assert c.protected_paths({"test_strategy": "scalar"}) == []
+
+
+# ── the bound reader (DEV-714) ──────────────────────────────────────────────
+
+class TestReader:
+    """DEV-632 keeps one door to the runner's read path. DEV-714 needs a role
+    to read mid-dispatch, so the door opens rather than a second one being cut
+    beside it — and the caller cannot vary the repo or the ref."""
+
+    def _ctx(self, **kw):
+        return SpecContext(spec_id="s1", repo="electric-sheep",
+                           base_ref="main", candidates=[], declared=[],
+                           protected_paths=[], **kw)
+
+    def test_binds_the_repo_and_the_ref(self, monkeypatch):
+        seen = {}
+
+        def fake(repo, paths, base_ref="HEAD", **kw):
+            seen.update(repo=repo, paths=list(paths), base_ref=base_ref)
+            return ([("a.swift", "x")], [])
+
+        monkeypatch.setattr(c.test_runner, "fetch_repo_files", fake)
+        files, problems = self._ctx().reader()(["a.swift"])
+        assert seen == {"repo": "electric-sheep", "paths": ["a.swift"],
+                        "base_ref": "main"}
+        assert files == [("a.swift", "x")] and problems == []
+
+    def test_no_repository_is_no_reader(self):
+        # Distinct from a read that found nothing (DEV-630).
+        ctx = SpecContext(spec_id="s1", repo=None, base_ref="HEAD",
+                          candidates=[], declared=[], protected_paths=[])
+        assert ctx.reader() is None
+
+    def test_the_ref_is_captured_not_read_late(self, monkeypatch):
+        refs = []
+        monkeypatch.setattr(c.test_runner, "fetch_repo_files",
+                            lambda repo, paths, base_ref="HEAD", **kw:
+                            (refs.append(base_ref), ([], []))[1])
+        ctx = self._ctx()
+        read = ctx.reader()
+        ctx.base_ref = "some-other-branch"      # a later mutation must not leak
+        read(["a"])
+        assert refs == ["main"]

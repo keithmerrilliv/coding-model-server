@@ -1710,6 +1710,36 @@ def _render_approval_conditions(notes: str, *, approved: str,
     )
 
 
+ARCHITECT_TOOL_PROTOCOL = textwrap.dedent("""\
+    ## Reading a file you were not given (DEV-714)
+
+    The set of files above was chosen from the plan before you saw the spec. It
+    is regularly short of something you need — a protocol the modified type
+    conforms to, the real signature of a function it calls, the existing test
+    file you must fit alongside. You can ask for those.
+
+    To read a file, reply with NOTHING but read lines, one per file:
+
+        <<<READ_FILE>>>ElectricSheep/MetricsParticleBridge.swift
+
+    Rules that matter:
+
+    - A reply containing a read line is a REQUEST, not a design. Do not put a
+      `<<<DESIGN>>>` block in it — anything else in that reply is discarded.
+      You will be sent the contents and asked again.
+    - Paths are exact repository paths from the repository root, as they appear
+      in the plan. There is no directory listing and no glob or grep, so a
+      guessed path just comes back empty. Prefer paths you have already seen
+      named in the plan, the spec, or an import.
+    - Ask for everything you need in ONE reply. Each round costs a whole pass,
+      and there are very few of them.
+    - This is READ-ONLY. You are producing a design; you cannot write, edit or
+      run anything.
+    - Reading is for resolving a fact you need, not for a tour of the
+      repository. If you already have what the design turns on, design.
+    """)
+
+
 def build_architect_message(spec_md: str,
                             rejection_notes: str | None = None,
                             plan_yaml: str | None = None,
@@ -1719,6 +1749,7 @@ def build_architect_message(spec_md: str,
                             omitted_existing: list[str] | None = None,
                             omitted_reference: list[str] | None = None,
                             unresolved: list[str] | None = None,
+                            tools: bool = False,
                             ) -> list[dict[str, str]]:
     user_parts: list[str] = []
     # On a re-run (design-review rejection or supervisor design-revision), the
@@ -1762,11 +1793,18 @@ def build_architect_message(spec_md: str,
         shown = ("every file you may modify is shown here in full"
                  if not omitted_existing else
                  "the files shown here are shown in full")
+        # DEV-714: "do not ask to examine anything" was the right instruction
+        # when asking was futile (run 20's architect refused to design and
+        # asked for the module). With a tool loop it is simply false, and a
+        # model that believes it will guess at the API instead of reading it.
+        ask = ("and where you need a file you were not given, READ IT with the "
+               "tool below rather than guessing"
+               if tools else "and do not ask to examine anything")
         user_parts.append(
             "## Current contents of files the plan will MODIFY\n\n"
             "Design against THIS code — its real names, signatures, and "
-            "structure. Do not assume or invent an API, and do not ask to "
-            f"examine anything: {shown}.\n\n" + blocks + "\n\n")
+            f"structure. Do not assume or invent an API, {ask}: "
+            f"{shown}.\n\n" + blocks + "\n\n")
         if omitted_existing:
             user_parts.append(
                 "**Not shown** (over the context budget), but the plan still "
@@ -1791,17 +1829,26 @@ def build_architect_message(spec_md: str,
                 "another file of this repository, or in a framework. Treat "
                 "them as present and working, design against the call as "
                 "written, and do NOT invent a definition, rename them, or "
-                "conclude they are missing.\n\n")
+                "conclude they are missing."
+                + (" If a design decision turns on one of their real "
+                   "signatures, read the file that defines it with the tool "
+                   "below instead of assuming." if tools else "")
+                + "\n\n")
         user_parts.append("---\n\n")
     if reference_files or omitted_reference:
         user_parts.append(
             _render_reference_files(reference_files or [],
                                     omitted=omitted_reference) + "---\n\n")
+    if tools:
+        user_parts.append(ARCHITECT_TOOL_PROTOCOL + "\n---\n\n")
     user_parts.append(
         "## Specification\n\n"
         f"{spec_md}\n\n---\n\n"
         "Your task: produce a complete architecture design for this project. "
-        "Output exactly one <<<DESIGN>>>…<<<END>>> block as instructed."
+        + ("If a file you need was not shown, read it first — one "
+           "`<<<READ_FILE>>>` line per file and nothing else in the reply. "
+           "Otherwise, output " if tools else "Output ")
+        + "exactly one <<<DESIGN>>>…<<<END>>> block as instructed."
     )
     if constraints_block:
         # Restated after the spec: the failure this guards against is the
