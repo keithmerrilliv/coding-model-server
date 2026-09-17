@@ -455,6 +455,7 @@ def run_tests_endpoint(req: RunTestsRequest) -> RunTestsResponse:
                     wt, resolve_cmd, cmd,
                     timeout=timeout,
                     resolve_timeout=min(timeout, RESOLVE_TIMEOUT),
+                    warnings=integration_warnings,
                 )
                 passed = exit_code == 0
             else:
