@@ -61,6 +61,7 @@ A green build is NOT sufficient — the tests below are the gate.
     framework: xcodebuild_test
     required: true
     repo: electric-sheep
+    base_ref: main
     scheme: ElectricSheep
     destination: "platform=macOS"
     filter: ElectricSheepTests

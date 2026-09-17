@@ -6,6 +6,9 @@ Jira: DEV-592 (high), DEV-593 (high). Same loop, one change set.
 
 Repo: `electric-sheep`. `ElectricSheepApp.swift` spawns `runBridgeLoop()` (lines 75-100)
 from `.onAppear` (lines 36-40 visionOS, 51-54 macOS) as `Task { await runBridgeLoop() }`.
+`runBridgeLoop()` itself sits OUTSIDE any `#if`, so it compiles and runs under
+`platform=macOS`; only the two call sites are platform-gated. This spec changes the
+macOS call site only — see "Required change" below.
 The loop ticks at ~90 Hz: calls `bridge.update(from:in:audio:)`, steps the simulator with
 its own `dt`, and pushes audio levels. `MetricsParticleBridge.update` (lines 13-19) does:
 
@@ -44,7 +47,13 @@ if !recentMetrics.isEmpty {
 2. Store the loop task (e.g. `@State private var bridgeTask: Task<Void, Never>?`), guard
    `.onAppear` against double-start (`if bridgeTask == nil`), cancel it in
    `.onDisappear`, and keep the existing `while !Task.isCancelled` as the exit condition.
-   Apply to BOTH platform branches (visionOS and macOS window groups).
+
+   **Apply this to the macOS window-group branch ONLY.** Leave the `#if os(visionOS)`
+   branch exactly as it is — do not edit it, do not mirror the change into it, and do
+   not mention it in the design's file structure. The test destination is
+   `platform=macOS`, which never compiles a `#if os(visionOS)` branch, so an edit
+   there would ship unverified under a green suite. The visionOS half is tracked
+   separately and will be done when a device is available.
 
 ## Acceptance criteria
 
@@ -60,12 +69,16 @@ A green build is NOT sufficient — the tests below are the gate.
 - Unit test: cursor resets when the forcer is replaced (simulate a new generation) so
   the new run's metrics are consumed from its start.
 - MetricsParticleBridge currently has ZERO tests — the above establishes its suite.
+- The `#if os(visionOS)` branch of `ElectricSheepApp.swift` is UNCHANGED. A diff that
+  touches it fails this criterion, because `platform=macOS` cannot compile or test it
+  and the change would reach the repository unverified.
 
 ## test_strategy
 
     framework: xcodebuild_test
     required: true
     repo: electric-sheep
+    base_ref: main
     scheme: ElectricSheep
     destination: "platform=macOS"
     filter: ElectricSheepTests
