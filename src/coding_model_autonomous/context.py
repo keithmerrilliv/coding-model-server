@@ -311,6 +311,8 @@ _CALL_NOISE = frozenset("""
     asdict astuple cls self super reversed next iter repr vars dir hash id
     callable staticmethod classmethod property getattr setattr hasattr
     bytes bytearray divmod pow ord chr bin hex oct slice memoryview
+    CACurrentMediaTime CompositorLayer ImmersiveSpace WindowGroup Text
+    MLXArray softmax log withAnimation withTaskGroup DispatchQueue
 
     if else for while switch guard return catch throw defer repeat do
     init deinit super self print assert precondition fatalError
@@ -339,11 +341,21 @@ _STRIP_RES = (
     re.compile(r"'[^'\n]*'"),
 )
 
-# Above this the heuristic is not finding a missing file, it is confused, and a
-# long list of invented symbols is worse than silence. The real case is small:
-# run 39's entire defect was ONE name. DEV-630's rule again — an answer we do
-# not trust is not reported as a finding.
-UNRESOLVED_MAX = 6
+# How many names to SHOW. Not a suppression threshold — that premise was wrong.
+#
+# The first version of this stood down entirely above six candidates, on the
+# theory that a long list meant the heuristic was confused. Run 1 of the
+# Electric Sheep queue disproved it: three editable files, ZERO protected
+# files, and 17 candidates of which ELEVEN were real project types the
+# architect could not see (TokenMetrics, HallucinationSimulator, AudioManager,
+# HalluRenderer, ...). A long list did not mean confusion; it meant the served
+# context was very short — which is exactly the case the check exists for, and
+# exactly the case the cap silenced.
+UNRESOLVED_SHOW = 8
+
+# A ceiling that really does mean confusion rather than a thin context. Well
+# above anything a genuinely short modification set produces.
+UNRESOLVED_ABSURD = 40
 
 
 def _strip_prose(source: str) -> str:
@@ -374,11 +386,11 @@ def unresolved_symbols(editable: dict, served: dict) -> list[str]:
         n for n in called - declared - _CALL_NOISE - _KEYWORDS
         if not n.isupper()                        # SCREAMING_CASE is a constant
         and not n.startswith(_NOISE_PREFIXES))
-    if len(names) > UNRESOLVED_MAX:
+    if len(names) > UNRESOLVED_ABSURD:
         logger.info(
-            "context: %d candidate unresolved symbols is over the cap of %d — "
-            "the check is standing down rather than reporting a list it does "
-            "not trust (DEV-698)", len(names), UNRESOLVED_MAX)
+            "context: %d candidate unresolved symbols is past the absurdity "
+            "ceiling of %d — standing down rather than reporting a list that "
+            "large (DEV-698)", len(names), UNRESOLVED_ABSURD)
         return []
     return names
 

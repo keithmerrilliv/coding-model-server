@@ -1770,11 +1770,13 @@ def build_architect_message(spec_md: str,
                 "files above and are defined in neither the modifiable set nor "
                 "the read-only references: "
                 + ", ".join(f"`{name}`" for name in unresolved[:20])
-                + ". They exist in the repository — the spec simply did not "
-                "list the file that holds them. Treat them as present and "
-                "working, design against the call as written, and do NOT "
-                "invent a definition, rename them, or conclude they are "
-                "missing.\n\n")
+                + (f" (and {len(unresolved) - 20} more)"
+                   if len(unresolved) > 20 else "")
+                + ". They are defined outside the set you were given — in "
+                "another file of this repository, or in a framework. Treat "
+                "them as present and working, design against the call as "
+                "written, and do NOT invent a definition, rename them, or "
+                "conclude they are missing.\n\n")
         user_parts.append("---\n\n")
     if reference_files or omitted_reference:
         user_parts.append(
