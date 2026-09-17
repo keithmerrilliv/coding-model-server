@@ -4313,6 +4313,11 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
                        ", ".join(protected_touched))
 
     # Create code_review gate
+    # DEV-700: the spec's own wording is where a required new-test count lives.
+    try:
+        spec_md = (spec_dir / spec.source_md_path).read_text()
+    except OSError:
+        spec_md = ""
     file_list = "\n".join(f"- `{p}`" for p, _ in result.files)
     if restored:
         file_list += "\n" + "\n".join(
@@ -4362,7 +4367,8 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
             f"## Code review: {spec.title}\n\n"
             f"Spec ID: `{spec.id}`\n"
             f"Retry: {task.retry_count}\n"
-            f"{_build_check_line(build_passed, build_output, build_framework)}\n"
+            f"{_build_check_line(build_passed, build_output, build_framework)}"
+            f"{_test_delta_line(spec_dir, result.files, build_framework, spec_md)}\n"
             f"The implementer produced the following files:\n\n{file_list}\n"
             f"{missing_block}{protected_block}{tolerant_block}{ledger_block}{build_excerpt}\n"
             f"Approve to proceed to testing, or reject with notes.\n"
@@ -5125,6 +5131,74 @@ def _test_split_suffix(build_output: str) -> str:
             "off": "existing tests off"}.get(split.mode, split.mode)
     return (f" — {split.new_total} new + {split.existing_total} existing "
             f"test(s) ({what})")
+
+
+# DEV-700: an explicit new-test count in the spec's acceptance criteria.
+# "at least 5 new tests covering criteria 1-5" is the shape run 39 used.
+_REQUIRED_TESTS_RE = re.compile(
+    r"\b(?:at\s+least\s+|minimum\s+of\s+|>=\s*)?(\d{1,3})\s+new\s+tests?\b",
+    re.IGNORECASE)
+
+
+def required_new_test_count(spec_md: str) -> int | None:
+    """The new-test count the spec demands, or None when it names none."""
+    counts = [int(m) for m in _REQUIRED_TESTS_RE.findall(spec_md or "")]
+    return max(counts) if counts else None
+
+
+def attempt_test_delta(spec_dir: Path, produced: list[tuple[str, str]],
+                           framework: str) -> dict[str, int] | None:
+    """Per-file change in test declarations against base_ref, or None.
+
+    None means "could not tell" — no context.json, so no base_ref snapshot to
+    compare against. DEV-630's rule: that is not the same as "nothing was
+    added", and the caller must not report a zero it did not measure.
+    """
+    ctx = _context.SpecContext.load(spec_dir)
+    if ctx is None:
+        return None
+    before = {**ctx.protected, **ctx.editable}
+    after = dict(before)
+    after.update({path: content for path, content in produced})
+    return test_runner.declaration_delta(before, after, framework)
+
+
+def _test_delta_line(spec_dir: Path, produced: list[tuple[str, str]],
+                     framework: str | None, spec_md: str) -> str:
+    """One line on the gate saying how many tests the attempt actually added.
+
+    DEV-700: run 39's implementer produced all three planned files, correctly
+    implemented the feature, and wrote ZERO new tests — 26 test functions
+    before, 26 after. The gate said "compiled and the suite passed", which was
+    true of the 26 pre-existing tests and told a reviewer nothing about the
+    slice. DEV-645's planned-output check is satisfied (every declared file
+    exists); the missing deliverable is INSIDE a file that does exist.
+    """
+    if not framework:
+        return ""
+    delta = attempt_test_delta(spec_dir, produced, framework)
+    if delta is None:
+        return ""                      # could not tell; say nothing
+    added = sum(v for v in delta.values() if v > 0)
+    removed = -sum(v for v in delta.values() if v < 0)
+    required = required_new_test_count(spec_md)
+
+    if added == 0:
+        line = ("\n⚠ **Tests added: 0.** No test function was added anywhere "
+                "in this attempt. A green suite here is the pre-existing tests "
+                "passing — nothing verified the behaviour this spec asks for")
+        if required:
+            line += f", and the spec requires at least {required}"
+        return line + " (DEV-700).\n"
+
+    line = f"\nTests added: **{added}**"
+    if removed:
+        line += f" (and {removed} removed)"
+    if required and added < required:
+        line += (f" — the spec requires at least {required}, so this attempt "
+                 f"is {required - added} short (DEV-700)")
+        return "⚠ " + line + ".\n"
+    return line + ".\n"
 
 
 def _build_check_line(build_passed: bool | None, build_output: str = "",
