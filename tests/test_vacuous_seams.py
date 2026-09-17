@@ -160,3 +160,63 @@ def test_the_prompt_still_demands_an_api_fix_for_code_criteria():
     from coding_model_autonomous.executor import ARCHITECT_SYSTEM_PROMPT
     assert "fix the API" in ARCHITECT_SYSTEM_PROMPT
     assert "ABOUT THE CODE" in ARCHITECT_SYSTEM_PROMPT
+
+
+# ── DEV-715: the count check must not punish the hatch ─────────────────────
+
+def _design(criteria, seams):
+    return ("## Acceptance Criteria Checklist\n\n"
+            + "\n".join(f"- {c}" for c in criteria)
+            + "\n\n## Criterion Seams\n\n"
+            + "\n".join(f"- {s}" for s in seams) + "\n")
+
+
+REAL_SEAM = ("{n} | setup: `var g = Game()` | act: `g.tick()` | "
+             "assert: `g.count == 1`")
+
+
+def test_suite_level_criteria_are_not_counted_against_the_seams():
+    """Run 2's architect did exactly what DEV-715's prompt told it to.
+
+    It marked three criteria `(suite-level)`, gave them no seams, and wrote
+    three real seams for the other three. The count check compared 3 seams
+    against 6 criteria and rejected a correct design. The prompt half of the
+    hatch shipped without this half.
+    """
+    from coding_model_autonomous.design_testability import (
+        KIND_COUNT_MISMATCH, check_design_testability)
+    md = _design(
+        ["Build succeeds with no new warnings. (suite-level — build property)",
+         "Double-update spawns 3 particles",
+         "Capacity clamp consumes 5",
+         "Cursor resets on forcer replacement",
+         "This file establishes its suite. (suite-level)",
+         "The visionOS branch is UNCHANGED. (suite-level — diff property)"],
+        [REAL_SEAM.format(n="Double-update spawns 3 particles"),
+         REAL_SEAM.format(n="Capacity clamp consumes 5"),
+         REAL_SEAM.format(n="Cursor resets on forcer replacement")])
+    assert KIND_COUNT_MISMATCH not in {f.kind for f in
+                                       check_design_testability(md)}
+
+
+def test_a_genuine_count_mismatch_still_fires():
+    """Negative control — the hatch must not disable the rule."""
+    from coding_model_autonomous.design_testability import (
+        KIND_COUNT_MISMATCH, check_design_testability)
+    md = _design(
+        ["Build succeeds. (suite-level)", "Criterion A", "Criterion B"],
+        [REAL_SEAM.format(n="Criterion A")])          # B has no seam
+    kinds = {f.kind for f in check_design_testability(md)}
+    assert KIND_COUNT_MISMATCH in kinds
+
+
+def test_the_mismatch_message_says_how_many_were_skipped():
+    """So a human reading the gate knows the marker was honoured."""
+    from coding_model_autonomous.design_testability import (
+        KIND_COUNT_MISMATCH, check_design_testability)
+    md = _design(
+        ["Build succeeds. (suite-level)", "Criterion A", "Criterion B"],
+        [REAL_SEAM.format(n="Criterion A")])
+    detail = next(f.detail for f in check_design_testability(md)
+                  if f.kind == KIND_COUNT_MISMATCH)
+    assert "suite-level" in detail and "correctly have none" in detail
