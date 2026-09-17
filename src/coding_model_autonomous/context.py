@@ -539,6 +539,30 @@ class SpecContext:
                            omitted=list(self.omitted), stale=self.stale,
                            unknown_files=unknown)
 
+    def reader(self) -> Optional[Callable[[Iterable[str]],
+                                          tuple[list[tuple[str, str]],
+                                                list[str]]]]:
+        """A read into THIS context's repo at THIS context's base_ref.
+
+        DEV-632 made this module the daemon's only door to the runner's read
+        path, because every role used to grow its own fetch with its own
+        outage handling. DEV-714 needs a role to read a file mid-dispatch —
+        so the door opens, rather than a second one being cut beside it. The
+        repo and the ref are bound here and the caller cannot vary them.
+
+        None when the spec names no repository: there is nothing to read, and
+        that is a different answer from a read that found nothing.
+        """
+        if not self.repo:
+            return None
+        repo, base_ref = self.repo, self.base_ref
+
+        def read(paths: Iterable[str]) -> tuple[list[tuple[str, str]],
+                                                list[str]]:
+            return test_runner.fetch_repo_files(repo, list(paths),
+                                                base_ref=base_ref)
+        return read
+
     # ── reuse policy ────────────────────────────────────────────────────────
 
     def covers(self, candidates: Iterable[str], protected: Iterable[str]) -> bool:

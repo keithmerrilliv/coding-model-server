@@ -91,8 +91,8 @@ from coding_model_autonomous.jira_client import (
 )
 from coding_model_autonomous.jira_sync import JiraSync
 from coding_model_autonomous import (
-    adversarial, apply_edits, delivery, design_testability, executor,
-    swift_prechecks, test_runner,
+    adversarial, apply_edits, architect_tools, delivery, design_testability,
+    executor, swift_prechecks, test_runner,
 )
 from coding_model_autonomous.test_runner import run_tests
 from coding_model_autonomous.retry_policy import (
@@ -154,6 +154,13 @@ GATE_REPORT_INTERVAL = float(os.getenv("ORCHESTRATOR_GATE_REPORT_INTERVAL", "300
 SPEC_WORKERS = int(os.getenv("ORCHESTRATOR_SPEC_WORKERS", "4"))
 LOG_LEVEL = os.getenv("ORCHESTRATOR_LOG_LEVEL", "INFO").upper()
 SUPERVISOR_ENABLED = os.getenv("AUTONOMOUS_SUPERVISOR", "0") == "1"
+# DEV-714: let the architect read files it was not served. On by default —
+# DEV-702 measured the same marker protocol in eval and the tool-using arm won
+# 5-1, and the failure it addresses (designing against an API nobody showed
+# the model) has cancelled two specs. The switch is here so it can be turned
+# off without a deploy if a live run shows it spending rounds on a tour.
+ARCHITECT_TOOLS = os.getenv("AUTONOMOUS_ARCHITECT_TOOLS", "1").lower() not in (
+    "0", "false", "no")
 
 logging.basicConfig(
     level=LOG_LEVEL,
@@ -1834,10 +1841,18 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
     # runner outage parks the task instead of stripping the protected
     # section and charging the attempt (DEV-544).
     try:
-        view = _spec_context(db, spec, spec_md, role="architect").select("architect")
+        ctx = _spec_context(db, spec, spec_md, role="architect")
+        view = ctx.select("architect")
     except RunnerOutage as e:
         _requeue_implement_for_runner_outage(db, spec, task, str(e))
         return
+    # DEV-714: the architect may read files for itself. The selection above is
+    # made from the plan before anyone reads the spec, and when it is short a
+    # file the architect has had exactly two options — invent the API
+    # (DEV-698, five attempts, spec cancelled) or refuse to design (run 20).
+    # Needs a repository to read from; a greenfield spec has nothing to ask.
+    architect_read = ctx.reader()
+    use_tools = ARCHITECT_TOOLS and architect_read is not None
     # DEV-698: symbols the editable files call that the whole served set never
     # defines. Computed once from the full context, not from the budget-trimmed
     # render, so a file dropped for size is not reported as undefined.
@@ -1849,7 +1864,7 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
             existing_files=existing, reference_files=reference,
             approval_conditions=plan_conditions,
             omitted_existing=omitted_e, omitted_reference=omitted_r,
-            unresolved=unresolved)
+            unresolved=unresolved, tools=use_tools)
 
     # DEV-633: the architect's editable render was the pipeline's one entirely
     # unbudgeted file section — a raw join of every modified file into a model
@@ -1868,6 +1883,20 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
             _context.Section(_context.SECTION_PROTECTED, view.reference_files,
                              executor.PROTECTED_FILES_MAX_CHARS),
         ])
+    # DEV-714: tool results are prompt text like any other, and they arrive
+    # AFTER the allocation above has already sized the window. Bound them by
+    # what the allocation actually left free, or an architect that reads three
+    # files answers a 413 instead of a design. The fixed cost was measured with
+    # the protocol included, so withdrawing the offer here only frees space.
+    tool_chars = min(architect_tools.DEFAULT_MAX_CHARS,
+                     max(0, alloc.input_budget_chars - alloc.section_chars))
+    if use_tools and tool_chars < architect_tools.MIN_USEFUL_CHARS:
+        logger.info("spec %s: architect tools withdrawn — the served context "
+                    "leaves only %d chars of headroom (DEV-714)",
+                    spec.id, tool_chars)
+        use_tools = False
+    # Built after the decision: the closure reads `use_tools` at call time, so
+    # a withdrawn offer is also absent from the prompt.
     messages = _architect_prompt(
         alloc.files(_context.SECTION_EDITABLE),
         alloc.files(_context.SECTION_PROTECTED),
@@ -1881,16 +1910,55 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
     # persisted alongside spec.md so the post-mortem isn't blind.
     max_attempts = executor.ARCHITECT_PARSE_RETRIES + 1
     result = None
+    memory_query = executor.spec_memory_query(spec_md)
     for attempt in range(1, max_attempts + 1):
         meta: dict = {}
         raw = call_agent("architect", messages, meta=meta,
-                         memory_query=executor.spec_memory_query(spec_md))
-        _note_truncation(db, spec, task, "architect", meta, executor.ARCHITECT_MAX_TOKENS)
+                         memory_query=memory_query)
+        _note_truncation(db, spec, task, "architect", meta,
+                         executor.ARCHITECT_MAX_TOKENS)
+        # DEV-714: a reply that asks for files is answered and re-sent. A fresh
+        # budget per parse attempt, because a retry is a fresh conversation and
+        # would otherwise inherit a spend it never made. The loop cannot run
+        # away: refusals cost a round too, so a model that only ever emits an
+        # unavailable tool still terminates.
+        budget = (architect_tools.ToolBudget(max_chars=tool_chars)
+                  if use_tools else None)
+        convo = messages
+        while budget is not None and not budget.exhausted():
+            if not architect_tools.is_tool_request(raw):
+                break
+            answer = architect_tools.resolve_round(
+                architect_tools.parse_tool_markers(raw),
+                read=architect_read, budget=budget)
+            logger.info("spec %s: architect asked for %s (round %d/%d)",
+                        spec.id, ", ".join(budget.calls[-6:]),
+                        budget.rounds_used, budget.max_rounds)
+            convo = [*convo, {"role": "assistant", "content": raw},
+                     {"role": "user", "content": answer}]
+            meta = {}
+            raw = call_agent("architect", convo, meta=meta,
+                             memory_query=memory_query)
+            _note_truncation(db, spec, task, "architect", meta,
+                             executor.ARCHITECT_MAX_TOKENS)
+        tool_fields = (architect_tools.summary(budget) if budget is not None
+                       else {})
+        if budget is not None and budget.rounds_used:
+            # Its own line in the ledger: what the architect fetched for itself
+            # is context the CONTEXT_ASSEMBLED row does not know about.
+            db.record_event(EventKind.CONTEXT_ASSEMBLED, spec_id=spec.id,
+                            payload={"trigger": "architect_tools",
+                                     "repo": ctx.repo,
+                                     "base_ref": ctx.base_ref, **tool_fields})
+        # Markers cannot reach the design: the testability checker reads
+        # backticked spans and would score one as content.
+        if use_tools:
+            raw = architect_tools.strip_tool_markers(raw)
         result = parse_architect_response(raw)
         db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
                         payload={"role": "architect",
                                  "result_kind": type(result).__name__,
-                                 "attempt": attempt,
+                                 "attempt": attempt, **tool_fields,
                                  **executor.agent_event_fields(meta)})
         if not isinstance(result, ParseError):
             if attempt > 1:
