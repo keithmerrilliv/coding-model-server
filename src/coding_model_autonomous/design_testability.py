@@ -197,10 +197,21 @@ _SUITE_LEVEL_RE = re.compile(
     r"\b(?:suite[-_ ]level|meta[-_ ]criterion|no[-_ ]seam)\b", re.IGNORECASE)
 
 
+def is_suite_level_text(text: str) -> bool:
+    """True when a criterion's own wording declares it suite-level.
+
+    Needed on the CHECKLIST as well as on seams: a suite-level criterion has
+    no seam by design, so the count check has to recognise it from the
+    checklist text alone or it punishes the very behaviour the marker exists
+    to produce (DEV-715).
+    """
+    return bool(_SUITE_LEVEL_RE.search(text or ""))
+
+
 def is_suite_level(seam: "Seam") -> bool:
     """True when the criterion declares itself a property of the suite."""
-    return bool(_SUITE_LEVEL_RE.search(seam.criterion)
-                or _SUITE_LEVEL_RE.search(seam.setup))
+    return (is_suite_level_text(seam.criterion)
+            or is_suite_level_text(seam.setup))
 
 
 def _clean_criterion(text: str) -> str:
@@ -753,14 +764,23 @@ def check_design_testability(design_md: str) -> list[Finding]:
         )]
 
     findings: list[Finding] = list(tuple_findings)
-    if len(seams) != len(criteria):
+    # DEV-715: a criterion marked suite-level has NO seam BY DESIGN — that is
+    # what the marker instructs. Counting it here made the check punish the
+    # exact behaviour the hatch exists to produce: run 2's architect marked
+    # three criteria suite-level, wrote three real seams for the other three,
+    # and was rejected for "6 criteria but 3 seams". The prompt half of the
+    # hatch shipped without this half.
+    seam_bearing = [c for c in criteria if not is_suite_level_text(c)]
+    if len(seams) != len(seam_bearing):
+        skipped = len(criteria) - len(seam_bearing)
+        detail = (f"{len(seam_bearing)} acceptance criteria need a seam but "
+                  f"{len(seams)} were emitted. Emit exactly one seam per "
+                  f"criterion, in checklist order.")
+        if skipped:
+            detail += (f" ({skipped} criterion/criteria are marked "
+                       f"suite-level and correctly have none.)")
         findings.append(Finding(
-            kind=KIND_COUNT_MISMATCH,
-            criterion="",
-            detail=(
-                f"{len(criteria)} acceptance criteria but {len(seams)} seams. "
-                f"Emit exactly one seam per criterion, in checklist order."),
-        ))
+            kind=KIND_COUNT_MISMATCH, criterion="", detail=detail))
 
     types = declared_types(design_md)
     members = declared_members(design_md)
@@ -771,8 +791,8 @@ def check_design_testability(design_md: str) -> list[Finding]:
         # Prefer the checklist's own wording when the counts line up, so the
         # architect reads back the criterion it wrote.
         labelled = seam
-        if len(seams) == len(criteria):
-            labelled = Seam(criterion=criteria[i], setup=seam.setup,
+        if len(seams) == len(seam_bearing):
+            labelled = Seam(criterion=seam_bearing[i], setup=seam.setup,
                             act=seam.act, assert_=seam.assert_)
         if missing := labelled.missing():
             findings.append(Finding(
