@@ -26,6 +26,7 @@ import logging
 import shlex
 import shutil
 import subprocess
+import threading
 import tempfile
 import time
 import uuid
@@ -67,6 +68,8 @@ _SSH_OPTS = [
 CLONE_TIMEOUT = 300
 SYNC_TIMEOUT = 600
 TEARDOWN_TIMEOUT = 60
+# How long a dispatch waits for the single VM slot before refusing.
+VM_SLOT_TIMEOUT = 30
 
 
 class VMError(RuntimeError):
@@ -148,37 +151,136 @@ def _wait_for_ssh(name: str, boot_proc: "subprocess.Popen",
         f"{_boot_log(boot_log)}")
 
 
-def _destroy(name: str, boot_proc: "subprocess.Popen | None") -> None:
-    """Best-effort, unconditional teardown — a leaked VM holds tens of GB."""
+# The runner is the only writer of this prefix, so a VM still carrying it
+# once no run is in flight is by definition a leak (DEV-705).
+VM_NAME_PREFIX = "cmr-"
+
+# VM dispatch is serialised. tart has a system VM limit and discovering it by
+# hitting it produces an opaque refusal at a DIFFERENT spec's dispatch, three
+# seconds in, after that attempt already spent its context assembly and its
+# write. One at a time is also simply what this host can do.
+_VM_SLOT = threading.Lock()
+_ACTIVE_VMS: set[str] = set()
+_ACTIVE_LOCK = threading.Lock()
+
+
+def list_runner_vms() -> "list[str]":
+    """Every VM carrying the runner's prefix. Empty when tart cannot be read."""
     try:
-        subprocess.run(["tart", "stop", name],
-                       capture_output=True, text=True, timeout=TEARDOWN_TIMEOUT)
+        listed = subprocess.run(["tart", "list"], capture_output=True,
+                                text=True, timeout=TEARDOWN_TIMEOUT)
     except Exception:
-        logger.warning("tart stop %s failed", name, exc_info=True)
+        logger.warning("tart list failed while looking for leaked VMs",
+                       exc_info=True)
+        return []
+    if listed.returncode != 0:
+        return []
+    names = []
+    for line in listed.stdout.splitlines()[1:]:
+        cols = line.split()
+        if len(cols) >= 2 and cols[1].startswith(VM_NAME_PREFIX):
+            names.append(cols[1])
+    return names
+
+
+def sweep_leaked_vms(warnings: "list[str] | None" = None) -> "list[str]":
+    """Reclaim runner VMs no live dispatch owns. Returns what was reclaimed.
+
+    DEV-705: teardown is best-effort and a failed `tart delete` used to leak
+    silently, so leaks accumulated until tart refused the next clone. Sweeping
+    before claiming a slot means one bad teardown costs the NEXT run nothing
+    instead of costing every run after it everything.
+
+    Only VMs absent from _ACTIVE_VMS are touched, so a concurrent dispatch is
+    never swept out from under itself.
+    """
+    with _ACTIVE_LOCK:
+        active = set(_ACTIVE_VMS)
+    leaked = [n for n in list_runner_vms() if n not in active]
+    reclaimed = []
+    for name in leaked:
+        logger.warning("reclaiming leaked VM %s from an earlier run (DEV-705)",
+                       name)
+        _tart_quiet(["tart", "stop", name])
+        if _tart_quiet(["tart", "delete", name]):
+            reclaimed.append(name)
+    if reclaimed and warnings is not None:
+        warnings.append(
+            f"[vm] reclaimed {len(reclaimed)} leaked VM(s) from an earlier "
+            f"run before starting this one: {', '.join(reclaimed)}. A previous "
+            "teardown did not complete (DEV-705).")
+    return reclaimed
+
+
+def _tart_quiet(argv: list[str]) -> bool:
+    """Run a tart command, swallowing failure. True when it succeeded."""
+    try:
+        done = subprocess.run(argv, capture_output=True, text=True,
+                              timeout=TEARDOWN_TIMEOUT)
+        return done.returncode == 0
+    except Exception:
+        logger.warning("%s failed", " ".join(argv), exc_info=True)
+        return False
+
+
+def _destroy(name: str, boot_proc: "subprocess.Popen | None",
+             warnings: "list[str] | None" = None) -> None:
+    """Best-effort, unconditional teardown — a leaked VM holds tens of GB.
+
+    DEV-705: a teardown that fails now SAYS so on the response. The evidence
+    used to live only in the Mac's log, on a host nobody is watching, and the
+    first anyone knew of it was an unrelated spec dying on tart's VM limit.
+    """
+    stopped = _tart_quiet(["tart", "stop", name])
     if boot_proc is not None and boot_proc.poll() is None:
         boot_proc.kill()
-    try:
-        subprocess.run(["tart", "delete", name],
-                       capture_output=True, text=True, timeout=TEARDOWN_TIMEOUT)
-    except Exception:
-        logger.warning("tart delete %s failed — reclaim it by hand "
-                       "(tart delete %s)", name, name, exc_info=True)
+    deleted = _tart_quiet(["tart", "delete", name])
+    if deleted:
+        return
+    logger.error("tart delete %s failed — the VM is LEAKED; reclaim it with "
+                 "`bash scripts/reclaim_tart_vms.sh --delete` (DEV-705)", name)
+    if warnings is not None:
+        warnings.append(
+            f"[vm] teardown of {name} did not complete (stop "
+            f"{'ok' if stopped else 'failed'}, delete failed) — the VM is "
+            "leaked and will be reclaimed before the next dispatch. This is "
+            "an infrastructure fault, not a fault in the code under test "
+            "(DEV-705).")
 
 
 def run_tests_in_vm(worktree: Path, resolve_cmd: "list[str] | None",
                     cmd: list[str], *, timeout: int,
-                    resolve_timeout: int) -> "tuple[int | None, str]":
+                    resolve_timeout: int,
+                    warnings: "list[str] | None" = None
+                    ) -> "tuple[int | None, str]":
     """Run one test dispatch inside a throwaway VM; ALWAYS destroys it.
 
     Returns (exit_code, combined_output). exit_code None means the VM
     infrastructure failed or the budget ran out — not a test verdict.
+
+    DEV-705: dispatch is serialised on _VM_SLOT and leaked VMs from earlier
+    runs are swept before the clone, so this never discovers tart's system
+    limit the hard way. Anything appended to *warnings* reaches the response
+    as an infrastructure note rather than being read as the attempt's fault.
     """
-    name = f"cmr-{uuid.uuid4().hex[:12]}"
+    if not _VM_SLOT.acquire(timeout=VM_SLOT_TIMEOUT):
+        # Refusing outright beats queueing behind a run whose budget we cannot
+        # see, and beats letting tart refuse us with a message that names two
+        # VM ids and no remedy.
+        return None, (
+            f"[vm] another VM dispatch has held the single VM slot for more "
+            f"than {VM_SLOT_TIMEOUT}s — refusing to start a second one. This "
+            "is an infrastructure limit on the runner host, not a fault in "
+            "the code under test (DEV-705).")
+    name = f"{VM_NAME_PREFIX}{uuid.uuid4().hex[:12]}"
     boot_proc: "subprocess.Popen | None" = None
     boot_log: "Path | None" = None
     deadline = time.monotonic() + timeout
     resolve_output = ""
     try:
+        sweep_leaked_vms(warnings)
+        with _ACTIVE_LOCK:
+            _ACTIVE_VMS.add(name)
         clone = subprocess.run(["tart", "clone", Config.VM_IMAGE, name],
                                capture_output=True, text=True,
                                timeout=CLONE_TIMEOUT)
@@ -249,6 +351,13 @@ def run_tests_in_vm(worktree: Path, resolve_cmd: "list[str] | None",
         return tr.returncode, (resolve_output + (tr.stdout or "") + "\n" +
                                (tr.stderr or ""))
     finally:
-        _destroy(name, boot_proc)
-        if boot_log is not None:
-            boot_log.unlink(missing_ok=True)
+        try:
+            _destroy(name, boot_proc, warnings)
+            if boot_log is not None:
+                boot_log.unlink(missing_ok=True)
+        finally:
+            # Drop ownership before releasing the slot, so the next dispatch's
+            # sweep sees this VM as reclaimable if teardown left it behind.
+            with _ACTIVE_LOCK:
+                _ACTIVE_VMS.discard(name)
+            _VM_SLOT.release()

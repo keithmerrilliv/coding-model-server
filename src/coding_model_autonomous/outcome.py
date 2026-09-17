@@ -492,6 +492,44 @@ def repo_packages(paths: Iterable[str]) -> set[str]:
     return {x for x in out if re.match(r"^[A-Za-z_]\w*$", x)}
 
 
+# DEV-705: the runner's VM layer prefixes its own infrastructure events with
+# `[vm] `, and tart's refusal carries its own unmistakable sentence. None of
+# these mean the code under test is wrong — the code was never run. Matching
+# the specific phrasings rather than any `[vm]` line keeps a test that happens
+# to print the token from being reclassified out of a real failure.
+_VM_INFRA_PHRASES = (
+    "the number of vms exceeds the system limit",
+    "tart clone",
+    "tart run exited",
+    "before the guest came up",
+    "worktree sync failed",
+    "vm containment is enabled",
+    "another vm dispatch has held the single vm slot",
+    "vm containment unavailable",
+)
+
+
+def _vm_infrastructure_refusal(output: str) -> Optional[str]:
+    """The line proving the VM never carried the tests, or None.
+
+    A leaked-VM refusal used to arrive as `passed=False` with no build reason
+    and was charged to the implementer as TESTS_FAILED — on a target where a
+    dispatch costs 3-4 minutes, and for a fault on the runner host that the
+    model could not have patched its way out of (DEV-705).
+    """
+    if not output:
+        return None
+    for line in output.splitlines():
+        stripped = line.strip()
+        low = stripped.lower()
+        if not (low.startswith("[vm]")
+                or "the number of vms exceeds the system limit" in low):
+            continue
+        if any(phrase in low for phrase in _VM_INFRA_PHRASES):
+            return stripped
+    return None
+
+
 def classify_test_run(output: str, *, role: str, passed: bool,
                       build_reason: Optional[str], unreachable: bool,
                       packages: Iterable[str] = (), phase: str = "build_check",
@@ -502,6 +540,13 @@ def classify_test_run(output: str, *, role: str, passed: bool,
         return Failure(FailureClass.RUNNER_OUTAGE, role, "runner",
                        (output or "").strip().splitlines()[0] if output else "runner unreachable",
                        phase=phase)
+    # Before anything that could read as a verdict: the VM never ran the code.
+    # Infrastructure outranks a build reason here, because a guest that did not
+    # come up produces both, and only one of them is the cause (DEV-705).
+    if not passed and (vm_line := _vm_infrastructure_refusal(output or "")):
+        return Failure(FailureClass.SANDBOX_PROVISIONING, role, "sandbox",
+                       f"the test VM never ran the code: {vm_line}",
+                       phase=phase, extra={"vm_infrastructure": True})
     if build_reason:
         m = _MISSING_MODULE_RE.search(build_reason) or _MISSING_MODULE_RE.search(output or "")
         if m:

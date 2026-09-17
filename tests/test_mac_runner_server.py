@@ -423,9 +423,13 @@ def test_xcodebuild_dispatches_into_a_vm_not_onto_the_host(client, monkeypatch):
     monkeypatch.setattr(server.vm, "vm_available", lambda: None)
     seen = {}
 
-    def fake_vm_run(wt, resolve_cmd, cmd, *, timeout, resolve_timeout):
+    def fake_vm_run(wt, resolve_cmd, cmd, *, timeout, resolve_timeout,
+                    warnings=None):
         seen["resolve_cmd"] = resolve_cmd
         seen["cmd"] = cmd
+        # DEV-705: the VM layer reports a leaked teardown on the response, so
+        # the dispatch must hand it the request's own warnings list.
+        seen["warnings"] = warnings
         return 0, "guest tests ok"
 
     monkeypatch.setattr(server.vm, "run_tests_in_vm", fake_vm_run)
@@ -443,6 +447,10 @@ def test_xcodebuild_dispatches_into_a_vm_not_onto_the_host(client, monkeypatch):
     body = resp.json()
     assert body["passed"] is True
     assert "guest tests ok" in body["output"]
+    # DEV-705: a leaked teardown has to have somewhere to be reported. Passing
+    # None here would put the evidence back in the Mac's log, where the first
+    # anyone knew of a leak was an unrelated spec dying on tart's VM limit.
+    assert isinstance(seen["warnings"], list)
     # Both commands target the GUEST's DerivedData — building into the host's
     # would be wrong twice over (path doesn't exist in the guest; and the
     # guest must not share host build state).
