@@ -220,3 +220,50 @@ def test_the_mismatch_message_says_how_many_were_skipped():
     detail = next(f.detail for f in check_design_testability(md)
                   if f.kind == KIND_COUNT_MISMATCH)
     assert "suite-level" in detail and "correctly have none" in detail
+
+
+def test_a_suite_level_seam_entry_is_parsed_not_dropped():
+    """Where the architect actually writes the marker.
+
+    Run 2 put it on the seam entry — `- **Build succeeds** | suite-level` —
+    not on the checklist. parse_seams dropped any entry with no setup/act/
+    assert label, so three markers vanished before counting and a correct
+    design still read as "6 criteria but 3 seams". Second half-fix in a row
+    on this feature; this is where the marker has to be recognised.
+    """
+    from coding_model_autonomous.design_testability import (
+        is_suite_level, parse_seams)
+    md = ("## Criterion Seams\n\n"
+          "- **Build succeeds** | suite-level\n"
+          "- **Real one** | setup: `var g = G()` | act: `g.t()` | "
+          "assert: `g.n == 1`\n")
+    seams = parse_seams(md)
+    assert len(seams) == 2
+    assert is_suite_level(seams[0]) and not is_suite_level(seams[1])
+
+
+def test_a_suite_level_seam_does_not_trip_the_missing_steps_rule():
+    """It has no steps BY DESIGN — that is what the marker instructs."""
+    from coding_model_autonomous.design_testability import (
+        KIND_INCOMPLETE_SEAM, check_design_testability)
+    md = ("## Acceptance Criteria Checklist\n\n"
+          "- Build succeeds\n- Real one\n\n"
+          "## Criterion Seams\n\n"
+          "- **Build succeeds** | suite-level\n"
+          "- **Real one** | setup: `var g = G()` | act: `g.t()` | "
+          "assert: `g.n == 1`\n")
+    assert KIND_INCOMPLETE_SEAM not in {f.kind for f in
+                                        check_design_testability(md)}
+
+
+def test_an_ordinary_seam_with_no_steps_still_trips_it():
+    """Negative control: only the MARKER buys the exemption."""
+    from coding_model_autonomous.design_testability import (
+        KIND_INCOMPLETE_SEAM, check_design_testability)
+    md = ("## Acceptance Criteria Checklist\n\n"
+          "- Real one\n- Other\n\n"
+          "## Criterion Seams\n\n"
+          "- **Real one** | setup: `var g = G()` | act: `g.t()` | assert: `g.n == 1`\n"
+          "- **Other** | setup: `var h = H()` | act: `h.t()`\n")
+    assert KIND_INCOMPLETE_SEAM in {f.kind for f in
+                                    check_design_testability(md)}

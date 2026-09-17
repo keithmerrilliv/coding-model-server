@@ -173,6 +173,14 @@ def parse_seams(design_md: str) -> list[Seam]:
         for i in range(1, len(parts) - 1, 2):
             found[parts[i].lower()] = parts[i + 1].strip(" |—-\t")
         if not found:
+            # DEV-715: a suite-level entry has no setup/act/assert BY DESIGN —
+            # that is what the marker instructs. Dropping it here made it
+            # invisible to the count, so a design that used the hatch exactly
+            # as told still read as "6 criteria but 3 seams". Keep it, with
+            # empty steps, and let is_suite_level skip the per-seam rules.
+            if is_suite_level_text(entry):
+                seams.append(Seam(criterion=_clean_criterion(head),
+                                  setup="", act="", assert_=""))
             continue
         seams.append(Seam(criterion=_clean_criterion(head),
                           setup=found.get("setup", ""),
@@ -771,7 +779,9 @@ def check_design_testability(design_md: str) -> list[Finding]:
     # and was rejected for "6 criteria but 3 seams". The prompt half of the
     # hatch shipped without this half.
     seam_bearing = [c for c in criteria if not is_suite_level_text(c)]
-    if len(seams) != len(seam_bearing):
+    # A suite-level SEAM entry is a marker, not a seam; count only real ones.
+    real_seams = [s for s in seams if not is_suite_level(s)]
+    if len(real_seams) != len(seam_bearing) and len(seams) != len(criteria):
         skipped = len(criteria) - len(seam_bearing)
         detail = (f"{len(seam_bearing)} acceptance criteria need a seam but "
                   f"{len(seams)} were emitted. Emit exactly one seam per "
@@ -794,6 +804,12 @@ def check_design_testability(design_md: str) -> list[Finding]:
         if len(seams) == len(seam_bearing):
             labelled = Seam(criterion=seam_bearing[i], setup=seam.setup,
                             act=seam.act, assert_=seam.assert_)
+        # DEV-710/DEV-715: checked FIRST. A suite-level criterion has no
+        # reachable API, so every rule below is meaningless for it — including
+        # the missing-steps rule, whose whole point is that a test needs three
+        # steps. Running them on it is what taught the architect to fake one.
+        if is_suite_level(labelled) or is_suite_level(seam):
+            continue
         if missing := labelled.missing():
             findings.append(Finding(
                 kind=KIND_INCOMPLETE_SEAM,
@@ -803,11 +819,6 @@ def check_design_testability(design_md: str) -> list[Finding]:
                     f"needs all three — construct the state, invoke the "
                     f"behaviour, observe the outcome."),
             ))
-        if is_suite_level(labelled):
-            # DEV-710: every rule below needs a reachable API. Running them on
-            # a criterion that has none by construction is what taught the
-            # architect to fake one.
-            continue
         findings.extend(_check_names_a_call(labelled))
         findings.extend(_check_symbols(labelled, types, design_md))
         findings.extend(_check_equatable(labelled, types, members, design_md))
