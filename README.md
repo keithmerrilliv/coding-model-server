@@ -227,11 +227,25 @@ for method, prefill figures, and the caveat about raw-vs-proxy numbers).
 `decide()` function call) and never gets marker-based shell tools.
 `brainstorm` has no tools at all.
 
-Three eval-only agents are also registered (so they appear in `/v1/models`) but
+Five eval-only agents are also registered (so they appear in `/v1/models`) but
 are left out of the table above: `devstral_implementer` (Devstral Small 2 24B,
 DEV-414 eval), `dense_architect_nothink` (`dense_architect` with
-`enable_thinking=False`, the DEV-556 eval arm), and `qwen38_architect`
-(Qwen3.8-27B with embedded MTP, the DEV-615 architect-eval candidate).
+`enable_thinking=False`, the DEV-556 eval arm), `qwen38_architect`
+(Qwen3.8-27B with embedded MTP, the DEV-615 architect-eval candidate), and
+`glimmer_architect` / `glimmer_implementer` (Muse-Glimmer-30B, the DEV-692
+candidate for both slots — 131K Q4_0 ctx, ngl 36 `--swa-full`, 10.9 decode).
+
+The Glimmer pair is **registered but not routed**: neither appears in the
+implementer rotation, in `ALLOWED_IMPLEMENTER_AGENTS` or in the complexity-tier
+map, and `ARCHITECT_AGENT` still points at `dense_architect`. Reach them by
+pinning `AUTONOMOUS_ARCHITECT_AGENT=glimmer_architect` or
+`AUTONOMOUS_IMPLEMENTER_AGENT=glimmer_implementer`, or by addressing them
+directly. Registration is still what arms the prompt-fit check — the allocator
+reads each agent's window off its config — so an unrouted agent is a known
+quantity to the router rather than an unknown one. Wire the routing when the
+pairwise eval returns a verdict. Note that Muse **Spark** itself is hosted and
+cannot be served here; Glimmer is its open-weight distill, and there is
+deliberately no `spark` alias.
 
 **Expert offload.** `cpu_moe=True` (`--cpu-moe`) keeps *all* MoE expert weights
 on CPU. `n_cpu_moe=N` (`--n-cpu-moe N`) keeps only the first N layers' experts
@@ -248,7 +262,8 @@ than a smaller context.
 they aren't listed in `/v1/models`:
 `architect` → `dense_architect`, `q36_architect` → `dense_architect_nothink`,
 `m25_architect` → `moe_architect`, `m25_implementer` → `moe_implementer`,
-`glm` → `native_implementer`, `nemotron` → `brainstorm`. The interactive client
+`glm` → `native_implementer`, `nemotron` → `brainstorm`,
+`glimmer` → `glimmer_implementer`. The interactive client
 (`--model`, `/agent`, `@name`) currently needs the canonical name.
 
 ## Client Commands

@@ -138,6 +138,10 @@ THEME_STYLES = {
     # they rendered with the default robot theme.
     "deep_reviewer":     {"color": COLORS['CYAN'],    "icon": "\U0001f52c", "prompt": "Deep Review"},
     "supervisor":        {"color": COLORS['HEADER'],  "icon": "\U0001f9ed", "prompt": "Supervisor"},
+    # DEV-692: Muse-Glimmer eval arms. Registered but not routed, so these only
+    # render when someone pins them by env or addresses them directly.
+    "glimmer_architect":   {"color": COLORS['HEADER'],  "icon": "\u2728",     "prompt": "Glimmer Arch"},
+    "glimmer_implementer": {"color": COLORS['GREEN'],   "icon": "\u2728",     "prompt": "Glimmer Impl"},
     "default":           {"color": COLORS['WARNING'], "icon": "\U0001f916", "prompt": "Agent"},
 }
 

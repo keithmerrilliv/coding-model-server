@@ -722,6 +722,46 @@ Update these after each retrieval step. They help you stay organized and efficie
         n_ubatch=2048,
     )
 
+    # MUSE-GLIMMER-30B UD-Q4_K_XL (DEV-692) — Meta's open-weight distill of the
+    # HOSTED Muse Spark 1.1. Spark itself is not wirable here: every agent in this
+    # server is a local llama-server GGUF and there is no remote-provider path.
+    # Glimmer is the thing that exists on disk, and it is what "bring Spark
+    # online" resolves to (Keith confirmed 2026-09-15).
+    #
+    # general.architecture = `muse-glimmer`, a NEW arch — not a Qwen re-label.
+    # The PINNED build already speaks it: libllama.so.0.1.0 (a94d563, Aug 13)
+    # exports llama_model_muse_glimmer::load_arch_hparams / load_arch_tensors /
+    # graph, so no llama-server upgrade is needed. 52 blocks, native 131072 ctx,
+    # embedding_length 6656, head_count 32 / head_count_kv 2 (GQA 16:1),
+    # rope.freq_base 500000, sliding_window 2048 / pattern 4,
+    # final_logit_softcapping 20.0. The chat template is MULTIMODAL (it emits
+    # `<|patch|>` for image parts); we only ever send text parts, so that path
+    # stays cold, but do not assume the template is text-only if it is edited.
+    #
+    # SWEEP 2026-09-15 on the RTX 5080 (16,303 MiB), production argv (-fa auto,
+    # --mmap, --cache-reuse 256, --lookup-cache-dynamic, -np 1), 131072 ctx,
+    # Q4_0 KV, one fixed prompt, 256 predicted (decode / prefill tok/s @ MiB free):
+    #   ngl=28 --swa-full    8.1 /  236 @ 4,128     ngl=28 no-swa   8.1 / 182 @ 5,329
+    #   ngl=32 --swa-full    9.3 /  276 @ 2,946     ngl=32 no-swa   9.3 / 208 @ 4,253
+    #   ngl=36 --swa-full   10.9 /  328 @ 1,763  <- THE PICK
+    #   ngl=40 --swa-full   13.2 /  407 @   579     ngl=36 no-swa  10.9 / 243 @ 3,173
+    #   ngl=44 --swa-full   OOM, exit 1             ngl=40 no-swa  13.2 / 298 @ 2,093
+    #                                               ngl=44 no-swa  16.6 / 384 @ 1,015
+    # --swa-full costs a FLAT ~1.1 GB at every rung and buys ~35% faster prefill
+    # plus prompt-cache reuse; decode is completely unaffected by it. ngl=36
+    # --swa-full is the only rung that clears the ~1.4 GB reload floor (DEV-616
+    # rejected 692 MiB free; the 3.6 crashed production at 714, spec_b956e1c9)
+    # while keeping the cache reuse the retry loop's --cache-reuse 256 depends on.
+    # ngl=40 at 579 free and ngl=44 no-swa at 1,015 free are both under it.
+    _MUSE_GLIMMER_30B = _create_model_config(
+        'MODEL_PATH_MUSE_GLIMMER_30B',
+        f'{_MODELS_ROOT}/unsloth/Muse-Glimmer-30B-GGUF/Muse-Glimmer-30B-UD-Q4_K_XL.gguf',
+        36, 131072, 2048,
+        server_extra_args=['--jinja', '--reasoning-format', 'none', '--swa-full'],
+        type_k=2, type_v=2,
+        n_ubatch=2048,
+    )
+
     # ── Non-Coding Model models ──
 
     # Nemotron-3-Nano-30B-A3B Q4_K_M — NVIDIA hybrid Mamba-Transformer MoE
@@ -985,6 +1025,38 @@ Update these after each retrieval step. They help you stay organized and efficie
             _DENSE_27B_38,
             executor=True
         ),
+        # ── Muse-Glimmer agents (DEV-692) ──
+        # Two entries over ONE model config, the same shape as dense_architect /
+        # supervisor over _DENSE_27B: the slots differ only by system prompt, so
+        # a single GGUF serves both and the eval isolates the model variable.
+        #
+        # REGISTRATION ONLY — deliberately NOT routed. These are absent from
+        # _IMPLEMENTER_ROTATION, ALLOWED_IMPLEMENTER_AGENTS and
+        # TIER_TO_IMPLEMENTER, and ARCHITECT_AGENT still points at
+        # dense_architect. An unevaluated model that is reachable by rotation or
+        # by an architect tier recommendation is an unevaluated model in
+        # production, which is the exact confound DEV-692 was parked to avoid.
+        # Reach them by env pin instead — AUTONOMOUS_ARCHITECT_AGENT or
+        # AUTONOMOUS_IMPLEMENTER_AGENT — or address them directly from the eval
+        # harness. Wire the routing once the pairwise eval has a verdict.
+        #
+        # Registration alone is what arms the DEV-676 window fit check:
+        # _agent_ctx_limit reads n_ctx off the agent's model config, so being in
+        # AGENTS is exactly what stops eligible_agents treating Glimmer's window
+        # as unknown and mis-routing it (that bug cost runs 32 and 34 six
+        # attempts each). No separate window table to update.
+        'glimmer_architect': _create_agent_config(
+            'Architect — Muse-Glimmer-30B UD-Q4_K_XL (Meta, 131K Q4_0 ctx, ngl=36 --swa-full, DEV-692 eval arm)',
+            _ARCHITECT_SYSTEM_PROMPT,
+            _MUSE_GLIMMER_30B,
+            executor=True
+        ),
+        'glimmer_implementer': _create_agent_config(
+            'Implementer — Muse-Glimmer-30B UD-Q4_K_XL (Meta, 131K Q4_0 ctx, ngl=36 --swa-full, DEV-692 eval arm)',
+            _IMPLEMENTER_SYSTEM_PROMPT,
+            _MUSE_GLIMMER_30B,
+            executor=True
+        ),
         # Supervisor — meta-orchestrator. Always invoked with native tools
         # (decide()), never with marker-based shell tools, so executor=False.
         'supervisor': _create_agent_config(
@@ -1036,6 +1108,11 @@ Update these after each retrieval step. They help you stay organized and efficie
         'm25_implementer': 'moe_implementer',
         'glm':             'native_implementer',
         'nemotron':        'brainstorm',
+        # Vendor-nickname handle, same pattern as `glm` and `nemotron` above.
+        # There is deliberately NO `spark` alias: Muse Spark is the hosted model
+        # this server cannot serve, and an alias by that name would resolve to a
+        # different model than the one it names (DEV-692).
+        'glimmer':         'glimmer_implementer',
     }
 
     @classmethod
