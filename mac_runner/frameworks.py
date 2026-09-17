@@ -9,9 +9,16 @@ logger = logging.getLogger("mac_runner.frameworks")
 
 # Per-framework default timeouts (seconds). Cold xcodebuild can be slow;
 # swift test is faster but still heavier than pytest.
+#
+# The VM path spends this budget on boot, worktree sync and package resolution
+# before the test starts (vm.py sets its deadline at dispatch, not at the test
+# step). A resolve that times out alone costs RESOLVE_TIMEOUT — 300s — and one
+# such run came within 77s of the old 900s ceiling with 823.4s elapsed, so a
+# passing test was a few seconds of overhead away from being reported as a
+# timeout. 1200s keeps that overhead from deciding the verdict.
 DEFAULT_TIMEOUTS: dict[str, int] = {
     "swift_test": 300,
-    "xcodebuild_test": 900,
+    "xcodebuild_test": 1200,
 }
 
 
