@@ -753,11 +753,27 @@ Update these after each retrieval step. They help you stay organized and efficie
     # rejected 692 MiB free; the 3.6 crashed production at 714, spec_b956e1c9)
     # while keeping the cache reuse the retry loop's --cache-reuse 256 depends on.
     # ngl=40 at 579 free and ngl=44 no-swa at 1,015 free are both under it.
+    #
+    # DEV-692 item 5, 2026-09-17: `--reasoning-format none` is WRONG for this
+    # model and was copied here from the Qwen agents without checking. The flag
+    # means "leaves thoughts unparsed in message.content". Qwen's thoughts are
+    # `<think>` tags that streaming.strip_thinking removes, so `none` is
+    # harmless there. Glimmer reasons in HARMONY CHANNELS delimited by
+    # `<|start|>assistant to=user<|message|>` / `<|eom|>` / `<|eot|>`, which
+    # strip_thinking has no pattern for — so its planning reached
+    # parse_architect_response intact. Its planning discusses the output format
+    # in prose ("Ensure DESIGN block starts with <<<DESIGN>>> then # Architecture
+    # etc."), so it CONTAINS the marker, and the parser anchored on that instead
+    # of the real design that follows. All 3 item-5 attempts parsed and all 3
+    # were unusable; the control (dense_architect, same prompt, same harness)
+    # was 3/3 clean, so this is Glimmer-specific and not a parser bug.
+    # `deepseek` routes thoughts to message.reasoning_content and leaves
+    # content clean.
     _MUSE_GLIMMER_30B = _create_model_config(
         'MODEL_PATH_MUSE_GLIMMER_30B',
         f'{_MODELS_ROOT}/unsloth/Muse-Glimmer-30B-GGUF/Muse-Glimmer-30B-UD-Q4_K_XL.gguf',
         36, 131072, 2048,
-        server_extra_args=['--jinja', '--reasoning-format', 'none', '--swa-full'],
+        server_extra_args=['--jinja', '--reasoning-format', 'deepseek', '--swa-full'],
         type_k=2, type_v=2,
         n_ubatch=2048,
     )
