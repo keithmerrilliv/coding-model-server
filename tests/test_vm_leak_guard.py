@@ -168,3 +168,50 @@ def test_successful_teardown_is_silent():
     with mock.patch.object(subprocess, "run", _fake_tart(calls)):
         vm._destroy("cmr-deadbeef0002", None, warnings)
     assert warnings == []
+
+
+# ── DEV-705 follow-up: the boundary, not an enumeration ────────────────────
+
+# Verbatim from Electric Sheep run 2 (spec_c8606c0c), 2026-09-17. The VM
+# cloned, booted and got an address; SSH into the guest then failed. Nothing
+# compiled and no test ran — yet the first version of this classifier let it
+# through, because `ssh transport failed` was not on the phrase list.
+SSH_TRANSPORT = (
+    "[vm] ssh transport failed mid-run\n\n"
+    "admin@192.168.64.3: Permission denied "
+    "(publickey,password,keyboard-interactive).\n")
+
+
+def test_an_unanticipated_vm_failure_is_still_a_no_verdict():
+    """The lesson: enumerate the boundary, not the failures you have seen.
+
+    Requiring BOTH the `[vm]` prefix AND a known phrase meant any new phrasing
+    fell through and opened a human gate on an unverified build.
+    """
+    failure = classify_test_run(SSH_TRANSPORT, role="implementer",
+                                passed=False, build_reason=None,
+                                unreachable=False)
+    assert failure is not None
+    assert failure.cls is FailureClass.SANDBOX_PROVISIONING
+    assert failure.cls in NO_VERDICT_CLASSES
+
+
+@pytest.mark.parametrize("output", [
+    pytest.param("[vm] guest ready\nTest Case '-[T t]' failed.\n"
+                 "** TEST FAILED **", id="xctest-ran"),
+    pytest.param("[vm] guest ready\n/p/F.swift:8:1: error: no such type",
+                 id="compiler-diagnostic"),
+    pytest.param("[vm] fixture up\n3 passed, 1 failed", id="pytest-summary"),
+    pytest.param("[vm] up\nExecuted 44 tests, with 0 failures",
+                 id="executed-summary"),
+])
+def test_a_vm_line_beside_a_real_result_is_still_a_verdict(output):
+    """The control that keeps the widening honest.
+
+    A `[vm]` line alongside a build or suite result means the tests RAN and
+    something printed the token — not that the VM failed.
+    """
+    failure = classify_test_run(output, role="implementer", passed=False,
+                                build_reason=None, unreachable=False)
+    assert failure.cls is FailureClass.TESTS_FAILED
+    assert failure.cls in VERDICT_CLASSES
