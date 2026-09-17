@@ -2073,6 +2073,7 @@ def build_implementer_message(
     new_files: list[str] | None = None,
     omitted_existing: list[str] | None = None,
     omitted_reference: list[str] | None = None,
+    unresolved: list[str] | None = None,
 ) -> list[dict[str, str]]:
     # DEV-581: edit-mode only changes anything when there ARE existing files to
     # edit. With no existing files the response is all new whole files, so the
@@ -2133,6 +2134,31 @@ def build_implementer_message(
         user_parts.append("\n\n")
         user_parts.append(_render_reference_files(reference_files or [],
                                                   omitted=omitted_reference))
+    if unresolved:
+        # DEV-698. The architect got this list first; the implementer is the
+        # role that actually needs it. spec_0aab1c17 died here: it needed an
+        # audio spy, subclassed `AudioManager` without being served the file,
+        # and `AudioManager` is `final`. Five attempts, a synthesis pass and a
+        # repair pass, all on "what shape is this type I cannot see".
+        user_parts.append(
+            "\n\n---\n\n## Referenced but NOT shown\n\n"
+            "These symbols are used by the files above and are defined "
+            "nowhere in what you were given: "
+            + ", ".join(f"`{n}`" for n in unresolved[:20])
+            + (f" (and {len(unresolved) - 20} more)"
+               if len(unresolved) > 20 else "")
+            + ".\n\nThey are real — in another file of this repository, or in "
+            "a framework. You have NOT seen their declarations, so you do not "
+            "know their shape.\n\n"
+            "- Call them as the existing code already calls them. Copy the "
+            "call form from the files above.\n"
+            "- Do NOT subclass one, conform to one, or construct one from "
+            "guesswork. A type you cannot read may be `final`, may have "
+            "required initialisers, or may be a protocol with members you "
+            "cannot see.\n"
+            "- If a test needs a double for one of these, inject a closure or "
+            "a small protocol you define yourself rather than subclassing "
+            "theirs.\n")
     if rejection_notes:
         if edit_mode:
             task_line = (

@@ -14,7 +14,10 @@ NOTHING else changed produced a valid design on the first attempt.
 import pytest
 
 from coding_model_autonomous.context import SpecContext, unresolved_symbols
-from coding_model_autonomous.executor import build_architect_message
+from coding_model_autonomous.executor import (
+    build_architect_message,
+    build_implementer_message,
+)
 
 GAME = """struct Game {
     mutating func tick() {
@@ -164,3 +167,43 @@ def test_the_prompt_no_longer_claims_they_are_all_in_the_repository():
         "# Spec", existing_files=[("a.swift", GAME)], unresolved=["Thing"])
     body = "\n".join(m["content"] for m in msgs)
     assert "or in a framework" in body
+
+
+# ── DEV-698: the IMPLEMENTER is the role that meets the compiler ───────────
+
+def _impl(unresolved):
+    return "\n".join(m["content"] for m in build_implementer_message(
+        "# Spec", "# Design", existing_files=[("a.swift", GAME)],
+        unresolved=unresolved))
+
+
+def test_the_implementer_is_told_what_it_cannot_see():
+    """spec_0aab1c17 died here, not at the architect.
+
+    It needed an audio spy, subclassed `AudioManager` without being served the
+    file, and `AudioManager` is `final`. Five attempts, a synthesis pass and a
+    repair pass, all on the shape of a type it could not read. The list existed
+    the whole time and only the architect got it.
+    """
+    body = _impl(["AudioManager", "ForcingStrategy", "Particle"])
+    assert "Referenced but NOT shown" in body
+    assert "AudioManager" in body
+
+
+def test_the_implementer_is_warned_off_subclassing_what_it_cannot_read():
+    """The specific mistake that killed the spec."""
+    body = _impl(["AudioManager"])
+    assert "Do NOT subclass one" in body
+    assert "final" in body
+    assert "inject a closure" in body
+
+
+def test_a_healthy_context_costs_the_implementer_no_prompt():
+    """Negative control."""
+    assert "Referenced but NOT shown" not in _impl([])
+    assert "Referenced but NOT shown" not in _impl(None)
+
+
+def test_the_implementer_list_truncates_like_the_architect_one():
+    body = _impl([f"Thing{i}" for i in range(25)])
+    assert "and 5 more" in body
