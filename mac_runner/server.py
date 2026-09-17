@@ -48,6 +48,11 @@ app = FastAPI(title="coding-model mac-runner", version="0.1.0")
 # fetch should not consume the whole budget the actual test run needs.
 RESOLVE_TIMEOUT = int(os.getenv("CODING_MODEL_RUNNER_RESOLVE_TIMEOUT", "300"))
 
+# Above this, a failure's output is test output and belongs to the caller;
+# at or below it, the failure is infrastructure and the runner log should
+# carry the reason itself.
+INFRA_OUTPUT_CHARS = 2000
+
 
 def _sandbox_available() -> bool:
     """Separate seam so tests can exercise both paths off-macOS."""
@@ -474,6 +479,12 @@ def run_tests_endpoint(req: RunTestsRequest) -> RunTestsResponse:
     duration = time.monotonic() - start
     logger.info("test result: %s in %.1fs (%d chars output)",
                 "PASS" if passed else "FAIL", duration, len(output))
+    # A real test failure runs to megabytes; a short one is an infrastructure
+    # message (sync failed, ssh dropped, budget spent) that otherwise exists
+    # only in the reply to the caller. Logging it here is the difference
+    # between diagnosing the next one and guessing at its character count.
+    if not passed and len(output) <= INFRA_OUTPUT_CHARS:
+        logger.warning("short failure output: %s", output.strip())
     if integration_warnings:
         # First, not last: a 20k-char xcodebuild log buries a trailing note,
         # and this changes how the whole result should be read.

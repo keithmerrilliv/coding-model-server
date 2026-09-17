@@ -241,3 +241,50 @@ def test_vm_available_requires_the_image_to_be_pulled(monkeypatch):
     reason = vm.vm_available()
     assert reason is not None and "tart pull" in reason, (
         "clone would otherwise trigger a mid-run multi-GB image download")
+
+
+def _boot_logs(d):
+    return sorted(p.name for p in d.glob("*-tart-run.log"))
+
+
+def test_boot_log_is_discarded_once_the_tests_return_a_verdict(
+        tmp_path, monkeypatch):
+    """A run that reached a verdict explains itself through the test output,
+    so `tart run`'s log is noise and gets cleaned up."""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    monkeypatch.setattr(vm.tempfile, "gettempdir", lambda: str(logs))
+    _wire(monkeypatch, _happy)
+
+    exit_code, _ = _dispatch(tmp_path)
+
+    assert exit_code == 0
+    assert _boot_logs(logs) == []
+
+
+def test_boot_log_survives_a_dispatch_that_never_reached_a_verdict(
+        tmp_path, monkeypatch, caplog):
+    """`tart run`'s output is the only account of what the guest was doing.
+    Deleting it on an infrastructure failure leaves the next investigation
+    with a character count and nothing else (spec_c8606c0c)."""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    monkeypatch.setattr(vm.tempfile, "gettempdir", lambda: str(logs))
+
+    def behave(cmd):
+        if "xcodebuild test" in cmd[-1]:
+            return subprocess.CompletedProcess(
+                cmd, 255, stdout="", stderr="Connection closed")
+        return _happy(cmd)
+
+    _wire(monkeypatch, behave)
+
+    with caplog.at_level("WARNING"):
+        exit_code, output = _dispatch(tmp_path)
+
+    assert exit_code is None
+    assert "ssh transport failed" in output
+    kept = _boot_logs(logs)
+    assert len(kept) == 1, kept
+    # The path is useless if the operator cannot find it.
+    assert any(kept[0] in r.getMessage() for r in caplog.records), caplog.text

@@ -277,6 +277,10 @@ def run_tests_in_vm(worktree: Path, resolve_cmd: "list[str] | None",
     boot_log: "Path | None" = None
     deadline = time.monotonic() + timeout
     resolve_output = ""
+    # Discarding `tart run`'s log on an infrastructure failure throws away the
+    # only account of what the guest was doing. Cleared once the test itself
+    # returns a verdict; every other exit keeps the log and says where it is.
+    keep_boot_log = True
     try:
         sweep_leaked_vms(warnings)
         with _ACTIVE_LOCK:
@@ -348,13 +352,19 @@ def run_tests_in_vm(worktree: Path, resolve_cmd: "list[str] | None",
         if tr.returncode == 255:
             return None, (resolve_output + "[vm] ssh transport failed "
                           f"mid-run\n{tr.stdout}\n{tr.stderr}")
+        keep_boot_log = False
         return tr.returncode, (resolve_output + (tr.stdout or "") + "\n" +
                                (tr.stderr or ""))
     finally:
         try:
             _destroy(name, boot_proc, warnings)
             if boot_log is not None:
-                boot_log.unlink(missing_ok=True)
+                if keep_boot_log:
+                    logger.warning(
+                        "dispatch failed before a test verdict — kept tart "
+                        "run log at %s", boot_log)
+                else:
+                    boot_log.unlink(missing_ok=True)
         finally:
             # Drop ownership before releasing the slot, so the next dispatch's
             # sweep sees this VM as reclaimable if teardown left it behind.
