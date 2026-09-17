@@ -102,6 +102,11 @@ def build_xcodebuild_test_cmd(worktree: Path, derived_data: Path, **opts: Any) -
         "-destination", destination,
         "-configuration", configuration,
         "-derivedDataPath", str(derived_data),
+        # Same cache the resolve pre-step populated. Without this the build
+        # would look in DerivedData's default SourcePackages, find nothing
+        # resolved, and -disableAutomaticPackageResolution would leave it
+        # unable to recover (DEV-721).
+        *_cloned_packages_selector(opts),
         # Resolution happens in a separate, UNSANDBOXED pre-step (see
         # build_resolve_cmd / DEV-294) because SwiftPM sandboxes manifest
         # evaluation itself and macOS cannot nest sandboxes. Disabling it here
@@ -166,6 +171,19 @@ def _project_selector(opts: dict[str, Any]) -> list[str]:
     return []
 
 
+def _cloned_packages_selector(opts: dict[str, Any]) -> list[str]:
+    """-clonedSourcePackagesDirPath, or nothing for xcodebuild's default.
+
+    Set only on the VM path, where the caller pushes a warm cache to this
+    location so resolution reads from disk instead of re-fetching the graph
+    over slow guest egress (DEV-721). The resolve pre-step and the build must
+    agree on the path or the build finds nothing resolved.
+    """
+    if cloned := opts.get("cloned_packages"):
+        return ["-clonedSourcePackagesDirPath", str(cloned)]
+    return []
+
+
 def build_resolve_cmd(framework: str, worktree: Path, derived_data: Path,
                       **opts: Any) -> "list[str] | None":
     """Command that resolves package dependencies, to run OUTSIDE the sandbox.
@@ -197,6 +215,7 @@ def build_resolve_cmd(framework: str, worktree: Path, derived_data: Path,
             "xcodebuild", "-resolvePackageDependencies",
             "-scheme", scheme,
             "-derivedDataPath", str(derived_data),
+            *_cloned_packages_selector(opts),
             *_project_selector(opts),
         ]
     if framework == "swift_test":

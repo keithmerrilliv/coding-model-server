@@ -73,6 +73,16 @@ class Config:
     # Spike-measured boot-to-ssh is ~19 s; the generous default absorbs a
     # cold host and first-boot Spotlight churn.
     VM_BOOT_TIMEOUT = int(os.getenv("CODING_MODEL_RUNNER_VM_BOOT_TIMEOUT", "300"))
+    # Warm SwiftPM clone cache pushed into the guest before resolution
+    # (DEV-721). The guest is minted per run, so its package cache is cold
+    # every time and the whole graph is re-fetched over guest egress that
+    # measures ~15x slower than the host's. Copying a warm cache IN is the
+    # cheap half of that problem; host->guest rsync runs at ~120 MB/s.
+    #
+    # Empty (the default) disables it and the guest resolves from the network
+    # exactly as before. A path here is READ from, never written back: nothing
+    # the guest produces reaches the host, so DEV-422 containment is unchanged.
+    VM_PACKAGE_CACHE = os.getenv("CODING_MODEL_RUNNER_VM_PACKAGE_CACHE", "")
     SANDBOX_PROFILE = Path(os.getenv(
         "CODING_MODEL_RUNNER_SANDBOX_PROFILE",
         str(Path(__file__).parent / "sandbox.sb"),

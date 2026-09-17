@@ -288,3 +288,79 @@ def test_boot_log_survives_a_dispatch_that_never_reached_a_verdict(
     assert len(kept) == 1, kept
     # The path is useless if the operator cannot find it.
     assert any(kept[0] in r.getMessage() for r in caplog.records), caplog.text
+
+
+def _rsync_calls(calls):
+    return [c for c in calls if any("rsync" in part for part in c)]
+
+
+def test_no_package_cache_configured_means_no_push_and_no_flag(
+        tmp_path, monkeypatch):
+    """The default is the old behavior exactly: the guest resolves from the
+    network and xcodebuild is left on its own DerivedData path."""
+    monkeypatch.setattr(Config, "VM_PACKAGE_CACHE", "")
+    calls = _wire(monkeypatch, _happy)
+
+    exit_code, _ = _dispatch(tmp_path)
+
+    assert exit_code == 0
+    # Only the worktree rsync, no cache push.
+    assert len(_rsync_calls(calls)) == 1, _rsync_calls(calls)
+
+
+def test_configured_package_cache_is_pushed_before_resolution(
+        tmp_path, monkeypatch):
+    """Resolution must find the warm cache already on disk, so the push has to
+    land before the resolve step runs (DEV-721)."""
+    cache = tmp_path / "pkgcache"
+    cache.mkdir()
+    (cache / "repositories").write_text("warm")
+    monkeypatch.setattr(Config, "VM_PACKAGE_CACHE", str(cache))
+    calls = _wire(monkeypatch, _happy)
+
+    exit_code, _ = _dispatch(tmp_path)
+
+    assert exit_code == 0
+    joined = [" ".join(c) for c in calls]
+    push_i = next(i for i, j in enumerate(joined)
+                  if "rsync" in j and vm.GUEST_PKG_CACHE in j)
+    resolve_i = next(i for i, j in enumerate(joined)
+                     if "resolvePackageDependencies" in j)
+    assert push_i < resolve_i, joined
+
+
+def test_an_empty_cache_directory_is_not_pushed(tmp_path, monkeypatch):
+    """An empty tree would cost a round trip and warm nothing."""
+    cache = tmp_path / "pkgcache"
+    cache.mkdir()
+    monkeypatch.setattr(Config, "VM_PACKAGE_CACHE", str(cache))
+    calls = _wire(monkeypatch, _happy)
+
+    exit_code, _ = _dispatch(tmp_path)
+
+    assert exit_code == 0
+    assert len(_rsync_calls(calls)) == 1, _rsync_calls(calls)
+
+
+def test_a_failed_cache_push_costs_speed_not_the_run(tmp_path, monkeypatch):
+    """Same contract as resolution itself: without the cache the guest fetches
+    from the network, which is what it did before the cache existed."""
+    cache = tmp_path / "pkgcache"
+    cache.mkdir()
+    (cache / "repositories").write_text("warm")
+    monkeypatch.setattr(Config, "VM_PACKAGE_CACHE", str(cache))
+
+    def behave(cmd):
+        if any("rsync" in p for p in cmd) and vm.GUEST_PKG_CACHE in " ".join(cmd):
+            return subprocess.CompletedProcess(
+                cmd, 11, stdout="", stderr="guest disk full")
+        return _happy(cmd)
+
+    calls = _wire(monkeypatch, behave)
+
+    exit_code, output = _dispatch(tmp_path)
+
+    assert exit_code == 0
+    assert "guest tests ok" in output
+    # The test still ran despite the push failing.
+    assert any("xcodebuild test" in " ".join(c) for c in calls)
