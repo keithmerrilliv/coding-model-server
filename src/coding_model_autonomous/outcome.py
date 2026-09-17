@@ -506,7 +506,28 @@ _VM_INFRA_PHRASES = (
     "vm containment is enabled",
     "another vm dispatch has held the single vm slot",
     "vm containment unavailable",
+    "ssh transport failed",          # ES run 2, 2026-09-17
 )
+
+# Evidence the build or the suite actually produced a result. Their PRESENCE
+# is what makes an output a verdict; a `[vm]` line alongside them means the
+# tests ran and something printed the token, not that the VM failed.
+_TEST_RUN_MARKERS = (
+    "error:",                     # compiler diagnostic
+    "test case '",                # XCTest
+    "** test succeeded **",
+    "** test failed **",
+    "executed ",                  # "Executed 44 tests"
+    " passed",                    # pytest / swift-testing summaries
+    " failures",
+    "assertion",
+)
+
+
+def _looks_like_a_test_run(output: str) -> bool:
+    """True when the output carries a build or suite result of any kind."""
+    low = (output or "").lower()
+    return any(m in low for m in _TEST_RUN_MARKERS)
 
 
 def _vm_infrastructure_refusal(output: str) -> Optional[str]:
@@ -519,6 +540,7 @@ def _vm_infrastructure_refusal(output: str) -> Optional[str]:
     """
     if not output:
         return None
+    ran = _looks_like_a_test_run(output)
     for line in output.splitlines():
         stripped = line.strip()
         low = stripped.lower()
@@ -526,6 +548,16 @@ def _vm_infrastructure_refusal(output: str) -> Optional[str]:
                 or "the number of vms exceeds the system limit" in low):
             continue
         if any(phrase in low for phrase in _VM_INFRA_PHRASES):
+            return stripped
+        # DEV-705 follow-up, ES run 2. Requiring BOTH the prefix AND a known
+        # phrase meant every phrasing I had not already seen fell through:
+        # `[vm] ssh transport failed mid-run` read as an ordinary inconclusive
+        # result and opened a human gate on an unverified build. Enumerating
+        # the failures I had seen was the mistake. The `[vm]` prefix is
+        # written only by the runner's VM layer, so it means infrastructure
+        # UNLESS the output also carries a real build or suite result — in
+        # which case the tests ran and something merely printed the token.
+        if not ran:
             return stripped
     return None
 
