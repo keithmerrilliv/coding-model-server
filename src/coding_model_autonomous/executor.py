@@ -770,20 +770,35 @@ REVIEWER_SYSTEM_PROMPT = textwrap.dedent("""\
 
     # Output format
 
-    Test files first (one block per file). ALWAYS place test files
-    under a `tests/` subdirectory — pytest discovers them recursively
-    so the path doesn't affect execution, but a `tests/` prefix keeps
-    the spec workspace tidy and separates them from implementer
-    deliverables. The orchestrator will rewrite a bare `test_*.py`
-    path to `tests/test_*.py` defensively, but you should emit the
-    correct path yourself.
+    Test files first (one block per file), at the path the TARGET'S OWN
+    test framework expects. This is not one rule for every project:
+
+    - pytest / node: place them under a `tests/` subdirectory. pytest
+      discovers recursively so the path does not affect execution, but
+      the prefix keeps the workspace tidy and separates them from
+      implementer deliverables. The orchestrator rewrites a bare
+      `test_*.py` to `tests/test_*.py` defensively; emit the correct
+      path yourself.
+    - Swift (`swift_test` / `xcodebuild_test`): put them where the
+      package already puts its tests — typically
+      `Tests/<Target>Tests/<Name>.swift`. A `tests/` directory means
+      nothing to SwiftPM or to an Xcode scheme.
+
+    When the spec directs tests into an EXISTING test file, add them to
+    that file and emit it as your test block. Do not invent a second
+    file beside it.
+
+    NEVER write a placeholder file to satisfy a directory convention.
+    A file that only prints, or that exists to explain where the real
+    tests live, is worse than no file: it is not executed, and citing
+    it below makes your evidence false.
 
     For JavaScript `node --test` suites: import assertions with
     `import assert from 'node:assert/strict'`. The `node:test` module
     does NOT export `assert` — `import { assert } from 'node:test'`
     makes every test die on a TypeError before it exercises anything.
 
-    Example:
+    Example (a pytest target; use the Swift path shape on a Swift one):
 
         <<<FILE: tests/test_something.py>>>
         <complete test file content>
@@ -1096,6 +1111,48 @@ _VERDICT_RE = re.compile(
 # `### Heading` or end-of-text. Anchors the LLM's verdict to specific evidence
 # (acceptance criteria → test for PASS, file:line for FAIL); the parser
 # downgrades a missing/empty body to FAIL regardless of stated verdict.
+# DEV-711: a citation of the form `path::testName` in the Verdict Evidence
+# block. Run 41's reviewer wrote a Python placeholder containing six print
+# statements and then cited it ten times, once per acceptance criterion, for
+# tests that live in GameTests.swift. The verdict was right and the evidence
+# trail was fabricated — and a wrong verdict gets caught by a red suite, while
+# a wrong citation gets caught by nobody.
+_CITATION_RE = re.compile(r"([\w./-]+\.(?:py|swift|js|ts|mjs))::(\w+)")
+# How a test declares itself, across the frameworks this pipeline dispatches.
+_TEST_DECL_RES = (
+    re.compile(r"\bdef\s+(\w+)\s*\("),            # pytest
+    re.compile(r"\bfunc\s+(\w+)\s*\("),           # XCTest / swift-testing
+    re.compile(r"\btest\s*\(\s*[\"\']([^\"\']+)"),  # node:test / vitest
+    re.compile(r"\bit\s*\(\s*[\"\']([^\"\']+)"),
+)
+
+
+def _unresolvable_citations(
+        evidence_body: str,
+        test_files: "list[tuple[str, str]]") -> list[str]:
+    """Citations naming a test the cited file does not define.
+
+    Only files THIS reviewer wrote are judged. A citation pointing at the
+    implementer's file or the repository's own suite cannot be resolved from
+    here, and DEV-630's rule applies: unknown is not wrong, so it is left
+    alone rather than failed on a guess.
+    """
+    written = {path: content for path, content in test_files}
+    if not written:
+        return []
+    bad: list[str] = []
+    for path, name in _CITATION_RE.findall(evidence_body or ""):
+        content = written.get(path)
+        if content is None:
+            continue                      # not ours to judge
+        declared: set[str] = set()
+        for decl in _TEST_DECL_RES:
+            declared.update(decl.findall(content))
+        if name not in declared:
+            bad.append(f"{path}::{name}")
+    return bad
+
+
 _VERDICT_EVIDENCE_RE = re.compile(
     r"###\s*Verdict\s+Evidence\s*\n+(.*?)(?=\n###\s|\Z)",
     re.DOTALL | re.IGNORECASE,
@@ -1366,6 +1423,25 @@ def parse_reviewer_response(text: str) -> ReviewerResult | ParseError:
             "stated PASS but did not provide the required `### Verdict Evidence` "
             "block (acceptance-criterion → test-function mapping). An unanchored "
             "verdict is treated as a hallucination and rejected."
+        )
+
+    # DEV-711: the citation format being satisfied is not the same as the
+    # citation being true. A test named in the evidence must exist in the file
+    # the evidence points at.
+    if verdict == "PASS" and (bad := _unresolvable_citations(
+            evidence_body, test_files)):
+        verdict = "FAIL"
+        listed = ", ".join(f"`{c}`" for c in bad[:8])
+        more = f" (and {len(bad) - 8} more)" if len(bad) > 8 else ""
+        review_md += (
+            "\n\n---\n\n"
+            "**[orchestrator guard]** Verdict downgraded to FAIL: the Verdict "
+            f"Evidence cites {listed}{more}, but the file you wrote does not "
+            "define that test. Cite the file that actually contains the test "
+            "you are pointing at. If the tests live in a file you did not "
+            "write — an existing suite the spec directed you to extend — name "
+            "that file, not a placeholder beside it. An evidence trail that "
+            "does not resolve is not evidence (DEV-711)."
         )
 
     return ReviewerResult(
