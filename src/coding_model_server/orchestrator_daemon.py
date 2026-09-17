@@ -407,45 +407,149 @@ _FRAMEWORK_REQUIRED_KEYS = {
 PLAN_VALIDATION_MAX_ROUNDS = int(
     os.getenv("AUTONOMOUS_PLAN_VALIDATION_MAX_ROUNDS", "2"))
 _AUTO_PLAN_REJECT_MARKER = "## Plan validation failure (DEV-426)"
+# DEV-712: the heading is prose, not a key. Real specs write `## Test strategy`
+# as often as `## test_strategy`, sometimes with a trailing parenthetical
+# ("## Test strategy (for the planner — carry these keys through)"). Matching
+# only the underscore form disarmed every guard below for 8 specs.
 _SPEC_TEST_STRATEGY_RE = re.compile(
-    r"^##+\s*test_strategy\s*$(.*?)(?=^##\s|\Z)",
+    r"^##+[ \t]*test[ _]strategy\b[^\n]*$(.*?)(?=^##\s|\Z)",
     re.MULTILINE | re.DOTALL | re.IGNORECASE)
+_SPEC_STRATEGY_YAML_FENCE_RE = re.compile(
+    r"```ya?ml[ \t]*\n(.*?)```", re.DOTALL)
+_SPEC_STRATEGY_ANY_FENCE_RE = re.compile(
+    r"```[ \t]*\n(.*?)```", re.DOTALL)
 
 
-def _spec_declared_test_strategy(spec_md: str) -> dict:
-    """The `## test_strategy` block from the spec itself, as a mapping.
+class SpecStrategy(NamedTuple):
+    """What the spec's own test-strategy section yielded.
 
-    Specs write it either as an indented YAML block or inside a ```yaml fence
-    under the heading. The fence form is what every spec in docs/specs/
-    actually uses, and feeding the fence lines to yaml.safe_load raises — so
-    before DEV-573 this returned {} for every real spec and the DEV-426
-    dropped-key rule was vacuously satisfied. Returns {} when absent or
-    unparseable — this is an advisory source, never a hard failure.
+    DEV-630 at the spec boundary. "The operator declared nothing" and "the
+    operator declared something this parser could not read" are different
+    facts, and returning {} for both is what let DEV-712 hide: every guard
+    keyed on the declaration stood down at once and said nothing.
+    """
+    keys: dict
+    heading: bool   # a test-strategy heading exists in the spec
+    reason: str     # why nothing parsed; "" when keys were read or no heading
+
+    @property
+    def unreadable(self) -> bool:
+        """A section is there and it yielded no keys. Never silent."""
+        return self.heading and not self.keys
+
+
+def _spec_strategy_block(section: str) -> str:
+    """The YAML-ish part of a test-strategy section, without trailing prose.
+
+    Three sources, in order of how sure we are about them:
+
+    1. A ```yaml fence, which says what it is.
+    2. The leading run of indented or markdown-list lines, stopping at the
+       first column-0 prose line. Every Apple spec follows its indented block
+       with an explanatory paragraph, and because that paragraph sits at
+       column 0 textwrap.dedent finds a common prefix of "" and dedents
+       nothing, so the old code fed YAML and prose to safe_load together and
+       it raised (DEV-712, 14 specs).
+    3. Only then an untagged fence.
+
+    Order matters: several specs put an indented block under the heading and
+    a ```-fenced *shell command* further down the same section, and taking
+    the first fence of any kind returned the xcodebuild invocation as the
+    test strategy.
+    """
+    fence = _SPEC_STRATEGY_YAML_FENCE_RE.search(section)
+    if fence:
+        return textwrap.dedent(fence.group(1)).strip()
+    kept: list[str] = []
+    for line in section.splitlines():
+        if not line.strip():
+            kept.append(line)
+            continue
+        if line[0] in " \t" or line.lstrip().startswith(("- ", "* ")):
+            kept.append(line)
+            continue
+        break
+    leading = textwrap.dedent("\n".join(kept)).strip()
+    if leading:
+        return leading
+    untagged = _SPEC_STRATEGY_ANY_FENCE_RE.search(section)
+    return textwrap.dedent(untagged.group(1)).strip() if untagged else ""
+
+
+def _spec_strategy_mapping(parsed) -> dict:
+    """Coerce a parsed strategy block to a mapping, or {} if it is not one.
+
+    Accepts the markdown-list dialect. `- framework: swift_test` on its own
+    line is how an operator writes a mapping in a bullet list, and YAML reads
+    it as a sequence of single-key mappings; merging them in order recovers
+    exactly what was written. Every Centipede spec uses this form.
+    """
+    if isinstance(parsed, dict):
+        return parsed
+    if isinstance(parsed, list):
+        merged: dict = {}
+        for item in parsed:
+            if not isinstance(item, dict):
+                return {}
+            merged.update(item)
+        return merged
+    return {}
+
+
+def _parse_spec_test_strategy(spec_md: str) -> SpecStrategy:
+    """Read the spec's own test-strategy section. Never raises.
+
+    Four dialects are in real use and all four must work: a ```yaml fence, an
+    indented block followed by prose, a markdown bullet list, and any of those
+    under a prose heading. Before DEV-712 only the first parsed, and the other
+    three returned {} — indistinguishable from a spec that declared nothing.
     """
     import yaml as _yaml
     if not spec_md:
-        return {}
+        return SpecStrategy({}, False, "")
     match = _SPEC_TEST_STRATEGY_RE.search(spec_md)
     if not match:
-        return {}
-    section = match.group(1)
-    fence = re.search(r"```(?:ya?ml)?[ \t]*\n(.*?)```", section, re.DOTALL)
-    block = textwrap.dedent(fence.group(1) if fence else section).strip()
+        return SpecStrategy({}, False, "")
+    block = _spec_strategy_block(match.group(1))
     if not block:
-        return {}
+        return SpecStrategy({}, True, "the section is empty")
     try:
         parsed = _yaml.safe_load(block)
-    except _yaml.YAMLError:
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
+    except _yaml.YAMLError as exc:
+        return SpecStrategy(
+            {}, True,
+            f"the section is not valid YAML ({type(exc).__name__})")
+    keys = _spec_strategy_mapping(parsed)
+    if not keys:
+        return SpecStrategy(
+            {}, True,
+            f"the section parsed as {type(parsed).__name__}, not a mapping")
+    return SpecStrategy(keys, True, "")
+
+
+def _spec_declared_test_strategy(spec_md: str) -> dict:
+    """The spec's own test-strategy block as a mapping, {} when unreadable.
+
+    Kept as the mapping-only view for callers that cannot act on the reason.
+    Anything that can report should use _parse_spec_test_strategy and check
+    `.unreadable` — an unreadable section is an operator error worth one
+    planner round, not a green light (DEV-712).
+    """
+    return _parse_spec_test_strategy(spec_md).keys
 
 
 # test_strategy keys the operator declares in the spec that must reach the
 # dispatch byte-identical. Everything protective hangs off these; run 14b
 # (DEV-573) lost protected_paths to the planner's rewrite and a fabricated
 # project.pbxproj reached the VM worktree.
+# DEV-709 adds `framework`: run 41's planner read `framework: swift_test` and
+# emitted `xcodebuild_test` for a SwiftPM package with no .xcodeproj, which
+# could not have dispatched at all. The value comes from a closed enumeration
+# the operator picks — there is nothing for a model to add to it, and a
+# SUBSTITUTED value is worse than a dropped one because it is well-formed and
+# plausible and survives every structural check.
 _OPERATOR_STRATEGY_KEYS = ("repo", "protected_paths", "base_ref", "filter",
-                           "execution_target")
+                           "execution_target", "framework")
 
 
 def _overlay_operator_test_strategy(yaml_text: str, spec_md: str,
@@ -460,7 +564,16 @@ def _overlay_operator_test_strategy(yaml_text: str, spec_md: str,
     gate shows the planner's own formatting.
     """
     import yaml as _yaml
-    declared = _spec_declared_test_strategy(spec_md)
+    spec_strategy = _parse_spec_test_strategy(spec_md)
+    if spec_strategy.unreadable:
+        # DEV-712: the overlay used to stand down here without a word, which
+        # is how DEV-573's fix sat disarmed for a month on 23% of specs.
+        logger.warning(
+            "spec %s: the spec has a test-strategy section but %s — the "
+            "DEV-573 overlay has nothing to restore and is NOT armed for "
+            "this plan (DEV-712)", spec_id, spec_strategy.reason)
+        return yaml_text
+    declared = spec_strategy.keys
     wanted = {k: declared[k] for k in _OPERATOR_STRATEGY_KEYS if k in declared}
     if not wanted:
         return yaml_text
@@ -508,25 +621,41 @@ def _validate_test_strategy(yaml_text: str, spec_md: str) -> list[str]:
         return []  # malformed YAML is _bootstrap_tasks' job to reject, not ours
     if not isinstance(plan, dict):
         return []
+    # DEV-712: before anything else, say whether the spec's own declaration
+    # was readable. If it was not, every rule below is running on {} and the
+    # plan cannot be judged against the operator's intent at all. That is a
+    # spec defect, and one round naming it costs far less than a run that
+    # silently loses its protected paths.
+    spec_strategy = _parse_spec_test_strategy(spec_md)
+    spec_problems: list[str] = []
+    if spec_strategy.unreadable:
+        spec_problems.append(
+            "the spec has a `test_strategy` section but no keys could be read "
+            f"from it — {spec_strategy.reason}. Nothing the spec declared is "
+            "being enforced: the operator-key overlay, the dropped-key rule "
+            "and the repo check are all standing down. Write the block as "
+            "`key: value` lines under the heading (a ```yaml fence, an "
+            "indented block, or a `- key: value` list all parse) and "
+            "resubmit.")
     strategy = plan.get("test_strategy")
     if not isinstance(strategy, dict):
         # DEV-630: with no mapping at all, every rule below stood down at
         # once, including the DEV-573 overlay. When the spec declared
         # operator keys the planner dropped a whole block, and a round to
         # copy it through is exactly what plan validation is for.
-        declared = _spec_declared_test_strategy(spec_md)
+        declared = spec_strategy.keys
         wanted = sorted(k for k in _OPERATOR_STRATEGY_KEYS if k in declared)
         if wanted:
-            return [
+            return spec_problems + [
                 "the plan has no `test_strategy` mapping, but the spec's own "
                 "test_strategy block declares "
                 + ", ".join(f"`{k}`" for k in wanted)
                 + ". Copy the block through as real YAML keys under "
                 "`test_strategy:` — the pipeline cannot enforce protection "
                 "metadata it cannot read."]
-        return []  # no strategy at all is a different (non-Apple) shape
+        return spec_problems  # no strategy at all is a different (non-Apple) shape
 
-    problems: list[str] = []
+    problems: list[str] = list(spec_problems)
     reported: set[str] = set()
     framework = str(strategy.get("framework") or "").strip()
     for key in _FRAMEWORK_REQUIRED_KEYS.get(framework, ()):
@@ -537,7 +666,7 @@ def _validate_test_strategy(yaml_text: str, spec_md: str) -> list[str]:
                 f"Without it the runner dispatch cannot be built at all.")
 
     # A key can fail both rules; say so once.
-    declared = _spec_declared_test_strategy(spec_md)
+    declared = spec_strategy.keys
     dropped = [k for k in declared
                if k not in ("framework", "required", "notes")
                and k not in strategy and k not in reported]
