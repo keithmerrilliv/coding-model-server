@@ -1838,12 +1838,18 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
     except RunnerOutage as e:
         _requeue_implement_for_runner_outage(db, spec, task, str(e))
         return
+    # DEV-698: symbols the editable files call that the whole served set never
+    # defines. Computed once from the full context, not from the budget-trimmed
+    # render, so a file dropped for size is not reported as undefined.
+    unresolved = _unresolved_for(view)
+
     def _architect_prompt(existing, reference, omitted_e=None, omitted_r=None):
         return build_architect_message(
             spec_md, rejection_notes=rejection_notes, plan_yaml=plan_yaml,
             existing_files=existing, reference_files=reference,
             approval_conditions=plan_conditions,
-            omitted_existing=omitted_e, omitted_reference=omitted_r)
+            omitted_existing=omitted_e, omitted_reference=omitted_r,
+            unresolved=unresolved)
 
     # DEV-633: the architect's editable render was the pipeline's one entirely
     # unbudgeted file section — a raw join of every modified file into a model
@@ -5199,6 +5205,25 @@ def _test_delta_line(spec_dir: Path, produced: list[tuple[str, str]],
                  f"is {required - added} short (DEV-700)")
         return "⚠ " + line + ".\n"
     return line + ".\n"
+
+
+def _unresolved_for(view: "_context.RoleContext") -> list[str]:
+    """DEV-698: what the architect's own files call and nothing served defines.
+
+    Uses the role's whole served set — editable plus read-only references — so
+    a symbol defined in a protected file resolves correctly and is not
+    reported. Logged when non-empty: the operator wants to know their spec's
+    modification set was short before a model does.
+    """
+    editable = dict(view.existing_files)
+    served = {**dict(view.reference_files), **editable}
+    names = _context.unresolved_symbols(editable, served)
+    if names:
+        logger.warning(
+            "context: %d symbol(s) the editable files call are defined nowhere "
+            "in the served set — %s. The spec's modification set is probably "
+            "short a file (DEV-698)", len(names), ", ".join(names[:10]))
+    return names
 
 
 def _build_check_line(build_passed: bool | None, build_output: str = "",
