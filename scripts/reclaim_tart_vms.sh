@@ -33,7 +33,13 @@ echo "==> all VMs tart knows about"
 tart list 2>/dev/null | sed 's/^/    /' || { echo "    (tart list failed)"; exit 1; }
 
 # Column 2 is the name in `tart list` output; skip the header row.
-mapfile -t LEAKED < <(tart list 2>/dev/null | awk -v p="$PREFIX" 'NR>1 && $2 ~ "^"p {print $2}')
+# Built with a read loop, not mapfile: stock macOS ships bash 3.2, and callers
+# that invoke this as `bash reclaim_tart_vms.sh` bypass the shebang, so a
+# bash-4 builtin here fails the reclaim while the caller reports success.
+LEAKED=()
+while IFS= read -r vm; do
+    [[ -n "$vm" ]] && LEAKED+=("$vm")
+done < <(tart list 2>/dev/null | awk -v p="$PREFIX" 'NR>1 && $2 ~ "^"p {print $2}')
 
 echo
 if [[ "${#LEAKED[@]}" -eq 0 ]]; then
