@@ -1698,6 +1698,7 @@ def build_architect_message(spec_md: str,
                             existing_files: list[tuple[str, str]] | None = None,
                             omitted_existing: list[str] | None = None,
                             omitted_reference: list[str] | None = None,
+                            unresolved: list[str] | None = None,
                             ) -> list[dict[str, str]]:
     user_parts: list[str] = []
     # On a re-run (design-review rejection or supervisor design-revision), the
@@ -1752,6 +1753,23 @@ def build_architect_message(spec_md: str,
                 "modifies them: " + ", ".join(omitted_existing) + ". Design "
                 "the change they need without restating their current "
                 "contents — you have not read them.\n\n")
+        if unresolved:
+            # DEV-698: run 39's architect saw Game.tick() call spawnWaveChain()
+            # and no definition anywhere, and said so in its own words — "But
+            # wait ... it calls spawnWaveChain() which doesn't exist yet!" —
+            # then burned five attempts on the confusion across two rounds.
+            # Being TOLD what it cannot see costs a line; inferring it cost a
+            # cancelled spec.
+            user_parts.append(
+                "**Referenced but not shown.** These symbols are called by the "
+                "files above and are defined in neither the modifiable set nor "
+                "the read-only references: "
+                + ", ".join(f"`{name}`" for name in unresolved[:20])
+                + ". They exist in the repository — the spec simply did not "
+                "list the file that holds them. Treat them as present and "
+                "working, design against the call as written, and do NOT "
+                "invent a definition, rename them, or conclude they are "
+                "missing.\n\n")
         user_parts.append("---\n\n")
     if reference_files or omitted_reference:
         user_parts.append(

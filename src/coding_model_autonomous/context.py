@@ -249,6 +249,140 @@ def omission_status(reason: str) -> str:
     return STATUS_ABSENT if _ABSENT_RE.search(reason or "") else STATUS_UNKNOWN
 
 
+# ── DEV-698: symbols the served set does not define ──────────────────────────
+#
+# Run 39's spec listed World.swift, Game.swift and GameTests.swift as editable
+# with ten protected paths. Game.tick() calls spawnWaveChain(), defined in a
+# five-line Wave.swift that was neither editable, protected nor requested — so
+# it was never served, and context.json recorded `omitted: []`. Nothing told
+# the architect, the daemon or the human that the context could not do the job.
+# It burned five attempts across two rounds and the spec was cancelled. Adding
+# Wave.swift and changing nothing else produced a valid design on the FIRST
+# attempt.
+#
+# This is not a compiler and does not try to be. A false positive costs one
+# line of prompt; a false negative costs five model calls.
+
+# A BARE call: an identifier followed by `(` that is NOT preceded by `.`, so it
+# is not a method on a receiver whose type we cannot resolve from here. That
+# narrowness is what keeps the noise down, and it is exactly the shape of
+# `spawnWaveChain()`.
+_BARE_CALL_RE = re.compile(r"(?<![\w.])([A-Za-z_]\w{2,})\s*\(")
+
+# Anything the served files declare, across the languages this pipeline sees.
+_DECL_RES = (
+    re.compile(r"\bfunc\s+(\w+)"),                               # Swift
+    re.compile(r"\b(?:class|struct|enum|protocol|actor|extension)\s+(\w+)"),
+    re.compile(r"\bdef\s+(\w+)"),                                # Python
+    re.compile(r"\bclass\s+(\w+)"),
+    re.compile(r"\bfunction\s+(\w+)"),                           # JS/TS
+    re.compile(r"\b(?:let|var|const)\s+(\w+)\s*[:=]"),
+    re.compile(r"\btypealias\s+(\w+)"),
+)
+
+# Anything matching these is never a missing repository symbol. The prefix rule
+# covers XCTest's assertion family, which is large, stable and not worth
+# enumerating.
+_NOISE_PREFIXES = ("XCTAssert", "XCTUnwrap", "NS", "UI", "CG", "SIMD")
+
+# Language keywords. `except (KeyError, ValueError):` and `private(set)` both
+# read as a bare call to the regex, and both were false positives on the real
+# corpus.
+_KEYWORDS = frozenset("""
+    if elif else for while switch guard return catch throw try throws rethrows
+    defer repeat do in is as not and or await async yield with lambda pass
+    case default break continue fallthrough where let var func class struct
+    enum protocol extension actor init deinit subscript typealias import
+    private public internal fileprivate open final static mutating nonmutating
+    override required convenience lazy weak unowned inout some any
+    def global nonlocal assert del raise from except finally elif
+""".split())
+
+# Control flow and the stdlib names common enough to be noise in every language
+# here. Kept to what the real corpus actually produced: an unfamiliar name is
+# better reported and dismissed than silently dropped.
+_CALL_NOISE = frozenset("""
+    KeyError ValueError TypeError RuntimeError OSError IndexError StopIteration
+    NotImplementedError AttributeError FileNotFoundError Exception
+    Path PurePosixPath timedelta datetime date time deque defaultdict Counter
+    namedtuple dataclass field frozenset partial wraps deepcopy copy
+    Decimal UUID uuid4 Enum IntEnum StrEnum auto cached_property
+    NamedTuple Optional Union Any Callable Iterable Iterator Sequence Mapping
+    asdict astuple cls self super reversed next iter repr vars dir hash id
+    callable staticmethod classmethod property getattr setattr hasattr
+    bytes bytearray divmod pow ord chr bin hex oct slice memoryview
+
+    if else for while switch guard return catch throw defer repeat do
+    init deinit super self print assert precondition fatalError
+    String Int Double Float Bool Array Dictionary Set Optional Result
+    len str int float bool list dict set tuple range print type super
+    isinstance hasattr getattr setattr enumerate zip map filter sorted
+    min max sum abs round any all open format join split strip
+    require import export await async yield typeof instanceof
+    describe it expect beforeEach afterEach test
+    XCTAssert XCTAssertEqual XCTAssertTrue XCTAssertFalse XCTAssertNil
+    XCTAssertNotNil XCTAssertThrowsError XCTFail Task MainActor
+""".split())
+
+
+# Comments and string literals are prose, and prose is full of words followed
+# by a bracket: "Returns (", "Approve (", "the block (". Scanning them produced
+# 330 false positives on one real stored context, which would have flooded the
+# architect's prompt with symbols that do not exist. Strip them first.
+_STRIP_RES = (
+    re.compile(r'"{3}.*?"{3}', re.DOTALL),
+    re.compile(r"'{3}.*?'{3}", re.DOTALL),
+    re.compile(r"/\*.*?\*/", re.DOTALL),
+    re.compile(r"//[^\n]*"),
+    re.compile(r"#[^\n]*"),
+    re.compile(r'"[^"\n]*"'),
+    re.compile(r"'[^'\n]*'"),
+)
+
+# Above this the heuristic is not finding a missing file, it is confused, and a
+# long list of invented symbols is worse than silence. The real case is small:
+# run 39's entire defect was ONE name. DEV-630's rule again — an answer we do
+# not trust is not reported as a finding.
+UNRESOLVED_MAX = 6
+
+
+def _strip_prose(source: str) -> str:
+    for pattern in _STRIP_RES:
+        source = pattern.sub(" ", source)
+    return source
+
+
+def unresolved_symbols(editable: dict, served: dict) -> list[str]:
+    """Bare calls in *editable* that nothing in *served* declares.
+
+    *served* is every file the context holds — editable and protected — so a
+    symbol defined in a read-only reference file is correctly resolved.
+    Returns a sorted list; empty means everything the editable files call is
+    visible somewhere in the served set.
+    """
+    declared: set[str] = set()
+    for source in served.values():
+        for decl in _DECL_RES:
+            # Scan the raw text for declarations: a definition inside a doc
+            # example still tells us the name exists. Only CALLS are read from
+            # stripped text, because that is where prose creates ghosts.
+            declared.update(decl.findall(source))
+    called: set[str] = set()
+    for source in editable.values():
+        called.update(_BARE_CALL_RE.findall(_strip_prose(source)))
+    names = sorted(
+        n for n in called - declared - _CALL_NOISE - _KEYWORDS
+        if not n.isupper()                        # SCREAMING_CASE is a constant
+        and not n.startswith(_NOISE_PREFIXES))
+    if len(names) > UNRESOLVED_MAX:
+        logger.info(
+            "context: %d candidate unresolved symbols is over the cap of %d — "
+            "the check is standing down rather than reporting a list it does "
+            "not trust (DEV-698)", len(names), UNRESOLVED_MAX)
+        return []
+    return names
+
+
 @dataclass
 class RoleContext:
     """What one role selects from the spec context — the prompt builders'
@@ -406,6 +540,11 @@ class SpecContext:
 
     # ── persistence ─────────────────────────────────────────────────────────
 
+    def unresolved(self) -> list[str]:
+        """Symbols the editable files call that the served set never defines."""
+        return unresolved_symbols(self.editable,
+                                  {**self.protected, **self.editable})
+
     def summary(self) -> dict[str, Any]:
         """Event payload: what was fetched and what was omitted, no content."""
         return {
@@ -419,6 +558,10 @@ class SpecContext:
                         for o in self.omitted],
             "unknown": [o.path for o in self.omitted
                         if omission_status(o.reason) == STATUS_UNKNOWN],
+            # DEV-698: what the editable files reference and the served set
+            # cannot show. `omitted: []` used to be the only signal, and it is
+            # empty precisely when nobody knew to request the file.
+            **({"unresolved": self.unresolved()} if self.unresolved() else {}),
             "editable_chars": sum(len(c) for c in self.editable.values()),
             "protected_chars": sum(len(c) for c in self.protected.values()),
             # DEV-701: the commit this context was built from. Without it,
