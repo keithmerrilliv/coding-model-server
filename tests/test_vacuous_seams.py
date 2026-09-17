@@ -126,3 +126,37 @@ def test_an_ordinary_criterion_is_not_suite_level():
         Seam(criterion="Shooting a spider scores by distance",
              setup="`var g = Game()`", act="`g.fire()`",
              assert_="`g.score == 900`"))
+
+
+# ── DEV-715: the hatch must be reachable from the prompt ───────────────────
+
+def test_the_architect_prompt_names_the_suite_level_marker():
+    """Run 1 of the ES queue proved the hatch was unreachable.
+
+    DEV-710 added `suite-level` and advertised it only inside the
+    `vacuous_seam` finding message — a finding that never fires for the case
+    the marker is for. The architect wrote `xcodebuild_build(...)`,
+    `XCTestSuite.allTestCases(...)` and `git_diff(...)` instead, none of which
+    exist, and all of which pass every seam rule.
+    """
+    from coding_model_autonomous.executor import ARCHITECT_SYSTEM_PROMPT
+    assert "suite-level" in ARCHITECT_SYSTEM_PROMPT
+    assert "property of the build" in ARCHITECT_SYSTEM_PROMPT
+
+
+def test_the_prompt_names_the_invented_calls_it_must_not_write():
+    """The three real examples, so the instruction is concrete."""
+    from coding_model_autonomous.executor import ARCHITECT_SYSTEM_PROMPT
+    for invented in ("xcodebuild_build", "allTestCases", "git_diff"):
+        assert invented in ARCHITECT_SYSTEM_PROMPT, invented
+
+
+def test_the_prompt_still_demands_an_api_fix_for_code_criteria():
+    """Negative control: the hatch must not become an excuse.
+
+    A criterion that IS about the code and cannot be reached is still a defect
+    to fix in the API, not something to mark suite-level.
+    """
+    from coding_model_autonomous.executor import ARCHITECT_SYSTEM_PROMPT
+    assert "fix the API" in ARCHITECT_SYSTEM_PROMPT
+    assert "ABOUT THE CODE" in ARCHITECT_SYSTEM_PROMPT
