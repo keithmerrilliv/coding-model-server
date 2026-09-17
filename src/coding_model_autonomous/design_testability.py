@@ -47,6 +47,12 @@ KIND_DUPLICATE_TYPE = "duplicate_type_declaration"
 # not merely unchecked — it makes all of them unreachable.
 KIND_PROSE_SEAM = "prose_seam"
 KIND_ELIDED_STEP = "elided_step"
+# DEV-710: prose_seam asks only whether a backticked span EXISTS, never whether
+# it does anything. Under repeated rejection the cheapest way to clear a
+# syntactic rule is a syntactically valid nullity, and on run 41 the architect
+# found it — replacing two CORRECT seams with `act: _ = "testName" |
+# assert: true`. The check made the design worse.
+KIND_VACUOUS_SEAM = "vacuous_seam"
 # DEV-525: a collection of tuples on a type declaring Equatable. Unlike the
 # rules above this needs no seam — it is wrong in the declaration itself.
 KIND_TUPLE_CONFORMANCE = "tuple_conformance"
@@ -180,6 +186,23 @@ def is_python_design(design_md: str) -> bool:
     return ".py" in _section(design_md, FILE_STRUCTURE_HEADING)
 
 
+# DEV-710: not every criterion HAS a call. "at least 6 new tests exist and the
+# pre-existing ones still pass" is a property of the file and the suite result,
+# not a test. With nowhere for those to go, the seam rules fail on them forever
+# and teach the architect to fake a seam instead — which is exactly what run 41
+# did. A criterion may declare itself suite-level and be skipped by the rules
+# that need a reachable API. The marker stays visible in the design, so a human
+# can see what was claimed rather than it being silently exempt.
+_SUITE_LEVEL_RE = re.compile(
+    r"\b(?:suite[-_ ]level|meta[-_ ]criterion|no[-_ ]seam)\b", re.IGNORECASE)
+
+
+def is_suite_level(seam: "Seam") -> bool:
+    """True when the criterion declares itself a property of the suite."""
+    return bool(_SUITE_LEVEL_RE.search(seam.criterion)
+                or _SUITE_LEVEL_RE.search(seam.setup))
+
+
 def _clean_criterion(text: str) -> str:
     text = re.sub(r"^\[[ xX]?\]\s*", "", text)
     return text.strip(" *_`").strip()
@@ -199,6 +222,32 @@ _PLACEHOLDER_SPAN_RE = re.compile(r"^(?:\.{3}|…)$|=\s*(?:\.{3}|…)\s*$")
 
 def _is_placeholder_span(span: str) -> bool:
     return bool(_PLACEHOLDER_SPAN_RE.search(span.strip()))
+
+
+# A span that is syntactically valid and does nothing. Every one of these was
+# observed in an accepted design (DEV-710): an unconditional truth, the unit
+# value, a metatype discarded into `_`, and a bare string literal naming the
+# test instead of calling it. Anchored whole-span, so `XCTAssertTrue(g.isOver)`
+# and `g.state.score == 900` are untouched — only a step that is ENTIRELY one
+# of these forms is vacuous.
+_VACUOUS_SPAN_RE = re.compile(
+    r"""^(?:
+          true | false | True | False | nil | None      # an unconditional truth
+        | \(\s*\)                                       # ()
+        | pass                                          # python's no-op
+        | assert\s+True                                 # the same, spelled out
+        | _\s*=\s*\(\s*\)                               # _ = ()
+        | _\s*=\s*[\w.]+\.(?:self|class)                # _ = GameTests.self
+        | _\s*=\s*"[^"]*"                               # _ = "testName"
+        | _\s*=\s*'[^']*'
+        | "[^"]*"                                       # a bare string literal
+        | '[^']*'
+      )$""",
+    re.VERBOSE)
+
+
+def _is_vacuous_span(span: str) -> bool:
+    return bool(_VACUOUS_SPAN_RE.match(span.strip()))
 
 
 # ── the design's own vocabulary ──────────────────────────────────────────────
@@ -571,6 +620,7 @@ def _check_names_a_call(seam: Seam) -> list[Finding]:
     """
     prose: list[str] = []
     elided: list[str] = []
+    vacuous: list[str] = []
     for label, step in (("setup", seam.setup), ("act", seam.act),
                         ("assert", seam.assert_)):
         if not step.strip():
@@ -580,6 +630,12 @@ def _check_names_a_call(seam: Seam) -> list[Finding]:
             prose.append(label)
         elif all(_is_placeholder_span(s) for s in spans):
             elided.append(label)
+        elif all(_is_vacuous_span(s) for s in spans):
+            # DEV-710. A setup of `_ = ()` is a legitimate way to say "no state
+            # is needed", so only act and assert are judged — the two steps
+            # that have to reach the code for the seam to mean anything.
+            if label in ("act", "assert"):
+                vacuous.append(label)
 
     findings: list[Finding] = []
     if prose:
@@ -593,6 +649,20 @@ def _check_names_a_call(seam: Seam) -> list[Finding]:
                 f"row: 0))` rather than \"place a chain at the rightmost "
                 f"column\". If no call exists to write, that is the defect: the "
                 f"criterion has no reachable setup and the API needs a seam."),
+        ))
+    if vacuous:
+        findings.append(Finding(
+            kind=KIND_VACUOUS_SEAM,
+            criterion=seam.criterion,
+            detail=(
+                f"the {' and '.join(vacuous)} step is syntactically valid and "
+                f"does nothing — `true`, `_ = ()`, `_ = X.self` and a bare "
+                f"string literal are not an act or an assert. Name the call "
+                f"that exercises the criterion and the expression that "
+                f"observes it. If this criterion genuinely has no reachable "
+                f"API — a property of the suite rather than of the code, like "
+                f"\"N new tests exist\" — say so by writing `suite-level` in "
+                f"the criterion, and these rules will skip it instead."),
         ))
     if elided:
         findings.append(Finding(
@@ -713,6 +783,11 @@ def check_design_testability(design_md: str) -> list[Finding]:
                     f"needs all three — construct the state, invoke the "
                     f"behaviour, observe the outcome."),
             ))
+        if is_suite_level(labelled):
+            # DEV-710: every rule below needs a reachable API. Running them on
+            # a criterion that has none by construction is what taught the
+            # architect to fake one.
+            continue
         findings.extend(_check_names_a_call(labelled))
         findings.extend(_check_symbols(labelled, types, design_md))
         findings.extend(_check_equatable(labelled, types, members, design_md))
