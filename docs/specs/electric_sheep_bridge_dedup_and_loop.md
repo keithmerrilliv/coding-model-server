@@ -55,6 +55,22 @@ if !recentMetrics.isEmpty {
    there would ship unverified under a green suite. The visionOS half is tracked
    separately and will be done when a device is available.
 
+## Reference files (read-only)
+
+The test strategy protects six files. They are **reference, not scope** — read
+them, do not edit them. They are listed because the first attempt at this spec
+failed to compile entirely on types it could not see:
+
+    error: inheritance from a final class 'AudioManager'
+    error: type 'StubForcingStrategy' does not conform to protocol 'ForcingStrategy'
+    error: cannot find type 'Particle' in scope
+
+`AudioManager` is `final`, so an audio spy must be built by protocol or closure
+injection rather than by subclassing it. `ForcingStrategy` is a protocol whose
+requirements a stub has to satisfy exactly. `Particle` is nested inside
+`HallucinationSimulator`. None of that is guessable, and guessing it is what
+cost the first attempt.
+
 ## Acceptance criteria
 
 A green build is NOT sufficient — the tests below are the gate.
@@ -83,6 +99,13 @@ A green build is NOT sufficient — the tests below are the gate.
     destination: "platform=macOS"
     filter: ElectricSheepTests
     skip_filter: ElectricSheepTests/DtypeContainmentTests
+    protected_paths:
+      - ElectricSheep/AudioManager.swift
+      - ElectricSheep/Audioscape.swift
+      - ElectricSheep/ForcingStrategy.swift
+      - ElectricSheep/HallucinationSimulator.swift
+      - ElectricSheep/HallucinationEngine.swift
+      - ElectricSheep/TokenMetrics.swift
 
 ## Constraints
 

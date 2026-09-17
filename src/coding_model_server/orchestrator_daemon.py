@@ -2522,6 +2522,10 @@ def _generate_implementation(
     # never draws SEARCH/REPLACE blocks (five of run 21's eleven rotations).
     new_files = view.new_files
     impl_max_tokens = executor.implementer_max_tokens_for(design_md)
+    # DEV-698: the implementer writes the stubs and meets the compiler, so it
+    # needs this more than the architect did. Computed from the full context,
+    # not the budget-trimmed render.
+    unresolved = _unresolved_for(view)
 
     def _implementer_prompt(existing, reference, omitted_e=None, omitted_r=None):
         return build_implementer_message(
@@ -2529,6 +2533,7 @@ def _generate_implementation(
             clarifications=clarifications, existing_files=existing,
             reference_files=reference,
             approval_conditions=approval_conditions,
+            unresolved=unresolved,
             edit_mode=executor.DIFF_BASED_EDITS and bool(existing),
             new_files=new_files,
             omitted_existing=omitted_e, omitted_reference=omitted_r)
