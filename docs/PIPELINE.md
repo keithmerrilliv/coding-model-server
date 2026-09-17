@@ -379,7 +379,7 @@ table to read first when a run ends somewhere surprising.
 | No-verdict caps | 5 / 3 / 1 / ∞ | `AUTONOMOUS_NO_VERDICT_CAP` | Consecutive no-verdicts on one attempt before a task is parked behind an infrastructure gate: the default, the build-check runner outage, `prompt_too_large` (the sum is the same next time), and the fetch-time outage (never — the fetch is retried each tick). |
 | Invariant agents | 2 | `AUTONOMOUS_INVARIANT_AGENTS` | Distinct agents producing the same coarse failure key before the rotation is cut short into synthesis (diagram 6). |
 | Random rotation | 0 | `AUTONOMOUS_ROTATION_RANDOM_FRACTION` | Fraction of dispatches whose agent is drawn at random rather than from failure history — off unless you are collecting per-agent data (DEV-530). |
-| Crash recoveries | 5 | — | Recoveries of one task from RUNNING after a daemon restart, counted from recovery's own records rather than `retry_count` (DEV-558). |
+| Crash recoveries | 5 | `AUTONOMOUS_MAX_RETRIES` | Recoveries of one task from RUNNING after a daemon restart, counted from recovery's own records rather than `retry_count` (DEV-558). |
 | Synthesis repair rounds | 1 | — | Hard-coded. One repair, then the run ends. |
 | Repair pass-rate floor | 0.8 | `AUTONOMOUS_SYNTHESIS_REPAIR_MIN_RATE` | Below this, a repair call is not worth making. |
 | Parse retries | 2 / 2 / 2 / 1 / 1 | `AUTONOMOUS_ARCHITECT_PARSE_RETRIES`, `AUTONOMOUS_PER_FILE_PARSE_RETRIES`, `AUTONOMOUS_MANIFEST_PARSE_RETRIES`, `AUTONOMOUS_PLANNER_PARSE_RETRIES`, `AUTONOMOUS_REVIEWER_PARSE_RETRIES` | Malformed agent output before giving up. Each buys a re-call of that one step, never one of `MAX_RETRIES`: a corrupted delimiter says nothing about whether the agent can do the work (DEV-507, DEV-431). |
