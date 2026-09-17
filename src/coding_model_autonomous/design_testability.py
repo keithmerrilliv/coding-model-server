@@ -59,6 +59,13 @@ KIND_TUPLE_CONFORMANCE = "tuple_conformance"
 # DEV-661: a Python seam that calls the code under test without ever importing
 # it leaves the implementer to guess the import root — run 24 guessed `src.`.
 KIND_SEAM_NO_IMPORT = "seam_no_import"
+# DEV-722: a design that adds stored state to an existing Swift VALUE type
+# without saying whether it stays one. DEV-511's preamble already states the
+# rules and they are correct — they are jointly unsatisfiable until someone
+# decides what the type is. Mark the members `mutating` and every `let` call
+# site breaks; leave them and the assignment breaks. Run 2 spent three
+# implementers and 6 -> 15 -> 25 diagnostics discovering that.
+KIND_UNDECLARED_MUTABILITY = "undeclared_mutability"
 
 FILE_STRUCTURE_HEADING = "File Structure"
 
@@ -187,6 +194,138 @@ def parse_seams(design_md: str) -> list[Seam]:
                           act=found.get("act", ""),
                           assert_=found.get("assert", "")))
     return seams
+
+
+# A served file declaring a Swift value type at top level.
+_VALUE_TYPE_DECL_RE = re.compile(
+    r"^\s*(?:public |internal |fileprivate |private |final )*"
+    r"(struct|enum)\s+(\w+)", re.MULTILINE)
+
+# Saying what a type IS. Matched near the TYPE NAME, never document-wide: run
+# 2's design says "Lightweight value type" about an unrelated helper, and a
+# document-wide match let that suppress the check entirely.
+_CONTRACT_WORDS_RE = re.compile(
+    r"\bmutating\b|\bvalue type\b|\breference type\b|\bfinal class\b"
+    r"|\bbecomes a class\b|\bremains a struct\b|\bstays a struct\b"
+    r"|\bnonmutating\b|\bconvert(?:ed|s)? to a class\b",
+    re.IGNORECASE)
+
+# Adding state, as opposed to merely listing a file.
+_ADDS_STATE_RE = re.compile(
+    r"\bADD\b|\badds?\b|\bstore[ds]?\b|\bcursor\b|\bcounter\b"
+    r"|\bstate\b|\btrack(?:ing)?\b", re.IGNORECASE)
+
+
+# SwiftUI App/View/Scene structs mutate through property wrappers (@State,
+# @Binding, @StateObject) and need no `mutating` contract — adding
+# `@State private var task` to one is ordinary SwiftUI, not the DEV-722
+# defect. Flagging them would push the architect toward declaring a
+# contract that is wrong for the framework, which is the DEV-710 mistake:
+# a badly aimed check makes the design worse.
+_SWIFTUI_CONFORMANCE_RE = re.compile(
+    r"\b(struct|enum)\s+(\w+)\s*:[^{\n]*\b(App|View|Scene|"
+    r"ViewModifier|PreviewProvider)\b")
+
+
+def served_value_types(served: dict) -> dict:
+    """{path: [type names]} for served files declaring a struct or enum.
+
+    SwiftUI view types are excluded: their state lives in property wrappers,
+    so they have no mutability contract to declare.
+    """
+    out: dict = {}
+    for path, source in (served or {}).items():
+        src = source or ""
+        swiftui = {m.group(2) for m in _SWIFTUI_CONFORMANCE_RE.finditer(src)}
+        names = [n for _kind, n in _VALUE_TYPE_DECL_RE.findall(src)
+                 if n not in swiftui]
+        if names:
+            out[path] = names
+    return out
+
+
+def _states_contract_for(design_md: str, type_name: str) -> bool:
+    """True when the design says what THIS type is, not merely what some type is.
+
+    Scoped to the LINE (and the sentence within it) that names the type.
+    Document-wide matching made the first version silently never fire — run
+    2's design says "Lightweight value type" about an unrelated helper. A
+    character window is no better: in a compact design one type's contract
+    sits a few dozen characters from another type's name. Designs state a
+    contract where they name the type — a bullet, a table row, a sentence —
+    so that is the unit to read.
+    """
+    name_re = re.compile(r"\b" + re.escape(type_name) + r"\b")
+    for line in design_md.splitlines():
+        if not name_re.search(line):
+            continue
+        if not _CONTRACT_WORDS_RE.search(line):
+            continue
+        # Same line is usually enough, but a line can carry two clauses about
+        # two types. Require them in the same sentence.
+        for sentence in re.split(r"(?<=[.;])\s+", line):
+            if name_re.search(sentence) and _CONTRACT_WORDS_RE.search(sentence):
+                return True
+    return False
+
+
+def check_declared_mutability(design_md: str, served: dict) -> list:
+    """DEV-722: a design modifying a served value type must say what it is.
+
+    DEV-511's value-semantics rules are correct and already in the prompt. They
+    are JOINTLY UNSATISFIABLE until someone decides what the type is: mark the
+    members `mutating` and every `let` call site breaks, leave them and the
+    assignment breaks. Run 2 spent three implementers and 6 -> 15 -> 25
+    diagnostics discovering that, because its design never said.
+
+    Fires only when every one of these holds, so it cannot nag a design that
+    is not making this mistake:
+
+      * the File Structure names a file the context actually served;
+      * that file declares a `struct` or `enum` at top level;
+      * the entry describes ADDING state, not merely listing a reference;
+      * and the design states no contract NEAR that type's name.
+    """
+    if not served:
+        return []                      # cannot tell; DEV-630 says stay silent
+    fs = _section(design_md, FILE_STRUCTURE_HEADING)
+    if not fs.strip():
+        return []
+    value_types = served_value_types(served)
+    findings = []
+    seen: set = set()
+    for line in fs.splitlines():
+        if not _ADDS_STATE_RE.search(line):
+            continue
+        for path, names in value_types.items():
+            # File Structure is often a tree with bare filenames, so match the
+            # basename too — requiring the full path is why this missed.
+            base = path.rsplit("/", 1)[-1]
+            if path not in line and base not in line:
+                continue
+            undeclared = [n for n in names
+                          if not _states_contract_for(design_md, n)]
+            if not undeclared or path in seen:
+                continue
+            seen.add(path)
+            findings.append(Finding(
+                kind=KIND_UNDECLARED_MUTABILITY,
+                criterion="",
+                detail=(
+                    f"`{base}` declares the value type "
+                    + ", ".join("`" + n + "`" for n in undeclared[:3])
+                    + ", and this design adds stored state to it without "
+                    "saying what the type IS. Decide it here: either it "
+                    "REMAINS a struct — then name which members become "
+                    "`mutating` and which call sites must bind `var`, "
+                    "INCLUDING in the tests — or it becomes a `final class`. "
+                    "Leaving it unstated is not neutral: the value-semantics "
+                    "rules are jointly unsatisfiable without it, so each "
+                    "implementer invents a different contract and none of "
+                    "them agree (DEV-722)."),
+            ))
+            break
+    return findings
 
 
 def is_python_design(design_md: str) -> bool:
