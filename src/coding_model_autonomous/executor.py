@@ -562,11 +562,26 @@ ARCHITECT_SYSTEM_PROMPT = textwrap.dedent("""\
        declared read-only. EVERY STEP MUST NAME A CALL IN BACKTICKS — a step
        written as prose ("place a chain at the rightmost column") is rejected,
        and so is one that elides the call (`let snapshot = ...`). Write the
-       actual expression a test would run. If there is no call to write, you
-       have found a criterion your API cannot reach: that is the defect this
-       section exists to surface, so fix the API rather than describing the
-       intent. Write the seams as you write the checklist — if you cannot name
-       the seam, change the API until you can.
+       actual expression a test would run.
+
+       If there is no call to write, there are exactly two honest answers and
+       inventing a function is neither of them.
+
+       (a) The criterion is ABOUT THE CODE and your API cannot reach it. That
+       is the defect this section exists to surface: fix the API rather than
+       describing the intent, and change it until you can name the seam.
+
+       (b) The criterion is NOT about the code — it is a property of the build,
+       of the file set, or of the diff. "Build succeeds with no new warnings",
+       "at least 6 new tests exist", "this file is unchanged" are all of this
+       kind: nothing in the source can be called to observe them. Write
+       `suite-level` in the criterion text and give it NO seam. The check will
+       skip it, and a human can still see what you claimed.
+
+       Never satisfy this section with a call that does not exist. A seam
+       naming `xcodebuild_build(...)`, `XCTestSuite.allTestCases(...)` or
+       `git_diff(...)` is worse than an honest `suite-level` marker: it looks
+       checkable, it is copied into a test, and it does not compile.
     """)
 
 # Swift value semantics: ~29% of every build diagnostic this pipeline has
