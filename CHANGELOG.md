@@ -75,7 +75,7 @@ Every parser and fetch a guard keys on distinguishes "nothing there" from "could
 
 Every dispatch is planned before the call; a failure two agents produced identically goes to synthesis; citations have a position; the failure stream is the identity.
 
-The phase ticket itself remains In Review. Its bar is one a test cannot manufacture — two *distinct* agents producing the same coarse failure key on a live run — so it waits for the run that happens to produce one rather than for work.
+The phase ticket closed on live evidence from run 39 (`spec_a5b68678`, 2026-09-15): `implementer` and `moe_implementer` each produced the coarse key `review_rejected||`, and the retry-2 `failure_classified` event carries `disposition: synthesize` with `invariant across 2 agents` — three retries before exhaustion. The synthesis delivered the slice. That was the one bar in this release no test could manufacture.
 
 - [DEV-631](https://keith-merrill4.atlassian.net/browse/DEV-631) — Retry loop recognises invariant failures — a retry must change something (prompt, agent, temperature, environment) or classify the failure as environmental and stop spending the rotation
 - [DEV-539](https://keith-merrill4.atlassian.net/browse/DEV-539) — Targeted retry treats any filename mentioned in rejection notes as a citation, so saying "the bug is not in X.swift" regenerates X.swift and can destroy a file that compiled
@@ -98,9 +98,9 @@ Three event kinds with fixed schemas, a diagnostic taxonomy, an honest Jira mirr
 - [DEV-611](https://keith-merrill4.atlassian.net/browse/DEV-611) — Post-release doc polish backlog from the DEV-607 audit (non-blocking WARN/NIT items)
 - [DEV-670](https://keith-merrill4.atlassian.net/browse/DEV-670) — PIPELINE.md and CONFIGURATION.md rewrite for v0.2.0 — routing as the kernel does it, every AUTONOMOUS_* knob documented, .env.example matching
 
-### After the proving runs — found by runs 31–37 (2026-09-13/14)
+### After the proving runs — found by runs 31–41 (2026-09-13 to 09-16)
 
-Every proving run found defects in what it was proving. Runs 35–37 (2026-09-14) were the second wave: a cancel drill and two self-target runs.
+Every proving run found defects in what it was proving. Runs 35–37 (2026-09-14) were the second wave: a cancel drill and two self-target runs. Runs 39–41 (2026-09-15/16) were the third: two Centipede slices on the Mac runner and one self-target run, the last of them the v0.2.0 proving run (DEV-706). Fixes filed from those runs and merged before the tag are listed here; defects filed from them and not yet fixed (DEV-698/699/700/705/709/710/711) are v0.2.1 by the default-defer rule and do not appear.
 
 - [DEV-660](https://keith-merrill4.atlassian.net/browse/DEV-660) — Build-failure feedback for `No module named 'src.<pkg>'` names the cause — the import root — not the missing module (pipeline-written on run 32)
 - [DEV-661](https://keith-merrill4.atlassian.net/browse/DEV-661) — The testability check requires a Python design's Criterion Seams to import the code under test, never through `src.` (pipeline-written on run 34)
@@ -116,6 +116,19 @@ Every proving run found defects in what it was proving. Runs 35–37 (2026-09-14
 - [DEV-680](https://keith-merrill4.atlassian.net/browse/DEV-680) — A lossy Jira collapse tells the truth: the resolution write uses the operation form (so `Won't Do` now lands on a stock workflow), the note's wording matches the resolution actually set, and a `pipeline-failed` label makes the collapse queryable
 - [DEV-688](https://keith-merrill4.atlassian.net/browse/DEV-688) — The pre-gate sandbox never collects the attempt's own `src/` tree, and everything under it counts as a module: a source file named `test_*.py` (this repository ships `test_runner.py`) was imported as a test module and red every attempt at collection, while being dropped from the edited-module list left DEV-675's guard silently disarmed for it
 - [DEV-689](https://keith-merrill4.atlassian.net/browse/DEV-689) — A repository test that spawns its own sandbox, git checkout or npm install declares `PREGATE_SANDBOX_UNSAFE` and the existing-tests selection skips it, so it never reds an attempt for something the model did not do
+
+- [DEV-687](https://keith-merrill4.atlassian.net/browse/DEV-687) — The two Swift-only testability rules (`missing_equatable`, `type_without_file`) are language-scoped and no longer fire on a Python design; runs 39 and 40 were the natural A/B
+- [DEV-690](https://keith-merrill4.atlassian.net/browse/DEV-690) — An edit block naming a prompt-example placeholder path is named in the feedback rather than charged as an unappliable edit and sent to the ledger's closed door
+- [DEV-691](https://keith-merrill4.atlassian.net/browse/DEV-691) — A truncated implementer response is a no-verdict, not a `parse_failure` charge for the outputs the truncation prevented — DEV-645's planned-output check had reopened the hole DEV-623 closed
+- [DEV-701](https://keith-merrill4.atlassian.net/browse/DEV-701) — `CONTEXT_ASSEMBLED` carries `ref_state` (the runner clone's local and remote SHA and whether they agree), so a Mac runner whose clone silently lags origin is visible before a run reads a stale tree; the payload schema and its test carry the production shape
+- [DEV-700](https://keith-merrill4.atlassian.net/browse/DEV-700) — `count_test_declarations` / `declaration_delta` in `test_runner.py`, so a zero or negative test delta is measurable (landed by hand from run 40; wiring the delta into the gate is the open half of the ticket)
+- [DEV-705](https://keith-merrill4.atlassian.net/browse/DEV-705) — `scripts/reclaim_tart_vms.sh` reclaims leaked tart VMs on the Mac runner (the concurrency guard and hard teardown failure are the open half of the ticket)
+- [DEV-707](https://keith-merrill4.atlassian.net/browse/DEV-707) — The architect runs at a 64K window with 46 of its 65 layers on the GPU instead of 128K with 36: ~+37% decode on a 16 GB card; run 41 was its first workload, four passes clean
+- [DEV-703](https://keith-merrill4.atlassian.net/browse/DEV-703) — The unit's CUDA pin names the version actually in use (13.2, since August); the comment warning against 13.x was wrong
+- [DEV-704](https://keith-merrill4.atlassian.net/browse/DEV-704) — README leads with "What changed since v0.1.0" — every claim traceable to a ticket or a run, and a "what has not changed" list at the same prominence; `docs/PIPELINE.md` sections 6–9 corrected against the kernel
+- [DEV-508](https://keith-merrill4.atlassian.net/browse/DEV-508) — The suite is green with no `--deselect`: the month-old "known env failure" was test order-dependence, fixed in the test; the underlying import-time `load_dotenv()` leak this ticket names stays open
+- [DEV-657](https://keith-merrill4.atlassian.net/browse/DEV-657) — Part 2: retrieval outcomes (`rag`, `finish_reason`) are durable on `AGENT_RAN`, so whether RAG earned its keep can be read from the event stream rather than inferred
+- [DEV-297](https://keith-merrill4.atlassian.net/browse/DEV-297) — `scripts/fix_ufw_exposure.sh` no longer lists this host's addresses; a new test lane refuses any globally-routable address of this network in a tracked file, with a negative control that proves the lane fires
 
 ### Before the plan — August fixes and evaluations
 
