@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.2.0 — unreleased (main since v0.1.0, 2026-08-19)
+## v0.2.0 — 2026-09-16
 
 The Pipeline Kernel Refactor ([DEV-628](https://keith-merrill4.atlassian.net/browse/DEV-628)): the decisions that kept killing runs moved out of the orchestrator daemon into four typed kernel modules — `workspace.py`, `outcome.py`, `context.py`, `retry_policy.py` (~3,300 lines) — plus fixed event payload schemas, behind a fault-injecting seam tier. The daemon itself did not shrink (5,804 lines at v0.1.0, 7,185 now); what moved is the deciding. Seven phases, one ticket each; every line below links the ticket that carries the evidence and the live proof. Every ticket in the seven phase sections is Done. Where a fix could not be proven by a live run under conditions we can manufacture, green dedicated tests stand as the proof. The "After the proving runs" section is different: it lists what merged from the proving runs, and where a ticket shipped only in part it says which half is still open. Run 31 (Centipede logic core slice 7, `spec_c1e1c9ac`, 2026-09-13) was the proving run for phases 4–6: it delivered on the Mac runner with 52 tests green after one build-failure retry, and the tickets below naming a run-time behaviour were moved to Done on its events.
 
