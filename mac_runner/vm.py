@@ -40,6 +40,11 @@ logger = logging.getLogger("mac_runner.vm")
 GUEST_HOME = "/Users/admin"
 GUEST_WORKTREE = f"{GUEST_HOME}/work"
 GUEST_DERIVED_DATA = f"{GUEST_HOME}/dd"
+# Where a warm SwiftPM clone cache lands in the guest (DEV-721). Deliberately
+# NOT under GUEST_DERIVED_DATA: xcodebuild is pointed at it with
+# -clonedSourcePackagesDirPath, and keeping it separate means a future change
+# to DerivedData handling cannot silently drop the cache.
+GUEST_PKG_CACHE = f"{GUEST_HOME}/pkgcache"
 
 _SSH_OPTS = [
     # Every guest is minted fresh, so its host key is always unknown; pinning
@@ -96,6 +101,24 @@ def vm_available() -> "str | None":
 def _ssh_base(ip: str) -> list[str]:
     return ["sshpass", "-p", Config.VM_SSH_PASSWORD, "ssh", *_SSH_OPTS,
             f"{Config.VM_SSH_USER}@{ip}"]
+
+
+def _package_cache_dir() -> "Path | None":
+    """The configured warm SwiftPM cache, or None when there is nothing to push.
+
+    An empty or missing directory is the same as unconfigured: pushing it would
+    only create an empty tree in the guest and cost a round trip.
+    """
+    configured = Config.VM_PACKAGE_CACHE
+    if not configured:
+        return None
+    cache = Path(configured).expanduser()
+    try:
+        if not cache.is_dir() or not any(cache.iterdir()):
+            return None
+    except OSError:
+        return None
+    return cache
 
 
 def _guest_sh(cmd: list[str], cwd: str) -> str:
@@ -313,6 +336,25 @@ def run_tests_in_vm(worktree: Path, resolve_cmd: "list[str] | None",
             capture_output=True, text=True, timeout=SYNC_TIMEOUT)
         if sync.returncode != 0:
             return None, f"[vm] worktree sync failed: {sync.stderr.strip()}"
+
+        # A warm clone cache, when one is configured, so resolution reads from
+        # disk instead of re-fetching the graph over slow guest egress
+        # (DEV-721). Non-fatal by the same reasoning as resolution itself: a
+        # cache that fails to copy costs speed, not correctness — the guest
+        # falls back to fetching, which is what it did before this existed.
+        cache = _package_cache_dir()
+        if cache is not None:
+            pushed = subprocess.run(
+                ["sshpass", "-p", Config.VM_SSH_PASSWORD, "rsync", "-a",
+                 "-e", "ssh " + " ".join(_SSH_OPTS),
+                 f"{cache}/",
+                 f"{Config.VM_SSH_USER}@{ip}:{GUEST_PKG_CACHE}/"],
+                capture_output=True, text=True, timeout=SYNC_TIMEOUT)
+            if pushed.returncode != 0:
+                logger.warning("package cache push failed (resolving from the "
+                               "network instead): %s", pushed.stderr.strip())
+            else:
+                logger.info("pushed warm package cache from %s", cache)
 
         if resolve_cmd is not None:
             # Same contract as the host pre-step (DEV-294): a failed resolve

@@ -446,6 +446,10 @@ def run_tests_endpoint(req: RunTestsRequest) -> RunTestsResponse:
             # DerivedData, never the host's.
             derived_data = (Path(vm.GUEST_DERIVED_DATA) if use_vm
                             else Config.DERIVED_DATA)
+            if use_vm and Config.VM_PACKAGE_CACHE:
+                # Guest-side path only: the host keeps its own SwiftPM cache
+                # where xcodebuild already expects it (DEV-721).
+                opts["cloned_packages"] = vm.GUEST_PKG_CACHE
             try:
                 cmd = build_cmd(req.framework, wt, derived_data, **opts)
                 resolve_cmd = build_resolve_cmd(
