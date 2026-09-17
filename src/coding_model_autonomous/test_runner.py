@@ -1251,6 +1251,7 @@ def _run_mac_runner_tests(
     workspace: Optional[str] = None,
     project: Optional[str] = None,
     filter: Optional[str] = None,
+    skip_filter: Optional[str] = None,
     protected_paths: Optional[list] = None,
 ) -> tuple[bool, str]:
     """Dispatch swift_test / xcodebuild_test to the Mac runner over HTTP."""
@@ -1288,7 +1289,8 @@ def _run_mac_runner_tests(
     }
     for key, val in (("scheme", scheme), ("destination", destination),
                      ("configuration", configuration), ("workspace", workspace),
-                     ("project", project), ("filter", filter)):
+                     ("project", project), ("filter", filter),
+                     ("skip_filter", skip_filter)):
         if val is not None:
             payload[key] = val
 
@@ -1570,6 +1572,8 @@ def run_tests(
             workspace=framework_opts.get("workspace"),
             project=framework_opts.get("project"),
             filter=framework_opts.get("filter"),
+            # DEV-713: the operator's quarantine for a known flake (DEV-603).
+            skip_filter=framework_opts.get("skip_filter"),
             protected_paths=framework_opts.get("protected_paths"),
         )
     else:

@@ -549,7 +549,7 @@ def _spec_declared_test_strategy(spec_md: str) -> dict:
 # SUBSTITUTED value is worse than a dropped one because it is well-formed and
 # plausible and survives every structural check.
 _OPERATOR_STRATEGY_KEYS = ("repo", "protected_paths", "base_ref", "filter",
-                           "execution_target", "framework")
+                           "execution_target", "framework", "skip_filter")
 
 
 def _overlay_operator_test_strategy(yaml_text: str, spec_md: str,

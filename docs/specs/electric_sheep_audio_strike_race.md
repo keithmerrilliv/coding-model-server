@@ -75,6 +75,8 @@ A green build is NOT sufficient — the tests below are the gate.
     repo: electric-sheep
     scheme: ElectricSheep
     destination: "platform=macOS"
+    filter: ElectricSheepTests
+    skip_filter: ElectricSheepTests/DtypeContainmentTests
 
 ## Constraints
 

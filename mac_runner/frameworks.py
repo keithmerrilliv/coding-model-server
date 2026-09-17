@@ -41,7 +41,16 @@ def build_swift_test_cmd(worktree: Path, **opts: Any) -> list[str]:
     cmd = ["swift", "test", "--parallel", "--disable-sandbox"]
     if filt := opts.get("filter"):
         cmd.extend(["--filter", filt])
+    for sel in _selectors(opts.get("skip_filter")):
+        cmd.extend(["--skip", sel])
     return cmd
+
+
+def _selectors(raw: Any) -> list[str]:
+    """One selector or a comma/space separated list, normalised. [] when unset."""
+    if not raw:
+        return []
+    return [s for s in str(raw).replace(",", " ").split() if s]
 
 
 def _only_testing_args(opts: dict[str, Any]) -> list[str]:
@@ -59,13 +68,18 @@ def _only_testing_args(opts: dict[str, Any]) -> list[str]:
     target ("ElectricSheepTests") or a narrower path
     ("ElectricSheepTests/ForcingStrategyTests/testMaskZeroesNonTopK").
     """
-    raw = opts.get("filter")
-    if not raw:
-        return []
-    selectors = [s for s in str(raw).replace(",", " ").split() if s]
     args: list[str] = []
-    for sel in selectors:
+    for sel in _selectors(opts.get("filter")):
         args.extend(["-only-testing:" + sel])
+    # DEV-713: exclusion is the only way to quarantine a known-flaky test.
+    # DEV-603 measured DtypeContainmentTests a1/a2 failing on ~half of
+    # Electric Sheep runs with no relation to the code under test, sometimes
+    # aborting the suite — and with only -only-testing: available, the
+    # pipeline had no way to stop charging that coin flip to the implementer.
+    # Declared per spec rather than hardcoded, so it is visible at the plan
+    # gate and dies with the ticket that justified it.
+    for sel in _selectors(opts.get("skip_filter")):
+        args.extend(["-skip-testing:" + sel])
     return args
 
 

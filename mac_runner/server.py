@@ -68,6 +68,8 @@ class RunTestsRequest(BaseModel):
     timeout: Optional[int] = None
     # framework-specific options
     filter: Optional[str] = None
+    # DEV-713: tests to EXCLUDE — quarantine for a known flake (DEV-603).
+    skip_filter: Optional[str] = None
     scheme: Optional[str] = None
     destination: Optional[str] = None
     configuration: Optional[str] = None
