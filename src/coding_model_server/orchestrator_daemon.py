@@ -1612,6 +1612,18 @@ def _deliver_completed_spec(db: Database, spec: Spec) -> None:
                              "detail": result.detail[:500]})
 
 
+def _spec_language(spec: Spec) -> "str | None":
+    """The plan's declared language, for DEV-657's retrieval gate.
+
+    Read from the plan rather than guessed from file extensions: the plan is
+    the operator-approved statement of what this spec is, and all 82 stored
+    plans carry it. None means the plan could not be read, which the gate
+    treats as "not known to be covered" rather than as a default.
+    """
+    lang = _load_plan(spec).get("language")
+    return str(lang).strip() if lang and str(lang).strip() else None
+
+
 def _load_plan(spec: Spec) -> dict:
     """Parse spec.normalized_yaml into a dict; {} when absent or malformed.
 
@@ -1911,10 +1923,13 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
     max_attempts = executor.ARCHITECT_PARSE_RETRIES + 1
     result = None
     memory_query = executor.spec_memory_query(spec_md)
+    # DEV-657: the corpus is Apple documentation, so a Python spec must not
+    # pay for it. Read once — the language cannot change mid-dispatch.
+    language = _spec_language(spec)
     for attempt in range(1, max_attempts + 1):
         meta: dict = {}
         raw = call_agent("architect", messages, meta=meta,
-                         memory_query=memory_query)
+                         memory_query=memory_query, language=language)
         _note_truncation(db, spec, task, "architect", meta,
                          executor.ARCHITECT_MAX_TOKENS)
         # DEV-714: a reply that asks for files is answered and re-sent. A fresh
@@ -1938,7 +1953,7 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
                      {"role": "user", "content": answer}]
             meta = {}
             raw = call_agent("architect", convo, meta=meta,
-                             memory_query=memory_query)
+                             memory_query=memory_query, language=language)
             _note_truncation(db, spec, task, "architect", meta,
                              executor.ARCHITECT_MAX_TOKENS)
         tool_fields = (architect_tools.summary(budget) if budget is not None
@@ -3594,6 +3609,7 @@ def _generate_one_file(
             _per_file_prompt(reference_files, omitted_reference, edit_errors),
             agent=chosen_agent, max_tokens=executor.PER_FILE_MAX_TOKENS, meta=meta,
             memory_query=executor.file_memory_query(entry),
+            language=_spec_language(spec),
         )
         # Counted before any early return below: a truncated or unparseable
         # call still spent the GPU time and the tokens, and an attempt's cost

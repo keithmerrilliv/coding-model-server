@@ -161,6 +161,11 @@ class TestCallAgentForwarding:
 
         monkeypatch.setattr(executor, "post_chat_completion", fake_post)
         monkeypatch.setattr(executor, "AUTONOMOUS_MEMORY_ROLES", memory_roles)
+        # These tests are about forwarding the QUERY. Retrieval also needs a
+        # covered language since DEV-657, so a call passing none would be
+        # blocked by the language gate and this file would pass for the wrong
+        # reason.
+        kwargs.setdefault("language", "swift")
         executor.call_agent(role, [{"role": "user", "content": "hi"}], **kwargs)
         return sent
 
@@ -174,6 +179,13 @@ class TestCallAgentForwarding:
         """No point shipping a query the server will ignore."""
         sent = self._call(monkeypatch, "implementer", {"architect"},
                           memory_query="a good query")
+        assert "memory_query" not in sent
+        assert sent.get("skip_memory") is True
+
+    def test_query_is_omitted_when_the_language_did_not_opt_in(self, monkeypatch):
+        """DEV-657: the same reasoning applies to the other half of the gate."""
+        sent = self._call(monkeypatch, "architect", {"architect"},
+                          memory_query="a good query", language="python")
         assert "memory_query" not in sent
         assert sent.get("skip_memory") is True
 

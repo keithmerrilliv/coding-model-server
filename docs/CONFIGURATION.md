@@ -154,6 +154,7 @@ again can help (`docs/PIPELINE.md` sections 6 and 8):
 | `AUTONOMOUS_SYNTHESIS_REPAIR_MIN_RATE` | `0.8` | Pass rate the synthesis merge must reach for one repair round to be worth a call. |
 | `AUTONOMOUS_BUSY_WAIT_CAP` | `0` | Seconds to wait on `503 Retry-After` (another spec's generation holds the model) before giving up. `0` bounds the wait by the calling role's own timeout, which is the budget the task already has (DEV-491). |
 | `AUTONOMOUS_MEMORY_ROLES` | *(empty)* | Comma-separated roles (`architect,implementer,reviewer,planner`) whose prompts get RAG retrieval from the memory store. Empty means no role does. |
+| `AUTONOMOUS_MEMORY_LANGUAGES` | `swift` | Comma-separated spec languages the retrieval corpus covers (DEV-657). A call retrieves only when BOTH its role and the spec's language opt in, so an Apple-documentation corpus is not queried for Python work. A spec whose plan has no readable language does not retrieve. |
 
 **Guards on what an attempt may write** (`docs/PIPELINE.md` section 4):
 
