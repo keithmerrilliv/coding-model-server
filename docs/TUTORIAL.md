@@ -328,12 +328,15 @@ to 76 (implementer).
 6.3 decode) was retired by DEV-99 and can no longer be selected.
 
 `glimmer_architect` / `glimmer_implementer` (Muse-Glimmer-30B, DEV-692) have no
-row either. Their numbers — 328 tok/s prefill, 10.9 decode at ngl 36
-`--swa-full`, 131K Q4_0 KV — come from the DEV-692 VRAM sweep, which drove
+row either. Their number — 13.2 decode at ngl 40 `--swa-full`, 64K Q4_0 KV —
+comes from the DEV-727 re-sweep, which drove
 llama-server directly with production argv rather than going through the proxy
 with `benchmark_prefill.py`. That is the other measurement this table's preamble
-warns about, so the figures are not comparable to the rows above and are left
-out rather than mixed in. Re-run the script against them to get a comparable row.
+warns about, so the figure is not comparable to the rows above and is left out
+rather than mixed in. Prefill was not re-measured at this rung — the DEV-727
+sweep reported decode and free VRAM only, so the older 328 tok/s belongs to the
+superseded 131K rung and is not quoted here. Re-run the script against them to
+get a comparable row.
 
 To re-measure on your hardware: `python3 scripts/benchmark_prefill.py --warmup`
 and `python3 scripts/benchmark_decode.py -a <agent> --reps 3` from the server

@@ -233,7 +233,7 @@ DEV-414 eval), `dense_architect_nothink` (`dense_architect` with
 `enable_thinking=False`, the DEV-556 eval arm), `qwen38_architect`
 (Qwen3.8-27B with embedded MTP, the DEV-615 architect-eval candidate), and
 `glimmer_architect` / `glimmer_implementer` (Muse-Glimmer-30B, the DEV-692
-candidate for both slots — 131K Q4_0 ctx, ngl 36 `--swa-full`, 10.9 decode).
+candidate for both slots — 64K Q4_0 ctx, ngl 40 `--swa-full`, 13.2 decode).
 
 The Glimmer pair is **registered but not routed**: neither appears in the
 implementer rotation, in `ALLOWED_IMPLEMENTER_AGENTS` or in the complexity-tier

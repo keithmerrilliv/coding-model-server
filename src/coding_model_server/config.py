@@ -743,7 +743,7 @@ Update these after each retrieval step. They help you stay organized and efficie
     # Q4_0 KV, one fixed prompt, 256 predicted (decode / prefill tok/s @ MiB free):
     #   ngl=28 --swa-full    8.1 /  236 @ 4,128     ngl=28 no-swa   8.1 / 182 @ 5,329
     #   ngl=32 --swa-full    9.3 /  276 @ 2,946     ngl=32 no-swa   9.3 / 208 @ 4,253
-    #   ngl=36 --swa-full   10.9 /  328 @ 1,763  <- THE PICK
+    #   ngl=36 --swa-full   10.9 /  328 @ 1,763  <- the 131K pick, superseded
     #   ngl=40 --swa-full   13.2 /  407 @   579     ngl=36 no-swa  10.9 / 243 @ 3,173
     #   ngl=44 --swa-full   OOM, exit 1             ngl=40 no-swa  13.2 / 298 @ 2,093
     #                                               ngl=44 no-swa  16.6 / 384 @ 1,015
@@ -769,10 +769,61 @@ Update these after each retrieval step. They help you stay organized and efficie
     # was 3/3 clean, so this is Glimmer-specific and not a parser bug.
     # `deepseek` routes thoughts to message.reasoning_content and leaves
     # content clean.
+    #
+    # DEV-727, 2026-09-18: RE-SWEPT AT 65,536 AND REPITCHED TO ngl=40. Read the
+    # second half of this note before using the numbers: the sweep was motivated
+    # by a VRAM hypothesis that the sweep itself then DISPROVED, and the rung
+    # change is kept on its own merits, not as a fix.
+    #
+    # Glimmer was carrying DOUBLE the incumbent's KV for a window the pipeline
+    # never asks for. Architect prompts are median 8,518 tokens across 207 live
+    # calls, and DEV-633's fit check budgets against the DESTINATION window,
+    # which for the production architect has been 65,536 since DEV-707.
+    #
+    #   ngl=36 @ 65536   10.9 dec  @ 2,951 MiB free
+    #   ngl=40 @ 65536   13.2 dec  @ 1,884 MiB free   <- THE PICK
+    #   ngl=44 @ 65536   16.6 dec  @   780 MiB free   (under the floor)
+    #   ngl=48 @ 65536   load failed
+    #   ngl=52 @ 65536   load failed
+    #
+    # Selection rule, fixed in writing BEFORE the numbers existed (DEV-727): take
+    # the rung with the MOST headroom that still gains layers over 36 — headroom
+    # was the thing under investigation and speed the bonus, so this is
+    # deliberately not the fastest rung that loads. Against the superseded 131K
+    # pick it is +121 MiB free, +4 layers and +21% decode at the same time. The
+    # ten-layer figure DEV-707 got on the 27B did not transfer and was never
+    # assumed to — different arch (52 blocks, GQA 16:1, sliding_window 2048),
+    # different KV per token, hence a sweep rather than a config edit. Sweep argv
+    # is production argv (var/telemetry/sweep_glimmer_65k.sh).
+    #
+    # THE 502 IS NOT A VRAM FAULT, and this rung does not fix it. DEV-727
+    # hypothesised the 1-in-6 "upstream inference error" was the prefill compute
+    # buffer failing to allocate. It is not. The upstream error, in all five
+    # occurrences of the DEV-692 item-6 run and again here, is
+    #
+    #   common_chat_peg_parse: unparsed peg-native output:  to=<<<READ_FILE>>>...
+    #   500 "The model produced output that does not match the expected
+    #        peg-native format"
+    #
+    # which this proxy surfaces as a 502. Glimmer emits its TOOL CALLS in harmony
+    # recipient syntax — `<|start|>assistant to=<<<MARKER>>>` — and llama-server's
+    # native (peg) parser for the harmony template cannot parse a recipient that
+    # is one of our markers. It fires only when the model elects to call a tool,
+    # which is why it looked task-correlated. Round 0 of a tool loop emits bare
+    # markers and parses clean; from round 1, once a tool RESULT is in the
+    # conversation, it switches to the channel form and 500s. Reproduced
+    # deterministically on 2026-09-18 at this rung with 1,839 MiB free — MORE
+    # headroom than the config that first showed it — which is what retires the
+    # VRAM hypothesis. This is the third face of the harmony-format problem
+    # behind DEV-692 item 5, not a memory fault.
+    #
+    # `--no-jinja` is NOT the way out: llama-server refuses the model outright
+    # with "this custom template is not supported, try using --jinja" (tested,
+    # 2026-09-18). Remaining candidates are on DEV-727.
     _MUSE_GLIMMER_30B = _create_model_config(
         'MODEL_PATH_MUSE_GLIMMER_30B',
         f'{_MODELS_ROOT}/unsloth/Muse-Glimmer-30B-GGUF/Muse-Glimmer-30B-UD-Q4_K_XL.gguf',
-        36, 131072, 2048,
+        40, 65536, 2048,
         server_extra_args=['--jinja', '--reasoning-format', 'deepseek', '--swa-full'],
         type_k=2, type_v=2,
         n_ubatch=2048,
@@ -1062,13 +1113,13 @@ Update these after each retrieval step. They help you stay organized and efficie
         # as unknown and mis-routing it (that bug cost runs 32 and 34 six
         # attempts each). No separate window table to update.
         'glimmer_architect': _create_agent_config(
-            'Architect — Muse-Glimmer-30B UD-Q4_K_XL (Meta, 131K Q4_0 ctx, ngl=36 --swa-full, DEV-692 eval arm)',
+            'Architect — Muse-Glimmer-30B UD-Q4_K_XL (Meta, 64K Q4_0 ctx, ngl=40 --swa-full, DEV-692 eval arm)',
             _ARCHITECT_SYSTEM_PROMPT,
             _MUSE_GLIMMER_30B,
             executor=True
         ),
         'glimmer_implementer': _create_agent_config(
-            'Implementer — Muse-Glimmer-30B UD-Q4_K_XL (Meta, 131K Q4_0 ctx, ngl=36 --swa-full, DEV-692 eval arm)',
+            'Implementer — Muse-Glimmer-30B UD-Q4_K_XL (Meta, 64K Q4_0 ctx, ngl=40 --swa-full, DEV-692 eval arm)',
             _IMPLEMENTER_SYSTEM_PROMPT,
             _MUSE_GLIMMER_30B,
             executor=True

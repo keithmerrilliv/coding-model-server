@@ -34,15 +34,29 @@ def test_both_arms_are_the_same_model():
 
 
 def test_the_arms_carry_the_swept_config():
-    """The DEV-692 sweep picked ngl=36 --swa-full as the only rung that clears
-    the ~1.4 GB reload floor while keeping prompt-cache reuse. A later edit that
-    raises ngl without re-sweeping would OOM at load (ngl=44) or crash the
-    prefill buffer on a revision pass (the DEV-616 class)."""
+    """DEV-727 re-swept at 65,536 and moved the pick to ngl=40 --swa-full: the
+    rung with the most headroom that still gains layers over 36 (1,884 MiB free
+    against the old 1,763, +4 layers, +21% decode). ngl=44 drops to 780 MiB,
+    under the floor, and 48/52 do not load. A later edit that raises ngl without
+    re-sweeping would OOM at load or crash the prefill buffer on a revision pass
+    (the DEV-616 class); one that restores the 131K window pays double the KV
+    for context the DEV-633 fit check never budgets against."""
     cfg = Config.AGENTS["glimmer_architect"]["model_config"]
-    assert cfg["n_gpu_layers"] == 36
-    assert cfg["n_ctx"] == 131072
+    assert cfg["n_gpu_layers"] == 40
+    assert cfg["n_ctx"] == 65536
     assert cfg["type_k"] == 2 and cfg["type_v"] == 2
     assert "--swa-full" in cfg["server_extra_args"]
+
+
+def test_glimmer_is_served_with_jinja():
+    """--no-jinja is the tempting response to DEV-727's peg-parse 500, and it
+    does not work: llama-server refuses this model outright with "this custom
+    template is not supported, try using --jinja" (tested 2026-09-18), so the
+    arm 502s on every call instead of one in six. The harmony template has no
+    legacy path."""
+    cfg = Config.AGENTS["glimmer_architect"]["model_config"]
+    assert "--jinja" in cfg["server_extra_args"]
+    assert "--no-jinja" not in cfg["server_extra_args"]
 
 
 def test_the_window_is_readable_so_the_fit_check_arms():
