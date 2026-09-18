@@ -150,13 +150,36 @@ def _select_implementer_agent(spec_dir) -> "str | None":
 
 
 # Rotation chain for implementer retries. Ordered for vendor/family diversity:
-# Qwen3.6 → Qwen3-Coder-Next → MiniMax → Qwen3-Coder. GLM (Zhipu) was removed
-# 2026-06-07: as a reasoning model it burns the per-file/manifest budget on
-# reasoning (even with --reasoning-budget 0, which it ignores — see config.py)
-# and truncates without emitting usable code. See project_implementer_rotation.md
-# and project_glm_perfile_truncation.md for the evidence.
+# Qwen3.6 → Qwen3-Coder-Next → Meta → MiniMax → Qwen3-Coder. GLM (Zhipu) was
+# removed 2026-06-07: as a reasoning model it burns the per-file/manifest budget
+# on reasoning (even with --reasoning-budget 0, which it ignores — see
+# config.py) and truncates without emitting usable code. See
+# project_implementer_rotation.md and project_glm_perfile_truncation.md.
+#
+# DEV-692 item 3, 2026-09-18 (Keith): glimmer_implementer joins directly behind
+# deep_implementer. It is the first Meta model the rotation has ever had, and
+# sitting third it separates the two Qwen families rather than adding a fourth
+# consecutive one.
+#
+# RETRY-ONLY, and deliberately so. Glimmer is in this list but NOT in
+# ALLOWED_IMPLEMENTER_AGENTS or TIER_TO_IMPLEMENTER, so no architect
+# recommendation and no complexity tier can put it on attempt 1. Attempt 1 is
+# the only attempt whose agent is chosen rather than rotated into, so it is the
+# only one comparable across runs (DEV-431); keeping Glimmer off it leaves that
+# comparison intact while the model earns its record on retries.
+#
+# WHY THIS IS SAFE DESPITE DEV-727. Glimmer 500s inside llama-server whenever it
+# emits a tool call in harmony recipient syntax (`to=<<<MARKER>>>`), which it
+# starts doing once a conversation carries a tool RESULT — round 1 of the
+# architect's DEV-714 tool loop, reproduced 2026-09-18. The implementer never
+# builds that shape: build_manifest_message and build_per_file_message each
+# return a fresh [system, user] pair, one call per file, and a retry is a new
+# call rather than a continued conversation. Every round-0 probe parses clean.
+# test_implementer_calls_are_single_turn pins that property — if the implementer
+# ever gains a tool loop, it fails, and this membership must be revisited before
+# the loop ships.
 _IMPLEMENTER_ROTATION = [
-    "implementer", "deep_implementer",
+    "implementer", "deep_implementer", "glimmer_implementer",
     "moe_implementer", "fast_implementer",
 ]
 

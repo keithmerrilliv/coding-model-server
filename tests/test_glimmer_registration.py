@@ -69,17 +69,47 @@ def test_the_window_is_readable_so_the_fit_check_arms():
 
 # ── not routed ───────────────────────────────────────────────────────────────
 
-@pytest.mark.parametrize("agent", GLIMMER)
-def test_glimmer_is_not_in_the_implementer_rotation(agent):
-    assert agent not in _IMPLEMENTER_ROTATION
+def test_the_architect_arm_is_not_in_the_implementer_rotation():
+    assert "glimmer_architect" not in _IMPLEMENTER_ROTATION
+
+
+def test_the_implementer_arm_sits_directly_behind_deep():
+    """DEV-692 item 3: Keith's placement. Third in the chain, which is also the
+    position that separates the two Qwen families instead of stacking a fourth
+    consecutive one."""
+    assert _IMPLEMENTER_ROTATION.index("glimmer_implementer") == \
+        _IMPLEMENTER_ROTATION.index("deep_implementer") + 1
 
 
 @pytest.mark.parametrize("agent", GLIMMER)
 def test_glimmer_is_not_an_allowed_tier_recommendation(agent):
-    """ALLOWED_IMPLEMENTER_AGENTS is the set the architect may recommend into.
-    Membership would let a design put Glimmer on a production spec."""
+    """ALLOWED_IMPLEMENTER_AGENTS is the set the architect may recommend into,
+    and TIER_TO_IMPLEMENTER is what a complexity tier defaults to. Membership in
+    either would put Glimmer on ATTEMPT 1, which is the only attempt whose agent
+    is chosen rather than rotated into and therefore the only one comparable
+    across runs (DEV-431). Rotation membership is retry-only on purpose."""
     assert agent not in ALLOWED_IMPLEMENTER_AGENTS
     assert agent not in TIER_TO_IMPLEMENTER.values()
+
+
+def test_implementer_calls_are_single_turn():
+    """The load-bearing precondition for Glimmer being in the rotation at all.
+
+    DEV-727: Glimmer 500s inside llama-server whenever it emits a tool call in
+    harmony recipient syntax, which it starts doing once a conversation carries
+    a tool RESULT — round 1 of the architect's DEV-714 tool loop. The implementer
+    never builds that shape: each call is a fresh [system, user] pair. If the
+    implementer ever gains a tool loop, this test fails, and Glimmer's rotation
+    membership has to be reconsidered before that loop ships."""
+    from coding_model_autonomous.executor import (
+        build_manifest_message, build_per_file_message, ManifestEntry,
+    )
+    entry = ManifestEntry(path="a.py", purpose="thing", exports="")
+    for msgs in (
+        build_manifest_message("spec", "design"),
+        build_per_file_message("spec", "design", [entry], entry, ""),
+    ):
+        assert [m["role"] for m in msgs] == ["system", "user"]
 
 
 def test_no_spark_alias_exists():
