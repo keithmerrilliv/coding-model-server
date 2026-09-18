@@ -257,7 +257,10 @@ def test_run_architect_design_review_reject_revises(db):
     spec, task, spec_dir = _architect_spec(db)
     ares = ArchitectResult(design_md="# design", raw="x",
                            complexity={"tier": "low", "recommended_agent": "fast_implementer"})
+    # DEV-440 made the stage default-OFF; this test is about the stage's
+    # behaviour, so it turns it on explicitly rather than relying on a default.
     with mock.patch.object(d, "call_agent", return_value="raw"), \
+            mock.patch.object(executor, "DESIGN_REVIEW_ENABLED", True), \
             mock.patch.object(d, "parse_architect_response", return_value=ares), \
             mock.patch.object(executor, "parse_design_review",
                               return_value=("FAIL", "the formula collapses for count=20")):
@@ -273,7 +276,11 @@ def test_run_architect_design_review_pass_creates_gate(db):
     spec, task, spec_dir = _architect_spec(db)
     ares = ArchitectResult(design_md="# design", raw="x",
                            complexity={"tier": "low", "recommended_agent": "fast_implementer"})
+    # DEV-440: enable the stage explicitly. With it off this test would still
+    # pass — the gate is created when the stage is SKIPPED too — so without
+    # this line it would be asserting nothing about the PASS path.
     with mock.patch.object(d, "call_agent", return_value="raw"), \
+            mock.patch.object(executor, "DESIGN_REVIEW_ENABLED", True), \
             mock.patch.object(d, "parse_architect_response", return_value=ares), \
             mock.patch.object(executor, "parse_design_review", return_value=("PASS", "")):
         d._run_architect(db, spec, task, spec_dir)

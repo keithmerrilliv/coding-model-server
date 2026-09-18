@@ -47,7 +47,28 @@ REVIEWER_AGENT = os.getenv("AUTONOMOUS_REVIEWER_AGENT", "reviewer")
 # Design review (#3): a pre-implementation LLM critique of the architect's design.
 # Uses the light/fast `reviewer` (Coder-30B) by default — design input is small,
 # and turnaround matters. Bounded + fail-open in the orchestrator.
-DESIGN_REVIEW_ENABLED = os.getenv("AUTONOMOUS_DESIGN_REVIEW", "1").lower() not in ("0", "false", "no")
+#
+# DEFAULT OFF since DEV-440 (2026-09-17). Over its entire life this stage
+# returned **37 FAIL and 1 PASS** across 38 runs (2026-07-12 to 2026-09-16):
+#   2026-07  15 FAIL /  0 PASS
+#   2026-08  13 FAIL /  1 PASS
+#   2026-09   9 FAIL /  0 PASS
+# A verdict that is FAIL 97.4% of the time carries no information. It is not a
+# reviewer that is sometimes wrong; as a signal it is a constant, and the
+# pipeline was paying an architect revision for a constant. The calls are cheap
+# (38 runs, median 47s) but each FAIL bounced the design back, so ~37 architect
+# re-runs at a median 268s — roughly 2.8 hours — plus the regression risk
+# DEV-440 documents: revising a CORRECT design invites the architect to change
+# things that were right (it silently dropped an acceptance criterion doing
+# exactly that on spec_cc7dd609).
+#
+# Deliberately disabled rather than deleted: the idea is sound and the ticket
+# lists the fixes that would make it earn its place (a FAIL must name inputs and
+# a wrong output; explicitness requests are advisory, not blocking). Re-enable
+# with AUTONOMOUS_DESIGN_REVIEW=1 once there is a replay corpus on which the
+# PASS rate is not zero. `testability_check` and the human design_approval gate
+# cover this ground in the meantime.
+DESIGN_REVIEW_ENABLED = os.getenv("AUTONOMOUS_DESIGN_REVIEW", "0").lower() not in ("0", "false", "no")
 DESIGN_REVIEW_AGENT = os.getenv("AUTONOMOUS_DESIGN_REVIEW_AGENT", "reviewer")
 DESIGN_REVIEW_MAX_TOKENS = int(os.getenv("AUTONOMOUS_DESIGN_REVIEW_MAX_TOKENS", "8000"))
 DESIGN_REVIEW_MAX_REVISIONS = int(os.getenv("AUTONOMOUS_DESIGN_REVIEW_MAX_REVISIONS", "1"))
