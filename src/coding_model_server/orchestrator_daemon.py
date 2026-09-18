@@ -91,7 +91,7 @@ from coding_model_autonomous.jira_client import (
 )
 from coding_model_autonomous.jira_sync import JiraSync
 from coding_model_autonomous import (
-    adversarial, apply_edits, architect_tools, delivery, design_testability,
+    apply_edits, architect_tools, delivery, design_testability,
     executor, swift_prechecks, test_runner,
 )
 from coding_model_autonomous.test_runner import run_tests
@@ -5700,125 +5700,6 @@ def _run_reviewer_tests(db: Database, spec: Spec, task, spec_dir,
     return tests_passed, test_output
 
 
-def _run_reviewer_adversarial(db: Database, spec: Spec, task, spec_dir,
-                              framework, test_strategy, spec_md, design_md,
-                              code_files, result, test_output):
-    """Phase b: adversarial test generation via Gemini and/or Claude.
-
-    Fires once per spec, only when the Coding Model reviewer's tests pass on retry-0
-    (the caller gates entry). Each configured provider runs sequentially; if any
-    write tests we re-run the full suite and a failure downgrades the verdict
-    (the caller's retry branch picks it up). Fail-open everywhere — per-provider
-    exceptions are caught inside generate_adversarial_tests, and the try/except
-    here catches anything else (resolve errors, loop bugs) so the original PASS
-    stands.
-
-    Returns (tests_passed, test_output): the inputs unchanged unless an
-    adversarial rerun supersedes them.
-    """
-    tests_passed = True
-    try:
-        adv_results = adversarial.generate_adversarial_tests(
-            spec_dir, spec_md, design_md, code_files,
-            reviewer_tests=result.test_files,
-            reviewer_test_output=test_output,
-        )
-    except Exception as e:  # noqa: BLE001 — fail-open by design
-        logger.warning(
-            "spec %s: phase-b dispatch failed (%s: %s); skipping "
-            "adversarial tests, original PASS stands",
-            spec.id, type(e).__name__, e,
-        )
-        adv_results = []
-
-    all_adv_files = [
-        (path, content)
-        for r in adv_results
-        for (path, content) in r.files_written
-    ]
-
-    if all_adv_files:
-        for path, _content in all_adv_files:
-            db.create_artifact(spec_id=spec.id, task_id=task.id,
-                               kind=ArtifactKind.TEST_REPORT, path=path)
-
-        adv_passed, adv_output = _run_tests_with_guard(
-            spec.id, spec_dir, framework, test_strategy,
-            output_label="Combined test runner output:",
-            fail_log=("spec %s: phase-b combined test_output failed "
-                      "structural validation (%s); forcing adv_passed=False"),
-        )
-
-        # One AGENT_RAN event per provider so the stats script can
-        # attribute false-FAILs back to a specific model. `passed` is
-        # the combined-run outcome — same value across providers in a
-        # given firing, but each event stays self-contained for
-        # querying.
-        for r in adv_results:
-            db.record_event(
-                EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
-                payload={"role": "adversarial_test_writer",
-                         # provider-qualified: `model` alone collides across
-                         # providers, and `agent` is the column every other
-                         # role writes, so a per-agent query must find one
-                         # spelling here too (DEV-528).
-                         "agent": f"{r.provider}:{r.model}",
-                         "provider": r.provider,
-                         "model": r.model,
-                         "duration_ms": r.duration_ms,
-                         "tests_added": len(r.files_written),
-                         "passed": adv_passed if r.files_written else None,
-                         "error": r.error,
-                         "skip_reason": ("no_blocks_returned"
-                                         if r.skipped else None)},
-            )
-
-        # Combined run is now canonical — overwrite test_output.txt and
-        # record the rerun outcome so dashboards/audits see the merged
-        # truth, not the Coding Model-only first pass.
-        test_output = adv_output
-        tests_passed = adv_passed
-        ArtifactLedger.open(db, spec, spec_dir).note("test_output.txt", test_output)
-        db.record_event(EventKind.TEST_RAN, spec_id=spec.id, task_id=task.id,
-                        payload={"passed": tests_passed,
-                                 "output_chars": len(test_output),
-                                 "phase": "post_adversarial"})
-
-        providers_summary = ", ".join(
-            f"{r.provider}={len(r.files_written)}" for r in adv_results
-        )
-        if not adv_passed:
-            logger.info(
-                "spec %s: phase-b adversarial tests FAILED (%s) — "
-                "falling through to retry branch with combined output",
-                spec.id, providers_summary,
-            )
-        else:
-            logger.info(
-                "spec %s: phase-b adversarial tests passed (%s) — "
-                "PASS stands", spec.id, providers_summary,
-            )
-    else:
-        # No provider produced files — record per-provider so we can
-        # still distinguish "all skipped (rule 6)" from "all errored".
-        for r in adv_results:
-            db.record_event(
-                EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
-                payload={"role": "adversarial_test_writer",
-                         "agent": f"{r.provider}:{r.model}",
-                         "provider": r.provider,
-                         "model": r.model,
-                         "duration_ms": r.duration_ms,
-                         "tests_added": 0,
-                         "passed": None,
-                         "error": r.error,
-                         "skip_reason": ("no_blocks_returned"
-                                         if r.skipped else None)},
-            )
-
-    return tests_passed, test_output
-
-
 def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
     spec_md = (spec_dir / spec.source_md_path).read_text()
     design_path = spec_dir / "design.md"
@@ -5998,18 +5879,6 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
             tests_passed, test_output = _arbitrate_reviewer_only_failures(
                 spec, spec_dir, framework, test_strategy, result, test_output,
             )
-
-    # Phase b: adversarial test generation. Gated to retry-0 PASS runs; the
-    # heavy lifting (and its fail-open handling) lives in the helper.
-    if (adversarial.ADVERSARIAL_TESTS_ENABLED
-            and tests_passed
-            and result.verdict == "PASS"
-            and task.retry_count == 0
-            and tests_required):
-        tests_passed, test_output = _run_reviewer_adversarial(
-            db, spec, task, spec_dir, framework, test_strategy,
-            spec_md, design_md, code_files, result, test_output,
-        )
 
     # Tests are canonical: a reviewer PASS over a red test run must be
     # unrepresentable (DEV-405 — spec_96d7e07f's attempt-5 failure_report
@@ -7399,32 +7268,6 @@ def main() -> int:
                 "CODING_MODEL_REQUIRE_SECCOMP=1 — refusing to start with a "
                 "degraded test sandbox")
             return 1
-
-    # Phase b pre-flight: if the operator flipped the flag, surface up
-    # front whether each configured provider will actually fire — otherwise
-    # a missing key only shows up as a runtime warning per spec.
-    if adversarial.ADVERSARIAL_TESTS_ENABLED:
-        providers = adversarial._resolve_providers()
-        provider_summary = ", ".join(
-            f"{p}={adversarial._provider_model(p)}" for p in providers
-        )
-        adv_ok, adv_reason = adversarial.adversarial_tests_available()
-        if adv_ok:
-            logger.info(
-                "phase-b adversarial test generation ENABLED (providers=[%s], "
-                "max_tokens=%d, timeout=%.0fs)",
-                provider_summary,
-                adversarial.ADVERSARIAL_MAX_TOKENS,
-                adversarial.ADVERSARIAL_TIMEOUT,
-            )
-        else:
-            logger.warning(
-                "phase-b adversarial test generation flag is ON but a "
-                "configured provider is unavailable (%s) — providers=[%s]. "
-                "Fix the env or change AUTONOMOUS_ADVERSARIAL_PROVIDER to "
-                "silence this.",
-                adv_reason, provider_summary,
-            )
 
     # Spin up the Jira sync worker on its own thread. It shares the same
     # Database instance (SQLite WAL is thread-safe) and runs independently

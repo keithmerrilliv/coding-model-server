@@ -24,7 +24,7 @@ for _k in set(os.environ) - set(_env_before):
     del os.environ[_k]
 os.environ.update(_env_before)
 
-from coding_model_autonomous import adversarial, executor, outcome, planner, retry_policy  # noqa: E402
+from coding_model_autonomous import executor, outcome, planner, retry_policy  # noqa: E402
 from coding_model_autonomous.db import Database  # noqa: E402
 
 from seam_fakes import FakeModelServer, FakeRunner  # noqa: E402
@@ -38,9 +38,8 @@ def seam_env(monkeypatch):
     """Pin the daemon's env-derived globals to the shipped defaults."""
     # Routing stacks and optional phases.
     monkeypatch.setattr(d, "SUPERVISOR_ENABLED", False)
-    monkeypatch.setattr(adversarial, "ADVERSARIAL_TESTS_ENABLED", False)
-    monkeypatch.setattr(adversarial, "generate_adversarial_tests",
-                        lambda *a, **k: [])
+    # DEV-440 made this default-OFF. The seam matrix still exercises the
+    # stage, so it opts in explicitly rather than inheriting a default.
     monkeypatch.setattr(executor, "DESIGN_REVIEW_ENABLED", True)
     monkeypatch.setattr(executor, "DESIGN_REVIEW_MAX_REVISIONS", 1)
     monkeypatch.setattr(executor, "TESTABILITY_CHECK_ENABLED", True)

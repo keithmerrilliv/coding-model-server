@@ -2,7 +2,7 @@
 
 _run_reviewer was refactored from one 306-line function into a thin driver plus
 four named helpers. These exercise the driver end-to-end with the LLM call, test
-runner, and adversarial phase mocked, pinning the two outcomes that must not
+runner mocked, pinning the two outcomes that must not
 drift:
 
   * reviewer PASS + tests pass  -> task BLOCKED_ON_REVIEW + a release_approval gate
@@ -69,15 +69,13 @@ def _patches(verdict, *, tests_pass, test_output):
         "build": mock.patch.object(d, "build_reviewer_message", return_value=[]),
         "run_tests": mock.patch.object(d, "run_tests",
                                        return_value=(tests_pass, test_output)),
-        # keep phase-b out of the way unless a test opts in
-        "adv": mock.patch.object(d.adversarial, "ADVERSARIAL_TESTS_ENABLED", False),
     }
 
 
 def _run(db, spec, task, spec_dir, **kw):
     patches = _patches(**kw)
     with patches["call_agent"], patches["parse"], patches["build"], \
-            patches["run_tests"], patches["adv"]:
+            patches["run_tests"]:
         d._run_reviewer(db, spec, task, spec_dir)
 
 
@@ -127,8 +125,7 @@ def _run_seq(db, spec, task, spec_dir, *, verdict, run_results):
             mock.patch.object(d, "parse_reviewer_response",
                               return_value=_reviewer_result(verdict)), \
             mock.patch.object(d, "build_reviewer_message", return_value=[]), \
-            mock.patch.object(d, "run_tests", side_effect=run_results) as rt, \
-            mock.patch.object(d.adversarial, "ADVERSARIAL_TESTS_ENABLED", False):
+            mock.patch.object(d, "run_tests", side_effect=run_results) as rt:
         d._run_reviewer(db, spec, task, spec_dir)
     return rt
 

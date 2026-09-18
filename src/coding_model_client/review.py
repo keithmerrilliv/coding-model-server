@@ -133,7 +133,8 @@ def get_uncommitted_diff(cwd: Optional[str] = None) -> tuple[Optional[str], Opti
 # ── Per-judge call sites (each returns a markdown body or raises) ────────────
 #
 # Claude/Gemini calls live in the shared ``external_judges`` module so the
-# autonomous orchestrator can reuse them (Phase b adversarial test-writing).
+# autonomous orchestrator could reuse them; its only consumer, the Phase b
+# adversarial test-writer, was removed in DEV-717.
 # The local Coding Model call stays here because it's review-specific (talks to the
 # local server's OpenAI-compatible endpoint, not an external SDK).
 

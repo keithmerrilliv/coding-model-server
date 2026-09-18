@@ -3,7 +3,9 @@
 Used by:
 - ``coding_model_client.review``: ``/review`` fan-out (Claude + Gemini judges over
   an uncommitted git diff).
-- ``coding_model_autonomous.executor``: adversarial test-writer (Gemini only,
+- ``coding_model_client.review``: the /review fan-out (Gemini and Claude).
+  (The autonomous adversarial test-writer was removed in DEV-717.)
+- formerly ``coding_model_autonomous.executor``: adversarial test-writer,
   Phase b — fires after the local Coding Model reviewer's tests pass).
 
 Each call function takes a system prompt + user content and returns the
@@ -40,7 +42,7 @@ DEFAULT_CLAUDE_MODEL = "claude-sonnet-4-6"
 DEFAULT_CLAUDE_SDK_MODEL = "claude-opus-4-8"
 # Defaults to gemini-2.5-flash because pro models are paid-tier-only on the
 # Gemini API (free tier limit=0 for gemini-3-pro-preview / gemini-2.5-pro).
-# Override via REVIEW_GEMINI_MODEL or AUTONOMOUS_ADVERSARIAL_GEMINI_MODEL once
+# Override via REVIEW_GEMINI_MODEL once
 # paid billing is configured. gemini-3-pro-preview is the recommended upgrade.
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 
