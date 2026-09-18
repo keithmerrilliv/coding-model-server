@@ -264,3 +264,66 @@ class TestSpecLanguage:
     def test_a_blank_language_is_none(self, db):
         spec = self._spec(db, 'title: t\nlanguage: "   "\n')
         assert d._spec_language(spec) is None
+
+
+# ── the tally (DEV-657 part 2, the half that was missing) ───────────────────
+
+class TestTallyCarriesRetrieval:
+    """Retrieval outcomes were carried from a single `meta` but dropped by
+    `accumulate_agent_fields`, so every role whose AGENT_RAN is built from a
+    tally recorded nothing.
+
+    That role is the IMPLEMENTER. Measured on the live event store over the
+    window part 2 has covered: architect 15 calls / 15 records, implementer
+    22 calls / 0 records. Retrieval had been running the whole time; only the
+    record was missing — and it is the one role part 3 exists to measure.
+    """
+
+    def test_a_single_call_tally_keeps_the_outcome(self):
+        t = ex.accumulate_agent_fields(
+            {}, {"agent": "deep_implementer",
+                 "rag": {"outcome": "injected", "hits": 4, "gate": "retrieved"}})
+        assert t["rag"]["calls"] == 1
+        assert t["rag"]["outcomes"] == {"injected": 1}
+        assert t["rag"]["hits"] == 4
+        assert t["rag"]["gates"] == {"retrieved": 1}
+
+    def test_outcomes_are_counted_not_collapsed(self):
+        # A manifest attempt is 1 + N calls and they do not share an outcome;
+        # any single value for the attempt would be invented.
+        t = {}
+        for outcome in ("injected", "injected", "empty"):
+            ex.accumulate_agent_fields(t, {"rag": {"outcome": outcome}})
+        assert t["rag"]["outcomes"] == {"injected": 2, "empty": 1}
+        assert t["rag"]["calls"] == 3
+
+    def test_the_gate_reason_survives_the_tally(self):
+        # Without this the A/B cannot tell a disabled arm from a quiet one.
+        t = {}
+        for _ in range(2):
+            ex.accumulate_agent_fields(
+                t, {"rag": {"outcome": "not_requested",
+                            "gate": "role_not_opted_in"}})
+        assert t["rag"]["gates"] == {"role_not_opted_in": 2}
+
+    def test_a_call_with_no_retrieval_record_adds_nothing(self):
+        # Absence must stay absent: a server predating part 2 reports nothing,
+        # and inventing a zero would read as a measured outcome.
+        t = ex.accumulate_agent_fields({}, {"agent": "a", "duration_ms": 5})
+        assert "rag" not in t
+
+    def test_it_reaches_the_event_payload(self):
+        t = ex.accumulate_agent_fields(
+            {}, {"agent": "a", "rag": {"outcome": "empty", "gate": "retrieved"}})
+        assert ex.agent_event_fields(t)["rag"]["outcomes"] == {"empty": 1}
+
+    def test_the_other_tally_fields_are_untouched(self):
+        t = {}
+        ex.accumulate_agent_fields(t, {"agent": "a", "duration_ms": 10,
+                                       "total_tokens": 100,
+                                       "rag": {"outcome": "empty"}})
+        ex.accumulate_agent_fields(t, {"agent": "a", "duration_ms": 20,
+                                       "total_tokens": 200,
+                                       "rag": {"outcome": "empty"}})
+        assert t["duration_ms"] == 30 and t["total_tokens"] == 300
+        assert t["calls"] == 2
