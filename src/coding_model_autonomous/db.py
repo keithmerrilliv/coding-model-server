@@ -475,11 +475,28 @@ class Database:
             )
 
     def update_task_agent(self, task_id: str, agent: str) -> None:
-        """Override the agent recorded for a task.
+        """Override the agent recorded for a task. THIS IS DESTRUCTIVE.
 
         Used when the architect's complexity assessment routes the implementer
-        task to a non-default agent. Keeping the DB record authoritative
-        matters for telemetry queries ("which agent built spec X?").
+        task to a non-default agent, and on every rotation afterwards.
+
+        `tasks` holds exactly ONE row per (spec, role) and this overwrites its
+        `agent` in place, so the column is the LATEST agent, never the one that
+        produced any particular attempt or artifact. The previous value is
+        gone; nothing else records it.
+
+        DO NOT use `tasks.agent` to answer "which agent built X?" (DEV-719).
+        Joining a gate, artifact or event to its task returns the task's final
+        agent identically for every one of its attempts, which makes any
+        per-agent quality number wrong in a way that looks clean: every attempt
+        sequence comes out homogeneous BY CONSTRUCTION. That artifact was read
+        as a finding once already.
+
+        The correct source is the ATTEMPT_PLANNED event stream, which records
+        per attempt the agent, the `assignment` reason (recommended | rotation |
+        random | injected | fixed | sole_fit | rerouted) and, on a DEV-676
+        reroute, the `planned_agent` it was diverted from. See
+        `retry_policy.previous_plans`.
         """
         now = utc_now()
         with self.transaction() as conn:
