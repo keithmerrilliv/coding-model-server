@@ -243,6 +243,22 @@ def _wrap_in_sandbox(
 
 # Per-framework default timeouts (seconds). Swift/Xcode builds are slow,
 # especially cold, so their defaults are generous.
+#
+# DEV-705, 2026-09-18: THIS TABLE AND mac_runner/frameworks.py MUST AGREE for any
+# framework in both. The effective budget is the MINIMUM of the two, because this
+# side abandons the dispatch while the runner is still working, so a raise on one
+# host alone does nothing. DEV-705 raised xcodebuild_test to 1200 in
+# mac_runner/frameworks.py and not here, and the raise was inert for a day — run
+# 42 dispatched at 900s while the Mac was prepared to allow 1200s. The record said
+# the problem was fixed, which is worse than it being open.
+#
+# The 1200 itself is the runner's reasoning: the VM path spends the budget on
+# boot, worktree sync and package resolution before the test starts, and a resolve
+# that times out alone costs 300s — one run reached 823.4s of overhead, 77s short
+# of the old ceiling, so a passing test was seconds away from being reported as a
+# timeout.
+#
+# test_timeouts_agree_across_hosts pins the two tables together.
 DEFAULT_TIMEOUTS: dict[str, int] = {
     "pytest": 120,
     "python": 120,
@@ -250,7 +266,7 @@ DEFAULT_TIMEOUTS: dict[str, int] = {
     "vitest": 180,
     "node_test": 120,
     "swift_test": 300,
-    "xcodebuild_test": 900,
+    "xcodebuild_test": 1200,
 }
 
 # Frameworks whose tests import from `node_modules`, so the spec needs a
