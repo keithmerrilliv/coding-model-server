@@ -1,6 +1,11 @@
 # Consume token metrics exactly once and give the bridge loop a real lifecycle
 
 Jira: DEV-592 (high), DEV-593 (high). Same loop, one change set.
+Run 42 (DEV-728). Third submission — the two previous attempts died of pipeline
+defects, not model error, and both are now fixed: DEV-698 (context served no
+protected files) and DEV-722 (the design never declared the mutability contract).
+The "Required change" section below is rewritten to remove the trap that caused
+the second failure rather than relying on the new checker to catch it.
 
 ## Context
 
@@ -36,14 +41,31 @@ if !recentMetrics.isEmpty {
 
 ## Required change
 
-1. Give the bridge a monotonic consumption cursor. Preferred shape: `HallucinationForcer`
-   already appends metrics to a bounded queue — expose a monotonically increasing total
-   count (`totalMetricsProduced`) alongside the bounded queue, and have the bridge keep
-   `lastConsumedCount`, consuming only metrics with index > lastConsumedCount (clamped to
-   what's still in the bounded queue; if more than queue-capacity tokens arrived since
-   the last tick, consume what remains and advance the cursor — dropped metrics are
-   acceptable, duplicates are not). Reset the cursor when a new generation starts
-   (`forcer` identity changes or `prompt()` resets).
+1. Give metric consumption a monotonic cursor, and **put the cursor in
+   `HallucinationForcer`, not in the bridge.**
+
+   The forcer is already a `final class` holding `_allMetrics` behind an `NSLock`, so a
+   cursor there is thread-safe by construction and needs no new synchronisation. Add a
+   method that returns the metrics not yet consumed and advances the cursor in the same
+   locked region — for example `consumeNewMetrics() -> [TokenMetrics]`. Reset it when a
+   new generation starts (the existing `_allMetrics = []` path).
+
+   `MetricsParticleBridge` then **stays a stateless `struct` with a non-mutating
+   `update`**, and its call sites are untouched.
+
+   *This is a deliberate change from the previous attempt at this spec, which asked the
+   BRIDGE to hold `lastConsumedCount`. That is where three implementations died.* Adding
+   stored state to a `@MainActor struct` whose `update` is non-mutating forces a choice
+   — mark the members `mutating` and every `let bridge` call site breaks, or leave them
+   non-mutating and the assignment does not compile. Both branches are compile errors and
+   no rule says which way out to take, because it is not a rule question. Keeping the
+   state in the class that already has a lock removes the dilemma instead of resolving it.
+
+   If you have a reason to put the cursor in the bridge anyway, that is allowed — but the
+   design must then **state the mutability contract explicitly**: whether
+   `MetricsParticleBridge` remains a value type, which members become `mutating`, and
+   which call sites must become `var`, *including in the tests*. A design that adds
+   stored state to a served value type without saying which it is will be rejected.
 2. Store the loop task (e.g. `@State private var bridgeTask: Task<Void, Never>?`), guard
    `.onAppear` against double-start (`if bridgeTask == nil`), cancel it in
    `.onDisappear`, and keep the existing `while !Task.isCancelled` as the exit condition.
@@ -54,6 +76,21 @@ if !recentMetrics.isEmpty {
    `platform=macOS`, which never compiles a `#if os(visionOS)` branch, so an edit
    there would ship unverified under a green suite. The visionOS half is tracked
    separately and will be done when a device is available.
+
+## What the metric window actually is
+
+Read this before designing the cursor — the previous spec's wording implied a capacity
+you could configure, and there is none.
+
+- `HallucinationForcer._allMetrics` is the backing array, capped at
+  `private static let maxMetrics = 200`. **That cap is private and static: a test
+  cannot change it.**
+- `metricsQueue` is a *computed property*, not a stored queue:
+  `lock.withLock { Array(_allMetrics.suffix(5)) }`. The 5 is hardcoded in the accessor.
+- So a consumer reading `metricsQueue` can see at most the newest 5 metrics, however
+  many were produced. It cannot tell from the window alone how many it missed — which
+  is exactly why the cursor needs a monotonic *count* from the forcer, not just the
+  window contents.
 
 ## Reference files (read-only)
 
@@ -80,8 +117,10 @@ A green build is NOT sufficient — the tests below are the gate.
   metrics — exactly 3 particles spawned and 3 strikes recorded total (use a spy/stub for
   audio). This test FAILS on current `main` (6 particles / 6 strikes) — say so
   explicitly in the report.
-- Unit test: produce 12 metrics between two ticks with a queue capacity of 5 — the
-  bridge consumes at most the 5 available, never re-consumes, and the cursor lands at 12.
+- Unit test: produce 12 metrics between two ticks — only the newest 5 are reachable,
+  so the consumer takes those 5, never re-consumes them, and the cursor ends at 12 so
+  the 7 it never saw are not replayed later. Dropped metrics are acceptable here;
+  duplicates are not.
 - Unit test: cursor resets when the forcer is replaced (simulate a new generation) so
   the new run's metrics are consumed from its start.
 - MetricsParticleBridge currently has ZERO tests — the above establishes its suite.
