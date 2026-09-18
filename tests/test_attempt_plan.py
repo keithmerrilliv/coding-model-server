@@ -161,10 +161,11 @@ class TestIdenticalDispatch:
     def test_injection_skips_agents_that_already_had_this_dispatch(self, db, spec_task):
         spec, task = spec_task
         task = self._history(db, spec, task)
-        for n, agent in ((2, "moe_implementer"), (3, "fast_implementer"), (4, "implementer")):
+        for n, agent in ((2, "moe_implementer"), (3, "fast_implementer"),
+                         (4, "implementer"), (5, "glimmer_implementer")):
             task = _at_retry(db, task, 1)
             rp.record_attempt_plan(db, spec.id, task, _plan(db, spec, task, agent, feedback=FEEDBACK))
-        task = _at_retry(db, task, 1)  # retry 5
+        task = _at_retry(db, task, 1)  # retry 6
         plan = _plan(db, spec, task, "deep_implementer", feedback=FEEDBACK)
         prior = rp.previous_plans(db, spec.id, task.id)
         assert rp.inject_difference(plan, prior) is None
@@ -203,7 +204,8 @@ class TestRandomFraction:
 # ── DEV-676: rotate among the agents that fit; record what actually ran ─────
 
 _WINDOWS = {"implementer": 65536, "deep_implementer": 262144,
-            "moe_implementer": 118784, "fast_implementer": 65536}
+            "glimmer_implementer": 65536, "moe_implementer": 118784,
+            "fast_implementer": 65536}
 
 
 def _window(agent):
