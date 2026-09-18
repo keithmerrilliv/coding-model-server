@@ -159,3 +159,9 @@ tr:hover { background: #f8f9fa; cursor: pointer; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* DEV-726 — host CPU telemetry card */
+.chart-col-note { display: block; font-size: 11px; color: #6c757d; font-style: italic; margin-top: 6px; }
+.host-note { font-size: 11px; color: #6c757d; margin: 10px 0 0; line-height: 1.5; }
+.host-note code { font-family: 'SF Mono', Menlo, monospace; font-size: 11px; background: var(--color-border); padding: 1px 4px; border-radius: 3px; }
+.host-note-reason { font-family: 'SF Mono', Menlo, monospace; color: #b02a37; }

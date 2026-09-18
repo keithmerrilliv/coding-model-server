@@ -147,6 +147,28 @@ export interface GpuStatsResponse {
   samples: GpuSample[];
 }
 
+export interface HostSample {
+  t: string;
+  /** Percent busy over the last interval. Null when /proc/stat was unreadable. */
+  util_cpu: number | null;
+  /** CPU PACKAGE watts. Null means NOT MEASURED — never render it as zero. */
+  power_w: number | null;
+  load1: number | null;
+  load5: number | null;
+  load15: number | null;
+}
+
+export interface HostStatsResponse {
+  available: boolean;
+  interval_s: number;
+  cpu_count: number | null;
+  /** False when the RAPL counter is root-only, which is the default. */
+  cpu_power_available: boolean;
+  /** Why power is missing, shown to the reader instead of a fake number. */
+  cpu_power_error: string | null;
+  samples: HostSample[];
+}
+
 export interface ActiveModelDraft {
   path: string | null;
   basename: string | null;

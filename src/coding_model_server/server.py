@@ -26,7 +26,7 @@ from coding_model_server.logging_filters import (
 )
 from coding_model_server.mcp_service import AppleDeepDocsService
 from coding_model_server.memory_service import MemoryService
-from coding_model_server.metrics import gpu_sampler, request_metrics
+from coding_model_server.metrics import gpu_sampler, host_sampler, request_metrics
 from coding_model_server.routes import admin, autonomous, chat, meta, memory
 from coding_model_server.web_search_service import WebSearchService
 
@@ -65,6 +65,10 @@ async def lifespan(app: FastAPI):
     # 1 Hz regardless of how many dashboard tabs are watching. No-op without
     # nvidia-smi.
     gpu_sampler.start()
+    # DEV-726: CPU utilization and package power for the Metrics page. Reads
+    # /proc/stat (unprivileged) and the RAPL counter (usually not), and
+    # reports null rather than zero for whichever it cannot get.
+    host_sampler.start()
 
     logger.info("Server starting up...")
 

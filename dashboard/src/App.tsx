@@ -8,6 +8,7 @@ import SpecDetail from './components/SpecDetail';
 import GpuPanel from './components/GpuPanel';
 import RagPanel from './components/RagPanel';
 import EndpointMetrics from './components/EndpointMetrics';
+import HostTelemetry from './components/HostTelemetry';
 import ActiveModelCard from './components/ActiveModelCard';
 import CurrentExecutionCard from './components/CurrentExecutionCard';
 
@@ -62,6 +63,11 @@ const Overview: React.FC = () => (
 const MetricsPage: React.FC = () => (
   <>
     <GpuPanel />
+    {/* DEV-726: beside the GPU, because on this box CPU package power is
+        frequently the LARGER of the two — MoE expert offload runs on the
+        CPU — and the GPU panel alone made the machine look cheaper than it
+        is. */}
+    <HostTelemetry />
     <RagPanel />
     <EndpointMetrics />
   </>

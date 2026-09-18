@@ -2,7 +2,9 @@
 from fastapi import APIRouter, Depends, HTTPException
 
 from coding_model_server.config import Config
-from coding_model_server.metrics import gpu_sampler, rag_metrics, request_metrics
+from coding_model_server.metrics import (
+    gpu_sampler, host_sampler, rag_metrics, request_metrics,
+)
 from coding_model_server.runtime import chat_admission, llama_server_manager, verify_admin_key
 
 router = APIRouter()
@@ -27,6 +29,22 @@ def admin_gpu_stats(since: "str | None" = None, limit: int = 60) -> dict:
     defaults to the 60 the panel actually renders (DEV-159).
     """
     return gpu_sampler.snapshot(since=since, limit=limit)
+
+
+@router.get("/v1/admin/host_stats", dependencies=[Depends(verify_admin_key)])
+def admin_host_stats(since: "str | None" = None, limit: int = 60) -> dict:
+    """CPU utilization and CPU package power for the dashboard (DEV-726).
+
+    Same shape as gpu_stats, so the panel polls both identically and `since`
+    keeps a 1 Hz poll to one sample.
+
+    `cpu_power_available` and `cpu_power_error` are part of the contract, not
+    diagnostics: the RAPL counter is root-only on a default host, and a panel
+    that rendered the resulting absence as "0 W" would repeat DEV-725, where
+    exactly that substitution put two months of fictitious zeroes in the
+    stats log. Utilization needs no privilege and keeps reporting either way.
+    """
+    return host_sampler.snapshot(since=since, limit=max(1, min(limit, 120)))
 
 
 @router.get("/v1/admin/rag_stats", dependencies=[Depends(verify_admin_key)])
