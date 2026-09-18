@@ -26,7 +26,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     id                TEXT PRIMARY KEY,       -- task_<8 hex>
     spec_id           TEXT NOT NULL REFERENCES specs(id) ON DELETE CASCADE,
     parent_id         TEXT REFERENCES tasks(id),
-    agent             TEXT NOT NULL,          -- agent name (planner, architect, ...)
+    agent             TEXT NOT NULL,          -- LATEST agent, overwritten on every
+                                              -- rotation. NOT the agent that produced
+                                              -- any given attempt - use the
+                                              -- ATTEMPT_PLANNED events (DEV-719).
     role              TEXT NOT NULL,          -- semantic role (planner, architect, ...)
     title             TEXT NOT NULL,
     description       TEXT,
