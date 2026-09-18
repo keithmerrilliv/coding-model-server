@@ -92,6 +92,24 @@ you could configure, and there is none.
   is exactly why the cursor needs a monotonic *count* from the forcer, not just the
   window contents.
 
+## Change surface
+
+Repo-relative paths, so context assembly can resolve them. Every path below was
+verified to exist at `main` before this spec was submitted.
+
+| Path | Change |
+| --- | --- |
+| `ElectricSheep/HallucinationForcer.swift` | modified |
+| `ElectricSheep/MetricsParticleBridge.swift` | modified |
+| `ElectricSheep/ElectricSheepApp.swift` | modified |
+
+New tests go in **`ElectricSheepTests/`** — that exact directory, at the repository
+root, alongside the existing `ElectricSheepTests/DtypeContainmentTests.swift`. It is
+also the value of `test_strategy.filter`. The Xcode project uses synchronized root
+groups for exactly `ElectricSheep/` and `ElectricSheepTests/`, so *a source file
+written anywhere else is never compiled and never joins a target* — a test placed
+under `Tests/` would leave the suite green while the new tests silently do not exist.
+
 ## Reference files (read-only)
 
 The test strategy protects six files. They are **reference, not scope** — read
