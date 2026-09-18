@@ -95,6 +95,6 @@ class TestSilenceWhereItShouldBeSilent:
         Path("var/tasks_db/specs").glob("*/design.md")))
     def test_no_shipped_design_regresses(self, path):
         """Every design this pipeline has actually produced. A rule that fires
-        on the corpus would be rejecting sound work."""
+        on the spec archive would be rejecting sound work."""
         found = dt._tuple_collection_members(path.read_text())
         assert not found, f"{path}: {found}"

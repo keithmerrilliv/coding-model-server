@@ -4,7 +4,7 @@ It returned 37 FAIL and 1 PASS across its entire 38-run life (2026-07-12 to
 2026-09-16). A verdict that is FAIL 97.4% of the time is a constant, not a
 signal, and each FAIL cost an architect revision. These tests pin the default
 so it cannot drift back on without someone deciding to, and pin the escape
-hatch so re-enabling it for a replay corpus stays a one-line env change.
+hatch so re-enabling it for a replay set stays a one-line env change.
 
 The env cases run in a SUBPROCESS on purpose. `executor` reads the flag at
 import, so the obvious `importlib.reload` rebinds the module object underneath

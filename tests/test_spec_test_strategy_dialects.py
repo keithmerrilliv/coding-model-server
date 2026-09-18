@@ -275,7 +275,7 @@ def test_dev709_agreeing_framework_is_left_alone():
 
 
 # --------------------------------------------------------------------------
-# The corpus check that would have caught this on day one
+# The spec-archive check that would have caught this on day one
 # --------------------------------------------------------------------------
 
 # One tracked spec declares its strategy as prose with backticked keys and a
@@ -291,8 +291,8 @@ def _tracked_specs():
 
 
 def test_every_tracked_spec_with_a_strategy_section_parses():
-    """23% of the corpus disarmed every guard, and no test noticed."""
-    assert _tracked_specs(), "no specs found — the corpus check is vacuous"
+    """23% of the spec archive disarmed every guard, and no test noticed."""
+    assert _tracked_specs(), "no specs found — the archive check is vacuous"
     unreadable = []
     for path in _tracked_specs():
         parsed = _parse_spec_test_strategy(
