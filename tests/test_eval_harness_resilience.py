@@ -35,8 +35,9 @@ class _Resp:
     def __init__(self, status, text="", body=None):
         self.status_code = status
         self.text = text
-        self._body = body or {"choices": [{"message": {"content": "ok"}}],
-                              "usage": {"completion_tokens": 5}}
+        self._body = body or {
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"completion_tokens": 5}}
 
     def json(self):
         return self._body
@@ -78,8 +79,10 @@ def test_a_transient_5xx_is_retried_then_succeeds(ea, monkeypatch, status):
         return _Resp(status, "upstream hiccup") if len(calls) == 1 else _Resp(200)
 
     monkeypatch.setattr(ea.requests, "post", fake_post)
-    text, tokens = ea._completion("http://s", {}, "architect", [], 8000)
-    assert (text, tokens) == ("ok", 5)
+    text, tokens, finish = ea._completion("http://s", {}, "architect", [], 8000)
+    # DEV-723 follow-up: finish_reason comes back so truncation is provable
+    # rather than inferred from completion_tokens == max_tokens.
+    assert (text, tokens, finish) == ("ok", 5, "stop")
     assert len(calls) == 2, "should have retried exactly once"
 
 

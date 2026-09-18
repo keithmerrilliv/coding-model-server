@@ -254,8 +254,10 @@ def _completion(server, headers, agent, messages, max_tokens):
 
         r.raise_for_status()   # 4xx, or a 5xx on the final attempt
         body = r.json()
-        return ((body.get("choices") or [{}])[0].get("message", {}).get("content", "") or "",
-                (body.get("usage") or {}).get("completion_tokens", 0))
+        choice = (body.get("choices") or [{}])[0]
+        return (choice.get("message", {}).get("content", "") or "",
+                (body.get("usage") or {}).get("completion_tokens", 0),
+                choice.get("finish_reason"))
     raise RuntimeError("unreachable")   # pragma: no cover
 
 
@@ -272,8 +274,9 @@ def ask_agent(server, headers, agent, prompt, max_tokens, system=None, tool_loop
     messages = ([{"role": "system", "content": system}] if system else []) \
         + [{"role": "user", "content": prompt}]
     tokens, rounds, calls = 0, 0, []
-    text, n = _completion(server, headers, agent, messages, max_tokens)
+    text, n, finish = _completion(server, headers, agent, messages, max_tokens)
     tokens += n
+    finishes = [finish]
     exhausted = False
     while tool_loop:
         markers = parse_markers(text)
@@ -293,7 +296,8 @@ def ask_agent(server, headers, agent, prompt, max_tokens, system=None, tool_loop
                          f"# TOOL RESULTS (round {rounds}/{tool_loop})\n\n" + "\n\n".join(lines)
                          + "\n\nContinue. When you have what you need, write the complete final "
                            "answer with no tool markers."})
-        text, n = _completion(server, headers, agent, messages, max_tokens)
+        text, n, finish = _completion(server, headers, agent, messages, max_tokens)
+        finishes.append(finish)
         tokens += n
     return {
         "text": strip_markers(text) if tool_loop else text,
@@ -302,6 +306,12 @@ def ask_agent(server, headers, agent, prompt, max_tokens, system=None, tool_loop
         "tool_rounds": rounds,
         "tool_calls": calls,
         "tool_exhausted": exhausted,
+        # DEV-723 follow-up: the DEFINITIVE truncation signal. Inferring it from
+        # completion_tokens == max_tokens is a guess that breaks as soon as a
+        # tool loop sums several calls. "length" on ANY call means this answer
+        # was cut off and the judge is scoring a truncated design.
+        "finish_reasons": finishes,
+        "truncated": "length" in finishes,
     }
 
 
