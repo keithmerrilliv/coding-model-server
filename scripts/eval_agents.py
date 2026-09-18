@@ -31,6 +31,7 @@ Usage:
     python3 eval_agents.py -a dense_architect -a qwen38_architect --tool-loop 3   # DEV-618
 """
 import argparse
+import collections
 import json
 import os
 import re
@@ -192,15 +193,70 @@ class EvalSandbox:
         return "(unknown tool)"
 
 
+# DEV-723. A single 5xx used to abort the whole run. The harness batches by
+# agent -- every task for A, then every task for B, then judging -- so a 502 on
+# the last generation threw away ~40 minutes of finished work.
+#
+# The 502 that prompted this is the server's "model produced no visible content
+# (reasoning-only response)": a thinking-on model spent its whole budget
+# reasoning, the server stripped the reasoning and found an empty string. That
+# is STOCHASTIC, not deterministic -- the same prompt at temperature 0.0
+# returned 1400 tokens once and 305 the next time under MTP speculative decode
+# -- so a retry genuinely recovers it. Raising the budget (below) is the real
+# fix; this is the seatbelt.
+#
+# 4xx is NOT retried: a bad agent name or a bad key should fail immediately
+# rather than be retried into a timeout.
+# DEV-723. The budget was 1400, BELOW what a thinking-on architect needs.
+# Since DEV-556 the reasoning and the answer SHARE this budget, so 1400 either
+# truncated the answer (finish_reason=length) or was consumed entirely by
+# reasoning, which the server rejects as a reasoning-only 502. DEV-702's own
+# baseline logs show single completions of 2,801-6,083 tokens against it.
+#
+# Anchored to production rather than picked: an eval that measures a model
+# under a budget production never imposes is measuring the harness. A cap is a
+# ceiling, not a target -- measured, the same task returned 589 chars and
+# stopped under a 4000 cap, so models do not inflate to fill it. Imported so
+# that if production's budget moves and this does not, the test says so.
+try:
+    from coding_model_autonomous.executor import ARCHITECT_MAX_TOKENS as _PROD_BUDGET
+except Exception:                                    # pragma: no cover
+    _PROD_BUDGET = 8000
+DEFAULT_MAX_TOKENS = _PROD_BUDGET
+
+_RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
+COMPLETION_ATTEMPTS = 4
+
+
 def _completion(server, headers, agent, messages, max_tokens):
-    r = requests.post(
-        f"{server}/v1/chat/completions", headers=headers, timeout=1800,
-        json={"model": agent, "messages": messages,
-              "max_tokens": max_tokens, "temperature": 0.0, "stream": False})
-    r.raise_for_status()
-    body = r.json()
-    return ((body.get("choices") or [{}])[0].get("message", {}).get("content", "") or "",
-            (body.get("usage") or {}).get("completion_tokens", 0))
+    for attempt in range(1, COMPLETION_ATTEMPTS + 1):
+        last = attempt == COMPLETION_ATTEMPTS
+        try:
+            r = requests.post(
+                f"{server}/v1/chat/completions", headers=headers, timeout=1800,
+                json={"model": agent, "messages": messages,
+                      "max_tokens": max_tokens, "temperature": 0.0,
+                      "stream": False})
+        except requests.exceptions.RequestException as exc:
+            if last:
+                raise
+            print(f"    [retry {attempt}/{COMPLETION_ATTEMPTS - 1}] {agent}: "
+                  f"{type(exc).__name__}: {exc}", flush=True)
+            time.sleep(5 * attempt)
+            continue
+
+        if r.status_code in _RETRYABLE_STATUS and not last:
+            detail = (r.text or "")[:160].replace("\n", " ")
+            print(f"    [retry {attempt}/{COMPLETION_ATTEMPTS - 1}] {agent}: "
+                  f"HTTP {r.status_code} {detail}", flush=True)
+            time.sleep(5 * attempt)
+            continue
+
+        r.raise_for_status()   # 4xx, or a 5xx on the final attempt
+        body = r.json()
+        return ((body.get("choices") or [{}])[0].get("message", {}).get("content", "") or "",
+                (body.get("usage") or {}).get("completion_tokens", 0))
+    raise RuntimeError("unreachable")   # pragma: no cover
 
 
 def ask_agent(server, headers, agent, prompt, max_tokens, system=None, tool_loop=0, sandbox=None):
@@ -304,7 +360,10 @@ def main():
                     help="claude (API key) | claude-sdk (Claude Code subscription, "
                          "no API credit needed) | gemini | any local agent name "
                          "(e.g. deep_reviewer)")
-    ap.add_argument("--max-tokens", type=int, default=1400)
+    ap.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS,
+                    help=f"output budget per completion (default "
+                         f"{DEFAULT_MAX_TOKENS}, matching production's "
+                         f"architect budget; see DEV-723)")
     ap.add_argument("--system", metavar="TEXT_OR_@FILE", default=None,
                     help="system prompt sent with every generation request, "
                          "@path reads it from a file. The server honours a "
@@ -353,17 +412,30 @@ def main():
         missing = [a for a in (x, y) if a not in answers]
         if missing:
             ap.error(f"--reuse-answers {args.reuse_answers} has no answers for {missing}")
+        excluded = collections.defaultdict(list)
         print(f"### reusing saved answers for {x}, {y} (skipping generation)\n", flush=True)
     else:
         answers = {}
+        excluded = collections.defaultdict(list)   # task id -> why, per agent
         sandbox = EvalSandbox() if args.tool_loop else None
         for agent in (x, y):
             print(f"### {agent} answering (first call pays the model load)", flush=True)
             answers[agent] = {}
             for t in tasks:
-                a = ask_agent(args.server, headers, agent, t["prompt"],
-                              args.max_tokens, system=args.system,
-                              tool_loop=args.tool_loop, sandbox=sandbox)
+                # DEV-723: one unanswerable task must not discard the other
+                # five. Record the failure, carry on, and exclude the task
+                # from judging rather than scoring a missing answer as a loss
+                # -- a transport failure is not a quality signal.
+                try:
+                    a = ask_agent(args.server, headers, agent, t["prompt"],
+                                  args.max_tokens, system=args.system,
+                                  tool_loop=args.tool_loop, sandbox=sandbox)
+                except Exception as exc:
+                    excluded[t["id"]].append(f"{agent}: {type(exc).__name__}: {exc}")
+                    print(f"  {t['id']:16} FAILED after {COMPLETION_ATTEMPTS} "
+                          f"attempts -- {type(exc).__name__} -- task excluded",
+                          flush=True)
+                    continue
                 answers[agent][t["id"]] = a
                 tools = ""
                 if args.tool_loop:
@@ -375,14 +447,28 @@ def main():
         # and the judge is a flaky external API. Persist now so a judge failure
         # never costs the answers — re-run with --reuse-answers to judge only.
         json.dump({"agents": [x, y], "judge": args.judge, "tool_loop": args.tool_loop,
+                   "max_tokens": args.max_tokens,
+                   "excluded": {k: v for k, v in excluded.items()},
                    "answers": answers},
                   open(args.out, "w"), indent=1)
         print(f"(answers checkpointed to {args.out})\n", flush=True)
 
+    # DEV-723: a task is judgeable only if BOTH agents answered it.
+    judgeable = [t for t in tasks
+                 if t["id"] in answers[x] and t["id"] in answers[y]]
+    dropped = [t["id"] for t in tasks if t not in judgeable]
+    if dropped:
+        print(f"### EXCLUDED {len(dropped)} of {len(tasks)} task(s) -- no answer "
+              f"from one or both agents:", flush=True)
+        for tid in dropped:
+            for why in excluded.get(tid, ["(no answer recorded)"]):
+                print(f"      {tid}: {why}", flush=True)
+        print(flush=True)
+
     # Phase 2 -- judge each task in both orders; a flip means position bias, not merit.
     print("### judging (each task twice, order swapped)\n", flush=True)
     results, transcripts = [], {}
-    for i, t in enumerate(tasks):
+    for i, t in enumerate(judgeable):
         tx, ty = answers[x][t["id"]]["text"], answers[y][t["id"]]["text"]
 
         # Pace to stay under the judge's RPM limit (see --judge-interval). Two
@@ -408,7 +494,9 @@ def main():
 
     tally = Counter(r["winner"] for r in results)
     print("\n" + "=" * 62)
-    print(f"{x}: {tally[x]}   {y}: {tally[y]}   tie: {tally['tie']}   (of {len(tasks)})")
+    print(f"{x}: {tally[x]}   {y}: {tally[y]}   tie: {tally['tie']}   "
+          f"(of {len(judgeable)} judged"
+          + (f", {len(dropped)} EXCLUDED" if dropped else "") + ")")
     print("=" * 62)
     flips = [r["id"] for r in results if not r["consistent"]]
     if flips:
@@ -419,7 +507,13 @@ def main():
         tok = sum(a["completion_tokens"] for a in answers[agent].values())
         print(f"{agent:14} {tok:6d} tok in {tot:6.1f}s")
 
-    json.dump({"agents": [x, y], "judge": args.judge, "tool_loop": args.tool_loop, "results": results,
+    json.dump({"agents": [x, y], "judge": args.judge, "tool_loop": args.tool_loop,
+               # DEV-723: record the budget. Neither DEV-702 artifact did, so
+               # reconstructing that run's budget meant reading token counts
+               # out of a log.
+               "max_tokens": args.max_tokens,
+               "excluded": {k: v for k, v in excluded.items()},
+               "results": results,
                "answers": answers, "transcripts": transcripts},
               open(args.out, "w"), indent=1)
     print(f"\nfull answers + judge reasoning: {args.out}")

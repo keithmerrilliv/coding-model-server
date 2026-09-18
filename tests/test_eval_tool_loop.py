@@ -24,7 +24,12 @@ def ea():
 
 
 class _Resp:
-    def __init__(self, text, tokens=7):
+    # DEV-723: _completion now inspects status_code to decide whether a failure
+    # is retryable, so this stub carries one. A real requests.Response always
+    # does; the stub was just incomplete.
+    def __init__(self, text, tokens=7, status=200):
+        self.status_code = status
+        self.text = text
         self._body = {"choices": [{"message": {"content": text}}],
                       "usage": {"completion_tokens": tokens}}
 
