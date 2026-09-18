@@ -1159,6 +1159,29 @@ def accumulate_agent_fields(tally: dict, meta: Optional[dict]) -> dict:
     # half-finished regardless of how the remaining calls went.
     if meta.get("truncated"):
         tally["truncated"] = True
+    # DEV-657 part 2, completing it: retrieval outcomes were carried from a
+    # single `meta` but dropped here, so every role whose event is built from
+    # a tally recorded nothing. That is the IMPLEMENTER — 22 implementer
+    # calls since part 2 landed, zero retrieval records, while the architect
+    # scored 15 of 15. Retrieval had been running the whole time; only the
+    # record was missing, and the missing one is the role part 3 exists to
+    # measure.
+    #
+    # Counted rather than collapsed to one value: an attempt is 1 + N calls
+    # in manifest mode and they do not share an outcome. "3 injected, 2 empty"
+    # is the truth; any single outcome for the attempt would be invented.
+    rag = meta.get("rag")
+    if isinstance(rag, dict) and rag:
+        acc = tally.setdefault("rag", {})
+        acc["calls"] = acc.get("calls", 0) + 1
+        outcomes = acc.setdefault("outcomes", {})
+        outcome = str(rag.get("outcome") or "unknown")
+        outcomes[outcome] = outcomes.get(outcome, 0) + 1
+        if isinstance(rag.get("hits"), int):
+            acc["hits"] = acc.get("hits", 0) + rag["hits"]
+        if rag.get("gate"):
+            gates = acc.setdefault("gates", {})
+            gates[rag["gate"]] = gates.get(rag["gate"], 0) + 1
     return tally
 
 
