@@ -17,6 +17,7 @@ raw URL, and the only handler-set subkey is `agent_id` on chat completions.
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 import threading
 import time
@@ -440,5 +441,172 @@ class RagRetrievalCollector:
 
 # Module-level singletons. server.py imports + drives these.
 request_metrics = RequestMetricsCollector()
+_HOST_RING_SIZE = 120
+# Package-domain RAPL counter. Root-only by default since the PLATYPUS
+# mitigation (CVE-2020-8694); scripts/enable_rapl_reading.sh grants it to one
+# group and states the trade.
+_RAPL_PATH = os.getenv("CODING_MODEL_POWERCAP_PATH",
+                       "/sys/class/powercap/intel-rapl:0/energy_uj")
+
+
+class HostSampler:
+    """1-Hz CPU utilization and CPU package power, ring-buffered (DEV-726).
+
+    Sits beside GpuSampler and mirrors its shape so the dashboard polls both
+    the same way. The GPU has had a panel for months; the CPU has had none,
+    which is why "what is this box drawing" could not be answered on screen.
+
+    The load-bearing decision here is that **an unreadable sensor reports
+    null, never zero**. DEV-725 is this system lying about this exact
+    quantity: the standalone monitor caught a PermissionError, wrote 0.00,
+    and two months of cpu_watts were permission errors wearing a
+    measurement's clothes. Rendering a missing reading as "0 W" would repeat
+    that on a bigger screen.
+
+    Utilization comes from /proc/stat and needs no privilege, so it keeps
+    working when power does not. Utilization present with power absent is the
+    expected state on an unprivileged host, and the API says so explicitly
+    rather than leaving the panel to guess.
+    """
+
+    def __init__(self, interval_s: float = 1.0) -> None:
+        self._interval = interval_s
+        self._ring: Deque[dict] = deque(maxlen=_HOST_RING_SIZE)
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._prev_jiffies: Optional[tuple] = None
+        self._prev_energy: Optional[tuple] = None   # (microjoules, monotonic)
+        # Why power is missing, in words the panel can show. None once a
+        # reading succeeds.
+        self._power_error: Optional[str] = None
+        self._cpu_count = os.cpu_count()
+
+    # ── sensors ─────────────────────────────────────────────────────────
+
+    def _read_jiffies(self) -> Optional[tuple]:
+        """(busy, total) from /proc/stat's aggregate line."""
+        try:
+            with open("/proc/stat") as f:
+                for line in f:
+                    if line.startswith("cpu "):
+                        v = [int(x) for x in line.split()[1:]]
+                        idle = v[3] + (v[4] if len(v) > 4 else 0)  # idle+iowait
+                        return sum(v) - idle, sum(v)
+        except (OSError, ValueError) as e:
+            logger.debug("cpu utilization sample failed: %s", e)
+        return None
+
+    def _read_energy_uj(self) -> Optional[int]:
+        try:
+            with open(_RAPL_PATH) as f:
+                value = int(f.read().strip())
+            self._power_error = None
+            return value
+        except Exception as e:                      # noqa: BLE001
+            # Recorded, not raised: the sampler must keep producing
+            # utilization even when power is off-limits.
+            self._power_error = f"{type(e).__name__}: {e}"
+            return None
+
+    def _sample_once(self) -> Optional[dict]:
+        now_j = self._read_jiffies()
+        util = None
+        if now_j is not None and self._prev_jiffies is not None:
+            d_busy = now_j[0] - self._prev_jiffies[0]
+            d_total = now_j[1] - self._prev_jiffies[1]
+            if d_total > 0 and d_busy >= 0:
+                util = 100.0 * d_busy / d_total
+        if now_j is not None:
+            self._prev_jiffies = now_j
+
+        power_w = None
+        uj = self._read_energy_uj()
+        t = time.monotonic()
+        if uj is not None and self._prev_energy is not None:
+            d_uj = uj - self._prev_energy[0]
+            d_t = t - self._prev_energy[1]
+            # A counter that went backwards wrapped or was reset. That is not
+            # a measurement either, so it stays unknown rather than becoming
+            # a large negative or a zero.
+            if d_t > 0 and d_uj >= 0:
+                power_w = (d_uj / 1_000_000.0) / d_t
+        if uj is not None:
+            self._prev_energy = (uj, t)
+
+        try:
+            load1, load5, load15 = os.getloadavg()
+        except OSError:
+            load1 = load5 = load15 = None
+
+        return {
+            "t": datetime.now(timezone.utc).isoformat(),
+            "util_cpu": util,
+            "power_w": power_w,
+            "load1": load1,
+            "load5": load5,
+            "load15": load15,
+        }
+
+    # ── lifecycle, mirroring GpuSampler ─────────────────────────────────
+
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(
+            target=self._loop, daemon=True, name="HostSampler")
+        self._thread.start()
+        logger.info("HostSampler started (interval=%.1fs, cpu_power=%s)",
+                    self._interval,
+                    "unreadable" if self._power_error else "pending")
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=2.0)
+
+    def _loop(self) -> None:
+        announced: Optional[str] = None
+        while not self._stop.is_set():
+            sample = self._sample_once()
+            if sample is not None:
+                with self._lock:
+                    self._ring.append(sample)
+            # One line per state change, not per sample: at 1 Hz the latter
+            # is 86,400 lines a day, which hides the message it is meant to
+            # deliver (the DEV-725 lesson).
+            if self._power_error != announced:
+                announced = self._power_error
+                if self._power_error:
+                    logger.warning("HostSampler: CPU package power unreadable "
+                                   "(%s) — reporting null, not zero. "
+                                   "scripts/enable_rapl_reading.sh grants it.",
+                                   self._power_error)
+                else:
+                    logger.info("HostSampler: CPU package power readable")
+            self._stop.wait(self._interval)
+
+    def snapshot(self, since: "str | None" = None,
+                 limit: "int | None" = None) -> dict:
+        """Ring snapshot, incremental via *since* exactly like gpu_stats."""
+        with self._lock:
+            samples = list(self._ring)
+        if since:
+            samples = [s for s in samples if s["t"] > since]
+        if limit is not None and len(samples) > limit:
+            samples = samples[-limit:]
+        return {
+            "available": bool(self._ring),
+            "interval_s": self._interval,
+            "cpu_count": self._cpu_count,
+            # The panel needs BOTH of these: "no power number" and "why".
+            "cpu_power_available": self._power_error is None,
+            "cpu_power_error": self._power_error,
+            "samples": samples,
+        }
+
+
 gpu_sampler = GpuSampler(interval_s=1.0)
 rag_metrics = RagRetrievalCollector()
+host_sampler = HostSampler(interval_s=1.0)

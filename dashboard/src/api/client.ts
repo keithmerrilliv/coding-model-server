@@ -1,4 +1,4 @@
-import type {
+import type { HostStatsResponse,
   HealthResponse,
   ModelListResponse,
   Spec,
@@ -75,6 +75,13 @@ export async function respondToGate(gateId: string, payload: GateRespondRequest)
 
 export async function fetchMetrics(windowSeconds = 60): Promise<ApiResponse<MetricsResponse>> {
   return request<MetricsResponse>(`/v1/admin/metrics?window_seconds=${windowSeconds}`);
+}
+
+export async function fetchHostStats(since?: string): Promise<ApiResponse<HostStatsResponse>> {
+  // Same incremental contract as gpu_stats (DEV-159): pass the newest seen
+  // timestamp so a 1Hz poll carries one sample, not the whole ring.
+  const qs = since ? `?since=${encodeURIComponent(since)}` : '';
+  return request<HostStatsResponse>(`/v1/admin/host_stats${qs}`);
 }
 
 export async function fetchGpuStats(since?: string): Promise<ApiResponse<GpuStatsResponse>> {
