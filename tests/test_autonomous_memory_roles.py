@@ -21,14 +21,21 @@ import pytest
 import coding_model_autonomous.executor as ex
 
 
-def _capture_call(role):
-    """Run call_agent and return the kwargs it passed to post_chat_completion."""
+def _capture_call(role, language="swift"):
+    """Run call_agent and return the kwargs it passed to post_chat_completion.
+
+    *language* defaults to a covered one because these tests are about the
+    ROLE half of the opt-in. Since DEV-657 both halves must hold, so a test
+    of the role gate that passed no language would be measuring the language
+    gate instead and would pass for the wrong reason.
+    """
     resp = mock.Mock()
     resp.raise_for_status.return_value = None
     resp.json.return_value = {"choices": [{"message": {"content": "ok"},
                                            "finish_reason": "stop"}]}
     with mock.patch.object(ex, "post_chat_completion", return_value=resp) as p:
-        ex.call_agent(role, [{"role": "user", "content": "make an MTLDevice"}])
+        ex.call_agent(role, [{"role": "user", "content": "make an MTLDevice"}],
+                      language=language)
     return p.call_args.kwargs
 
 
@@ -95,3 +102,10 @@ class TestOptIn:
     def test_role_match_is_case_insensitive(self, monkeypatch):
         monkeypatch.setattr(ex, "AUTONOMOUS_MEMORY_ROLES", {"architect"})
         assert _capture_call("Architect")["skip_memory"] is False
+
+    def test_the_role_alone_is_no_longer_enough(self, monkeypatch):
+        """DEV-657: opting a role in does not opt every language in. The
+        corpus is Apple documentation and a Python spec must not pay for it."""
+        monkeypatch.setattr(ex, "AUTONOMOUS_MEMORY_ROLES", {"implementer"})
+        assert _capture_call("implementer", language="python")["skip_memory"] is True
+        assert _capture_call("implementer", language="swift")["skip_memory"] is False

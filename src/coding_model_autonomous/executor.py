@@ -95,6 +95,44 @@ def _parse_memory_roles(raw: str) -> set[str]:
 
 AUTONOMOUS_MEMORY_ROLES = _parse_memory_roles(os.getenv("AUTONOMOUS_MEMORY_ROLES", ""))
 
+# DEV-657 part 1: the OTHER half of the opt-in. Retrieval was conditioned on
+# the role and nothing else, so an all-Apple corpus was queried for every
+# opted-in call whatever the spec was written in — on run 29, on every
+# implementer call of a Python self-target spec. Across the 82 stored plans,
+# 32 (39%) are Python or JavaScript: two in five retrievals were asking a
+# Swift documentation corpus about code it has nothing to say on.
+#
+# This is config, not a hardcoded "swift", because it is a statement about
+# what the CORPUS covers rather than about the pipeline. The day a Python
+# corpus is indexed, this is the line that changes.
+AUTONOMOUS_MEMORY_LANGUAGES = _parse_memory_roles(
+    os.getenv("AUTONOMOUS_MEMORY_LANGUAGES", "swift"))
+
+
+def retrieval_decision(role: str, language: "str | None") -> tuple[bool, str]:
+    """Whether RAG runs for this call, and the reason in either direction.
+
+    The reason is returned rather than logged here so the caller can put it
+    on the event (DEV-657 part 2) — "retrieval did not run" and "retrieval
+    ran and found nothing" look identical downstream otherwise, which is
+    exactly how DEV-488 hid for weeks (DEV-501).
+
+    An unknown language does NOT retrieve. The corpus is Apple-specific, so
+    "we could not tell what this spec is" is not evidence that it is Swift,
+    and the cost of a wrong guess is asymmetric: injecting irrelevant docs is
+    a measured harm, while the benefit of retrieving is exactly what part 3
+    has yet to establish. Every one of the 82 stored plans carries a readable
+    language, so this branch is a guard, not a routine path — and it says so
+    out loud rather than quietly disarming retrieval.
+    """
+    if role.lower() not in AUTONOMOUS_MEMORY_ROLES:
+        return False, "role_not_opted_in"
+    if not language or not str(language).strip():
+        return False, "language_unknown"
+    if str(language).strip().lower() not in AUTONOMOUS_MEMORY_LANGUAGES:
+        return False, "language_not_covered"
+    return True, "retrieved"
+
 ARCHITECT_TIMEOUT = float(os.getenv("AUTONOMOUS_ARCHITECT_TIMEOUT", "2700"))
 IMPLEMENTER_TIMEOUT = float(os.getenv("AUTONOMOUS_IMPLEMENTER_TIMEOUT", "1800"))
 REVIEWER_TIMEOUT = float(os.getenv("AUTONOMOUS_REVIEWER_TIMEOUT", "2700"))
@@ -899,6 +937,7 @@ def call_agent(
     timeout: float | None = None,
     meta: Optional[dict] = None,
     memory_query: str | None = None,
+    language: str | None = None,
 ) -> str:
     """Call an agent via the coding-model-server inference API.
 
@@ -931,12 +970,21 @@ def call_agent(
     max_tokens = max_tokens or ROLE_TO_MAX_TOKENS.get(role, 8000)
     timeout = timeout or ROLE_TO_TIMEOUT.get(role, 1800)
 
-    # Per-role RAG opt-in (default: nothing opts in — see AUTONOMOUS_MEMORY_ROLES).
-    use_memory = role.lower() in AUTONOMOUS_MEMORY_ROLES
+    # RAG opt-in: the role AND the spec's language (DEV-657 part 1). Either
+    # one alone was never the right condition — a corpus is about a subject,
+    # and a role is not a subject.
+    use_memory, rag_reason = retrieval_decision(role, language)
 
-    logger.info("calling agent=%s, role=%s, msg_count=%d, max_tokens=%d, rag=%s",
-                agent, role, len(messages), max_tokens,
-                "on" if use_memory else "off")
+    logger.info("calling agent=%s, role=%s, msg_count=%d, max_tokens=%d, "
+                "rag=%s (%s, language=%s)", agent, role, len(messages),
+                max_tokens, "on" if use_memory else "off", rag_reason,
+                language or "unknown")
+    if rag_reason == "language_unknown" and role.lower() in AUTONOMOUS_MEMORY_ROLES:
+        # A role that opted in and got nothing is worth a line above INFO: it
+        # is the one way this gate could silently switch retrieval off for
+        # everything and look like a quiet success.
+        logger.warning("role %s opted into retrieval but the spec's language "
+                       "is unknown — RAG skipped (DEV-657)", role)
 
     # retry_5xx=True: model-swap CUDA OOM is the dominant cause of 500s here
     # (VRAM not fully released between models — see project_model_swap_oom.md):
@@ -994,12 +1042,21 @@ def call_agent(
         meta["finish_reason"] = fr or None
         meta["truncated"] = fr == "length"
         # DEV-657 part 2: the server reports what retrieval did for this call.
-        # Absent on a server that predates it, and absent when retrieval never
-        # ran at all — both of which must stay distinguishable from a recorded
-        # "skipped", so nothing is synthesised here.
+        # Absent on a server that predates it, which must stay distinguishable
+        # from a recorded "skipped".
+        #
+        # DEV-657 part 1 adds `gate`: the server can say retrieval was skipped
+        # but not WHY, because the language decision is made here. Without it
+        # "skipped" pools the role opt-out, the language gate and an unreadable
+        # plan into one value, and the part 3 A/B cannot tell which arm a call
+        # was actually in. The synthesised branch does not blur the old
+        # distinction — `not_requested` is a new value that no old server ever
+        # wrote, so absence still means "server predates this".
         rag = data.get("rag")
         if isinstance(rag, dict) and rag:
-            meta["rag"] = rag
+            meta["rag"] = {**rag, "gate": rag_reason}
+        elif not use_memory:
+            meta["rag"] = {"outcome": "not_requested", "gate": rag_reason}
         if meta["truncated"]:
             logger.warning(
                 "agent=%s role=%s OUTPUT TRUNCATED (finish_reason=length) at "
