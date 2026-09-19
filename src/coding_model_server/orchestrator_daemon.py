@@ -2010,6 +2010,19 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
     # defines. Computed once from the full context, not from the budget-trimmed
     # render, so a file dropped for size is not reported as undefined.
     unresolved = _unresolved_for(view)
+    # DEV-730: the files the spec says it MODIFIES that this context cannot
+    # show. Until now this was a warning in the journal and nothing in the
+    # prompt, so the architect could not tell an empty editable section from
+    # a spec with nothing to modify. Computed from the full context, like
+    # `unresolved` above: a file dropped for budget is a different statement
+    # (it is named as not-shown, and it WAS read) and is reported elsewhere.
+    unreadable = [(o.path, _context.omission_status(o.reason), o.reason)
+                  for o in ctx.unreadable_modifications()]
+    if unreadable:
+        logger.warning("spec %s: %d declared modification(s) could not be read "
+                       "at %s — telling the architect so, by name (DEV-730): %s",
+                       spec.id, len(unreadable), ctx.base_ref,
+                       ", ".join(p for p, _, _ in unreadable))
 
     def _architect_prompt(existing, reference, omitted_e=None, omitted_r=None):
         return build_architect_message(
@@ -2017,7 +2030,8 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
             existing_files=existing, reference_files=reference,
             approval_conditions=plan_conditions,
             omitted_existing=omitted_e, omitted_reference=omitted_r,
-            unresolved=unresolved, tools=use_tools)
+            unresolved=unresolved, unreadable=unreadable,
+            base_ref=ctx.base_ref, tools=use_tools)
 
     # DEV-633: the architect's editable render was the pipeline's one entirely
     # unbudgeted file section — a raw join of every modified file into a model

@@ -1841,6 +1841,62 @@ ARCHITECT_TOOL_PROTOCOL = textwrap.dedent("""\
     """)
 
 
+def _render_unreadable_modifications(
+        unreadable: list[tuple[str, str, str]],
+        *, shown: int, base_ref: str | None, tools: bool) -> str:
+    """The section that says a declared modification could not be read — DEV-730.
+
+    Run 42's architect was handed zero editable files and no sentence saying
+    so. Attempt 0 designed blind against files it had never seen and was
+    thrown away; attempt 1, after a rejection nudged it toward inspecting,
+    asked for exactly the right three files and got them. The capability was
+    there the whole time. What was missing was anyone telling it that it had
+    a hole to fill — so the trigger for using the tool was FAILURE rather
+    than noticing the gap, and DEV-431 sends retries to weaker models that
+    may never notice at all.
+
+    Two things must be said and kept apart. What the runner reported — git's
+    own words, per path — and what it MEANS, which git cannot tell us: a
+    wrong path and a file that is genuinely not there produce the same
+    sentence. Presenting that as certainty is how DEV-604 made whole-file
+    emission "correct" over three files that existed.
+    """
+    at_ref = f" at `{base_ref}`" if base_ref else ""
+    total = shown + len(unreadable)
+    lines = [
+        "## Files the plan MODIFIES that could not be read (DEV-730)\n",
+        f"**{len(unreadable)} of the {total} file(s) this spec asks you to "
+        f"modify could not be read{at_ref}.** You have not seen their "
+        f"contents, and nothing below is a substitute for them:\n",
+    ]
+    for path, _status, reason in unreadable:
+        lines.append(f"- `{path}` — {reason}")
+    lines.append(
+        "\nThat message is what the repository said, not what it means. A "
+        "path that is simply WRONG — a bare filename where the repository "
+        "holds `Dir/File.swift`, or the right name under the wrong directory "
+        "— answers identically to a file that is genuinely absent. These are "
+        "declared as modifications, so a real file almost certainly exists "
+        "for each of them under some path.")
+    if tools:
+        lines.append(
+            "\n**Read them before you design.** One `<<<READ_FILE>>>` line "
+            "per file and nothing else in that reply. If a path above comes "
+            "back empty, ask again for the same basename under a directory "
+            "you have seen in this prompt — the plan's other paths, the "
+            "read-only references, an import line. Inferring a corrected "
+            "path is expected here and is the whole point of this section; "
+            "it is the one case where the guidance below about preferring "
+            "paths you have already seen does not apply.")
+    else:
+        lines.append(
+            "\nDesign conservatively: do NOT assume these files are new, "
+            "empty, or small, and do not specify rewriting them whole. "
+            "Describe the change each one needs in terms of behaviour, and "
+            "say in the design that their current contents were unavailable.")
+    return "\n".join(lines) + "\n\n---\n\n"
+
+
 def build_architect_message(spec_md: str,
                             rejection_notes: str | None = None,
                             plan_yaml: str | None = None,
@@ -1850,6 +1906,8 @@ def build_architect_message(spec_md: str,
                             omitted_existing: list[str] | None = None,
                             omitted_reference: list[str] | None = None,
                             unresolved: list[str] | None = None,
+                            unreadable: list[tuple[str, str, str]] | None = None,
+                            base_ref: str | None = None,
                             tools: bool = False,
                             ) -> list[dict[str, str]]:
     user_parts: list[str] = []
@@ -1936,6 +1994,14 @@ def build_architect_message(spec_md: str,
                    "below instead of assuming." if tools else "")
                 + "\n\n")
         user_parts.append("---\n\n")
+    # DEV-730: OUTSIDE the section above on purpose. The run that motivated
+    # this served zero editable files, so that section did not render at all
+    # and the gap it should have announced went with it — the one shape where
+    # saying nothing is worst is the one where there is nothing to say it in.
+    if unreadable:
+        user_parts.append(_render_unreadable_modifications(
+            unreadable, shown=len(existing_files or []),
+            base_ref=base_ref, tools=tools))
     if reference_files or omitted_reference:
         user_parts.append(
             _render_reference_files(reference_files or [],

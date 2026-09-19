@@ -299,3 +299,72 @@ def test_reads_are_capped_by_the_headroom_not_the_constant(db, spec_task):
         _run(db, spec, task, spec_dir, agent)
     ran = _events(db, spec.id, EventKind.AGENT_RAN)[-1]
     assert 0 < ran.payload["tool_chars"] <= cap
+
+
+# ── DEV-730: the dispatch tells the architect when it is working blind ──────
+#
+# The prompt half and the SpecContext half have their own tests
+# (test_architect_told_when_files_unread.py). These cover the join: that the
+# daemon actually computes the gap from the context it just assembled and
+# passes it to the builder. DEV-705 is the standing reminder — a value raised
+# in one host's table while the caller kept its own read as fixed for a day.
+
+# A change surface naming the file by BARE name, which is how run 42's plan
+# named it. The repository holds ElectricSheep/Bridge.swift, so this fetches
+# exactly like a file that is not there — the ambiguity DEV-601 lives in.
+SPEC_WRONG_PATH = SPEC + (
+    "\n## Change surface\n\n| Path | Change |\n| --- | --- |\n"
+    "| `Bridge.swift` | modified |\n")
+SPEC_RIGHT_PATH = SPEC + (
+    "\n## Change surface\n\n| Path | Change |\n| --- | --- |\n"
+    "| `ElectricSheep/Bridge.swift` | modified |\n")
+
+
+def _with_spec(spec_task, spec_md, plan=PLAN):
+    spec, task, spec_dir = spec_task(plan)
+    (spec_dir / "spec.md").write_text(spec_md)
+    return spec, task, spec_dir
+
+
+def test_an_unreadable_declared_modification_reaches_the_prompt(db, spec_task):
+    spec, task, spec_dir = _with_spec(spec_task, SPEC_WRONG_PATH)
+    agent = _Agent(DESIGN)
+    _run(db, spec, task, spec_dir, agent)
+    prompt = agent.prompts[0][1]["content"]
+    assert "could not be read (DEV-730)" in prompt
+    assert "`Bridge.swift`" in prompt
+    # The affordance, because this dispatch really can answer a read.
+    assert "<<<READ_FILE>>>" in prompt
+    assert "same basename under a directory" in prompt
+
+
+def test_a_served_declared_modification_adds_no_section(db, spec_task):
+    """The negative control, and acceptance criterion 3: the normal path —
+    most dispatches — must not gain a word of this."""
+    spec, task, spec_dir = _with_spec(spec_task, SPEC_RIGHT_PATH)
+    agent = _Agent(DESIGN)
+    _run(db, spec, task, spec_dir, agent)
+    prompt = agent.prompts[0][1]["content"]
+    assert "could not be read (DEV-730)" not in prompt
+    assert "Bridge {" in prompt, "the file itself should be served here"
+
+
+def test_the_gap_is_stated_on_the_first_attempt(db, spec_task):
+    """The whole point. Run 42 learned this on attempt 1, after a rejection
+    threw attempt 0 away; there is no rejection here and no retry."""
+    spec, task, spec_dir = _with_spec(spec_task, SPEC_WRONG_PATH)
+    agent = _Agent(DESIGN)
+    _run(db, spec, task, spec_dir, agent)
+    assert len(agent.prompts) == 1
+    assert "could not be read (DEV-730)" in agent.prompts[0][1]["content"]
+
+
+def test_without_a_tool_loop_the_gap_is_still_stated(db, spec_task):
+    """Saying "you have not seen these" is worth as much to a dispatch that
+    cannot read as to one that can; it just must not promise the tool."""
+    spec, task, spec_dir = _with_spec(spec_task, SPEC_WRONG_PATH)
+    agent = _Agent(DESIGN)
+    _run(db, spec, task, spec_dir, agent, tools=False)
+    prompt = agent.prompts[0][1]["content"]
+    assert "could not be read (DEV-730)" in prompt
+    assert "<<<READ_FILE>>>" not in prompt
