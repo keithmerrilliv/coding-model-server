@@ -18,11 +18,13 @@ import logging
 import os
 import re
 import textwrap
+import time
 
 import yaml
 from dataclasses import dataclass
 
 from coding_model_autonomous._http import post_chat_completion
+from coding_model_autonomous.executor import accumulate_agent_fields
 from coding_model_server.streaming import strip_thinking as _server_strip_thinking
 
 logger = logging.getLogger(__name__)
@@ -461,10 +463,27 @@ def _call_planner_once(
     *,
     agent: str,
     timeout: float,
-) -> PlannerResult:
-    """One planner inference + parse. Raises requests.RequestException on
-    transport failure (so the retry loop in call_planner does NOT swallow
-    transport errors — only parse failures re-roll)."""
+) -> "tuple[PlannerResult, dict]":
+    """One planner inference + parse, and what the call cost.
+
+    Returns ``(result, meta)``. Raises requests.RequestException on transport
+    failure (so the retry loop in call_planner does NOT swallow transport
+    errors — only parse failures re-roll).
+
+    DEV-734: the planner was the only role emitting no telemetry at all, so a
+    truncated plan and a rushed one were indistinguishable after the fact and
+    a model swap could not have been evaluated even in hindsight. The meta
+    keys are spelled exactly as ``executor.call_agent`` spells them, because
+    ``accumulate_agent_fields`` and ``agent_event_fields`` are what render
+    them and a second spelling is how the adversarial path drifted (DEV-528).
+
+    ``finish_reason`` is the one that matters here: PLANNER_MAX_TOKENS is
+    4000 and _DENSE_27B serves with ``--reasoning-format none``, so thinking
+    is IN-BAND and spends that budget. Without this field "the planner is
+    weak" and "the planner never got to finish" look identical.
+    """
+    meta: dict = {"agent": agent}
+    started = time.monotonic()
     resp = post_chat_completion(
         agent,
         [
@@ -476,8 +495,24 @@ def _call_planner_once(
         temperature=0.2,           # low — we want consistent structured output
         retry_5xx=True,            # transient 5xx (e.g. mid model-swap) shouldn't kill planning
     )
+    meta["duration_ms"] = int((time.monotonic() - started) * 1000)
     resp.raise_for_status()
     data = resp.json()
+
+    # A zero total means "the backend did not report usage", not a free call —
+    # record nothing rather than a measured zero (same rule as call_agent).
+    usage = data.get("usage") or {}
+    if usage.get("total_tokens"):
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            val = usage.get(key)
+            if isinstance(val, int) and val >= 0:
+                meta[key] = val
+    try:
+        fr = (data["choices"][0].get("finish_reason") or "").lower()
+    except (KeyError, IndexError, AttributeError):
+        fr = ""
+    meta["finish_reason"] = fr or None
+    meta["truncated"] = fr == "length"
 
     try:
         content = data["choices"][0]["message"]["content"]
@@ -485,9 +520,9 @@ def _call_planner_once(
         return PlannerError(
             reason=f"Server response missing choices/content: {e}",
             raw_response=str(data)[:2000],
-        )
+        ), meta
 
-    return parse_planner_response(content)
+    return parse_planner_response(content), meta
 
 
 def call_planner(
@@ -497,8 +532,15 @@ def call_planner(
     agent: str = PLANNER_AGENT,
     timeout: float = PLANNER_TIMEOUT,
     parse_retries: int | None = None,
+    tally: "dict | None" = None,
 ) -> PlannerResult:
     """Send the spec to the planner agent and parse the response.
+
+    *tally*, when given, is filled in place with this plan's telemetry summed
+    over every attempt — agent, duration_ms, token counts, calls, truncated,
+    finish_reason (DEV-734). An out-parameter rather than a changed return
+    type, matching how the implementer's per-file calls are tallied, so every
+    existing caller keeps working unchanged.
 
     Raises requests.RequestException on transport failures so callers can
     distinguish "model said something we couldn't parse" from "couldn't
@@ -522,7 +564,21 @@ def call_planner(
     result: PlannerResult = PlannerError(reason="planner not called", raw_response="")
     base_user_msg = user_msg
     for attempt in range(parse_retries + 1):
-        result = _call_planner_once(user_msg, agent=agent, timeout=timeout)
+        result, meta = _call_planner_once(user_msg, agent=agent, timeout=timeout)
+        # Every attempt is counted, including the ones that failed to parse:
+        # a re-roll spent the same GPU time as the call that worked, and a
+        # planner cost that omits its re-rolls understates exactly the specs
+        # worth studying (same rule as the implementer's per-file tally).
+        if tally is not None:
+            accumulate_agent_fields(tally, meta)
+            # accumulate_agent_fields deliberately does not carry
+            # finish_reason — summed over a manifest's N calls it has no
+            # single meaning. The planner is one call per attempt, and this
+            # is the field the ticket exists for, so the last attempt's
+            # reason is the plan's reason. `truncated` already means "any
+            # attempt hit the budget".
+            if meta.get("finish_reason"):
+                tally["finish_reason"] = meta["finish_reason"]
         if not isinstance(result, PlannerError):
             break
         if attempt < parse_retries:
