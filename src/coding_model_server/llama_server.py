@@ -298,7 +298,15 @@ class LlamaServerManager:
             '-t', str(Config.DEFAULT_N_THREADS),
             '-tb', str(Config.DEFAULT_N_THREADS_BATCH),
             '-fa', 'auto',
-            '--mmap',
+            # `--mmap` was REMOVED in llama-server 0.4.x (hard startup
+            # failure, not a deprecation warning). `-lm mmap` is the
+            # replacement and the pinned build already accepts it, where
+            # --mmap is documented as DEPRECATED in favor of --load-mode.
+            # Explicit `mmap` rather than the `auto` default: auto is
+            # documented as "mmap, unless a device does not support it",
+            # which is the same behaviour here but as a default that a
+            # future release could move under us (DEV-741).
+            '-lm', 'mmap',
             '--cache-type-k', cache_k,
             '--cache-type-v', cache_v,
             '--host', '127.0.0.1',

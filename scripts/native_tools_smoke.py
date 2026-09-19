@@ -48,7 +48,7 @@ def start_server():
     cmd = [
         str(LLAMA_SERVER), "-m", str(MODEL),
         "-ngl", "47", "-c", "16384", "-b", "2048", "-ub", "2048",
-        "-t", "24", "-tb", "32", "-fa", "auto", "--mmap",
+        "-t", "24", "-tb", "32", "-fa", "auto", "-lm", "mmap",
         "--cache-type-k", "q4_0", "--cache-type-v", "q4_0",
         "--host", "127.0.0.1", "--port", str(PORT), "-np", "1",
         "--cpu-moe", "--jinja", "--reasoning-format", "none",
