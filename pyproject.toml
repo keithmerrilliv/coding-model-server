@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "coding-model-server"
-version = "0.2.0"
+version = "0.3.0"
 description = "Coding Model multi-agent FastAPI inference server, autonomous orchestrator, and chat client"
 readme = "README.md"
 requires-python = ">=3.10"

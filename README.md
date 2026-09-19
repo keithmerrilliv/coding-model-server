@@ -217,11 +217,22 @@ for method, prefill figures, and the caveat about raw-vs-proxy numbers).
 | `debugger` | Debugging | Qwen3-Coder-30B Q4_K_M | 3B/30B | 128K | Q8_0 | ngl 49, cpu_moe | 37.1 |
 | `reviewer` | Code review | Qwen3-Coder-30B Q8_0 | 3B/30B | 192K | Q8_0 | ngl 49, cpu_moe | 26.0 |
 | `deep_reviewer` | Deep judgment | Qwen3.5-122B-A10B Q4_K_M | 10B/122B | 256K | Q8_0 | ngl 49, cpu_moe | 20.0 |
-| `dense_architect` | Planner + architect (interactive `architect` alias) | Qwen3.6-27B MTP Q4_K_M (dense) | 27B dense | 128K | Q4_0 | ngl 36, MTP speculative decode | 10.8 |
-| `supervisor` | Retry/fail/replan decisions | Qwen3.6-27B MTP Q4_K_M (dense) | 27B dense | 128K | Q4_0 | ngl 36, MTP speculative decode | 11.4 |
+| `dense_architect` | Planner + architect (interactive `architect` alias) | Qwen3.6-27B MTP Q4_K_M (dense) | 27B dense | 64K | Q4_0 | ngl 66, **n_cpu_ffn 33**, MTP speculative decode | 17.4 † |
+| `supervisor` | Retry/fail/replan decisions | Qwen3.6-27B MTP Q4_K_M (dense) | 27B dense | 64K | Q4_0 | ngl 66, **n_cpu_ffn 33**, MTP speculative decode | 11.4 ‡ |
 | `moe_implementer` / `moe_architect` | Implementation / architecture | MiniMax M2.5 Q4_K_M | 10B/230B | 116K | Q4_0 | ngl 62, cpu_moe | 11.2 |
 | `brainstorm` | Fastest brainstorm | Nemotron-3-Nano Q4_K_M | 3.5B/30B | **1M** | Q8_0 | ngl 52, cpu_moe | 40.1 |
 | `native_implementer` | Implementation (native tools) | GLM-4.7-Flash Q4_K_M | 3B/30B | 64K | Q8_0 | ngl 47, n_cpu_moe 20 | 59.7 |
+
+† Measured 2026-09-19 through the managed path on a 53,333-token architect
+prompt ([DEV-744](https://keith-merrill4.atlassian.net/browse/DEV-744)); the old
+rung read 8.3–9.0 t/s at the same depth. The other rows in this table do not
+state their prompt depth and predate that measurement, so they are not directly
+comparable to it — re-measuring the roster on one basis is
+[DEV-95](https://keith-merrill4.atlassian.net/browse/DEV-95).
+
+‡ `supervisor` shares `_DENSE_27B` with `dense_architect`, so its serving config
+changed identically, but only the architect was re-measured. This figure
+predates [DEV-744](https://keith-merrill4.atlassian.net/browse/DEV-744).
 
 `supervisor` is decision-only: it is always called with native tools (a
 `decide()` function call) and never gets marker-based shell tools.

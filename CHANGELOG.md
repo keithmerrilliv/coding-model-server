@@ -1,5 +1,36 @@
 # Changelog
 
+## v0.3.0 — 2026-09-19
+
+The serving release. `tools/llama-server` moves from the pinned August build (`a94d563`) to upstream **v0.4.1**, and the architect stops paying for prompt depth. Nothing in the pipeline changed; what changed is the substrate underneath all eleven agents. Numbers below are **managed-path** figures — measured through the coding-model-server exactly as the pipeline calls it — not standalone bench numbers, because the two are not comparable and the gap between them is unexplained ([DEV-742](https://keith-merrill4.atlassian.net/browse/DEV-742)).
+
+### The finding
+
+`--n-cpu-ffn` keeps a dense model's FFN weights on the CPU while attention and the KV cache stay resident on the GPU. FFN cost is per-token and flat with depth; attention cost scales with context. The old `-ngl 46` rung put 19 of the architect's 65 blocks entirely on the CPU — their attention *compute* included — so it paid more the deeper the prompt went:
+
+| prompt depth | old rung | new rung |
+| --- | --- | --- |
+| 28 tokens | 18.30 t/s | 21.58 t/s |
+| ~26K (the band production uses) | 15.06 t/s | 22.33 t/s |
+| ~51K | 10.70 t/s | 21.93 t/s |
+
+The old curve falls 42% across that range. The new one is flat. Every architect decode figure on record was measuring the price of CPU attention ([DEV-742](https://keith-merrill4.atlassian.net/browse/DEV-742)).
+
+### Shipped
+
+- [DEV-741](https://keith-merrill4.atlassian.net/browse/DEV-741) — the model argv moves off the `--mmap` family, which 0.4.x **removes**, to `--load-mode`. Landed and proven on the *old* binary first, so the one change that could have taken every agent down at once was never in the same commit as the binary swap.
+- [DEV-744](https://keith-merrill4.atlassian.net/browse/DEV-744) — the upgrade, and `dense_architect` to `-ngl 66 --n-cpu-ffn 33`. Managed path at a 53,333-token architect prompt: **17.35 t/s decode against 8.3–9.0 on the old rung**, prefill 1,160 t/s, on more headroom than before. All 12 distinct models load on the new binary and 11 consecutive model swaps ran clean.
+- [DEV-748](https://keith-merrill4.atlassian.net/browse/DEV-748) — `devstral_implementer` was loading with **25 MiB** of VRAM free against a 500 MiB cushion its own config comment said the rung was chosen to clear. Nothing had regressed: ~595 MiB of the box's VRAM is now permanently held by desktop software, which is most of the margin. Now 491 MiB, at a 12,288 window with one FFN layer offloaded.
+
+### Measured and rejected
+
+- [DEV-745](https://keith-merrill4.atlassian.net/browse/DEV-745) — **CUDA 13.4**. Prefill identical to 0.1% and VRAM identical to 1 MiB, so [DEV-598](https://keith-merrill4.atlassian.net/browse/DEV-598)'s long-standing Blackwell MMQ concern is retired — but decode is ~9% *worse*, because different `nvcc` codegen changes the inference numerics. MTP draft acceptance is 0.860 on 13.2 and 0.739 on 13.4 at temperature 0, each reproducing byte-identically within its own build. The stack stays on 13.2. Two consequences worth carrying: measurements do not transfer across a toolkit boundary, and a deterministic pipeline's outputs can change under a toolkit upgrade with nothing moving in our own version numbers.
+- The 128K context window was shown **affordable** — `--n-cpu-ffn 52` holds it on 1,404 MiB free at 15.96 t/s, against 8.03 for the old 36/131072 rung — and deliberately not taken. At today's prompt sizes it buys no speed, and the window is not the constraint. It is a two-value change if that stops being true ([DEV-742](https://keith-merrill4.atlassian.net/browse/DEV-742)).
+
+### Superseded
+
+[DEV-707](https://keith-merrill4.atlassian.net/browse/DEV-707)'s premise — "the context window is the only thing we can trade for GPU layers on a 16 GB card" — was true of `--n-gpu-layers` and is not true under `--n-cpu-ffn`. [DEV-708](https://keith-merrill4.atlassian.net/browse/DEV-708)'s adaptive-window design rests on the same premise.
+
 ## v0.2.0 — 2026-09-16
 
 The Pipeline Kernel Refactor ([DEV-628](https://keith-merrill4.atlassian.net/browse/DEV-628)): the decisions that kept killing runs moved out of the orchestrator daemon into four typed kernel modules — `workspace.py`, `outcome.py`, `context.py`, `retry_policy.py` (~3,300 lines) — plus fixed event payload schemas, behind a fault-injecting seam tier. The daemon itself did not shrink (5,804 lines at v0.1.0, 7,185 now); what moved is the deciding. Seven phases, one ticket each; every line below links the ticket that carries the evidence and the live proof. Every ticket in the seven phase sections is Done. Where a fix could not be proven by a live run under conditions we can manufacture, green dedicated tests stand as the proof. The "After the proving runs" section is different: it lists what merged from the proving runs, and where a ticket shipped only in part it says which half is still open. Run 31 (Centipede logic core slice 7, `spec_c1e1c9ac`, 2026-09-13) was the proving run for phases 4–6: it delivered on the Mac runner with 52 tests green after one build-failure retry, and the tickets below naming a run-time behaviour were moved to Done on its events.
