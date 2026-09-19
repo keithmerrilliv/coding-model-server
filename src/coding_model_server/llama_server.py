@@ -337,6 +337,16 @@ class LlamaServerManager:
         elif model_config.get('cpu_moe'):
             cmd.append('--cpu-moe')
 
+        # Dense models: keep the first N layers' FFN weights on the CPU while
+        # attention and the KV cache stay resident (--n-cpu-ffn, 0.4.x only).
+        # Distinct from --n-cpu-moe and not interchangeable with it: this one
+        # targets dense FFN, which is active on every token, and the win is not
+        # bandwidth but that CPU-side work stops scaling with context depth.
+        # A model can legitimately set neither, either, or in principle both.
+        n_cpu_ffn = model_config.get('n_cpu_ffn')
+        if n_cpu_ffn is not None:
+            cmd.extend(['--n-cpu-ffn', str(n_cpu_ffn)])
+
         # Speculative decoding: pair a smaller same-tokenizer draft model with
         # the target. Draft predicts N tokens, target verifies them in a single
         # forward pass — accepted prefix is free decode. Net win depends on
