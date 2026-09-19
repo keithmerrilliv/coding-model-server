@@ -105,6 +105,7 @@ from coding_model_autonomous.retry_policy import (
     _rotation_pick,
     _select_implementer_agent,
     _snapshot_retry,
+    snapshot_phase,
     _IMPLEMENTER_ROTATION,
     inject_difference,
     plan_attempt,
@@ -6775,6 +6776,10 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
         (spec_dir / "test_output.txt").write_text(test_output)
     except OSError:
         pass
+    # DEV-755: the repair below overwrites test_output.txt in place and, on a
+    # rollback, restores the files underneath it. Capture synthesis as it
+    # stands NOW or nothing of it survives the repair either way.
+    snapshot_phase(spec_dir, "synthesis")
     logger.info("spec %s: synthesis test result: %s (%d chars)",
                 spec.id, "PASS" if tests_passed else "FAIL", len(test_output))
     if tests_passed:
@@ -6965,6 +6970,37 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
     improved, poisoned = _repair_verdict(
         repair_passed, pre_repair_diags, post_repair_diags, new_classes,
         protected_files)
+
+    # DEV-755: snapshot the repair AS IT STANDS, before the rollback below
+    # restores the pre-repair files over it. A rolled-back repair is exactly
+    # the one nobody can inspect afterwards, and exactly the one whose verdict
+    # is most likely to be wrong — run 45's was rolled back by a comparison
+    # that could not see its own diagnostics.
+    snapshot_phase(spec_dir, "synthesis_repair")
+    # test_output.txt still holds SYNTHESIS's run at this point — the repair's
+    # is only written further down, after the rollback. Put the repair's own
+    # output into its snapshot explicitly, or the directory would carry the
+    # previous phase's build and read as if the repair produced it.
+    try:
+        snap = spec_dir / "retry_history" / "synthesis_repair"
+        (snap / "test_output.txt").write_text(repair_output)
+        # And the verdict itself. The files say what the repair did; only this
+        # says what the gate decided about it, and on a rollback the decision
+        # is the thing under suspicion.
+        (snap / "repair_verdict.json").write_text(json.dumps({
+            "repair_passed": repair_passed,
+            "improved": improved,
+            "poisoned": poisoned,
+            "rolled_back": not improved,
+            "pre_repair_diagnostics": len(pre_repair_diags),
+            "post_repair_diagnostics": len(post_repair_diags),
+            "new_diagnostic_classes": sorted(new_classes),
+            # names only: these are (path, content) pairs, and the
+            # contents would be the whole protected scaffold.
+            "protected_files": sorted(f[0] for f in protected_files),
+        }, indent=2))
+    except (OSError, TypeError, ValueError):
+        pass
 
     if not improved:
         for rel_path, previous in pre_repair_state.items():
