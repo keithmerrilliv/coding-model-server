@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Collection, Iterable, Optional
 
 from . import seccomp_filter
+from .workspace import CONTAINED_DIR
 
 # Mac-runner dispatch session only. Inference calls never touch this — they
 # go through _http.post_chat_completion, which pools its own connections.
@@ -311,7 +312,12 @@ MAC_RUNNER_API_KEY = os.getenv("MAC_RUNNER_API_KEY", "")
 _REPO_OVERLAY_DIR = ".repo_overlay"
 
 _SPEC_SKIP_PATTERNS = (".pytest_cache", "__pycache__", ".DS_Store",
-                       "test_output.txt", "retry_history", _REPO_OVERLAY_DIR)
+                       "test_output.txt", "retry_history", _REPO_OVERLAY_DIR,
+                       # DEV-738: a contained colliding artifact is kept for
+                       # inspection and must participate in no run. Skipping
+                       # it here is what makes that true for every framework
+                       # at once, rather than per-language in the ledger.
+                       CONTAINED_DIR)
 # DEV-688: the workspace's own source tree. Never a pytest collection
 # target — the overlay puts it on PYTHONPATH instead.
 _WORKSPACE_SRC_DIR = "src"

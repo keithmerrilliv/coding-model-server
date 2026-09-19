@@ -228,8 +228,12 @@ class WriteOutcome:
             return (f"`{self.requested}` is not a file path — REFUSED "
                     f"({self.detail})")
         if self.action == REFUSED_COLLISION:
+            # The reason is the useful half and there are now three of them
+            # (the refuse policy, an occupied containment path, and DEV-738's
+            # identical discard); the bare policy name is the fallback.
             return (f"`{self.requested}` was produced by the {self.prior_role}; "
-                    f"the {self.role}'s version was REFUSED (collision policy: refuse)")
+                    f"the {self.role}'s version was REFUSED "
+                    f"({self.detail or 'collision policy: refuse'})")
         if self.action == REFUSED_EMPTYING:
             return (f"`{self.requested}`: the {self.role}'s version has no "
                     f"declarations where the current file has some — REFUSED "
@@ -240,12 +244,45 @@ class WriteOutcome:
         return f"`{self.path}` written by the {self.role}"
 
 
-def renamed_path(rel_path: str, role: str) -> str:
-    """Sibling path for a colliding write that keeps test discovery working.
+# Suffixes whose files share one namespace per build target, so two of them
+# cannot coexist in the same directory no matter what they are called
+# (DEV-738). A sibling rename is containment only where the copy is
+# independently loadable; for these it is a guaranteed redeclaration.
+# Extend this set when a language is added, not speculatively — each entry
+# should be one we have actually compiled.
+SHARED_NAMESPACE_SUFFIXES = frozenset({".swift"})
 
+# Where a contained artifact goes when a sibling rename would be compiled.
+# Nothing under this prefix is a source directory of any target, so the copy
+# is preserved for inspection and participates in no build.
+CONTAINED_DIR = "_contained"
+
+
+def shares_namespace_per_target(rel_path: str) -> bool:
+    """True when a sibling copy of *rel_path* would redeclare its contents."""
+    return PurePosixPath(rel_path).suffix.lower() in SHARED_NAMESPACE_SUFFIXES
+
+
+def renamed_path(rel_path: str, role: str) -> str:
+    """Containment path for a colliding write.
+
+    A sibling rename where the copy is independently loadable:
     ``tests/test_x.py`` → ``tests/test_reviewer_x.py`` (pytest collects
-    ``test_*.py`` only); ``Dir/Foo.swift`` → ``Dir/reviewer_Foo.swift`` (Swift
-    does not care what the file is called, only which target dir it is in).
+    ``test_*.py`` only, so the reviewer's version still runs under its own
+    module name).
+
+    DEV-738: it used to do the same for Swift, on the reasoning that "Swift
+    does not care what the file is called, only which target dir it is in".
+    The first half is true and the second is the bug — renaming the FILE does
+    not rename the TYPE inside it. Run 43's reviewer re-emitted the
+    implementer's ``AudioscapeStateTests.swift`` and the rename put a second
+    ``final class AudioscapeStateTests`` in the same target, which is
+    ``invalid redeclaration`` and cost an attempt that had already compiled,
+    passed 47 tests and been approved at the human gate. Worse, the directory
+    was a ``PBXFileSystemSynchronizedRootGroup``, where every file is compiled
+    and there is no membership list to leave the copy out of. So for those
+    languages the copy goes under ``_contained/`` instead, which no target
+    compiles.
     """
     p = PurePosixPath(rel_path)
     name = p.name
@@ -253,7 +290,10 @@ def renamed_path(rel_path: str, role: str) -> str:
         new = f"test_{role}_{name[len('test_'):]}"
     else:
         new = f"{role}_{name}"
-    return str(p.with_name(new))
+    sibling = p.with_name(new)
+    if shares_namespace_per_target(rel_path):
+        return str(PurePosixPath(CONTAINED_DIR) / role / p)
+    return str(sibling)
 
 
 class ArtifactLedger:
@@ -377,7 +417,18 @@ class ArtifactLedger:
         # 1. collision — someone else's work is at this path.
         if outcome is None and prior is not None and prior.role != role \
                 and prior.role not in _MAY_SUPERSEDE.get(role, frozenset()):
-            if self.policy is CollisionPolicy.RENAME:
+            if prior.sha256 == sha256_text(content):
+                # DEV-738: the two versions are the same bytes, so there is
+                # nothing to contain — the later role agreed with the earlier
+                # one exactly. Containing it anyway manufactures a second copy
+                # of every declaration in it, which is what broke run 43: the
+                # reviewer re-emitted the implementer's test file unchanged and
+                # the copy failed the build the original had just passed.
+                outcome = WriteOutcome(
+                    rel_path, None, REFUSED_COLLISION, role, prior_role,
+                    detail=(f"byte-identical to the {prior.role}'s version — "
+                            f"discarded rather than contained"))
+            elif self.policy is CollisionPolicy.RENAME:
                 candidate = renamed_path(rel_path, role)
                 other = self.producer(candidate)
                 if other is not None and other.role != role:
