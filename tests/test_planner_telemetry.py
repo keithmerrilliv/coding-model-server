@@ -184,3 +184,34 @@ class TestEventPayload:
         # The daemon spreads this into the payload unconditionally; a planner
         # that never reached the model must not invent a row of zeroes.
         assert agent_event_fields({}) == {}
+
+
+class TestTruncationIsLoud:
+    """Acceptance item 2: a truncated plan must never be silent, and a normal
+    one must not cry wolf."""
+
+    def test_a_truncated_plan_warns_and_names_the_knob(self, monkeypatch, caplog):
+        _serve(monkeypatch, [_Resp(GOOD_YAML, finish_reason="length",
+                                   usage=USAGE)])
+        with caplog.at_level("WARNING", logger=planner.logger.name):
+            planner.call_planner("spec", tally={})
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any("TRUNCATED" in m for m in msgs), msgs
+        # The message has to say what to do, not just that it happened.
+        assert any("AUTONOMOUS_PLANNER_MAX_TOKENS" in m for m in msgs), msgs
+
+    def test_a_normal_plan_does_not_warn(self, monkeypatch, caplog):
+        _serve(monkeypatch, [_Resp(GOOD_YAML, finish_reason="stop",
+                                   usage=USAGE)])
+        with caplog.at_level("WARNING", logger=planner.logger.name):
+            planner.call_planner("spec", tally={})
+        assert not [r for r in caplog.records if "TRUNCATED" in r.getMessage()]
+
+    def test_it_warns_even_with_no_tally(self, monkeypatch, caplog):
+        # The warning is about the run, not about the telemetry; a caller that
+        # asked for no tally still needs to be told.
+        _serve(monkeypatch, [_Resp(GOOD_YAML, finish_reason="length",
+                                   usage=USAGE)])
+        with caplog.at_level("WARNING", logger=planner.logger.name):
+            planner.call_planner("spec")
+        assert any("TRUNCATED" in r.getMessage() for r in caplog.records)

@@ -579,6 +579,18 @@ def call_planner(
             # attempt hit the budget".
             if meta.get("finish_reason"):
                 tally["finish_reason"] = meta["finish_reason"]
+        # A truncated plan must never be silent. Every other role has a
+        # _note_truncation on its path; the planner had none, so a plan that
+        # ran out of budget mid-emission looked exactly like a plan the model
+        # simply got wrong — and the retry then pulled the wrong lever
+        # (DEV-691 is the same lesson on the architect).
+        if meta.get("truncated"):
+            logger.warning(
+                "planner: response TRUNCATED at the %d-token budget "
+                "(agent=%s, completion_tokens=%s) — thinking is in-band under "
+                "--reasoning-format none, so raise AUTONOMOUS_PLANNER_MAX_TOKENS "
+                "before blaming the model (DEV-734)",
+                PLANNER_MAX_TOKENS, agent, meta.get("completion_tokens"))
         if not isinstance(result, PlannerError):
             break
         if attempt < parse_retries:
