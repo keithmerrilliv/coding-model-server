@@ -698,15 +698,28 @@ def _resolve_plan_phase_paths(
             "the DEV-601 check is NOT armed for this plan", spec.id, exc)
         return yaml_text, []
 
+    # DEV-733: the spec's change surface is the second anchor. A path the repo
+    # cannot confirm is either a new file or a typo in a new file's NAME, and
+    # only the spec can tell them apart — run 43 lost a plan gate to one
+    # missing letter that this table had spelled correctly all along.
+    declared_surface = _context.change_surface_path_rows(spec_md)
     report = plan_paths.resolve_plan_paths(
-        plan, lambda pth: ctx.existing(pth) is not None, protected)
+        plan, lambda pth: ctx.existing(pth) is not None, protected,
+        declared_paths=declared_surface)
 
     for res in report.ambiguous:
-        logger.warning(
-            "spec %s: plan path %r does not read at base_ref and its basename "
-            "resolves under more than one known directory (%s) — left as a new "
-            "file rather than guessed (DEV-601)",
-            spec.id, res.path, ", ".join(sorted(res.ambiguous)))
+        if res.source == "declared":
+            logger.warning(
+                "spec %s: plan path %r is within a typo's distance of more "
+                "than one path in the spec's change surface (%s) — left as a "
+                "new file rather than guessed (DEV-733)",
+                spec.id, res.path, ", ".join(sorted(res.ambiguous)))
+        else:
+            logger.warning(
+                "spec %s: plan path %r does not read at base_ref and its basename "
+                "resolves under more than one known directory (%s) — left as a new "
+                "file rather than guessed (DEV-601)",
+                spec.id, res.path, ", ".join(sorted(res.ambiguous)))
     if report.new_paths:
         logger.info(
             "spec %s: plan declares %d path(s) that do not exist at base_ref "
@@ -722,10 +735,14 @@ def _resolve_plan_phase_paths(
     if corrections:
         plan = plan_paths.apply_corrections(plan, corrections)
         yaml_text = _yaml.safe_dump(plan, sort_keys=False)
+        by_source = {r.path: r.source for r in report.resolutions
+                     if r.status == "corrected"}
         logger.warning(
             "spec %s: planner emitted %d unresolvable phase path(s); rewritten "
-            "to the files they name (DEV-601): %s", spec.id, len(corrections),
-            ", ".join(f"{k} -> {v}" for k, v in sorted(corrections.items())))
+            "to the files they name (DEV-601/DEV-733): %s", spec.id,
+            len(corrections),
+            ", ".join(f"{k} -> {v} [{by_source.get(k) or 'directory'}]"
+                      for k, v in sorted(corrections.items())))
         if db is not None:
             db.record_event(
                 EventKind.AGENT_RAN, spec_id=spec.id,

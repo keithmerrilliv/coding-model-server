@@ -125,3 +125,36 @@ def test_call_planner_uses_module_default_retries(monkeypatch):
     result = planner.call_planner("# Spec")  # no parse_retries → default 1
     assert isinstance(result, planner.PlannerError)
     assert state["n"] == 2  # 1 initial + 1 default retry
+
+
+class TestPathsAreCopiedNotRetyped:
+    """DEV-733, the prevention half of the same defect.
+
+    The resolver can correct a typo it recognises; not producing one is
+    cheaper. Before this, the YAML template said `outputs: ["<source file
+    paths>"]` and nothing anywhere told the planner where those strings were
+    supposed to come from.
+    """
+
+    def test_the_rule_is_in_the_system_prompt(self):
+        from coding_model_autonomous.planner import PLANNER_SYSTEM_PROMPT
+        p = PLANNER_SYSTEM_PROMPT
+        assert "CHARACTER FOR CHARACTER" in p
+        # The prompt is wrapped, so match tokens that cannot span a line break.
+        assert "change-surface" in p
+        assert "backticked paths" in p
+
+    def test_it_says_where_the_paths_come_from_and_what_a_slip_costs(self):
+        """A rule with no reason attached is the first thing a model drops
+        under a long prompt."""
+        from coding_model_autonomous.planner import PLANNER_SYSTEM_PROMPT
+        p = PLANNER_SYSTEM_PROMPT
+        assert "do not shorten it to a bare" in p
+        assert "charges the attempt" in p
+
+    def test_inventing_a_path_is_still_allowed_when_the_spec_names_none(self):
+        """Greenfield specs have no change surface. The rule must not read as
+        'never write a path I have not been given'."""
+        from coding_model_autonomous.planner import PLANNER_SYSTEM_PROMPT
+        assert "Invent a path only for a file the spec names nowhere" in \
+            PLANNER_SYSTEM_PROMPT

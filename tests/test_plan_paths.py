@@ -275,3 +275,97 @@ phases:
         text, problems = self._run(monkeypatch, no_repo, ELECTRIC_SHEEP)
         assert len(problems) == 1 and "<source files>" in problems[0]
         assert text == no_repo
+
+
+class TestDeclaredAnchorWiring:
+    """DEV-733: the daemon feeds the spec's change surface to the resolver.
+
+    The resolver's own behaviour is covered in
+    test_plan_paths_declared_anchor.py. This is the join — that the spec text
+    reaches it at all. DEV-705 is the standing reminder that a fix can live in
+    one place while the caller keeps its own answer.
+    """
+
+    SPEC = """# Stop the render callback from destroying concurrent audio strikes
+
+## Change surface
+
+| Path | Change |
+| --- | --- |
+| `ElectricSheep/Audioscape.swift` | modified |
+| `ElectricSheepTests/AudioscapeStateTests.swift` | new |
+"""
+
+    # Run 43's plan verbatim: the right file, and the new test file misspelled.
+    PLAN = """title: audio
+test_strategy:
+  repo: electric-sheep
+  base_ref: main
+  protected_paths:
+  - ElectricSheep/TokenMetrics.swift
+phases:
+- name: implement
+  inputs:
+  - ElectricSheep/Audioscape.swift
+  outputs:
+  - ElectricSheep/Audioscape.swift
+  - ElectricSheepTests/AudoscapeStateTests.swift
+- name: test
+  inputs:
+  - ElectricSheepTests/AudoscapeStateTests.swift
+  outputs:
+  - test_report.md
+"""
+
+    REPO = {"ElectricSheep/Audioscape.swift", "ElectricSheep/TokenMetrics.swift"}
+
+    @staticmethod
+    def _spec():
+        class _S:
+            id = "spec_d5b74cd6"
+        return _S()
+
+    def _run(self, monkeypatch, spec_md):
+        from coding_model_server import orchestrator_daemon as od
+
+        class _Ctx:
+            def existing(self, p):
+                return "contents" if p in TestDeclaredAnchorWiring.REPO else None
+
+        monkeypatch.setattr(od, "_spec_context", lambda *a, **k: _Ctx())
+        return od._resolve_plan_phase_paths(None, self._spec(), spec_md, self.PLAN)
+
+    def test_the_typo_is_corrected_from_the_spec(self, monkeypatch):
+        import yaml
+        text, problems = self._run(monkeypatch, self.SPEC)
+        assert problems == []
+        plan = yaml.safe_load(text)
+        assert plan["phases"][0]["outputs"] == [
+            "ElectricSheep/Audioscape.swift",
+            "ElectricSheepTests/AudioscapeStateTests.swift"]
+        # Both occurrences, not just the one in outputs.
+        assert plan["phases"][1]["inputs"] == [
+            "ElectricSheepTests/AudioscapeStateTests.swift"]
+
+    def test_without_the_spec_text_the_typo_survives(self, monkeypatch):
+        """The negative control. Without it, the test above would pass on a
+        resolver that corrected from something else entirely."""
+        text, problems = self._run(monkeypatch, "")
+        assert problems == []
+        assert "AudoscapeStateTests.swift" in text
+        assert text == self.PLAN                 # untouched, not reformatted
+
+    def test_a_spec_whose_table_matches_the_plan_changes_nothing(self, monkeypatch):
+        """Most plans. No churn and no reformat when there is nothing to fix."""
+        from coding_model_server import orchestrator_daemon as od
+
+        class _Ctx:
+            def existing(self, p):
+                return "contents" if p in TestDeclaredAnchorWiring.REPO else None
+
+        good = self.PLAN.replace("AudoscapeStateTests", "AudioscapeStateTests")
+        monkeypatch.setattr(od, "_spec_context", lambda *a, **k: _Ctx())
+        text, problems = od._resolve_plan_phase_paths(
+            None, self._spec(), self.SPEC, good)
+        assert problems == []
+        assert text == good
