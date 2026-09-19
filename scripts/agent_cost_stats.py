@@ -51,8 +51,13 @@ def _load(db_path: Path, since: Optional[str], until: Optional[str],
     conn.row_factory = sqlite3.Row
     # Read-only: this runs against the live orchestrator DB while a spec may
     # be executing, and a stats script must never take a write lock on it.
+    # DEV-734: `planner_ran` joins the table. The planner keeps its own
+    # event kind — AGENT_RAN is read by the rotation and crash-recovery
+    # paths, and telemetry must not add rows to a stream that decides
+    # retries — so the union happens here, at the reader, instead.
     sql = ("SELECT spec_id, payload_json, created_at FROM events "
-           "WHERE LOWER(kind) = 'agent_ran' AND payload_json IS NOT NULL")
+           "WHERE LOWER(kind) IN ('agent_ran', 'planner_ran') "
+           "AND payload_json IS NOT NULL")
     args: list = []
     if since:
         sql += " AND created_at >= ?"
@@ -72,6 +77,12 @@ def _load(db_path: Path, since: Optional[str], until: Optional[str],
             continue
         if not isinstance(payload, dict):
             continue
+        # Planner events predating DEV-734 carry no `role`; they are still
+        # the planner's, and a table that silently drops them would report
+        # better coverage than it has. Inferred only when the payload has no
+        # role of its own, so nothing else is relabelled.
+        if "role" not in payload and "result_kind" in payload:
+            payload["role"] = "planner"
         if role and payload.get("role") != role:
             continue
         payload["_spec_id"] = row["spec_id"]

@@ -287,8 +287,13 @@ def _process_pending_plan(db: Database, spec: Spec) -> None:
     logger.info("spec %s: running planner (md=%d bytes, rounds=%d)",
                 spec.id, len(markdown), len(rounds))
 
+    # DEV-734: the planner's own telemetry. `tally` is filled in place, so the
+    # error paths below record what the attempts cost even though call_planner
+    # never returned — a plan that died after burning two generations is the
+    # case most worth costing, and it was previously the emptiest record.
+    tally: dict = {}
     try:
-        result = call_planner(markdown, clarifications=rounds)
+        result = call_planner(markdown, clarifications=rounds, tally=tally)
     except _TRANSPORT_ERRORS as e:
         # Couldn't reach the server (redeploy race, or a read timeout). Leave the
         # spec in PENDING_PLAN so the next tick re-runs the planner rather than
@@ -298,7 +303,8 @@ def _process_pending_plan(db: Database, spec: Spec) -> None:
         db.record_event(
             EventKind.PLANNER_RAN,
             spec_id=spec.id,
-            payload={"transient_error": f"{type(e).__name__}: {e}"},
+            payload={"transient_error": f"{type(e).__name__}: {e}",
+                     **executor.agent_event_fields(tally)},
         )
         return
     except Exception as e:
@@ -312,7 +318,8 @@ def _process_pending_plan(db: Database, spec: Spec) -> None:
         db.record_event(
             EventKind.PLANNER_RAN,
             spec_id=spec.id,
-            payload={"error": f"{type(e).__name__}: {e}", "no_verdict": True},
+            payload={"error": f"{type(e).__name__}: {e}", "no_verdict": True,
+                     **executor.agent_event_fields(tally)},
         )
         _planner_no_verdict(db, spec, failure)
         return
@@ -323,6 +330,14 @@ def _process_pending_plan(db: Database, spec: Spec) -> None:
         payload={
             "result_kind": type(result).__name__,
             "rounds_provided": len(rounds),
+            "role": "planner",
+            # DEV-734: agent, duration_ms, token counts, calls, truncated and
+            # finish_reason, spelled as every other role spells them. Kept on
+            # PLANNER_RAN rather than emitted as a second AGENT_RAN: five
+            # readers drive rotation and crash recovery off AGENT_RAN
+            # (retry_policy, outcome, _crash_recoveries_used), and a telemetry
+            # ticket must not put rows into a stream that decides retries.
+            **executor.agent_event_fields(tally),
         },
     )
 

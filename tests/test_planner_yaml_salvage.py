@@ -69,13 +69,15 @@ class TestRetryFeedback:
     def test_retry_message_names_the_failure(self, monkeypatch):
         seen: list = []
 
+        # DEV-734: _call_planner_once returns (result, meta) — the meta is
+        # the plan's telemetry. These fakes care only about the result.
         def fake_call(user_msg, *, agent, timeout):
             seen.append(user_msg)
             if len(seen) == 1:
                 return PlannerError(
                     reason="<<<YAML>>> block is not valid YAML: boom",
-                    raw_response="")
-            return parse_planner_response(VALID)
+                    raw_response=""), {}
+            return parse_planner_response(VALID), {}
 
         monkeypatch.setattr(planner, "_call_planner_once", fake_call)
         result = call_planner("# Spec\nBuild the thing.", parse_retries=1)
@@ -90,7 +92,7 @@ class TestRetryFeedback:
 
         def fake_call(user_msg, *, agent, timeout):
             seen.append(user_msg)
-            return parse_planner_response(VALID)
+            return parse_planner_response(VALID), {}
 
         monkeypatch.setattr(planner, "_call_planner_once", fake_call)
         result = call_planner("# Spec\nBuild.", parse_retries=1)
