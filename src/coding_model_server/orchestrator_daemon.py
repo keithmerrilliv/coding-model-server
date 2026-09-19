@@ -7012,6 +7012,19 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
                    f"state. A collision with a file the pipeline may not edit "
                    f"is unrecoverable, so a lower count does not make it "
                    f"progress")
+    elif not pre_repair_diags and not post_repair_diags:
+        # DEV-755: zero on BOTH sides of a failing build is not a verdict about
+        # the repair — it means nothing parsed. Saying "did not improve" there
+        # reports the instrument's blindness as a finding about the code, which
+        # is what sent run 45's post-mortem down the wrong path. The rollback
+        # still happens (an unmeasured repair is not evidence of progress), but
+        # it says which of the two it is.
+        outcome = ("FAIL — repair NOT MEASURABLE: the build failed but no "
+                   "attributed diagnostics parsed on either side, so nothing "
+                   "here compares the repair against the original. Rolled back "
+                   "for lack of evidence, not for lack of improvement — treat "
+                   "this as an instrument failure and check the build output "
+                   "format before reading anything into it")
     else:
         outcome = (f"FAIL — repair did not improve the build "
                    f"({len(pre_repair_diags)} → {len(post_repair_diags)} "
