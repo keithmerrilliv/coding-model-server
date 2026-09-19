@@ -92,7 +92,7 @@ from coding_model_autonomous.jira_client import (
 from coding_model_autonomous.jira_sync import JiraSync
 from coding_model_autonomous import (
     apply_edits, architect_tools, delivery, design_testability,
-    plan_paths,
+    gate_output, plan_paths,
     executor, swift_prechecks, test_runner,
 )
 from coding_model_autonomous.test_runner import run_tests
@@ -610,6 +610,20 @@ def _overlay_operator_test_strategy(yaml_text: str, spec_md: str,
         "%s — restored verbatim from the spec (DEV-573)",
         spec_id, ", ".join(sorted(changed)))
     return _yaml.safe_dump(plan, sort_keys=False)
+
+
+def _test_log_path(db: "Database | None", spec: Spec) -> "str | None":
+    """Where the FULL test output lives, for the gate to name (DEV-731).
+
+    The gate shows a bounded excerpt; a reviewer who wants the rest should not
+    have to know the layout. Returns None when there is no workspace.
+    """
+    if db is None:
+        return None
+    try:
+        return str(db.spec_dir(spec.id) / "test_output.txt")
+    except Exception:
+        return None
 
 
 def _resolve_plan_phase_paths(
@@ -6038,7 +6052,7 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
                 f"Tests **PASSED**. Reviewer verdict: **PASS**.{tolerant_block}"
                 f"{ledger_block}\n\n"
                 f"### Review Report\n\n{result.review_md}\n\n"
-                f"### Test Output\n\n```\n{test_output[:3000]}\n```\n\n"
+                f"{gate_output.render_for_gate(test_output, log_path=_test_log_path(db, spec))}\n\n"
                 f"Approve to mark this spec as DONE, or reject to send "
                 f"back to the implementer.\n"
             ),
@@ -6068,7 +6082,7 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
                     f"test run (DEV-560) — judge them on their merits before "
                     f"trusting them.{tolerant_block}{ledger_block}\n\n"
                     f"### Review Report\n\n{result.review_md}\n\n"
-                    f"### Test Output\n\n```\n{test_output[:3000]}\n```\n\n"
+                    f"{gate_output.render_for_gate(test_output, log_path=_test_log_path(db, spec))}\n\n"
                     f"Approve to mark this spec as DONE, or reject to send "
                     f"back to the implementer with your notes.\n"
                 ),
@@ -7094,7 +7108,7 @@ def _synthesize_or_fail(db: Database, spec: Spec, impl_task, reviewer_task,
                 f"output merges the passing behaviors of every rotation "
                 f"attempt; tests **PASSED** on it, but it has no reviewer "
                 f"verdict.{size_block}{refused_block}\n\n"
-                f"### Test Output\n\n```\n{synth_output[:3000]}\n```\n\n"
+                f"{gate_output.render_for_gate(synth_output, log_path=_test_log_path(db, spec))}\n\n"
                 f"Approve to mark this spec as DONE, or reject to fail "
                 f"the spec (implementer retries are exhausted).\n"
             ),
