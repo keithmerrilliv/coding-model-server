@@ -879,7 +879,12 @@ class TestContextStage:
         recorded = events(db, spec.id, EventKind.CONTEXT_ASSEMBLED)
         assert len(recorded) == 1  # DEV-669: its own kind, one row per fetch
         assert not events(db, spec.id, EventKind.AGENT_RAN, role="context")
-        assert recorded[0]["trigger"] == "plan probe"
+        # DEV-601 resolves the plan's phase paths before the DEV-492 probe
+        # runs, and seeds the prefixed corrections into the same candidate set,
+        # so IT is now the first toucher and the probe reuses its fetch. The
+        # invariant this test exists for is the two asserts above — one fetch,
+        # one record — and both still hold; only the label moved.
+        assert recorded[0]["trigger"] == "plan paths"
         assert recorded[0]["unknown"] == []
         assert recorded[0]["editable"] == [DAEMON_PATH]
         assert any(o.startswith(f"{TEST_PATH} (editable)") for o in recorded[0]["omitted"])
