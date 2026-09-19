@@ -422,7 +422,7 @@ After each agent response:
 |-------|-----------|------------|
 | Prefill | Memory bandwidth (reading weights) | Higher `n_ubatch`, more GPU layers, `--cpu-moe` |
 | Generation | Memory bandwidth (1 token at a time) | More GPU layers, faster RAM (DDR5-5600) |
-| Model loading | Disk I/O + VRAM allocation | `--mmap` (already enabled), SSD storage |
+| Model loading | Disk I/O + VRAM allocation | `-lm mmap` (already enabled), SSD storage |
 | RAG retrieval | Embedding + vector search | Timeout (2s), smaller DB, faster CPU |
 | Tool execution | Shell command runtime | Not tunable (depends on the command) |
 | Context management | Compaction model call | Happens infrequently, acceptable |

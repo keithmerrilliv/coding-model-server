@@ -761,7 +761,7 @@ Update these after each retrieval step. They help you stay organized and efficie
     # stays cold, but do not assume the template is text-only if it is edited.
     #
     # SWEEP 2026-09-15 on the RTX 5080 (16,303 MiB), production argv (-fa auto,
-    # --mmap, --cache-reuse 256, --lookup-cache-dynamic, -np 1), 131072 ctx,
+    # -lm mmap, --cache-reuse 256, --lookup-cache-dynamic, -np 1), 131072 ctx,
     # Q4_0 KV, one fixed prompt, 256 predicted (decode / prefill tok/s @ MiB free):
     #   ngl=28 --swa-full    8.1 /  236 @ 4,128     ngl=28 no-swa   8.1 / 182 @ 5,329
     #   ngl=32 --swa-full    9.3 /  276 @ 2,946     ngl=32 no-swa   9.3 / 208 @ 4,253

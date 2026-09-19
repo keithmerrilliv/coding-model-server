@@ -7,10 +7,17 @@
 #                     -> how much of the ~31s model load is pure SSD->RAM transfer,
 #                        i.e. the part that keeping models warm in RAM actually removes.
 #
-#   Part B (--infer): decode tok/s with --mmap vs --no-mmap on the same model.
+#   Part B (--infer): decode tok/s with `-lm mmap` vs `-lm none` on the same model.
 #                     -> the real cost of the loader's expert-offload warning
 #                        ("tensor overrides to CPU are used with mmap enabled —
 #                         consider using --no-mmap for better performance").
+#                     DEV-741: the A/B used to be --mmap vs --no-mmap. BOTH of those
+#                     are REMOVED in llama-server 0.4.x; --load-mode replaces them and
+#                     the pinned build already accepts it. `none` is the documented
+#                     no-mmap equivalent ("no special loading mode"), so this is a
+#                     translation of the same experiment, not a change to it.
+#                     The upstream warning text above still says --no-mmap; that is
+#                     llama.cpp's string, quoted as it appears, not our spelling.
 #
 # SAFE BY DEFAULT: Part A evicts ONLY the target file's pages (vmtouch -e /
 # posix_fadvise DONTNEED) — it never calls `drop_caches`, so it will not disturb
@@ -30,7 +37,7 @@
 #
 # Note: for a more rigorous tok/s via the running service, scripts/benchmark_decode.py
 # already warms up and takes a median — but it goes through the service, which is
-# hard-wired to --mmap, so it cannot A/B the flag. That is why Part B launches its own
+# hard-wired to `-lm mmap`, so it cannot A/B the flag. That is why Part B launches its own
 # llama-server.
 set -uo pipefail
 
@@ -122,10 +129,10 @@ else
   awk -v w="$WARM" -v g="$TOTAL_BYTES" 'BEGIN{printf "  warm read: %.2f s (%.0f MB/s)\n", w, g/1048576/w}'
 fi
 
-# ---- Part B: --mmap vs --no-mmap decode tok/s ---------------------------------
+# ---- Part B: -lm mmap vs -lm none decode tok/s --------------------------------
 if [[ "$DO_INFER" == "1" ]]; then
   echo ""
-  echo "=== Part B: inference --mmap vs --no-mmap ==="
+  echo "=== Part B: inference -lm mmap vs -lm none ==="
   if [[ -z "$NGL" ]]; then
     echo "  --infer requires --ngl N (and usually --n-cpu-moe N) matching this model's" >&2
     echo "  config.py entry, or llama-server will mis-place layers and may OOM VRAM." >&2
@@ -167,9 +174,10 @@ print("busy" if (s.get("running") or s.get("pid") is not None) else "idle")' 2>/
   command -v vmtouch >/dev/null 2>&1 && vmtouch -qt "${SHARDS[@]}" >/dev/null 2>&1
 
   PROMPT="Explain, in two sentences, why memory-mapped model loading interacts with CPU tensor offload."
-  for FLAG in --mmap --no-mmap; do
-    echo "--- $FLAG ---"
-    args=( -m "$FIRST" --host 127.0.0.1 --port "$PORT" -c 4096 -ngl "$NGL" "$FLAG" )
+  # -lm takes a VALUE, so the mode cannot be a single "$FLAG" word any more.
+  for MODE in mmap none; do
+    echo "--- -lm $MODE ---"
+    args=( -m "$FIRST" --host 127.0.0.1 --port "$PORT" -c 4096 -ngl "$NGL" -lm "$MODE" )
     [[ -n "$NCM" ]] && args+=( --n-cpu-moe "$NCM" )
     log="$(mktemp /tmp/measure_ll.XXXXXX.log)"
     lstart=$(date +%s.%N)
@@ -199,7 +207,7 @@ except Exception as e:
     kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; rm -f "$log"
   done
   echo ""
-  echo "  If --no-mmap decodes materially faster, that is the offload warning made real;"
-  echo "  weigh it against --no-mmap's ~2x RAM (private copy) and cold-load cost, which a"
+  echo "  If -lm none decodes materially faster, that is the offload warning made real;"
+  echo "  weigh it against its ~2x RAM (private copy) and cold-load cost, which a"
   echo "  pre-warmed page cache (Part A) largely neutralizes."
 fi

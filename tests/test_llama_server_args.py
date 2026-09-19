@@ -28,7 +28,7 @@ def mgr():
 def _pairs(cmd):
     """Map '-flag value' pairs from an argv list for easy assertions.
 
-    Value-less flags (e.g. --cpu-moe, --mmap) map to True.
+    Value-less flags (e.g. --cpu-moe, --jinja) map to True.
     """
     out = {}
     i = 1  # skip binary
@@ -54,7 +54,8 @@ def test_base_flags_present(mgr):
     assert p["-c"] == "32768"          # default n_ctx
     assert p["-fa"] == "auto"
     assert p["--cache-reuse"] == "256"
-    assert p["--mmap"] is True
+    # DEV-741: `-lm mmap`, not `--mmap` — 0.4.x rejects the latter outright.
+    assert p["-lm"] == "mmap"
 
 
 def test_numeric_config_flows_through(mgr):

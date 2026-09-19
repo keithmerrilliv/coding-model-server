@@ -33,7 +33,7 @@ DEFAULT_MODEL = (
 )
 # Identical across builds — the point is to vary only the binary.
 FLAGS = ["-ngl", "49", "-c", "8192", "-b", "3584", "-ub", "3584",
-         "-t", "24", "-tb", "24", "-fa", "auto", "--mmap",
+         "-t", "24", "-tb", "24", "-fa", "auto", "-lm", "mmap",
          "--cache-type-k", "q8_0", "--cache-type-v", "q8_0",
          "--host", "127.0.0.1", "--port", str(PORT), "-np", "1",
          "--cpu-moe", "--chat-template", "chatml"]
