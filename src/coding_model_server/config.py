@@ -23,7 +23,7 @@ _MODELS_ROOT = os.getenv(
 def _create_model_config(path_env, path_default, n_gpu_layers, n_ctx=32768, n_batch=2048,
                          server_extra_args=None, logit_bias=None, type_k=8, type_v=8,
                          repeat_penalty=1.15, repeat_last_n=256, cpu_moe=False,
-                         n_cpu_moe=None, n_ubatch=512, draft=None):
+                         n_cpu_moe=None, n_cpu_ffn=None, n_ubatch=512, draft=None):
     """Helper function to create standardized model configurations.
 
     Args:
@@ -35,6 +35,14 @@ def _create_model_config(path_env, path_default, n_gpu_layers, n_ctx=32768, n_ba
         n_cpu_moe: Keep only the first N layers' MoE experts on CPU, rest on GPU
             (llama-server --n-cpu-moe). Overrides cpu_moe when set. Lower N => more
             experts on GPU => faster decode, bounded by VRAM (KV competes for it).
+        n_cpu_ffn: Keep only the first N layers' DENSE FFN weights on CPU
+            (llama-server --n-cpu-ffn, 0.4.x and later). The dense counterpart
+            to n_cpu_moe, but NOT the same trade: MoE experts are sparse, so
+            offloading them streams a fraction of what it frees, while dense
+            FFN is 100% active every token. What it buys is that attention and
+            the KV cache stay on the GPU, so the CPU's share of the work stops
+            growing with prompt depth. Set n_gpu_layers to cover every block
+            when using it, or the two offloads compound (DEV-742).
         n_ubatch: Physical micro-batch size for prompt processing (default 512).
         draft: Optional speculative-decode draft. Dict with keys:
             path (str, required) — same-tokenizer model file
@@ -56,6 +64,7 @@ def _create_model_config(path_env, path_default, n_gpu_layers, n_ctx=32768, n_ba
         'repeat_last_n': repeat_last_n,
         'cpu_moe': cpu_moe,
         'n_cpu_moe': n_cpu_moe,
+        'n_cpu_ffn': n_cpu_ffn,
     }
     if server_extra_args is not None:
         config['server_extra_args'] = server_extra_args
@@ -673,10 +682,40 @@ Update these after each retrieval step. They help you stay organized and efficie
     # the DEV-556 arms still differ in exactly one variable
     # (test_both_arms_are_the_same_model_and_the_same_prompt).
     # See [[project_mtp_test_scope]] / [[project_llama_server_upgrade]].
+    # DEV-744, 2026-09-19 — ngl 46 -> 66 with n_cpu_ffn=33, on llama-server
+    # v0.4.1. This SUPERSEDES the DEV-707 note above, whose premise ("the window
+    # is the ONLY thing tradeable for layers") was true only of --n-gpu-layers.
+    #
+    # ngl=46 put 19 of 65 blocks entirely on the CPU: their FFN, their attention
+    # weights, their KV cache AND their attention compute. Attention cost scales
+    # with context; FFN cost does not. So the old rung paid more the deeper the
+    # prompt went, and --n-cpu-ffn moves ONLY the FFN, leaving attention and KV
+    # resident. ngl=66 covers every block (65) plus output, so -ncffn carries the
+    # whole offload by itself — do not lower ngl here expecting more headroom,
+    # the two offloads would compound and 24/27 both OOM'd in the sweep.
+    #
+    # Measured (DEV-742, standalone, same box, same argv, one run per arm):
+    #     depth        ngl=46      ncffn=33
+    #      28 tok      18.30       21.58
+    #     ~26K         15.06       22.33   <- production band, +48%
+    #     ~51K         10.70       21.93
+    #   free MiB          851         951   (production's old rung: 884)
+    # The old rung falls 42% across that range; this one is flat. A repeat
+    # reproduced deep decode to 0.14% with byte-identical MTP draft counts
+    # (temp 0 through the MTP path is deterministic), and adding
+    # --slot-save-path changed nothing, so the win survives production's argv.
+    #
+    # 131072 was ALSO affordable here: ncffn=52 holds the full window on 1,404
+    # MiB free at 15.96 t/s deep, against 8.03 for the old ngl=36/131072 rung.
+    # Keith chose speed over window 2026-09-19 because architect prompts are
+    # median 8,518 tokens and have not exceeded 23,826 since 09-16 — the window
+    # is not the current constraint. Revisit if prompt sizes grow; it is a
+    # two-value change, not a rebuild.
     _DENSE_27B = _create_model_config(
         'MODEL_PATH_27B',
         f'{_MODELS_ROOT}/unsloth/Qwen3.6-27B-MTP-GGUF/Qwen3.6-27B-Q4_K_M.gguf',
-        46, 65536, 2048,
+        66, 65536, 2048,
+        n_cpu_ffn=33,
         server_extra_args=['--jinja', '--reasoning-format', 'none', '--swa-full',
                            '--spec-type', 'draft-mtp', '--spec-draft-n-max', '2'],
         type_k=2, type_v=2,

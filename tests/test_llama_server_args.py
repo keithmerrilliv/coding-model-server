@@ -103,6 +103,44 @@ def test_n_cpu_moe_emits_flag_and_overrides_cpu_moe(mgr):
     assert "--n-cpu-moe" not in none and "--cpu-moe" not in none
 
 
+def test_n_cpu_ffn_emits_flag_independently_of_moe(mgr):
+    """DEV-742/744: --n-cpu-ffn is the DENSE offload and is not --n-cpu-moe.
+
+    They are different trades, not two spellings of one: MoE experts are sparse
+    so offloading them streams a fraction of what it frees, while dense FFN is
+    active on every token and what it buys instead is attention and KV staying
+    resident. A model may set either, neither, or in principle both, so the two
+    code paths must not be wired to each other.
+    """
+    args = mgr._build_server_args("/b", {"path": "/m.gguf", "n_cpu_ffn": 33})
+    assert args[args.index("--n-cpu-ffn") + 1] == "33"
+    # ...and it does NOT drag the MoE flags along with it
+    assert "--n-cpu-moe" not in args and "--cpu-moe" not in args
+
+    # absent -> no flag, so models that never set it are untouched
+    assert "--n-cpu-ffn" not in mgr._build_server_args("/b", {"path": "/m.gguf"})
+
+    # both set -> both emitted, neither suppressing the other
+    both = mgr._build_server_args(
+        "/b", {"path": "/m.gguf", "n_cpu_ffn": 8, "n_cpu_moe": 26})
+    assert both[both.index("--n-cpu-ffn") + 1] == "8"
+    assert both[both.index("--n-cpu-moe") + 1] == "26"
+
+
+def test_dense_architect_rung_is_the_measured_one():
+    """The DEV-742 rung, pinned so a stray edit to one of the two numbers shows.
+
+    ngl must cover every block (65) plus output, because -ncffn is carrying the
+    whole offload; lowering it would compound the two offloads, which is the
+    configuration that OOM'd in the sweep.
+    """
+    from coding_model_server.config import Config
+    cfg = Config._DENSE_27B
+    assert cfg["n_gpu_layers"] == 66
+    assert cfg["n_cpu_ffn"] == 33
+    assert cfg["n_ctx"] == 65536
+
+
 def test_no_draft_flags_when_absent(mgr):
     cmd = mgr._build_server_args("/b", {"path": "/m.gguf"})
     assert "-md" not in cmd
