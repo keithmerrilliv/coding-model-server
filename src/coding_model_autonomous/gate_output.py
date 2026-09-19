@@ -123,7 +123,7 @@ def render_for_gate(output: str, *, log_path: str | None = None,
     """
     text = output or ""
     s = summarize_test_output(text)
-    lines = [f"### Test result\n", _headline(s), ""]
+    lines = ["### Test result\n", _headline(s), ""]
 
     if s.failed:
         lines.append("**Failed:**")
