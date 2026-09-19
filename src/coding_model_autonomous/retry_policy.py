@@ -85,6 +85,42 @@ def _snapshot_retry(spec_dir: Path, retry_index: int) -> None:
                            retry_index, path, exc)
 
 
+def snapshot_phase(spec_dir: Path, label: str) -> None:
+    """Keep a NAMED snapshot of spec_dir under retry_history/<label>/.
+
+    DEV-755. The implementer's attempts are preserved because each retry
+    snapshots the previous one on its way past. Synthesis and its repair have
+    no such successor: synthesis wipes the live attempt, the repair overwrites
+    ``test_output.txt`` in place, and a rolled-back repair restores the files
+    underneath it. So the two artifacts the pipeline produces LAST are the two
+    it keeps NOTHING of.
+
+    That is not academic. Run 45's repair was rolled back on a comparison that
+    could not see its own diagnostics, and afterwards there was no way to tell
+    whether the discarded repair had been correct — the evidence had already
+    overwritten itself. A narrow bug therefore looked like a broad one for as
+    long as it took to read the predicate instead of the message.
+
+    Best-effort by design, like _snapshot_retry: losing a snapshot must never
+    take down the daemon loop, and a missing directory is a gap in evidence
+    rather than a failure of the run.
+    """
+    snap = spec_dir / "retry_history" / label
+    snap.mkdir(parents=True, exist_ok=True)
+    for path in spec_dir.iterdir():
+        if path.name == "retry_history":
+            continue
+        target = snap / path.name
+        try:
+            if path.is_dir():
+                shutil.copytree(path, target, dirs_exist_ok=True)
+            else:
+                shutil.copy2(path, target)
+        except OSError as exc:
+            logger.warning("snapshot %s: failed to copy %s: %s",
+                           label, path, exc)
+
+
 def _clean_spec_dir_for_retry(spec_dir: Path, retry_count: int) -> None:
     """Wipe implementer / reviewer artifacts from spec_dir, keeping the
     inputs (spec, plan, design) and prior-run diagnostics.
