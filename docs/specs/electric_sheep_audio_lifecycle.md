@@ -7,8 +7,15 @@ Jira: DEV-595 (high). Includes the related medium finding (session activated at 
 Repo: `electric-sheep`. `Audioscape.swift` / `AudioManager.swift` own an `AVAudioEngine`
 with an `AVAudioSourceNode` synth; `isPlaying` drives the ContentView Play/Stop button
 and green "Playing" indicator. On iOS/visionOS an `AVAudioSession` is configured
-`.playback` and activated in `init()` (Audioscape.swift lines ~84-87, all via `try?`),
-which runs at app launch because `AudioManager` is `@State` on the App struct.
+`.playback` and activated at `Audioscape.swift:84-87`, all via `try?`. That code is in
+`setupAudioGraph()`, which `Audioscape.init()` calls unconditionally; `AudioManager.init()`
+constructs an `Audioscape`; and `ElectricSheepApp` holds
+`@State private var audioManager = AudioManager()` (line 16). So the session is activated
+during App-struct initialisation, at launch, before any user action.
+
+`ElectricSheepApp` does NOT currently observe `scenePhase` — there is no
+`@Environment(\.scenePhase)` in the file. Requirement 2 below ADDS that observation; it
+is not a rewiring of something already present.
 
 ## Problem
 
@@ -55,6 +62,44 @@ A green build is NOT sufficient — the tests below are the gate.
 - Inspection criterion in the report: no `AVAudioSession` activation remains in any
   `init()` path, and no `try?` remains on session activate/deactivate or engine start.
 
+## Change surface
+
+Repo-relative paths, so context assembly can resolve them. Every modified path was
+verified to exist at `main` before this spec was submitted.
+
+| Path | Change |
+| --- | --- |
+| `ElectricSheep/AudioManager.swift` | modified |
+| `ElectricSheep/Audioscape.swift` | modified |
+| `ElectricSheep/ElectricSheepApp.swift` | modified |
+| `ElectricSheep/AudioLifecycle.swift` | new |
+| `ElectricSheepTests/AudioLifecycleTests.swift` | new |
+
+Both new files go in those exact directories. The Xcode project uses synchronized
+root groups for exactly `ElectricSheep/` and `ElectricSheepTests/`, so a source file
+written anywhere else is never compiled and never joins a target — a test placed at
+the repository root would leave the suite green while the new tests silently do not
+exist.
+
+`AudioLifecycle.swift` holds the pure state machine of requirement 1. It imports
+Foundation and nothing else: no AVFoundation, no SwiftUI. That is what lets it be
+tested on macOS with no audio hardware, no engine and no session.
+
+## Reference files (read-only)
+
+The test strategy protects three files. Read them, do not edit them.
+
+- `ElectricSheep/ContentView.swift` — the real bindings the compatibility constraint
+  is about. Check your changes against lines 219-232 rather than against memory.
+- `ElectricSheep/Protocols.swift` — `AudioStrikeTarget` and its conformance.
+- `ElectricSheepTests/BridgeLifecycleTests.swift` — house style for a new test file
+  (`import XCTest`, `@testable import ElectricSheep`, `final class ...: XCTestCase`).
+  Four of the five existing test files use swift-testing (`import Testing`) instead;
+  either is accepted, but do not mix the two in one file.
+
+Every path in the plan's phases should be one of the repo-relative paths above. A
+bare filename is not shorthand; it is the defect class of DEV-601.
+
 ## test_strategy
 
     framework: xcodebuild_test
@@ -65,6 +110,10 @@ A green build is NOT sufficient — the tests below are the gate.
     destination: "platform=macOS"
     filter: ElectricSheepTests
     skip_filter: ElectricSheepTests/DtypeContainmentTests
+    protected_paths:
+      - ElectricSheep/ContentView.swift
+      - ElectricSheep/Protocols.swift
+      - ElectricSheepTests/BridgeLifecycleTests.swift
 
 ## Constraints
 
@@ -72,8 +121,23 @@ A green build is NOT sufficient — the tests below are the gate.
   AVAudioSession symbols in it).
 - Do not touch synthesis or the render callback (covered by
   `electric_sheep_audio_strike_race.md`).
-- Keep the public AudioManager API used by ContentView (`togglePlayback`, `isPlaying`,
-  `updateIntensity`, `strike`, `pushLevels`) source-compatible; additive changes only.
+- Keep `AudioManager`'s public surface source-compatible; additive changes only. The
+  real surface, read from `AudioManager.swift` at `main` before this spec was
+  submitted, is:
+
+      var isPlaying: Bool          var volume: Float
+      func togglePlayback() throws func setVolume(_ value: Float)
+      func triggerEvent(_ type: HallucinationType)
+      func pushLevels(_ levels: [Float])
+      func strike(_ metric: TokenMetrics)
+
+  Note what is NOT on this type: there is no `updateIntensity` on `AudioManager`.
+  That name belongs to `Audioscape` (`Audioscape.swift:50`), which `setVolume`
+  calls through. `ContentView` binds to `isPlaying` (lines 219, 223, 225),
+  `togglePlayback()` (line 220, as `try?`) and `volume`/`setVolume` (lines 231-232)
+  — so `volume` and `setVolume` are load-bearing UI contract, not incidental.
+- `strike(_:)` additionally satisfies `AudioStrikeTarget` (`Protocols.swift:10-12`,
+  conformance at line 17). Changing its signature breaks `MetricsParticleBridge`.
 
 ## Risks
 
