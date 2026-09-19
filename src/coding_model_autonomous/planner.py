@@ -182,6 +182,16 @@ PLANNER_SYSTEM_PROMPT = textwrap.dedent("""\
     7. If the spec targets macOS-only tooling (Xcode, Swift Package Manager
        on Apple platforms, AppKit, UIKit, CoreML training, etc.), set
        execution_target: client. Otherwise set it to server.
+    7a. FILE PATHS ARE COPIED, NEVER RETYPED. If the spec has a change-surface
+       table — a table whose first column holds backticked paths — then every
+       path in `phases[*].inputs` and `phases[*].outputs` is one of those
+       paths, reproduced CHARACTER FOR CHARACTER including its directory.
+       Copy it; do not retype it from memory and do not shorten it to a bare
+       filename. Invent a path only for a file the spec names nowhere.
+       This is not a style rule. Downstream checks compare your strings to
+       files on disk literally, so a single wrong character marks the work
+       incomplete, charges the attempt and sends it to a weaker model — for a
+       file that was written correctly.
     8. If you are producing YAML, every required field above must be
        present. If you cannot fill any required field from the spec or
        from prior clarifications, switch to CLARIFY format and ask.

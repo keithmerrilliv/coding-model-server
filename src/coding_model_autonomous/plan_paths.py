@@ -71,6 +71,95 @@ def is_run_artifact(path: str) -> bool:
     return (path or "").strip() in _RUN_ARTIFACTS
 
 
+# DEV-733. A path the repository cannot confirm is not always a new file: it is
+# also what a typo in a new file's NAME looks like, and no repo lookup can tell
+# the two apart. Run 43's planner wrote `AudoscapeStateTests.swift` for a spec
+# whose change-surface table said `AudioscapeStateTests.swift` — one missing
+# letter. The resolver correctly called it new, because a file that does not
+# exist yet resolves under no directory and the correction ladder had nothing
+# to try. The spec had the answer the whole time, in a table already parsed.
+#
+# The bar is deliberately tight, because the cost of a WRONG correction is
+# higher than the cost of a missed one: a missed typo is caught at the plan
+# gate, while a wrong correction silently retargets a file nobody asked for.
+# Two edits catches transcription slips (a dropped letter, a transposition) and
+# refuses `FooTests.swift` -> `FooBarTests.swift`, which is three.
+TYPO_MAX_DISTANCE = 2
+# Below this, two edits is most of the name: `a.py` and `b.py` are one edit
+# apart and have nothing to do with each other.
+TYPO_MIN_BASENAME = 8
+
+
+def _edit_distance(a: str, b: str, limit: int) -> int:
+    """Levenshtein distance between *a* and *b*, abandoned past *limit*.
+
+    Returns ``limit + 1`` rather than the true distance once it is exceeded —
+    callers only ever ask "is this within the bar?", and the early exit keeps
+    a long pair from being walked in full.
+    """
+    if abs(len(a) - len(b)) > limit:
+        return limit + 1
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1,
+                           prev[j - 1] + (0 if ca == cb else 1)))
+        if min(cur) > limit:
+            return limit + 1
+        prev = cur
+    return prev[-1]
+
+
+# A change-surface table's first column is backticked prose as often as it is a
+# path. Measuring this guard against the spec archive turned up
+# `grep -c 'if Task.isCancelled { break }' ElectricSheep/HallucinationEngine.swift`
+# sitting in one — its basename is a real filename, so without this it becomes a
+# correction target and rewrites a good path into a shell command. A repository
+# path in any spec we have ever run carries none of these.
+_NOT_A_PATH = re.compile(r"""[\s'"`|&;$()<>*?\\]""")
+
+
+def is_plausible_path(candidate: str) -> bool:
+    """False for a change-surface cell that is prose or a command, not a path."""
+    c = (candidate or "").strip()
+    return bool(c) and not _NOT_A_PATH.search(c)
+
+
+def declared_near_misses(path: str, declared: Iterable[str],
+                         exclude: Iterable[str] = ()) -> list[str]:
+    """Declared paths whose basename is a typo's distance from *path*'s.
+
+    *declared* is the spec's change surface — paths the operator wrote and the
+    pipeline already parses. *exclude* is the plan's own path set: a declared
+    path the plan ALREADY carries verbatim is not a correction target, because
+    then the plan names both spellings and collapsing them would silently drop
+    a file the plan asked for. That is a judgement this module does not make.
+
+    Basenames are compared, not whole paths, so this also catches the new file
+    written to the wrong directory — run 42's root-level path outside the
+    project's synchronized groups, where nothing is ever compiled.
+    """
+    base = posixpath.basename((path or "").strip())
+    if len(base) < TYPO_MIN_BASENAME:
+        return []
+    _, ext = posixpath.splitext(base)
+    skip = {p for p in exclude}
+    out: list[str] = []
+    for cand in declared:
+        cand = (cand or "").strip()
+        if not cand or cand == path or cand in skip or cand in out:
+            continue
+        if not is_plausible_path(cand):
+            continue
+        cand_base = posixpath.basename(cand)
+        if posixpath.splitext(cand_base)[1] != ext:
+            continue
+        if _edit_distance(base, cand_base, TYPO_MAX_DISTANCE) <= TYPO_MAX_DISTANCE:
+            out.append(cand)
+    return out
+
+
 def phase_paths(plan: dict) -> list[tuple[str, str, int, str]]:
     """Every (phase_name, key, index, path) in phases[*].inputs/outputs.
 
@@ -131,6 +220,12 @@ class PathResolution:
     status: str                      # resolved | corrected | placeholder | new
     corrected_to: str | None = None
     ambiguous: list[str] = field(default_factory=list)
+    # Which anchor decided it: "" for none, "directory" for a basename that
+    # reads under a known directory, "declared" for a near-miss of the spec's
+    # change surface (DEV-733). The two mean different things to a reader —
+    # one says the file exists elsewhere, the other says the NAME is wrong —
+    # so the journal should not have to guess which fired.
+    source: str = ""
 
     @property
     def is_problem(self) -> bool:
@@ -168,7 +263,8 @@ class PlanPathReport:
 
 
 def resolve_plan_paths(plan: dict, exists: Callable[[str], bool],
-                       extra_directories: Iterable[str] = ()) -> PlanPathReport:
+                       extra_directories: Iterable[str] = (),
+                       declared_paths: Iterable[str] = ()) -> PlanPathReport:
     """Classify every phase path. *exists* answers "reads at base_ref".
 
     *extra_directories* seeds the correction search with directories known to
@@ -185,6 +281,10 @@ def resolve_plan_paths(plan: dict, exists: Callable[[str], bool],
 
     resolved_paths = [p for _, _, _, p in entries if exists(p)]
     directories = known_directories(list(extra_directories) + resolved_paths)
+    # The plan's own paths, so a declared path the plan already carries is
+    # never proposed as a correction for a different one (DEV-733).
+    plan_own = {p for _, _, _, p in entries}
+    declared = list(declared_paths)
 
     seen: dict[str, PathResolution] = {}
     for _, _, _, path in entries:
@@ -198,11 +298,23 @@ def resolve_plan_paths(plan: dict, exists: Callable[[str], bool],
         else:
             hits = [c for c in correction_candidates(path, directories) if exists(c)]
             if len(hits) == 1:
-                res = PathResolution(path, "corrected", corrected_to=hits[0])
+                res = PathResolution(path, "corrected", corrected_to=hits[0],
+                                     source="directory")
             elif len(hits) > 1:
-                res = PathResolution(path, "new", ambiguous=hits)
+                res = PathResolution(path, "new", ambiguous=hits,
+                                     source="directory")
             else:
-                res = PathResolution(path, "new")
+                # DEV-733: the repository had nothing to say, which is also
+                # what a typo in a NEW file's name looks like. The spec did.
+                near = declared_near_misses(path, declared, exclude=plan_own)
+                if len(near) == 1:
+                    res = PathResolution(path, "corrected", corrected_to=near[0],
+                                         source="declared")
+                elif len(near) > 1:
+                    res = PathResolution(path, "new", ambiguous=near,
+                                         source="declared")
+                else:
+                    res = PathResolution(path, "new")
         seen[path] = res
         report.resolutions.append(res)
     return report
