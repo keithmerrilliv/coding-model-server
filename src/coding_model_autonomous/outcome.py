@@ -164,6 +164,17 @@ def with_import_root_hint(failure: Failure) -> Failure:
 # identity live beside it. Absolute worktree paths differ per dispatch
 # (…/worktrees/spec_x-7f8a8795/…) and line numbers move as the file is
 # rewritten; neither changes what the defect IS, so both are stripped.
+# DEV-755: swiftc colourises diagnostics, and the escape lands BETWEEN the
+# location and the keyword — `Game.swift:109:38: \x1b[1;31merror: \x1b[1;39mvalue
+# of...`. ATTRIBUTED_ERROR_RE needs a literal ": error: " and never matches, so a
+# genuinely failing build reports ZERO attributed diagnostics. Run 45's repair
+# gate then compared 0 -> 0 and read its own blindness as "did not improve".
+# Escapes also pollute the captured message, so the same defect seen twice can
+# compare unequal — which corrupts the failure IDENTITY this module exists to
+# produce (DEV-631). xcodebuild output is not coloured, which is why run 44 saw
+# a real 6 -> 36 and this stayed hidden until a swift_test run hit it.
+ANSI_SGR_RE = re.compile(r"\x1b\[[0-9;]*m")
+
 SIG_PATH_RE = re.compile(r"(/\S+?/)?([\w.+-]+\.\w+):\d+:\d+:")
 SIG_ERROR_RE = re.compile(r"error: (.+)")
 ATTRIBUTED_ERROR_RE = re.compile(r"^\s*\S.*?:\d+:\d+: error: ", re.MULTILINE)
@@ -190,6 +201,7 @@ def attributed_diagnostics(notes: str) -> list:
     """
     if not notes:
         return []
+    notes = ANSI_SGR_RE.sub("", notes)
     msgs = []
     for line in notes.splitlines():
         if not ATTRIBUTED_ERROR_RE.search(line):
