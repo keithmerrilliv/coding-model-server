@@ -92,6 +92,7 @@ from coding_model_autonomous.jira_client import (
 from coding_model_autonomous.jira_sync import JiraSync
 from coding_model_autonomous import (
     apply_edits, architect_tools, delivery, design_testability,
+    plan_paths,
     executor, swift_prechecks, test_runner,
 )
 from coding_model_autonomous.test_runner import run_tests
@@ -611,6 +612,121 @@ def _overlay_operator_test_strategy(yaml_text: str, spec_md: str,
     return _yaml.safe_dump(plan, sort_keys=False)
 
 
+def _resolve_plan_phase_paths(
+    db: "Database | None", spec: Spec, spec_md: str, yaml_text: str,
+) -> "tuple[str, list[str]]":
+    """Resolve the plan's phase paths against the repo — DEV-601.
+
+    Returns (yaml_text, problems). The text is rewritten when a path is a
+    PATH ERROR rather than a new file: it does not read at base_ref, but its
+    basename reads uniquely under a directory the plan already knows is real
+    (in practice `test_strategy.protected_paths`, which the operator writes
+    with full paths).
+
+    Why this is a rewrite and not a rejection. A bare filename is the planner's
+    mistake, not the operator's, and bouncing it costs a planner round of
+    7-11k tokens to fix something mechanically derivable. DEV-573 made the same
+    call for dropped operator keys — restore, do not re-ask.
+
+    Why it matters more than a tidy plan. On run 42 three bare paths produced
+    five distinct failures: two roles served zero editable files, whole-file
+    emission over three existing files (DEV-604 treats "cannot read" as "new"),
+    a planned-output check that could never pass, and feedback instructing the
+    implementer to create root-level files. The corrections are seeded into the
+    context fetch here, so the roles downstream get the real files too.
+
+    Placeholders (`<source files>`) are the one hard problem: never a path,
+    never correctable, and a plan carrying one has not finished being written.
+    """
+    import yaml as _yaml
+    try:
+        plan = _yaml.safe_load(yaml_text)
+    except _yaml.YAMLError:
+        return yaml_text, []          # malformed YAML is _bootstrap_tasks' job
+    if not isinstance(plan, dict):
+        return yaml_text, []
+
+    entries = plan_paths.phase_paths(plan)
+    if not entries:
+        return yaml_text, []
+
+    strategy = plan.get("test_strategy")
+    strategy = strategy if isinstance(strategy, dict) else {}
+    protected = [p for p in (strategy.get("protected_paths") or [])
+                 if isinstance(p, str)]
+    if not strategy.get("repo"):
+        # Nothing to resolve against. Placeholders are still worth catching:
+        # they are wrong whatever the repo is.
+        report = plan_paths.resolve_plan_paths(plan, lambda _p: False, protected)
+        return yaml_text, [
+            f"`phases` carries the literal {ph!r} where a file path belongs — "
+            f"a placeholder is never a path (DEV-601)"
+            for ph in report.placeholders]
+
+    # Probe the corrections alongside the plan's own paths, so one fetch answers
+    # both "does this read?" and "does the prefixed form read?".
+    directories = plan_paths.known_directories(protected)
+    probes: list[str] = []
+    for _, _, _, path in entries:
+        if plan_paths.is_placeholder(path) or plan_paths.is_run_artifact(path):
+            continue
+        for cand in plan_paths.correction_candidates(path, directories):
+            if cand not in probes:
+                probes.append(cand)
+    try:
+        ctx = _spec_context(db, spec, spec_md, role="plan paths", plan=plan,
+                            extra_candidates=probes)
+    except Exception as exc:
+        # DEV-620 semantics: a runner outage must not fail the plan. Say so —
+        # silence here is what let this bug live for five weeks.
+        logger.warning(
+            "spec %s: could not resolve plan paths against the repo (%s) — "
+            "the DEV-601 check is NOT armed for this plan", spec.id, exc)
+        return yaml_text, []
+
+    report = plan_paths.resolve_plan_paths(
+        plan, lambda pth: ctx.existing(pth) is not None, protected)
+
+    for res in report.ambiguous:
+        logger.warning(
+            "spec %s: plan path %r does not read at base_ref and its basename "
+            "resolves under more than one known directory (%s) — left as a new "
+            "file rather than guessed (DEV-601)",
+            spec.id, res.path, ", ".join(sorted(res.ambiguous)))
+    if report.new_paths:
+        logger.info(
+            "spec %s: plan declares %d path(s) that do not exist at base_ref "
+            "and will be CREATED: %s (DEV-601)",
+            spec.id, len(report.new_paths), ", ".join(report.new_paths))
+
+    problems = [
+        f"`phases` carries the literal {ph!r} where a file path belongs — a "
+        f"placeholder is never a path (DEV-601)"
+        for ph in report.placeholders]
+
+    corrections = report.corrections
+    if corrections:
+        plan = plan_paths.apply_corrections(plan, corrections)
+        yaml_text = _yaml.safe_dump(plan, sort_keys=False)
+        logger.warning(
+            "spec %s: planner emitted %d unresolvable phase path(s); rewritten "
+            "to the files they name (DEV-601): %s", spec.id, len(corrections),
+            ", ".join(f"{k} -> {v}" for k, v in sorted(corrections.items())))
+        if db is not None:
+            db.record_event(
+                EventKind.AGENT_RAN, spec_id=spec.id,
+                payload={"role": "plan_paths", "model_call": False,
+                         "corrected": corrections,
+                         "new_paths": report.new_paths,
+                         "placeholders": report.placeholders,
+                         "summary": report.summary()})
+    else:
+        logger.info("spec %s: plan paths verified against the repo at %s — %s "
+                    "(DEV-601)", spec.id, strategy.get("base_ref") or "HEAD",
+                    report.summary())
+    return yaml_text, problems
+
+
 def _validate_test_strategy(yaml_text: str, spec_md: str) -> list[str]:
     """Problems that make a plan's test_strategy unrunnable. Empty means fine.
 
@@ -1011,6 +1127,17 @@ def _accept_plan(db: Database, spec: Spec, spec_dir, result: PlannerYaml) -> Non
     problems = _validate_test_strategy(yaml_text, spec_md)
     if problems:
         _reject_plan_for_validation(db, spec, problems, yaml_text)
+        return
+
+    # DEV-601: the planner's phase paths are free text and nothing checked them
+    # against the repo. A bare filename where the repo holds `Dir/File.swift` is
+    # not cosmetic — run 42 turned three of them into five separate failures,
+    # ending with the pipeline telling the implementer to create root-level
+    # files. Correct what is mechanically derivable, bounce what is not a path.
+    yaml_text, path_problems = _resolve_plan_phase_paths(
+        db, spec, spec_md, yaml_text)
+    if path_problems:
+        _reject_plan_for_validation(db, spec, path_problems, yaml_text)
         return
 
     # Checked before the human gate for the same reason DEV-426 moved test_strategy
