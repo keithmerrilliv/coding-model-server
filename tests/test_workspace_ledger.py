@@ -7,11 +7,13 @@ import pytest
 
 from coding_model_autonomous import ArtifactKind
 from coding_model_autonomous.db import Database
+from coding_model_autonomous.test_runner import _SPEC_SKIP_PATTERNS
 from coding_model_autonomous.workspace import (
-    ACTION_RENAMED, ACTION_RESTORED, ACTION_WRITTEN, LEDGER_FILE,
+    ACTION_RENAMED, ACTION_RESTORED, ACTION_WRITTEN, CONTAINED_DIR, LEDGER_FILE,
     REFUSED_COLLISION, REFUSED_EMPTYING, REFUSED_PLACEHOLDER, REFUSED_SHRINK,
     ArtifactLedger,
     CollisionPolicy, attempt_files_from_ledger, read_entries, renamed_path,
+    shares_namespace_per_target,
 )
 
 CODE = "def a():\n    return 1\n\n\ndef b():\n    return 2\n"
@@ -102,14 +104,84 @@ class TestCollision:
         assert out.action == ACTION_WRITTEN
 
     def test_reviewer_rename_that_also_collides_is_refused(self, ledger):
+        # The reviewer's content must DIFFER from the implementer's, or this
+        # is DEV-738's identical discard rather than an occupied rename
+        # target — the case under test here is the occupied target.
         ledger.write("tests/test_x.py", TESTS, role="implementer")
         ledger.write("tests/test_reviewer_x.py", TESTS, role="implementer")
-        out = ledger.write("tests/test_x.py", TESTS, role="reviewer")
+        out = ledger.write("tests/test_x.py", TESTS + "# differs\n", role="reviewer")
         assert out.action == REFUSED_COLLISION and "rename target" in out.detail
 
-    def test_swift_rename(self):
+
+class TestCollisionContainment:
+    """DEV-738: containing a colliding write must not change what compiles."""
+
+    SWIFT = ("import XCTest\n\nfinal class AudioscapeStateTests: XCTestCase {\n"
+             "    func testA() { XCTAssertTrue(true) }\n}\n")
+
+    def test_identical_swift_duplicate_is_discarded_not_contained(self, ledger):
+        # Run 43's fixture: the reviewer re-emitted the implementer's test
+        # file byte for byte. Containing it put a second
+        # `final class AudioscapeStateTests` in the same target.
+        path = "ElectricSheepTests/AudioscapeStateTests.swift"
+        ledger.write(path, self.SWIFT, role="implementer")
+        out = ledger.write(path, self.SWIFT, role="reviewer",
+                           kind=ArtifactKind.TEST_REPORT)
+        assert out.action == REFUSED_COLLISION and not out.ok
+        assert "byte-identical" in out.detail
+        # The implementer's tested bytes are untouched and are the ONLY copy.
+        assert (ledger.spec_dir / path).read_text() == self.SWIFT
+        swift = sorted(p.relative_to(ledger.spec_dir).as_posix()
+                       for p in ledger.spec_dir.rglob("*.swift"))
+        assert swift == [path]
+
+    def test_identical_python_duplicate_is_discarded_too(self, ledger):
+        # Language-agnostic: identical bytes are identical bytes.
+        ledger.write("tests/test_x.py", TESTS, role="implementer")
+        out = ledger.write("tests/test_x.py", TESTS, role="reviewer")
+        assert out.action == REFUSED_COLLISION and "byte-identical" in out.detail
+        assert not (ledger.spec_dir / "tests/test_reviewer_x.py").exists()
+
+    def test_differing_swift_duplicate_is_kept_outside_the_target(self, ledger):
+        # The other direction: a reviewer that genuinely disagrees is still
+        # preserved (DEV-602), just not where the target compiles it.
+        path = "ElectricSheepTests/AudioscapeStateTests.swift"
+        ledger.write(path, self.SWIFT, role="implementer")
+        out = ledger.write(path, self.SWIFT + "// reviewer\n", role="reviewer",
+                           kind=ArtifactKind.TEST_REPORT)
+        assert out.action == ACTION_RENAMED and out.ok
+        assert out.path == f"{CONTAINED_DIR}/reviewer/{path}"
+        assert "// reviewer" in (ledger.spec_dir / out.path).read_text()
+        # Nothing new landed in the compiled directory.
+        in_target = sorted(p.name for p in
+                           (ledger.spec_dir / "ElectricSheepTests").iterdir())
+        assert in_target == ["AudioscapeStateTests.swift"]
+        assert (ledger.spec_dir / path).read_text() == self.SWIFT
+
+    def test_differing_python_duplicate_still_renames_in_place(self, ledger):
+        # No regression for the language the rename was designed for: a
+        # separate module name, still collected by pytest.
+        ledger.write("tests/test_x.py", TESTS, role="implementer")
+        out = ledger.write("tests/test_x.py", TESTS + "# reviewer\n", role="reviewer")
+        assert out.action == ACTION_RENAMED
+        assert out.path == "tests/test_reviewer_x.py"
+        assert not (ledger.spec_dir / CONTAINED_DIR).exists()
+
+    def test_contained_artifacts_are_sent_to_no_test_run(self):
+        # Acceptance item 4, enforced where every framework passes through:
+        # the payload builder skips the containment directory outright.
+        assert CONTAINED_DIR in _SPEC_SKIP_PATTERNS
+
+    def test_refusal_reason_reaches_the_description(self, ledger):
+        ledger.write("tests/test_x.py", TESTS, role="implementer")
+        out = ledger.write("tests/test_x.py", TESTS, role="reviewer")
+        assert "byte-identical" in out.describe()
+
+    def test_swift_containment_path(self):
         assert renamed_path("ElectricSheepTests/ElectricSheepTests.swift", "reviewer") == \
-            "ElectricSheepTests/reviewer_ElectricSheepTests.swift"
+            f"{CONTAINED_DIR}/reviewer/ElectricSheepTests/ElectricSheepTests.swift"
+        assert shares_namespace_per_target("a/B.Swift") is True
+        assert shares_namespace_per_target("a/b.py") is False
 
 
 class TestEmptying:
@@ -233,7 +305,8 @@ class TestRestoreAndReads:
 
     def test_outcomes_block_lists_renames_and_refusals(self, ledger):
         ledger.write("tests/test_x.py", TESTS, role="implementer")
-        ledger.write("tests/test_x.py", TESTS, role="reviewer")
+        # Must differ, or DEV-738 discards it and the block has no rename.
+        ledger.write("tests/test_x.py", TESTS + "# reviewer\n", role="reviewer")
         ledger.write("tests/test_x.py", "# nothing\n", role="implementer")
         block = ArtifactLedger.outcomes_block(ledger.outcomes, "Ledger")
         assert "test_reviewer_x.py" in block and "REFUSED" in block
