@@ -503,6 +503,38 @@ class SpecContext:
         return [p for p in dict.fromkeys(planned)
                 if self.status(p) == STATUS_UNKNOWN]
 
+    def unreadable_modifications(self) -> list[Omission]:
+        """Files the spec DECLARES it modifies that this context cannot show.
+
+        DEV-730. This is the gap a role needs told about, and it is the one
+        the journal reported only to itself: run 42 served the architect zero
+        editable files, and the prompt simply omitted the section, so the
+        model had no way to distinguish "there was nothing to show you" from
+        "there is nothing to modify". It designed blind, and the attempt was
+        thrown away.
+
+        Every omission is reported, including the ones the runner called
+        ABSENT. That looks wrong for a moment — absent means "create it", and
+        a creation is not a defect — but a declared MODIFICATION that is not
+        at base_ref is not a creation, it is a wrong path, and git answers
+        both with the same sentence (DEV-601, all five manifestations). A
+        filter on status here would have disarmed this on exactly the run
+        that motivated it.
+
+        Creations are excluded structurally instead, and for free: a path
+        reaches ``declared`` only by being marked as a modification in the
+        spec, so a new file is never in this list to begin with.
+        """
+        if not self.repo:
+            # Nothing to read from; every path is a creation by construction
+            # and no role can be told otherwise.
+            return []
+        served = set(self.editable) | set(self.protected)
+        by_path = {o.path: o for o in self.omitted}
+        return [by_path.get(p) or Omission(p, SECTION_EDITABLE,
+                                           "not returned by the fetch")
+                for p in dict.fromkeys(self.declared) if p not in served]
+
     def select(self, role: str, *, planned: Iterable[str] = ()) -> RoleContext:
         """The role's view, with the journal lines that say what it saw."""
         existing = self.editable_files
