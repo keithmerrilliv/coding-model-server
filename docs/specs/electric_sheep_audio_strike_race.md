@@ -245,6 +245,11 @@ A green build is NOT sufficient — the four tests below are the gate. All of th
 are deterministic: single-threaded, fixed `frameCount` of 512, and the default sample rate
 of 44,100 (construct `AudioscapeState()` directly and never call `setSampleRate`).
 
+**Every call below is written with its argument labels, and they are required.**
+`applyStrike(modeIdx:strength:brightness:)` is not callable positionally —
+`applyStrike(2, 0.3, 0.1)` is a compile error (`missing argument labels`). Copy the
+calls as written.
+
 - **Build succeeds for the macOS target.** If the change introduces a new compiler
   warning in `Audioscape.swift`, quote it in the report rather than leaving it to be
   discovered.
@@ -275,13 +280,14 @@ of 44,100 (construct `AudioscapeState()` directly and never call `setSampleRate`
   vacuously, because the envelopes start at 0.
 
 - **Accumulation semantics are preserved.** On a fresh instance, before any render:
-  - `applyStrike(2, 0.3, 0.1)` then `applyStrike(2, 0.3, 0.4)` →
+  - `applyStrike(modeIdx: 2, strength: 0.3, brightness: 0.1)` then
+    `applyStrike(modeIdx: 2, strength: 0.3, brightness: 0.4)` →
     `pendingStrikesForTesting().amplitude[2]` ≈ **0.6** and `.brightness[2]` ≈ **0.4**
     (sum for amplitude, max for brightness; accuracy 1e-6).
-  - `applyStrike(5, 0.7, 0.0)` twice → `.amplitude[5]` ≈ **1.0** (saturates).
+  - `applyStrike(modeIdx: 5, strength: 0.7, brightness: 0.0)` twice → `.amplitude[5]` ≈ **1.0** (saturates).
 
-- **The merge consumes pending and decays after synthesis.** `applyStrike(2, 0.3, 0.4)`,
-  then one `render()`. Assert `pendingStrikesForTesting().amplitude[2] == 0` (pending
+- **The merge consumes pending and decays after synthesis.** `applyStrike(modeIdx: 2, strength: 0.3,
+  brightness: 0.4)`, then one `render()`. Assert `pendingStrikesForTesting().amplitude[2] == 0` (pending
   was consumed and zeroed) and `envelopesForTesting().amplitude[2]` ≈ **0.291418**
   (= 0.3 × 0.971392, accuracy 1e-5) — which pins that the strike sounded at its full
   0.3 in that buffer and was decayed only afterwards.
