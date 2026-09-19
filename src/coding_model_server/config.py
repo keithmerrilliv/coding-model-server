@@ -711,10 +711,32 @@ Update these after each retrieval step. They help you stay organized and efficie
     # DEV-616): the 3.8 is UNFIT for the architect slot as served — the
     # budget stays so failures are at least visible, and this agent stays
     # eval-only. DEV-615 verdict (no repoint) stands.
+    # DEV-740: re-swept 2026-09-19 to the incumbent's rung. This served at
+    # 36/131072 — the configuration DEV-707 SUPERSEDED on _DENSE_27B — so
+    # every qwen38-vs-dense comparison measured a stale sweep alongside the
+    # model. Same architecture as the incumbent (qwen35, block_count 65,
+    # embedding 5120) and a smaller file (15.33 vs 15.93 GiB), so matching
+    # its 46/65536 was the obvious move; what the sweep added was the
+    # ceiling, which prediction got wrong.
+    #
+    # Measured at n_ctx=65536 (var/telemetry/sweep_qwen38_65k.sh):
+    #   ngl=46 -> 843 MiB free, 15.40 t/s shallow   <- chosen
+    #   ngl=48 -> 369 MiB free, 16.24 t/s           REJECTED: below DEV-616's
+    #             observed SIGABRT at 714 MiB free
+    #   ngl=50 -> LOAD FAILED, "failed to create MTP context"
+    #
+    # 843 MiB is 41 MiB under what the incumbent runs on in production, not
+    # a new risk. The 600 MiB the smaller file promised did NOT become
+    # headroom — predicted ~1,484, measured 843 — so do not re-derive this
+    # rung from file size when the next binary moves the footprint
+    # (DEV-598 moved it ~2.7 GB); re-run the sweep.
+    #
+    # --reasoning-budget 4096 STAYS (DEV-616): without it this model
+    # ruminates unboundedly and returns empty content.
     _DENSE_27B_38 = _create_model_config(
         'MODEL_PATH_27B_38',
         f'{_MODELS_ROOT}/unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q4_K_M.gguf',
-        36, 131072, 2048,
+        46, 65536, 2048,
         server_extra_args=['--jinja', '--reasoning-format', 'none', '--swa-full',
                            '--spec-type', 'draft-mtp', '--spec-draft-n-max', '2',
                            '--reasoning-budget', '4096'],
@@ -1087,7 +1109,7 @@ Update these after each retrieval step. They help you stay organized and efficie
         # architect/supervisor slots. Same prompt as dense_architect so the
         # DEV-615 pairwise eval isolates the model variable.
         'qwen38_architect': _create_agent_config(
-            'Architect — Qwen3.8-27B UD-Q4_K_M (dense + MTP, 128K Q4_0 ctx, ngl=36, DEV-614 eval; DEV-615 candidate)',
+            'Architect — Qwen3.8-27B UD-Q4_K_M (dense + MTP, 64K Q4_0 ctx, ngl=46, DEV-614 eval; DEV-615 candidate; rung re-swept DEV-740)',
             _ARCHITECT_SYSTEM_PROMPT,
             _DENSE_27B_38,
             executor=True
