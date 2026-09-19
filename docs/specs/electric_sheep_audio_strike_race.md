@@ -174,6 +174,71 @@ Every path in the plan's phases should be one of the repo-relative paths in the 
 surface above. A bare filename such as `Audioscape.swift` is not a harmless shorthand:
 it is the defect class of DEV-601.
 
+## Given code — the test's buffer helpers
+
+**Use these as written.** They are provided, not an exercise. Nothing in
+`electric-sheep` has ever *allocated* an `AudioBufferList` — the repository's only
+two mentions both consume the one `AVAudioSourceNode` hands them — so there is no
+precedent to copy and no reason for four different inventions of it.
+
+```swift
+import AVFoundation
+import XCTest
+@testable import ElectricSheep
+
+/// A stereo, zero-filled buffer list of `frameCount` Float frames per channel,
+/// shaped exactly as `render(frameCount:buffers:)` expects.
+private func makeStereoBuffer(frameCount: Int) -> UnsafeMutableAudioBufferListPointer {
+    let abl = AudioBufferList.allocate(maximumBuffers: 2)
+    let bytes = frameCount * MemoryLayout<Float>.size
+    for i in 0..<2 {
+        let mem = UnsafeMutableRawPointer.allocate(
+            byteCount: bytes, alignment: MemoryLayout<Float>.alignment)
+        mem.initializeMemory(as: Float.self, repeating: 0, count: frameCount)
+        abl[i] = AudioBuffer(mNumberChannels: 1,
+                             mDataByteSize: UInt32(bytes),
+                             mData: mem)
+    }
+    return abl
+}
+
+/// Root-mean-square across every channel. 0 when the buffer is silent.
+private func rms(_ abl: UnsafeMutableAudioBufferListPointer,
+                 frameCount: Int) -> Float {
+    var sum: Float = 0
+    var n = 0
+    for buf in abl {
+        guard let p = buf.mData?.assumingMemoryBound(to: Float.self) else { continue }
+        for i in 0..<frameCount { sum += p[i] * p[i]; n += 1 }
+    }
+    return n == 0 ? 0 : sqrtf(sum / Float(n))
+}
+
+/// Channel-major copy, for sample-for-sample comparison of two renders.
+private func samples(_ abl: UnsafeMutableAudioBufferListPointer,
+                     frameCount: Int) -> [[Float]] {
+    abl.map { buf in
+        guard let p = buf.mData?.assumingMemoryBound(to: Float.self) else { return [] }
+        return (0..<frameCount).map { p[$0] }
+    }
+}
+```
+
+Three rules about them:
+
+1. **Do not substitute an `AVAudioPCMBuffer`.** It is the obvious alternative and
+   it carries a lifetime trap: `UnsafeMutableAudioBufferListPointer` does not
+   retain the buffer, so a helper that builds a `PCMBuffer` locally and returns
+   only the pointer hands back a dangling one the moment ARC releases it. The raw
+   allocation above has no such coupling.
+2. **Allocate a fresh buffer per captured render.** Two renders compared against
+   each other must not share storage, or the comparison is of one buffer with
+   itself.
+3. **If any of this does not compile, repair it MINIMALLY and say so in the
+   report.** These helpers were written against the compiler's own diagnostics
+   from a previous attempt but were not compiled by the author. Fix the line, keep
+   the shape, and do not redesign the test around a different buffer strategy.
+
 ## Acceptance criteria
 
 A green build is NOT sufficient — the four tests below are the gate. All of them
@@ -191,9 +256,10 @@ of 44,100 (construct `AudioscapeState()` directly and never call `setSampleRate`
   - *Interleaved*: `render(frameCount:buffers:afterLockSection:)` where the closure
     calls the identical `applyStrike`; then `render()` capturing the output.
 
-  Assert the two captured buffers are **equal sample-for-sample** (accuracy 1e-6) and
-  that their RMS is **> 0**. Both halves are required: equality alone passes on two
-  silent buffers. This is exact rather than approximate because the first render of
+  Each capture uses its own `makeStereoBuffer(frameCount: 512)`. Compare with
+  `samples(...)` and measure with `rms(...)` from the Given code above. Assert the two
+  captured buffers are **equal sample-for-sample** (accuracy 1e-6) and that their RMS
+  is **> 0**. Both halves are required: equality alone passes on two silent buffers. This is exact rather than approximate because the first render of
   each sequence is silent for mode 3 (`amp < 0.0001` → `continue`), so it advances no
   phase and both second renders start from the same state. On `main` the interleaved
   strike is destroyed by the line 279 write-back and its buffer is silent, so the test
