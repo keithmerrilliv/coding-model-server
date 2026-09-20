@@ -296,6 +296,163 @@ def mutating_methods_in_classes(
     return violations
 
 
+# ── DEV-764: unqualified static members inside instance context ──────────────
+#
+# Run 47 (spec_ffe89fdd): `frameIndex = (frameIndex + 1) % maxFramesInFlight`
+# inside an instance method, with `static let maxFramesInFlight` on the same
+# class. swiftc: `static member 'maxFramesInFlight' cannot be used on instance
+# of type 'HalluRenderer'`. Retry 1, synthesis AND the repair round all made
+# it, and run 46's retry 1 had made it on the identical line — three Mac
+# round trips for a rule decidable from the text.
+#
+# Conservative by design (a false positive rejects code swiftc would accept):
+#   * only `static let` / `static var` declared DIRECTLY in a type body count;
+#   * only bare uses inside a `func`/`init` that is not itself `static`/`class`
+#     in that same type body;
+#   * a use is skipped when the name is preceded by `.`, `\.` or `#`, followed
+#     by `:` (an argument label), or is any kind of declaration or binding;
+#   * the whole function is skipped for that name when any token in its
+#     signature or body could be a binding of the name (`let`/`var`/`for`/
+#     `case`/`catch` + name, a `name in` closure parameter, or the name
+#     appearing anywhere between `func` and its `{`).
+_STATIC_MEMBER_DECL = {"let", "var"}
+_BINDING_KEYWORDS = {"let", "var", "for", "case", "catch", "func", "class",
+                     "struct", "enum", "actor", "protocol", "typealias",
+                     "associatedtype", "import"}
+_FUNC_KEYWORDS = {"func", "init"}
+
+
+def unqualified_static_member_references(
+    files: list[tuple[str, str]],
+) -> list[Violation]:
+    """Bare `NAME` inside an instance method where `NAME` is a `static`
+    stored property of the enclosing type — one Violation per use."""
+    violations: list[Violation] = []
+    for path, content in files:
+        if not path.endswith(".swift"):
+            continue
+        if _CONDITIONAL_COMPILATION_RE.search(content):
+            continue  # same exemption as the other detectors
+        blanked = blank_comments_and_strings(content)
+        toks = list(_TOKEN_RE.finditer(blanked))
+        words = [t.group(0) for t in toks]
+
+        # Pass 1: scope tree. Each `{` gets a scope id; record its kind and
+        # parent, and collect `static let/var NAME` directly inside type
+        # scopes.
+        kind_of: dict[int, str] = {}     # scope id (token index of '{') -> kind
+        parent_of: dict[int, int | None] = {}
+        statics: dict[int, set] = {}     # type scope id -> static names
+        stack: list[int] = []
+        pending: str | None = None
+        for i, w in enumerate(words):
+            if w == "{":
+                kind_of[i] = pending or "other"
+                parent_of[i] = stack[-1] if stack else None
+                stack.append(i)
+                pending = None
+            elif w == "}":
+                if stack:
+                    stack.pop()
+                pending = None
+            elif w in _TYPE_SCOPE_KEYWORDS:
+                pending = "type"
+            elif w in _FUNC_KEYWORDS:
+                # `static func` / `class func` -> a static context.
+                prev = words[i - 1] if i > 0 else ""
+                pending = "static_func" if prev in ("static", "class") else "func"
+            elif (w == "static" and i + 2 < len(words)
+                  and words[i + 1] in _STATIC_MEMBER_DECL
+                  and stack and kind_of.get(stack[-1]) == "type"):
+                name = words[i + 2]
+                if name not in ("{", "}"):
+                    statics.setdefault(stack[-1], set()).add(name)
+        if not statics:
+            continue
+
+        # Pass 2: walk again, tracking the enclosing type scope and the
+        # enclosing func scope, and flag bare uses.
+        stack = []
+        pending = None
+        for i, w in enumerate(words):
+            if w == "{":
+                stack.append(i)
+                pending = None
+                continue
+            if w == "}":
+                if stack:
+                    stack.pop()
+                pending = None
+                continue
+            # Find the innermost enclosing func scope and its type parent.
+            func_scope = next((sid for sid in reversed(stack)
+                               if kind_of.get(sid) in ("func", "static_func")), None)
+            if func_scope is None or kind_of[func_scope] != "func":
+                continue
+            type_scope = parent_of.get(func_scope)
+            # A func directly inside a type body; nested closures/blocks are
+            # deeper scopes whose ancestor chain still reaches this func.
+            while type_scope is not None and kind_of.get(type_scope) != "type":
+                type_scope = parent_of.get(type_scope)
+            names = statics.get(type_scope, set()) if type_scope is not None else set()
+            if w not in names:
+                continue
+            tok = toks[i]
+            before = blanked[max(0, tok.start() - 2):tok.start()]
+            after = blanked[tok.end():tok.end() + 1]
+            if before.endswith(".") or before.endswith("#") or before.endswith("\\"):
+                continue
+            if after == ":":
+                continue  # argument label or dictionary key
+            if i > 0 and words[i - 1] in _BINDING_KEYWORDS:
+                continue  # a declaration of the name, not a use
+            if i + 1 < len(words) and words[i + 1] == "in":
+                continue  # a closure parameter `{ name in ... }`
+            # Shadowing: scan the enclosing function's signature + body.
+            fs = func_scope
+            sig_start = None
+            for k in range(fs - 1, -1, -1):
+                if words[k] in _FUNC_KEYWORDS:
+                    sig_start = k
+                    break
+                if words[k] in ("{", "}"):
+                    break
+            depth = 0
+            body_end = len(words)
+            for k in range(fs, len(words)):
+                if words[k] == "{":
+                    depth += 1
+                elif words[k] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        body_end = k
+                        break
+            shadowed = False
+            lo = sig_start if sig_start is not None else fs
+            for k in range(lo, body_end):
+                if k == i:
+                    continue
+                if words[k] != w:
+                    continue
+                if k < fs:                      # anywhere in the signature
+                    shadowed = True
+                    break
+                if k > 0 and words[k - 1] in _BINDING_KEYWORDS:
+                    shadowed = True
+                    break
+                if k + 1 < len(words) and words[k + 1] == "in":
+                    shadowed = True
+                    break
+            if shadowed:
+                continue
+            violations.append(Violation(
+                kind="unqualified_static_member",
+                message=(f"static member '{w}' cannot be used on instance "
+                         f"(write Self.{w})"),
+                path=path, line=_line_of(blanked, tok.start()), notes=()))
+    return violations
+
+
 @dataclass
 class SwiftPrecheckResult:
     """Outcome of the local Swift pre-checks over a generated file set."""
@@ -346,4 +503,5 @@ def run_swift_prechecks(
     violations: list[Violation] = []
     violations += duplicate_type_declarations(generated_files, context_files)
     violations += mutating_methods_in_classes(generated_files)
+    violations += unqualified_static_member_references(generated_files)
     return SwiftPrecheckResult(violations=violations)

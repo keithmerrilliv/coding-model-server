@@ -93,7 +93,7 @@ from coding_model_autonomous.jira_sync import JiraSync
 from coding_model_autonomous import (
     apply_edits, architect_tools, delivery, design_testability,
     gate_output, plan_paths,
-    executor, swift_prechecks, test_runner,
+    executor, swift_prechecks, swift_rules, test_runner,
 )
 from coding_model_autonomous.test_runner import run_tests
 from coding_model_autonomous.retry_policy import (
@@ -6843,6 +6843,12 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
     # since the warning branch is only reachable when it is falsy. The two
     # early returns above have already discarded the unexplained and
     # far-from-passing cases. Both existing prompts stay byte-identical.
+    # DEV-767: the located diagnostics, mapped onto the synthesized files.
+    # Only a BUILD failure cites lines; a near-miss test failure does not, and
+    # the filter below is a no-op without citations.
+    cited = (swift_rules.located_diagnostics(
+                 test_output, [p for p, _ in result.files])
+             if rate is None and build_failed else [])
     repair_messages = executor.build_synthesis_repair_message(
         spec_md, design_md, result.files,
         _extract_actionable_test_output(test_output, framework),
@@ -6851,6 +6857,7 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
                             if rate is None and not build_failed
                             and warning_blocking else None),
         reference_files=protected_files,
+        cited_diagnostics=cited,
     )
     repair_meta: dict = {}
     try:
@@ -6874,6 +6881,67 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
         logger.warning("spec %s: synthesis repair unparseable (%s) — keeping "
                        "the original failure", spec.id, repair.reason)
         return False, test_output
+
+    # DEV-767: cite-or-refuse. Run 48's repair rewrote the renderer while all
+    # 14 diagnostics sat in the test file; run 47's left the one cited line
+    # alone and changed four others. Blocks for uncited files are dropped,
+    # and a repair that changes no cited line is not worth the Mac round trip
+    # — the verdict would be "not improved" by construction.
+    cited_before: dict = {}
+    for rel_path, _ in repair.files:
+        try:
+            target = executor.artifact_path(spec_dir, rel_path)
+        except ValueError:
+            continue
+        cited_before[rel_path] = (
+            target.read_text() if target.is_file() else None)
+    cite = swift_rules.filter_repair_to_cited(repair.files, cited_before, cited)
+    if cite.dropped:
+        logger.warning("spec %s: synthesis repair emitted %d file(s) no "
+                       "diagnostic cites — dropped: %s", spec.id,
+                       len(cite.dropped), ", ".join(cite.dropped))
+    if cite.refuse():
+        logger.warning("spec %s: synthesis repair changed no cited line "
+                       "(cited: %s; untouched: %s) — not built, keeping the "
+                       "original failure", spec.id,
+                       ", ".join(sorted({d.located() for d in cited}))[:400],
+                       ", ".join(cite.untouched))
+        db.record_event(EventKind.AGENT_RAN, spec_id=spec.id,
+                        task_id=impl_task.id,
+                        payload={"role": "synthesis_repair",
+                                 **executor.agent_event_fields(repair_meta),
+                                 "trigger": "build_failure",
+                                 "files_offered": len(result.files),
+                                 "files_changed": 0,
+                                 "refused": "no_cited_line_touched",
+                                 "cited": [d.located() for d in cited][:40],
+                                 "dropped_paths": cite.dropped,
+                                 "untouched_paths": cite.untouched,
+                                 "emitted_paths": [p for p, _ in repair.files]})
+        # Keep the refused proposal inspectable (DEV-755's retention), then
+        # leave the synthesis state exactly as it was.
+        try:
+            snap = spec_dir / "retry_history" / "synthesis_repair"
+            snap.mkdir(parents=True, exist_ok=True)
+            for rel_path, content in repair.files:
+                if rel_path not in cited_before:
+                    continue  # failed the traversal check above
+                dest = snap / "refused" / rel_path
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_text(content)
+            (snap / "repair_verdict.json").write_text(json.dumps({
+                "repair_passed": False, "improved": False, "poisoned": [],
+                "rolled_back": True, "refused": "no_cited_line_touched",
+                "cited": [d.located() for d in cited][:40],
+                "dropped_paths": cite.dropped,
+                "untouched_paths": cite.untouched,
+                "pre_repair_diagnostics": len(_attributed_diagnostics(test_output)),
+                "post_repair_diagnostics": None}, indent=2))
+        except OSError as exc:
+            logger.warning("spec %s: could not snapshot the refused repair (%s)",
+                           spec.id, exc)
+        return False, test_output
+    repair.files = cite.kept
 
     # DEV-541: the repair is a proposal, not a commit. Snapshot every path it
     # is about to touch, so a repair that comes back worse can be undone. This

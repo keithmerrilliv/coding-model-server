@@ -320,3 +320,96 @@ def test_clean_swift_still_dispatches_to_the_mac(db, impl_spec):
                if g.status is GateStatus.PENDING]
     assert len(pending) == 1 and pending[0].gate_type is GateType.CODE_REVIEW
     assert db.get_task(task.id).status is TaskStatus.BLOCKED_ON_REVIEW
+
+
+# ── DEV-764: unqualified static members in instance context ──────────────────
+
+from coding_model_autonomous.swift_prechecks import unqualified_static_member_references
+
+
+def _static(files):
+    return unqualified_static_member_references(files)
+
+
+def test_run47_line_fires_with_file_and_line():
+    src = """\
+class HalluRenderer {
+    static let maxFramesInFlight = 3
+    private(set) var frameIndex: Int = 0
+
+    func beginFrame() {
+        frameIndex = (frameIndex + 1) % maxFramesInFlight
+    }
+}
+"""
+    v = _static([("HalluRenderer.swift", src)])
+    assert [(x.path, x.line) for x in v] == [("HalluRenderer.swift", 6)]
+    assert "Self.maxFramesInFlight" in v[0].message
+
+
+def test_qualified_uses_do_not_fire():
+    src = """\
+class R {
+    static let n = 3
+    func f() -> Int { return Self.n + R.n }
+}
+"""
+    assert _static([("R.swift", src)]) == []
+
+
+def test_static_and_class_funcs_do_not_fire():
+    src = """\
+enum Palette {
+    static let head = 1
+    static func color() -> Int { return head }
+    class func other() -> Int { head }
+}
+"""
+    assert _static([("P.swift", src)]) == []
+
+
+def test_parameter_local_and_closure_bindings_shadow():
+    src = """\
+struct S {
+    static let count = 3
+    func a(count: Int) -> Int { count }
+    func b() -> Int { let count = 2; return count }
+    func c() -> Int { [1].map { count in count }.first ?? 0 }
+    func d() { for count in 0..<3 { _ = count } }
+    func e(x: Int) { g(count: x) }
+}
+"""
+    assert _static([("S.swift", src)]) == []
+
+
+def test_init_and_nested_closure_inside_instance_method_fire():
+    src = """\
+struct S {
+    static let limit = 3
+    var v: Int
+    init() { v = limit }
+    func f() -> [Int] { [1].map { $0 % limit } }
+}
+"""
+    v = _static([("S.swift", src)])
+    assert [x.line for x in v] == [4, 5]
+
+
+def test_only_direct_static_stored_properties_count():
+    src = """\
+struct S {
+    let limit = 3
+    func f() -> Int { limit }
+}
+struct T {
+    struct Inner { static let z = 1 }
+    func g() -> Int { z }
+}
+"""
+    assert _static([("S.swift", src)]) == []
+
+
+def test_conditional_compilation_and_non_swift_are_exempt():
+    src = "#if os(macOS)\nstruct S { static let n = 1; func f() -> Int { n } }\n#endif\n"
+    assert _static([("S.swift", src)]) == []
+    assert _static([("S.py", "static let n = 1")]) == []
