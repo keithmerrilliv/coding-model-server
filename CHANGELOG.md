@@ -31,6 +31,68 @@ The old curve falls 42% across that range. The new one is flat. Every architect 
 
 [DEV-707](https://keith-merrill4.atlassian.net/browse/DEV-707)'s premise — "the context window is the only thing we can trade for GPU layers on a 16 GB card" — was true of `--n-gpu-layers` and is not true under `--n-cpu-ffn`. [DEV-708](https://keith-merrill4.atlassian.net/browse/DEV-708)'s adaptive-window design rests on the same premise.
 
+### The proving runs — 42 to 49 (2026-09-18 to 09-20)
+
+Eight runs, all against Swift targets on the Mac runner. Two delivered autonomously (42, 49), three failed and were finished by hand (43, 47, 48), three failed outright (44, 45, 46). Every failure was in the implementer or synthesis-repair loop; none was in serving, which is what this release changed. Run 49 is the v0.3.0 proving run: the first autonomous delivery on llama-server v0.4.1, merged to Centipede main `5185167`. The run records carry the evidence:
+
+- [DEV-728](https://keith-merrill4.atlassian.net/browse/DEV-728) — Run 42, Electric Sheep bridge dedup (DEV-592/593): delivered, merged by hand; the run that raised DEV-601 to High
+- [DEV-732](https://keith-merrill4.atlassian.net/browse/DEV-732) — Run 43, Electric Sheep audio strike race (DEV-594/200/201): failed at synthesis on a test helper the spec left to the model; retry 2 corrected by hand and merged
+- [DEV-750](https://keith-merrill4.atlassian.net/browse/DEV-750) — Run 44, Electric Sheep audio lifecycle: the first run on v0.4.1; Swift 6 actor isolation beat five implementers and synthesis (DEV-753); serving clean
+- [DEV-754](https://keith-merrill4.atlassian.net/browse/DEV-754) — Run 45, Centipede slice 9 as a controlled old/new-binary comparison: failed; found the ANSI blind spot in the repair gate (DEV-755)
+- [DEV-758](https://keith-merrill4.atlassian.net/browse/DEV-758) — Run 46, Electric Sheep triple buffering: failed on an operator approval condition that could not change the plan's file set (DEV-546)
+- [DEV-761](https://keith-merrill4.atlassian.net/browse/DEV-761) — Run 47, the same spec re-issued: failed on an ambiguous SEARCH and an unqualified static (DEV-763, DEV-764); retry 1 hand-fixed and merged as ElectricSheep `6506baf`
+- [DEV-766](https://keith-merrill4.atlassian.net/browse/DEV-766) — Run 48, Centipede renderer slice 1 (DEV-765): failed at synthesis; the repair edited an uncited file (DEV-767); hand-fixed to green, not merged
+- [DEV-769](https://keith-merrill4.atlassian.net/browse/DEV-769) — Run 49, the identical spec on the DEV-764/767 pipeline: **delivered**, five new tests, DEV-744 closed on it
+
+### Pipeline fixes shipped since v0.2.0
+
+Everything below is on main and in this tag. Items marked *(In Review)* are merged and awaiting the live run that proves them; the rest are Done on run evidence.
+
+- [DEV-601](https://keith-merrill4.atlassian.net/browse/DEV-601) — `plan_paths.py` resolves every phase path at plan validation: resolved, corrected (rewritten, not rejected), placeholder (rejected) or new (surfaced), with corrections probed on the same plan-time fetch *(In Review)*
+- [DEV-733](https://keith-merrill4.atlassian.net/browse/DEV-733) — A plan's new-file path within two edits of a change-surface basename is corrected to it, and the planner is told to copy paths, never retype them *(In Review)*
+- [DEV-698](https://keith-merrill4.atlassian.net/browse/DEV-698) — Context assembly names the symbols an editable file calls that the served set cannot show, to the architect and the implementer, and never suppresses a long list *(In Review)*
+- [DEV-730](https://keith-merrill4.atlassian.net/browse/DEV-730) — The architect is told which declared modifications it was not given and that `READ_FILE` exists, in the one case where it must use it *(In Review)*
+- [DEV-714](https://keith-merrill4.atlassian.net/browse/DEV-714) — The production architect has the tool loop the eval harness had; it really emits `<<<READ_FILE>>>` (Done, run 42)
+- [DEV-700](https://keith-merrill4.atlassian.net/browse/DEV-700) — The code-review gate says how many tests the attempt actually added, from `count_test_declarations` *(In Review; the Swift counter's camelCase-only match is DEV-751)*
+- [DEV-731](https://keith-merrill4.atlassian.net/browse/DEV-731) — The release gate shows the test verdict and roster first and the log tail, not the build preamble *(In Review)*
+- [DEV-710](https://keith-merrill4.atlassian.net/browse/DEV-710) — A criterion seam that is syntactically valid and asserts nothing is not a seam *(In Review)*
+- [DEV-715](https://keith-merrill4.atlassian.net/browse/DEV-715) — The suite-level hatch DEV-710 added is reachable from the architect prompt, and suite-level criteria are excluded from the seam count *(In Review)*
+- [DEV-711](https://keith-merrill4.atlassian.net/browse/DEV-711) — The reviewer no longer asserts one Swift test layout, and an evidence trail that does not resolve is not evidence *(In Review)*
+- [DEV-712](https://keith-merrill4.atlassian.net/browse/DEV-712) — The spec's test-strategy section parses in every dialect the archive contains; it had returned empty on 23% of real specs (Done, run 42)
+- [DEV-709](https://keith-merrill4.atlassian.net/browse/DEV-709) — The planner substituting `test_strategy.framework` is caught by DEV-712's overlay *(In Review)*
+- [DEV-713](https://keith-merrill4.atlassian.net/browse/DEV-713) — A known-flaky test can be quarantined by a skip filter instead of charged to the model (Done, run 42)
+- [DEV-722](https://keith-merrill4.atlassian.net/browse/DEV-722) — A design that adds stored mutable state to a Swift value type must declare the contract (Done, run 42)
+- [DEV-738](https://keith-merrill4.atlassian.net/browse/DEV-738) — A byte-identical reviewer duplicate is contained without writing into a compiled source directory *(In Review)*
+- [DEV-705](https://keith-merrill4.atlassian.net/browse/DEV-705) — Leaked tart VMs: a concurrency guard, a hard teardown failure, evidence kept when a VM dispatch fails without a verdict, VM failures classified by boundary, the 1200 s xcodebuild budget on both hosts, and a one-command Mac runner update *(In Review)*
+- [DEV-755](https://keith-merrill4.atlassian.net/browse/DEV-755) — ANSI escapes are stripped before diagnostics, an unmeasurable build is not "unimproved", and synthesis and repair outputs are retained under `retry_history/` *(In Review; fixes 1 and 3 proven on runs 46 and 48)*
+- [DEV-764](https://keith-merrill4.atlassian.net/browse/DEV-764) — Standing Swift rules in every implementer, synthesis and repair prompt on a Swift file set, and a static-member precheck that fires on run 47's line *(In Review)*
+- [DEV-767](https://keith-merrill4.atlassian.net/browse/DEV-767) — The synthesis repair round must edit what the compiler cited: uncited files are dropped, and a repair that touches no cited line is refused without a Mac trip *(In Review)*
+- [DEV-770](https://keith-merrill4.atlassian.net/browse/DEV-770) — A SEARCH/REPLACE block inside a `<<<FILE: path>>>` block edits that file instead of costing the attempt *(In Review)*
+- [DEV-717](https://keith-merrill4.atlassian.net/browse/DEV-717) — The `adversarial_test_writer` stage is retired: 15 lifetime invocations, one test *(In Review)*
+- [DEV-440](https://keith-merrill4.atlassian.net/browse/DEV-440) — The automated design-review stage is off by default *(In Review)*
+- [DEV-734](https://keith-merrill4.atlassian.net/browse/DEV-734) — The planner has the telemetry every other role has, reads `finish_reason`, and appears in the role table *(In Review)*
+- [DEV-719](https://keith-merrill4.atlassian.net/browse/DEV-719) — `tasks.agent` is documented as destructive and guarded *(In Review)*
+- [DEV-723](https://keith-merrill4.atlassian.net/browse/DEV-723) — `eval_agents.py` has a real token budget and a retry, and records `finish_reason` *(In Review)*
+- [DEV-657](https://keith-merrill4.atlassian.net/browse/DEV-657) — Part 1: retrieval is gated on the spec's language, not only the role; the ticket's part 3 (proving it earns its keep) is v0.4.0
+- [DEV-692](https://keith-merrill4.atlassian.net/browse/DEV-692) — Muse-Glimmer-30B is registered for the architect and implementer slots and joins the implementer rotation on retries only; the architect slot is unusable because of DEV-747 (partial; the rest is v0.4.0)
+- [DEV-727](https://keith-merrill4.atlassian.net/browse/DEV-727) — The Glimmer 502 is a chat-template parse failure, not VRAM; the rung is ngl=40 / 64K (partial)
+- [DEV-721](https://keith-merrill4.atlassian.net/browse/DEV-721) — A warm SwiftPM cache pushed into the guest, prototype (partial)
+- [DEV-773](https://keith-merrill4.atlassian.net/browse/DEV-773) — `scripts/merge_gate.sh` runs ruff, mypy and pytest on the merged tree and merges only on all three; the hand-typed chain had let a lint error sit on main for 12 commits
+
+### Serving and environment, beyond the headline
+
+- [DEV-740](https://keith-merrill4.atlassian.net/browse/DEV-740) — `qwen38_architect` re-swept onto the incumbent's rung, so a comparison measures the model and not a stale sweep *(In Review)*
+- [DEV-725](https://keith-merrill4.atlassian.net/browse/DEV-725) — The resource monitor writes "unmeasured" rather than a zero when RAPL is unreadable *(In Review)*
+- [DEV-726](https://keith-merrill4.atlassian.net/browse/DEV-726) — Dashboard Metrics shows CPU utilization and CPU/GPU power, with unmeasured rendered as unmeasured *(In Review)*
+- [DEV-729](https://keith-merrill4.atlassian.net/browse/DEV-729) — llama-server v0.4.1 evaluated against the pinned build for Glimmer's harmony tool calls: it does not fix them (DEV-747) *(In Review)*
+- [DEV-702](https://keith-merrill4.atlassian.net/browse/DEV-702) — The Qwen3.8 vs dense_architect re-challenge under the tool loop: Qwen3.8 wins 5–1 with tools, having lost 5–1 without; production kept dense_architect because it now has the tool loop too (DEV-714) *(In Review)*
+
+### Specs and target repositories
+
+- [DEV-590](https://keith-merrill4.atlassian.net/browse/DEV-590) — The Electric Sheep triple-buffering spec is narrowed to the MTKView path (the immersive path is DEV-757); delivered by hand from run 47
+- [DEV-595](https://keith-merrill4.atlassian.net/browse/DEV-595) — The audio-lifecycle spec is corrected against `AudioManager` and given a change surface
+- [DEV-765](https://keith-merrill4.atlassian.net/browse/DEV-765) — Centipede renderer slice 1, split from DEV-102: an offscreen Metal 3 renderer with pixel-asserted tests; delivered by run 49
+
 ## v0.2.0 — 2026-09-16
 
 The Pipeline Kernel Refactor ([DEV-628](https://keith-merrill4.atlassian.net/browse/DEV-628)): the decisions that kept killing runs moved out of the orchestrator daemon into four typed kernel modules — `workspace.py`, `outcome.py`, `context.py`, `retry_policy.py` (~3,300 lines) — plus fixed event payload schemas, behind a fault-injecting seam tier. The daemon itself did not shrink (5,804 lines at v0.1.0, 7,185 now); what moved is the deciding. Seven phases, one ticket each; every line below links the ticket that carries the evidence and the live proof. Every ticket in the seven phase sections is Done. Where a fix could not be proven by a live run under conditions we can manufacture, green dedicated tests stand as the proof. The "After the proving runs" section is different: it lists what merged from the proving runs, and where a ticket shipped only in part it says which half is still open. Run 31 (Centipede logic core slice 7, `spec_c1e1c9ac`, 2026-09-13) was the proving run for phases 4–6: it delivered on the Mac runner with 52 tests green after one build-failure retry, and the tickets below naming a run-time behaviour were moved to Done on its events.
