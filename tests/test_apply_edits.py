@@ -315,3 +315,71 @@ class TestPlaceholderEditBlocks:
         assert "EMIT WHOLE" in joined
         assert "PLACEHOLDER" not in joined
         assert [f.reason for f in out.failures] == ["no_base"]
+
+
+# ── DEV-770: a SEARCH/REPLACE block inside a <<<FILE: path>>> block ──────────
+#
+# Runs 48 and 49, retry 0, deep_implementer both times: the one existing-file
+# edit was wrapped in the whole-file marker instead of a `### path` header, and
+# the applier refused it as "no ### path header". The response is unambiguous.
+
+PACKAGE_BEFORE = """\
+// swift-tools-version:6.0
+import PackageDescription
+
+let package = Package(
+    name: "Centipede",
+    targets: [
+        .target(name: "CentipedeCore"),
+        .testTarget(name: "CentipedeCoreTests", dependencies: ["CentipedeCore"]),
+    ]
+)
+"""
+
+RUN49_RETRY0 = """\
+<<<FILE: Package.swift>>>
+<<<<<<< SEARCH
+        .testTarget(name: "CentipedeCoreTests", dependencies: ["CentipedeCore"]),
+=======
+        .testTarget(name: "CentipedeCoreTests", dependencies: ["CentipedeCore"]),
+        .target(name: "CentipedeRender"),
+        .testTarget(name: "CentipedeRenderTests", dependencies: ["CentipedeRender"]),
+>>>>>>> REPLACE
+<<<END_FILE>>>
+<<<FILE: Sources/CentipedeRender/FrameSnapshot.swift>>>
+public struct GridPosition: Hashable, Sendable {}
+<<<END_FILE>>>
+"""
+
+
+def test_file_marker_serves_as_the_header_for_an_edit_set():
+    from coding_model_autonomous.apply_edits import parse_edit_blocks
+    parsed = parse_edit_blocks(RUN49_RETRY0)
+    assert parsed.malformed == []
+    assert [fe.path for fe in parsed.files] == ["Package.swift"]
+    assert len(parsed.files[0].blocks) == 1
+
+
+def test_run49_retry0_response_resolves_to_the_edited_package_and_the_new_file():
+    from coding_model_autonomous.apply_edits import resolve_edits
+    # What the whole-file parser hands over: BOTH blocks, the first one with
+    # the markers as its "content".
+    whole = [("Package.swift", RUN49_RETRY0.split("<<<END_FILE>>>")[0]
+              .split(">>>\n", 1)[1]),
+             ("Sources/CentipedeRender/FrameSnapshot.swift",
+              "public struct GridPosition: Hashable, Sendable {}")]
+    res = resolve_edits(whole, RUN49_RETRY0, {"Package.swift": PACKAGE_BEFORE})
+    assert res.errors == []
+    files = dict(res.files)
+    assert '.target(name: "CentipedeRender"),' in files["Package.swift"]
+    assert "<<<<<<<" not in files["Package.swift"]
+    assert files["Sources/CentipedeRender/FrameSnapshot.swift"].startswith("public struct")
+
+
+def test_end_file_resets_the_target_so_a_stray_block_is_still_refused():
+    from coding_model_autonomous.apply_edits import parse_edit_blocks
+    text = ("<<<FILE: a.swift>>>\nwhole content\n<<<END_FILE>>>\n"
+            "<<<<<<< SEARCH\nx\n=======\ny\n>>>>>>> REPLACE\n")
+    parsed = parse_edit_blocks(text)
+    assert parsed.files == []
+    assert any("no `### path` header" in m for m in parsed.malformed)

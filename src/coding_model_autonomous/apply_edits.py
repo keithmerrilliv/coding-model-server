@@ -46,6 +46,14 @@ _REPLACE_RE = re.compile(r"^[ \t]*>{5,}[ \t]*(?:REPLACE)?[ \t]*$")
 # A file header: `### path`. Only recognised OUTSIDE a SEARCH/REPLACE body, so a
 # `###` heading inside replacement content is treated as content, not a header.
 _HEADER_RE = re.compile(r"^[ \t]*#{2,4}[ \t]+(.+?)[ \t]*$")
+# DEV-770: a whole-file marker used as the header of an edit set. Runs 48 and
+# 49 (deep_implementer, retry 0 both times) wrapped the one Package.swift
+# SEARCH/REPLACE block in `<<<FILE: Package.swift>>> ... <<<END_FILE>>>` and
+# were refused as "no ### path header" — a block inside a FILE block can only
+# mean "edit that file". Same tolerance DEV-638 gave the SEARCH text.
+_FILE_OPEN_RE = re.compile(r"^[ \t]*<{1,3}FILE:[ \t]*([^\n>]+?)>{1,3}[ \t]*$",
+                           re.IGNORECASE)
+_FILE_CLOSE_RE = re.compile(r"^[ \t]*<{1,3}END_FILE>{1,3}[ \t]*$", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -235,6 +243,14 @@ def parse_edit_blocks(text: str) -> ParsedEdits:
         m = _HEADER_RE.match(line)
         if m:
             current_path = m.group(1).strip().strip("`").lstrip("/").strip()
+        else:
+            fm = _FILE_OPEN_RE.match(line)
+            if fm:
+                current_path = fm.group(1).strip().strip("`").lstrip("/").strip()
+            elif _FILE_CLOSE_RE.match(line):
+                # The FILE block is over; a later stray block must not be
+                # attributed to it.
+                current_path = None
         i += 1
 
     # A header with no blocks is not an edit for that file; drop empties.
@@ -519,6 +535,11 @@ def _is_placeholder_path(path: str) -> bool:
     return is_placeholder_path(path)
 
 
+def _holds_edit_markers(content: str) -> bool:
+    """True when *content* contains a SEARCH/REPLACE block (DEV-770)."""
+    return any(_SEARCH_RE.match(ln) for ln in content.splitlines())
+
+
 def resolve_edits(
     whole_files: list[tuple[str, str]],
     edit_text: str,
@@ -549,8 +570,13 @@ def resolve_edits(
             order.append(path)
         resolved[path] = content
 
-    # New files pass through untouched.
+    # New files pass through untouched. DEV-770: a whole-file block for an
+    # EXISTING path whose body is SEARCH/REPLACE markers is an edit set that
+    # parse_edit_blocks picks up below, not content — writing it would put the
+    # markers into the file verbatim.
     for path, content in whole_files:
+        if path in existing and _holds_edit_markers(content):
+            continue
         put(path, content)
 
     errors: list[str] = []
