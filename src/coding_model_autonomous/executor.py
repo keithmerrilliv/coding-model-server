@@ -34,6 +34,7 @@ import yaml
 from coding_model_server.streaming import strip_thinking as _server_strip_thinking
 
 from ._http import post_chat_completion
+from .swift_rules import render_swift_rules, render_cited_diagnostics
 
 logger = logging.getLogger("orchestrator.executor")
 
@@ -2359,6 +2360,12 @@ def build_implementer_message(
         [p for p, _ in (existing_files or [])] + list(new_files or []))
     if import_root:
         user_parts.append("\n\n" + import_root)
+    # DEV-764: the Swift counterpart of the import-root paragraph. Empty for
+    # a non-Swift file set, so every other prompt stays byte-identical.
+    swift_rules = render_swift_rules(
+        [p for p, _ in (existing_files or [])] + list(new_files or []))
+    if swift_rules:
+        user_parts.append("\n\n" + swift_rules)
     if reference_files or omitted_reference:
         user_parts.append("\n\n")
         user_parts.append(_render_reference_files(reference_files or [],
@@ -3455,6 +3462,12 @@ def build_synthesis_message(
             parts.append("\n```\n\n")
         for relpath, content in att.get("files", {}).items():
             parts.append(f"#### {relpath}\n\n```\n{content}\n```\n\n")
+    # DEV-764: synthesis reproduced retry 1's unqualified static member
+    # verbatim on run 47; it merges text and needs the same rules.
+    swift_rules = render_swift_rules(
+        [p for att in attempts for p in att.get("files", {})])
+    if swift_rules:
+        parts.append(swift_rules)
     parts.append(
         "---\n\n"
         "Synthesize a single correct implementation by taking the union of "
@@ -3477,8 +3490,17 @@ def build_synthesis_repair_message(
     warning_diagnostic: str | None = None,
     reference_files: list[tuple[str, str]] | None = None,
     omitted_reference: list[str] | None = None,
+    cited_diagnostics: "list | None" = None,
 ) -> list[dict[str, str]]:
     """One targeted repair round on a synthesized artifact.
+
+    ``cited_diagnostics`` (DEV-767) is the located ``path:line`` list the
+    build reported, already mapped onto artifact paths. When present, the
+    build-failure prompt lists each with the fix its class asks for and
+    tells the repair its edits must land on those lines — the daemon then
+    discards blocks for uncited files and refuses to build a repair that
+    changed no cited line. Runs 47 and 48 both produced repairs that never
+    touched the cited line.
 
     Unlike synthesis (which merges all attempts), the repair sees only the
     synthesized files plus the failure excerpt, and is told to change the
@@ -3549,6 +3571,10 @@ def build_synthesis_repair_message(
             "change, each with its complete content."
         )
     elif building:
+        # DEV-764 / DEV-767: rules first, then the cited locations with their
+        # hints, then the raw diagnostics the two are drawn from.
+        parts.append(render_swift_rules([p for p, _ in files]))
+        parts.append(render_cited_diagnostics(cited_diagnostics or []))
         parts.append(
             "## Compiler diagnostics\n\n```\n" + failing_output + "\n```\n\n"
             "---\n\n"
