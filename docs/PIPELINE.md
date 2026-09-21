@@ -247,7 +247,7 @@ each now has its own name. Only the first is still called a corpus.
 
 | name | what it is | where it lives |
 |---|---|---|
-| **the retrieval corpus** | the RAG collection retrieval searches: 30,290 chunks scraped from developer.apple.com (SwiftUI, RealityKit, Metal, Foundation, Swift, ARKit …). Nothing but Apple API documentation is in it, which is why `AUTONOMOUS_MEMORY_LANGUAGES` defaults to `swift` (DEV-657). | Chroma collection `qwen_agent_memory` under `var/memory_db` |
+| **the retrieval corpus** | the RAG collection retrieval searches: 30,290 chunks scraped from developer.apple.com (SwiftUI, RealityKit, Metal, Foundation, Swift, ARKit …). Nothing but Apple API documentation is in it, which is why `AUTONOMOUS_MEMORY_LANGUAGES` defaults to the Apple-API languages — `swift,objective-c,objective-c++` (DEV-657, DEV-781). | Chroma collection `qwen_agent_memory` under `var/memory_db` |
 | **the spec archive** | every completed pipeline run kept on disk — plan, spec, design, assembled context, test output. What a new guard is measured against before it ships, so "it fires on 22 of 96 real specs" is a number rather than a hope (DEV-712). | `var/tasks_db/specs/` — **gitignored**, so a worktree has none of it and its tests collect nothing there |
 | **the synthesis corpus** | the prior attempts' files that synthesis builds a repair from. Always written with the qualifier. | `retry_history/` in a spec's workspace |
 

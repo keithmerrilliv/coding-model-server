@@ -1844,8 +1844,17 @@ def _spec_language(spec: Spec) -> "str | None":
     plans carry it. None means the plan could not be read, which the gate
     treats as "not known to be covered" rather than as a default.
     """
-    lang = _load_plan(spec).get("language")
-    return str(lang).strip() if lang and str(lang).strip() else None
+    plan = _load_plan(spec)
+    declared = executor.normalize_language(plan.get("language"))
+    # DEV-781: when the plan cannot say, the implement phase's own paths
+    # can — a `.mm` is Objective-C++ whatever the prose called it. The plan
+    # wins when both exist; a disagreement is logged, not resolved.
+    implied = executor.language_from_paths(_context.planned_outputs(plan))
+    if declared and implied and declared != implied:
+        logger.info("spec %s: plan says language=%s but its implement "
+                    "outputs imply %s — using the plan's (DEV-781)",
+                    spec.id, declared, implied)
+    return declared or implied
 
 
 def _load_plan(spec: Spec) -> dict:
