@@ -40,6 +40,95 @@ logger = logging.getLogger("orchestrator")
 BRANCH_PREFIX = "pipeline/"
 
 TESTED_MANIFEST = "tested_manifest.json"
+DELIVERY_BASE = "delivery_base.json"
+
+# DEV-756: the names a test file declares, so a delivery that would REMOVE a
+# test the default branch has is refused rather than pushed. Both Swift
+# styles (XCTest `func testX`, Swift Testing `@Test func x`) and pytest.
+_TEST_NAME_RES = (
+    re.compile(r"\bfunc\s+(test\w*)\s*\("),
+    re.compile(r"@Test\b[^\n]*?\bfunc\s+(\w+)\s*\("),
+    re.compile(r"^\s*(?:async\s+)?def\s+(test\w*)\s*\(", re.MULTILINE),
+)
+
+
+def test_names(source: str) -> set:
+    """Test function names declared in *source* (comment lines excluded)."""
+    text = "\n".join(ln for ln in source.splitlines()
+                     if not ln.lstrip().startswith(("//", "#")))
+    names: set = set()
+    for pat in _TEST_NAME_RES:
+        names.update(pat.findall(text))
+    return names
+
+
+def stale_base_refusal(repo: Path, deliverable: "list[str]", spec_dir: Path,
+                       base_files: "dict[str, str] | None") -> "str | None":
+    """Why this delivery must not be pushed as-is, or None (DEV-756).
+
+    A pipeline branch is a SNAPSHOT of files written against base_ref, copied
+    onto whatever the default branch is at delivery time. Once main has moved
+    past that base, copying the snapshot deletes main's newer content — three
+    of four open Centipede branches were pure deletions by the time anyone
+    looked, and slice 8 removed six tests present in its own base. Two checks,
+    both computed against the freshly cloned default branch:
+
+      * a delivered file would REMOVE a test function main currently has;
+      * a delivered file differs from main's copy AND main's copy differs from
+        the base copy the artifact was written against — main moved under the
+        file, and the snapshot would overwrite that movement unseen.
+
+    The second needs the base copy (context.json's editable set); without it
+    only the first runs. Both name every offending file.
+    """
+    removed: list[str] = []
+    moved: list[str] = []
+    for rel in deliverable:
+        current = repo / rel
+        if not current.is_file():
+            continue          # new file on main: nothing to regress
+        main_src = current.read_text(errors="replace")
+        ours = (spec_dir / rel).read_text(errors="replace")
+        lost = sorted(test_names(main_src) - test_names(ours))
+        if lost:
+            removed.append(f"  {rel}: removes {len(lost)} test(s) main has: "
+                           + ", ".join(lost[:8])
+                           + (" …" if len(lost) > 8 else ""))
+        base_src = (base_files or {}).get(rel)
+        if base_src is not None and main_src != base_src and main_src != ours:
+            moved.append(f"  {rel}: main changed since the base this artifact "
+                         "was written against")
+    if not removed and not moved:
+        return None
+    lines = ["REFUSED — stale base; nothing was pushed (DEV-756)."]
+    if removed:
+        lines.append("Delivering would REMOVE tests the default branch has:")
+        lines += removed
+    if moved:
+        lines.append("The default branch moved under these files since base_ref, "
+                     "and the artifact would overwrite that movement:")
+        lines += moved
+    lines.append("Re-run the spec against current main, or rebase the artifact "
+                 "by hand; the workspace copy is unchanged.")
+    return "\n".join(lines)
+
+
+def _base_from_context(spec_dir: Path) -> "tuple[str | None, dict[str, str]]":
+    """(base sha, base file contents) from the spec's persisted context, or
+    (None, {}) when there is none — pre-DEV-701 workspaces and tests."""
+    try:
+        from .context import SpecContext
+        ctx = SpecContext.load(spec_dir)
+    except Exception:
+        return None, {}
+    if ctx is None:
+        return None, {}
+    sha = None
+    if isinstance(ctx.ref_state, dict):
+        sha = ctx.ref_state.get("local_sha") or None
+    files = dict(ctx.editable)
+    files.update(ctx.protected)
+    return sha, files
 
 
 def verify_tested_manifest(spec_dir: Path,
@@ -249,6 +338,23 @@ def deliver_spec(spec_id: str, spec_title: str, spec_dir: Path,
             return DeliveryResult(
                 "failed", f"clone of {url} failed: {_err_tail(clone)}")
         repo = Path(tmp) / "repo"
+        head_res = _git(repo, "rev-parse", "HEAD")
+        head = (getattr(head_res, "stdout", "") or "").strip() or "unknown"
+        base_sha, base_files = _base_from_context(spec_dir)
+        # DEV-756: refuse a snapshot that has decayed into a deletion, and
+        # record the base so the check is computable after the fact.
+        stale = stale_base_refusal(repo, deliverable, spec_dir, base_files)
+        try:
+            (spec_dir / DELIVERY_BASE).write_text(json.dumps({
+                "branch": branch, "base_sha": base_sha,
+                "default_branch_sha_at_delivery": head,
+                "base_is_current": (base_sha == head) if base_sha else None,
+                "files": deliverable, "refused": bool(stale),
+            }, indent=2) + "\n")
+        except OSError as e:
+            logger.warning("could not write %s: %s", DELIVERY_BASE, e)
+        if stale:
+            return DeliveryResult("failed", stale)
         _git(repo, "checkout", "-b", branch)
         for rel in deliverable:
             dst = repo / rel
@@ -278,6 +384,10 @@ def deliver_spec(spec_id: str, spec_title: str, spec_dir: Path,
         detail = f"{len(deliverable)} file(s) committed to {branch} of {url}"
         if verified_note:
             detail += f" — {verified_note}"
+        detail += (f"; cut from default branch {head[:12]}"
+                   + (f", base {base_sha[:12]}"
+                      + (" (current)" if base_sha == head else " (main moved; no delivered file affected)")
+                      if base_sha else ""))
         return DeliveryResult("pushed", detail, branch=branch)
     except Exception as e:  # never let delivery take down the tick
         return DeliveryResult("failed", f"{type(e).__name__}: {e}")

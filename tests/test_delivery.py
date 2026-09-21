@@ -6,6 +6,7 @@ the only surviving copy of each change was scratch state under var/. These
 tests drive the delivery step against a real local bare repo so the git
 mechanics (clone, branch, commit, force-push) are exercised for real.
 """
+import json
 import subprocess
 
 import pytest
@@ -114,3 +115,70 @@ def test_remotes_parser_handles_multiple_pairs(monkeypatch):
     remotes = delivery.delivery_remotes()
     assert remotes == {"electric-sheep": "git@github.com:k/ES.git",
                        "centipede": "git@github.com:k/C.git"}
+
+
+# ── DEV-756: a stale snapshot is refused, and the base is recorded ───────────
+
+def _seed_test_file(remote, tmp_path, name, content):
+    seed = tmp_path / f"seed_{name}"
+    _git(tmp_path, "clone", str(remote), seed.name)
+    (seed / "Tests").mkdir(exist_ok=True)
+    (seed / "Tests" / "GameTests.swift").write_text(content)
+    _git(seed, "add", "-A")
+    _git(seed, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", name)
+    _git(seed, "push", "origin", "HEAD")
+
+
+def test_names_extraction_covers_both_swift_styles_and_pytest():
+    from coding_model_autonomous.delivery import test_names
+    src = ("func testA() {}\n@Test func b() {}\n@Test(\"x\") func c() throws {}\n"
+           "// func testCommented() {}\nfunc helper() {}\ndef test_py():\n    pass\n")
+    assert test_names(src) == {"testA", "b", "c", "test_py"}
+
+
+def test_delivery_refuses_a_snapshot_that_removes_tests_main_has(remote, spec_dir, tmp_path,
+                                                                 monkeypatch):
+    from coding_model_autonomous import delivery
+    monkeypatch.setenv("AUTONOMOUS_DELIVERY_REMOTES", f"demo={remote}")
+    _seed_test_file(remote, tmp_path, "main_has_two",
+                    "func testOne() {}\nfunc testTwo() {}\n")
+    (spec_dir / "Tests").mkdir(exist_ok=True)
+    (spec_dir / "Tests" / "GameTests.swift").write_text("func testOne() {}\nfunc testNew() {}\n")
+    r = delivery.deliver_spec("spec_t2", "slice", spec_dir,
+                              ["Tests/GameTests.swift"], repo_name="demo", protected_paths=[])
+    assert r.status == "failed"
+    assert "REFUSED — stale base" in r.detail and "testTwo" in r.detail
+    rec = json.loads((spec_dir / delivery.DELIVERY_BASE).read_text())
+    assert rec["refused"] is True and rec["files"] == ["Tests/GameTests.swift"]
+    # nothing reached the remote
+    assert "pipeline/spec_t2" not in _git(tmp_path, "ls-remote", "--heads", str(remote))
+
+
+def test_delivery_that_only_adds_tests_pushes_and_records_the_base(remote, spec_dir, tmp_path,
+                                                                    monkeypatch):
+    from coding_model_autonomous import delivery
+    monkeypatch.setenv("AUTONOMOUS_DELIVERY_REMOTES", f"demo={remote}")
+    _seed_test_file(remote, tmp_path, "main_has_one", "func testOne() {}\n")
+    (spec_dir / "Tests").mkdir(exist_ok=True)
+    (spec_dir / "Tests" / "GameTests.swift").write_text("func testOne() {}\nfunc testNew() {}\n")
+    r = delivery.deliver_spec("spec_t3", "slice", spec_dir,
+                              ["Tests/GameTests.swift"], repo_name="demo", protected_paths=[])
+    assert r.status == "pushed", r.detail
+    assert "cut from default branch" in r.detail
+    rec = json.loads((spec_dir / delivery.DELIVERY_BASE).read_text())
+    assert rec["refused"] is False and rec["default_branch_sha_at_delivery"]
+    assert rec["base_sha"] is None            # no context.json in this workspace
+
+
+def test_main_moving_under_a_delivered_file_is_refused_when_the_base_is_known(tmp_path):
+    from coding_model_autonomous.delivery import stale_base_refusal
+    repo = tmp_path / "repo"; (repo / "Sources").mkdir(parents=True)
+    (repo / "Sources" / "A.swift").write_text("let a = 2  // main moved\n")
+    ws = tmp_path / "ws"; (ws / "Sources").mkdir(parents=True)
+    (ws / "Sources" / "A.swift").write_text("let a = 1\nlet b = 9\n")
+    base = {"Sources/A.swift": "let a = 1\n"}
+    why = stale_base_refusal(repo, ["Sources/A.swift"], ws, base)
+    assert why and "main changed since the base" in why
+    # main == base: the artifact is a clean edit of what it read — no refusal
+    (repo / "Sources" / "A.swift").write_text("let a = 1\n")
+    assert stale_base_refusal(repo, ["Sources/A.swift"], ws, base) is None
