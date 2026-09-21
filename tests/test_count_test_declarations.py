@@ -191,3 +191,26 @@ def test_self_import_root_is_correct():
     
     assert callable(ctd)
     assert ctd("def test_x(): pass", "pytest") == 1
+
+
+# ── DEV-751: snake_case XCTest methods are tests too ─────────────────────────
+
+RUN44_SNAKE = """import XCTest
+@testable import ElectricSheep
+
+final class AudioLifecycleTests: XCTestCase {
+    func test_play_then_interruption_began_stops_and_sets_false() {
+        XCTAssertTrue(true)
+    }
+    func test_second_case() { XCTAssertTrue(true) }
+    func testCamelCase() { XCTAssertTrue(true) }
+    // func test_commented_out() {}
+    func helper_not_a_test() {}
+}
+"""
+
+
+def test_snake_case_xctest_methods_are_counted_dev751():
+    from coding_model_autonomous.test_runner import count_test_declarations
+    assert count_test_declarations(RUN44_SNAKE, "xcodebuild_test") == 3
+    assert count_test_declarations(RUN44_SNAKE, "swift_test") == 3
