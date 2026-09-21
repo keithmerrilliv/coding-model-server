@@ -782,8 +782,29 @@ def rotation_offset(db: Any, spec_id: str, task) -> int:
 _KEY_PATH_RE = re.compile(r"((?:[\w.+-]+/)+[\w.+-]+\.[A-Za-z0-9]+)")
 
 
+# DEV-783: for a build failure the compiler's message IS the identity. Run 50
+# keyed retry 0 (an invented API member) and retry 1 (a placeholder line the
+# pipeline itself inserted) both as `build_failure||AudioManager.swift`, and
+# the guard ended the rotation at 2 of 5 on two unrelated defects. Every
+# attempt on a modify-spec touches the same files, so class+file collides by
+# construction; class+file+message is what run 29 (the same error reproduced
+# from the design) actually looked like. Other classes keep the class+file
+# key: an unappliable-edit detail carries block numbers and scores that are
+# exactly the volatile particulars an identity must ignore.
+_DIAG_MESSAGE_RE = re.compile(r":\d+:\d+:\s*(?:error|warning):\s*(.+)$")
+
+
+def _diagnostic_identity(detail: str) -> str:
+    """The first compiler message in *detail*, normalised, or ""."""
+    first = (detail or "").strip().splitlines()[0] if (detail or "").strip() else ""
+    m = _DIAG_MESSAGE_RE.search(first)
+    msg = m.group(1) if m else ""
+    return " ".join(msg.lower().split())[:160]
+
+
 def coarse_key(failure: Failure) -> str:
-    """Identity of a failure for invariance detection: class | phase | path.
+    """Identity of a failure for invariance detection: class | phase | path,
+    plus the compiler's message for a build failure (DEV-783).
 
     The path is repository-relative (`repo_relative`): run 31's first Mac
     build failure keyed on `…/worktrees/spec_c1e1c9ac-277805d1/Sources/…`,
@@ -793,7 +814,12 @@ def coarse_key(failure: Failure) -> str:
     """
     m = _KEY_PATH_RE.search(failure.detail or "")
     path = repo_relative(m.group(1)) if m else ""
-    return f"{failure.cls.value}|{failure.phase}|{path}"
+    key = f"{failure.cls.value}|{failure.phase}|{path}"
+    if failure.cls is FailureClass.BUILD_FAILURE:
+        msg = _diagnostic_identity(failure.detail)
+        if msg:
+            key += f"|{msg}"
+    return key
 
 
 def attempt_agent(db: Any, spec_id: str, task: Any) -> str:

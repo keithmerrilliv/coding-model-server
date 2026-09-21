@@ -87,7 +87,7 @@ class TestCoarseKey:
         b = Failure(FailureClass.BUILD_FAILURE, "implementer", "build_check",
                     self.WT.format(h="7aeae7c4"), phase="build_check")
         assert coarse_key(a) == coarse_key(b)
-        assert coarse_key(a) == "build_failure|build_check|Sources/CentipedeCore/Game.swift"
+        assert coarse_key(a).startswith("build_failure|build_check|Sources/CentipedeCore/Game.swift")  # DEV-783: message follows
         assert "worktrees" not in coarse_key(a)
 
     def test_a_relative_path_is_unchanged_and_an_unknown_layout_keeps_its_basename(self):
@@ -96,7 +96,7 @@ class TestCoarseKey:
         assert coarse_key(rel) == "unappliable_edits|apply|src/a.py"
         odd = Failure(FailureClass.BUILD_FAILURE, "implementer", "build_check",
                       "/tmp/build-9f/Module/Thing.swift:3:1: error: x", phase="build_check")
-        assert coarse_key(odd) == "build_failure|build_check|Thing.swift"
+        assert coarse_key(odd) == "build_failure|build_check|Thing.swift|x"   # DEV-783: + message
 
 
 class TestAttemptAgent:
@@ -264,3 +264,37 @@ class TestSoleFit:
         assert d1.action == "synthesize", d1
         assert len(calls) == 1
         assert db.get_task(task.id).retry_count == 1   # not spent to the cap
+
+
+# ── DEV-783: a build failure's identity is its diagnostic, not only its file ─
+
+def test_two_unrelated_build_failures_in_one_file_are_not_invariant_dev783():
+    from coding_model_autonomous.outcome import Failure, FailureClass, coarse_key
+    a = Failure(FailureClass.BUILD_FAILURE, "implementer", "build_check",
+                "/Users/admin/work/ElectricSheep/AudioManager.swift:50:33: error: "
+                "type 'AVAudioEngine' has no member 'configurationChangeNotification'")
+    b = Failure(FailureClass.BUILD_FAILURE, "implementer", "build_check",
+                "/Users/admin/work/ElectricSheep/AudioManager.swift:1:1: error: "
+                "Expressions are not allowed at the top level")
+    assert coarse_key(a) != coarse_key(b)
+    assert "audiomanager.swift" in coarse_key(a).lower()
+
+
+def test_the_same_diagnostic_from_two_worktrees_is_still_invariant_dev783():
+    from coding_model_autonomous.outcome import Failure, FailureClass, coarse_key
+    a = Failure(FailureClass.BUILD_FAILURE, "implementer", "build_check",
+                "/w/worktrees/spec_x-aaaa/Sources/Game/Player.swift:2:6: error: "
+                "invalid redeclaration of 'Direction'")
+    b = Failure(FailureClass.BUILD_FAILURE, "implementer", "build_check",
+                "/w/worktrees/spec_x-bbbb/Sources/Game/Player.swift:9:6: error:  "
+                "Invalid redeclaration of 'Direction'")
+    assert coarse_key(a) == coarse_key(b)        # line and case are not identity
+
+
+def test_non_build_classes_keep_the_class_and_file_key_dev783():
+    from coding_model_autonomous.outcome import Failure, FailureClass, coarse_key
+    a = Failure(FailureClass.UNAPPLIABLE_EDITS, "implementer", "apply",
+                "edit block #1: SEARCH text not found in Sources/A.swift")
+    b = Failure(FailureClass.UNAPPLIABLE_EDITS, "implementer", "apply",
+                "edit block #5: SEARCH text not found in Sources/A.swift. Closest window: 0.81")
+    assert coarse_key(a) == coarse_key(b)        # run 29's shape stays one defect
