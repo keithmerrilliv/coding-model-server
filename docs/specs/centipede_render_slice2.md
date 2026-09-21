@@ -223,7 +223,8 @@ report.
 6. **Adapter maps every drawable kind and drops the rest.** A `BoardSnapshot` built with the
    public init holding one of each `BoardEntity` in distinct cells (the mushroom
    `.mushroom(damage: 2, poisoned: true)`) adapts to a `FrameSnapshot` with
-   `columns == 30`, `rows == 30`, `cells.count == 6`, `.mushroom(damage: 2)` at the
+   `columns == 30`, `rows == 30`, `cells.count == 7` (eight entities, the shot dropped),
+   `.mushroom(damage: 2)` at the
    mushroom's cell, `.segment(isHead: true)`, `.segment(isHead: false)`, `.player`,
    `.spider`, `.flea`, `.scorpion` at theirs, and NO cell at the shot's position.
 7. **An adapted board renders where the board said.** `FrameSnapshot(board:)` of a board with
