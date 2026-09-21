@@ -85,6 +85,43 @@ exist.
 Foundation and nothing else: no AVFoundation, no SwiftUI. That is what lets it be
 tested on macOS with no audio hardware, no engine and no session.
 
+## The actor-isolation contract — read this before writing a line
+
+This is what defeated runs 44 and 50 (DEV-753, DEV-784). The project builds with
+`SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` on the **app target only**
+(`ElectricSheep.xcodeproj/project.pbxproj`), so:
+
+1. **Every unannotated declaration in `ElectricSheep/` is implicitly `@MainActor`.**
+   `AudioManager` and `Audioscape` are MainActor-isolated today with no annotation.
+   Do not add `@MainActor` (redundant); do not add `nonisolated` to anything that
+   touches their state.
+2. **`AudioLifecycle` is the one exception by construction**: pure Foundation, no
+   AV imports, no isolation dependence — it is a value-level state machine called
+   from wherever `AudioManager` runs. Keep it that way.
+3. **A closure handed to `NotificationCenter.default.addObserver(forName:object:queue:using:)`,
+   a Combine `sink`, `DispatchQueue….async`, or a `Timer` is a nonisolated
+   synchronous context.** Calling an `AudioManager` / `Audioscape` instance method or
+   touching their properties directly inside it is the compile error
+   `call to main actor-isolated instance method in a synchronous nonisolated context`.
+   Hop first: `Task { @MainActor in self.handle(.interruptionBegan) }` (or pass
+   `queue: .main` and use `MainActor.assumeIsolated { … }`). Every observer closure in
+   this spec hops.
+4. **`AVAudioSession` and its notification keys do not exist on macOS.** Every use —
+   observers, activation, deactivation, the interruption-type key — lives under
+   `#if os(iOS) || os(visionOS)`, with a macOS branch that compiles. The macOS build is
+   the gate here; an unguarded `AVAudioSession` is `'AVAudioSession' is unavailable in
+   macOS` and fails it.
+5. **The test target does NOT have default MainActor isolation.** A plain
+   `func testX()` on an `XCTestCase` is nonisolated; constructing `AudioManager()` or
+   `Audioscape()` from it does not compile. `AudioLifecycle` itself may be tested from a
+   plain test method (rule 2). Any test that touches the manager is declared
+   `@MainActor func test_…() async throws` — the pattern of
+   `ElectricSheepTests/BridgeLifecycleTests.swift`.
+6. **`AVAudioEngine` has no `configurationChangeNotification` member.** The
+   notification is the `Notification.Name` constant `.AVAudioEngineConfigurationChange`,
+   observed through `NotificationCenter`. Do not invent members; if a name is not in
+   the served files or the SDK you know, it does not exist.
+
 ## Reference files (read-only)
 
 The test strategy protects three files. Read them, do not edit them.
