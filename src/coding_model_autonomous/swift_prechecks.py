@@ -453,6 +453,405 @@ def unqualified_static_member_references(
     return violations
 
 
+
+# ── DEV-777 (v0.4.0 phase A1): the runs-44–49 classes ────────────────────────
+#
+# Each detector below is named after the swiftc diagnostic it pre-empts and
+# the run that paid a Mac round trip for it. Same stance as the originals: a
+# false negative costs nothing new, a false positive rejects code swiftc would
+# accept, so every rule is written to stay silent when unsure. All were
+# measured against the spec archive before shipping (scripts/
+# sweep_swift_prechecks.py); the numbers are on DEV-777.
+
+_TEST_FUNC_NAME_RE = re.compile(r"^test")
+_TEST_ATTR_RE = re.compile(r"@Test\b")
+_MAIN_ACTOR_ATTR_RE = re.compile(r"@MainActor\b")
+
+
+def _attribute_slice(blanked: str, tok_start: int) -> str:
+    """The raw text between the previous `{`/`}`/`;` (or the start of the
+    previous declaration) and *tok_start* — where attributes and modifiers
+    for the declaration at *tok_start* live."""
+    lo = max(blanked.rfind("{", 0, tok_start), blanked.rfind("}", 0, tok_start),
+             blanked.rfind(";", 0, tok_start))
+    # Attributes precede modifiers; a previous `func`'s body brace bounds them.
+    return blanked[lo + 1:tok_start]
+
+
+def _func_scopes(blanked: str, words: list[str], toks: list) -> list[tuple[int, int, int]]:
+    """(func_token_index, body_open_index, body_close_index) for every
+    `func` whose body brace is found; closes at the matching `}` or the
+    end of the token stream."""
+    out: list[tuple[int, int, int]] = []
+    for i, w in enumerate(words):
+        if w != "func":
+            continue
+        # The body `{` is the first brace after the signature's parens —
+        # any `{` before a `(`‑balanced `)` would be in a default value
+        # closure, which we treat as "unsure": skip such a func.
+        depth = 0
+        body_open = None
+        # walk raw text from the func token to find the first `{` at paren depth 0
+        k = toks[i].end()
+        n = len(blanked)
+        while k < n:
+            c = blanked[k]
+            if c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+            elif c == "{" and depth == 0:
+                break
+            elif c == "}" and depth == 0:
+                k = None
+                break
+            k += 1
+        if k is None or k >= n:
+            continue
+        # translate raw offset to the token index of that `{`
+        for t_idx in range(i + 1, len(words)):
+            if toks[t_idx].start() == k:
+                body_open = t_idx
+                break
+        if body_open is None:
+            continue
+        d = 0
+        body_close = len(words)
+        for t_idx in range(body_open, len(words)):
+            if words[t_idx] == "{":
+                d += 1
+            elif words[t_idx] == "}":
+                d -= 1
+                if d == 0:
+                    body_close = t_idx
+                    break
+        out.append((i, body_open, body_close))
+    return out
+
+
+
+def _is_test_func(blanked: str, words: list[str], toks: list, fi: int) -> bool:
+    name = words[fi + 1] if fi + 1 < len(words) else ""
+    if _TEST_FUNC_NAME_RE.match(name):
+        return True
+    return bool(_TEST_ATTR_RE.search(_attribute_slice(blanked, toks[fi].start())))
+
+
+def missing_throws_on_test_functions(
+    files: list[tuple[str, str]],
+) -> list[Violation]:
+    """A `@Test` / `func test…` whose body uses `try` at body level with no
+    `throws` on the signature and no `do` anywhere in the body.
+
+    Run 48 (spec_a8b7c3e5): six `@Test func` bodies each `try #require(...)`
+    with no `throws` — twelve `errors thrown from here are not handled`
+    diagnostics, every one mechanical. One Violation per function, at the
+    first offending `try`. A `try` inside a nested `{ … }` (a closure that
+    may itself throw) does not count; `try?` / `try!` never count.
+    """
+    violations: list[Violation] = []
+    for path, content in files:
+        if not path.endswith(".swift"):
+            continue
+        blanked = blank_comments_and_strings(content)
+        toks = list(_TOKEN_RE.finditer(blanked))
+        words = [t.group(0) for t in toks]
+        for fi, bo, bc in _func_scopes(blanked, words, toks):
+            if not _is_test_func(blanked, words, toks, fi):
+                continue
+            sig = words[fi:bo]
+            if "throws" in sig or "rethrows" in sig:
+                continue
+            body = words[bo + 1:bc]
+            if "do" in body:
+                continue
+            depth = 0
+            for k in range(bo + 1, bc):
+                w = words[k]
+                if w == "{":
+                    depth += 1
+                elif w == "}":
+                    depth -= 1
+                elif w == "try" and depth == 0:
+                    after = blanked[toks[k].end():toks[k].end() + 1]
+                    if after in ("?", "!"):
+                        continue
+                    violations.append(Violation(
+                        kind="missing_throws_on_test",
+                        message=(f"errors thrown from here are not handled "
+                                 f"(add 'throws' to func {words[fi + 1]})"),
+                        path=path, line=_line_of(blanked, toks[k].start()),
+                        notes=()))
+                    break
+    return violations
+
+
+# Column-0 struct/class declaration with its inheritance clause up to `{`.
+_TYPE_WITH_CLAUSE_RE = re.compile(
+    r"^(?:@[A-Za-z_]\w*(?:\s*\([^)]*\))?[ \t]+)*"
+    r"(?:(?:public|internal|fileprivate|private|final|open)[ \t]+)*"
+    r"(struct|class)[ \t]+([A-Za-z_]\w*)([^{]*)\{", re.MULTILINE)
+_EXTENSION_CLAUSE_RE = re.compile(
+    r"^(?:(?:public|internal|fileprivate|private)[ \t]+)?"
+    r"extension[ \t]+([A-Za-z_]\w*)([^{]*)\{", re.MULTILINE)
+
+
+def missing_hashable_conformance(
+    files: list[tuple[str, str]],
+) -> list[Violation]:
+    """`Set<T>` or a `[T: …]` dictionary type where `T` is a struct/class
+    declared in the emitted set with no `Hashable` in its inheritance clause
+    or in any emitted `extension T: …`.
+
+    Run 48 (spec_a8b7c3e5): `public struct RGBA: Equatable, Sendable` and a
+    `Set<RGBA>` in the tests — `generic struct 'Set' requires that 'RGBA'
+    conform to 'Hashable'`, twice. Enums are skipped (an enum without
+    associated values is Hashable for free and telling the cases apart is
+    not worth a false positive). One Violation per (type, file).
+    """
+    decls: dict[str, tuple[str, int, str]] = {}   # name -> (path, line, kind)
+    hashable: set[str] = set()
+    blanked_by_path: dict[str, str] = {}
+    for path, content in files:
+        if not path.endswith(".swift"):
+            continue
+        b = blank_comments_and_strings(content)
+        blanked_by_path[path] = b
+        for m in _TYPE_WITH_CLAUSE_RE.finditer(b):
+            kind, name, clause = m.group(1), m.group(2), m.group(3)
+            decls.setdefault(name, (path, _line_of(b, m.start()), kind))
+            if "Hashable" in clause:
+                hashable.add(name)
+        for m in _EXTENSION_CLAUSE_RE.finditer(b):
+            if "Hashable" in m.group(2):
+                hashable.add(m.group(1))
+    candidates = {n for n in decls if n not in hashable}
+    if not candidates:
+        return []
+    # `Set(Palette.mushroom)` — run 48's actual shape: the element type is
+    # only visible through the declaration `static let mushroom: [RGBA]`.
+    array_members: dict[str, str] = {}
+    for b in blanked_by_path.values():
+        for m in re.finditer(r"\b(?:let|var)[ \t]+([A-Za-z_]\w*)[ \t]*:[ \t]*\[([A-Za-z_]\w*)\]", b):
+            array_members.setdefault(m.group(1), m.group(2))
+    use_re = re.compile(
+        r"\bSet<([A-Za-z_]\w*)>"
+        r"|\[([A-Za-z_]\w*)[ \t]*:[ \t]*[A-Za-z_\[]"
+        r"|\bSet\(\s*(?:[A-Za-z_]\w*\.)?([A-Za-z_]\w*)\s*\)")
+    violations: list[Violation] = []
+    for path, b in blanked_by_path.items():
+        seen: set[str] = set()
+        for m in use_re.finditer(b):
+            if m.group(3):
+                name = array_members.get(m.group(3), "")
+            else:
+                name = m.group(1) or m.group(2)
+            if name not in candidates or name in seen:
+                continue
+            seen.add(name)
+            dpath, dline, kind = decls[name]
+            container = "Dictionary" if m.group(2) else "Set"
+            violations.append(Violation(
+                kind="missing_hashable_conformance",
+                message=(f"generic struct '{container}' requires that '{name}' "
+                         f"conform to 'Hashable' (add Hashable to the {kind} "
+                         f"declaration)"),
+                path=path, line=_line_of(b, m.start()),
+                notes=((dpath, dline),)))
+    return violations
+
+
+# (callee, argument label) -> the non-optional SDK type swiftc will name.
+# Run 49 retry 1 (spec_4baf2650): `device.makeBuffer(bytes:length:options: nil)`
+# — `'nil' is not compatible with expected argument type 'MTLResourceOptions'`.
+# Deliberately tiny: an entry is added only after a run has paid for it.
+_KNOWN_NON_OPTIONAL_ARGS: dict[tuple[str, str], str] = {
+    ("makeBuffer", "options"): "MTLResourceOptions",
+    ("makeTexture", "descriptor"): "MTLTextureDescriptor",
+}
+_NIL_ARG_RE = re.compile(r"\b([A-Za-z_]\w*)\s*\(([^()]*(?:\([^()]*\)[^()]*)*)\)")
+_LABEL_NIL_RE = re.compile(r"\b([A-Za-z_]\w*)\s*:\s*nil\b")
+
+
+def _emitted_signatures(files: list[tuple[str, str]]) -> dict[str, list[dict[str, str]]]:
+    """name -> list of {label: type} for every `func name(` / `init(` in the
+    emitted set (the list holds one dict per overload)."""
+    sigs: dict[str, list[dict[str, str]]] = {}
+    sig_re = re.compile(r"\b(?:func[ \t]+([A-Za-z_]\w*)|(init))\s*(?:<[^>]*>)?\s*\(")
+    for path, content in files:
+        if not path.endswith(".swift"):
+            continue
+        b = blank_comments_and_strings(content)
+        for m in sig_re.finditer(b):
+            name = m.group(1) or m.group(2)
+            k = m.end()
+            depth = 1
+            while k < len(b) and depth:
+                depth += b[k] == "("
+                depth -= b[k] == ")"
+                k += 1
+            params = b[m.end():k - 1]
+            table: dict[str, str] = {}
+            for piece in _split_top_level(params):
+                pm = re.match(r"\s*(?:([A-Za-z_]\w*)\s+)?([A-Za-z_]\w*)\s*:\s*([^=]+?)\s*(=.*)?$",
+                              piece, re.S)
+                if not pm:
+                    continue
+                label = pm.group(1) or pm.group(2)
+                if label == "_":
+                    continue
+                table[label] = pm.group(3).strip() + ("=" if pm.group(4) else "")
+            sigs.setdefault(name, []).append(table)
+    return sigs
+
+
+def _split_top_level(text: str) -> list[str]:
+    out: list[str] = []
+    depth = 0
+    cur: list[str] = []
+    for c in text:
+        if c in "([<":
+            depth += 1
+        elif c in ")]>":
+            depth -= 1
+        if c == "," and depth == 0:
+            out.append("".join(cur)); cur = []
+        else:
+            cur.append(c)
+    if cur:
+        out.append("".join(cur))
+    return out
+
+
+def nil_for_non_optional_argument(
+    files: list[tuple[str, str]],
+) -> list[Violation]:
+    """`label: nil` passed to a parameter that cannot take it: a known SDK
+    entry in `_KNOWN_NON_OPTIONAL_ARGS`, or an emitted signature with exactly
+    one overload whose `label:` type carries no `?`/`!`, no `Optional<`,
+    and no default value."""
+    sigs = _emitted_signatures(files)
+    violations: list[Violation] = []
+    for path, content in files:
+        if not path.endswith(".swift"):
+            continue
+        b = blank_comments_and_strings(content)
+        for m in _NIL_ARG_RE.finditer(b):
+            callee, args = m.group(1), m.group(2)
+            if "nil" not in args:
+                continue
+            for lm in _LABEL_NIL_RE.finditer(args):
+                label = lm.group(1)
+                expected = _KNOWN_NON_OPTIONAL_ARGS.get((callee, label))
+                if expected is None:
+                    overloads = sigs.get(callee, [])
+                    if len(overloads) != 1 or label not in overloads[0]:
+                        continue
+                    t = overloads[0][label]
+                    if t.endswith(("?", "!", "=")) or t.startswith("Optional<") or t == "Any":
+                        continue
+                    expected = t
+                violations.append(Violation(
+                    kind="nil_for_non_optional_argument",
+                    message=(f"'nil' is not compatible with expected argument "
+                             f"type '{expected}' (parameter '{label}' of "
+                             f"{callee} is not optional)"),
+                    path=path, line=_line_of(b, m.start() + lm.start()),
+                    notes=()))
+    return violations
+
+
+def main_actor_types_called_from_nonisolated_tests(
+    files: list[tuple[str, str]],
+) -> list[Violation]:
+    """A type declared `@MainActor` in the emitted set, constructed inside a
+    test function that is neither `@MainActor` (itself or via its enclosing
+    type) nor `async`.
+
+    Runs 44 and 47 (DEV-753): `@MainActor final class AudioLifecycle` and
+    `final class AudioLifecycleTests: XCTestCase { func testX() { let lc =
+    AudioLifecycle() … } }` — `call to main actor-isolated initializer
+    'init()' in a synchronous nonisolated context`, on every test. One
+    Violation per test function, at the first construction.
+    """
+    isolated: dict[str, tuple[str, int]] = {}
+    blanked_by_path: dict[str, str] = {}
+    for path, content in files:
+        if not path.endswith(".swift"):
+            continue
+        b = blank_comments_and_strings(content)
+        blanked_by_path[path] = b
+        for m in _TYPE_WITH_CLAUSE_RE.finditer(b):
+            attrs = _attribute_slice(b, m.start()) + m.group(0)[:m.group(0).find(m.group(1))]
+            if _MAIN_ACTOR_ATTR_RE.search(attrs):
+                isolated.setdefault(m.group(2), (path, _line_of(b, m.start())))
+    if not isolated:
+        return []
+    ctor_re = re.compile(r"\b(" + "|".join(map(re.escape, isolated)) + r")\s*\(")
+    violations: list[Violation] = []
+    for path, b in blanked_by_path.items():
+        toks = list(_TOKEN_RE.finditer(b))
+        words = [t.group(0) for t in toks]
+        # Enclosing type annotated @MainActor => every method is isolated.
+        type_scopes_isolated: dict[int, bool] = {}
+        stack: list[int] = []
+        pending_isolated: bool | None = None
+        for i, w in enumerate(words):
+            if w == "{":
+                stack.append(i)
+                type_scopes_isolated[i] = bool(pending_isolated)
+                pending_isolated = None
+            elif w == "}":
+                if stack:
+                    stack.pop()
+                pending_isolated = None
+            elif w in _TYPE_SCOPE_KEYWORDS:
+                pending_isolated = bool(_MAIN_ACTOR_ATTR_RE.search(
+                    _attribute_slice(b, toks[i].start())))
+        for fi, bo, bc in _func_scopes(b, words, toks):
+            if not _is_test_func(b, words, toks, fi):
+                continue
+            sig = words[fi:bo]
+            if "async" in sig:
+                continue
+            if _MAIN_ACTOR_ATTR_RE.search(_attribute_slice(b, toks[fi].start())):
+                continue
+            # any enclosing scope annotated @MainActor?
+            enclosing = [sid for sid in type_scopes_isolated
+                         if toks[sid].start() < toks[fi].start()
+                         and _scope_contains(words, sid, fi)]
+            if any(type_scopes_isolated[sid] for sid in enclosing):
+                continue
+            body_text = b[toks[bo].start():toks[bc].start() if bc < len(toks) else len(b)]
+            cm = ctor_re.search(body_text)
+            if not cm:
+                continue
+            name = cm.group(1)
+            dpath, dline = isolated[name]
+            violations.append(Violation(
+                kind="main_actor_call_from_nonisolated_test",
+                message=(f"call to main actor-isolated initializer 'init' of "
+                         f"'{name}' in a synchronous nonisolated context "
+                         f"(mark func {words[fi + 1]} @MainActor and async, "
+                         f"or the enclosing test type @MainActor)"),
+                path=path,
+                line=_line_of(b, toks[bo].start() + cm.start()),
+                notes=((dpath, dline),)))
+    return violations
+
+
+def _scope_contains(words: list[str], open_idx: int, tok_idx: int) -> bool:
+    depth = 0
+    for k in range(open_idx, len(words)):
+        if words[k] == "{":
+            depth += 1
+        elif words[k] == "}":
+            depth -= 1
+            if depth == 0:
+                return open_idx < tok_idx < k
+    return open_idx < tok_idx
+
+
 @dataclass
 class SwiftPrecheckResult:
     """Outcome of the local Swift pre-checks over a generated file set."""
@@ -504,4 +903,9 @@ def run_swift_prechecks(
     violations += duplicate_type_declarations(generated_files, context_files)
     violations += mutating_methods_in_classes(generated_files)
     violations += unqualified_static_member_references(generated_files)
+    # DEV-777: the runs-44–49 classes.
+    violations += missing_throws_on_test_functions(generated_files)
+    violations += missing_hashable_conformance(generated_files)
+    violations += nil_for_non_optional_argument(generated_files)
+    violations += main_actor_types_called_from_nonisolated_tests(generated_files)
     return SwiftPrecheckResult(violations=violations)

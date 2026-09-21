@@ -383,3 +383,27 @@ def test_end_file_resets_the_target_so_a_stray_block_is_still_refused():
     parsed = parse_edit_blocks(text)
     assert parsed.files == []
     assert any("no `### path` header" in m for m in parsed.malformed)
+
+
+# ── DEV-777 class 6: an ambiguous SEARCH names the copies and their #if branches
+
+def test_ambiguous_search_names_lines_and_conditional_branches():
+    from coding_model_autonomous.apply_edits import EditBlock, apply_search_replace
+    body = "    func draw(in view: MTKView) {\n        render()\n    }\n"
+    content = ("#if os(macOS)\nstruct A {\n" + body + "}\n"
+               "#elseif os(iOS) || os(visionOS)\nstruct A {\n" + body + "}\n#endif\n")
+    r = apply_search_replace(content, [EditBlock(search=body, replace="")])
+    assert not r.ok and r.reason == "ambiguous"
+    assert "at lines 3, 9" in r.error
+    assert "#if os(macOS)` at line 1" in r.error
+    assert "#elseif os(iOS) || os(visionOS)` at line 7" in r.error
+    assert "widening the block will not make it unique" in r.error
+
+
+def test_ambiguous_search_without_conditional_branches_only_names_lines():
+    from coding_model_autonomous.apply_edits import EditBlock, apply_search_replace
+    content = "let a = 1\nlet a = 1\n"
+    r = apply_search_replace(content, [EditBlock(search="let a = 1\n", replace="")])
+    assert not r.ok and r.reason == "ambiguous"
+    assert "at lines 1, 2" in r.error
+    assert "conditional-compilation" not in r.error
