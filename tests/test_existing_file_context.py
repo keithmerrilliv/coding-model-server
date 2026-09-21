@@ -202,13 +202,32 @@ def test_plan_gate_allows_a_modify_spec_once_the_files_are_readable(monkeypatch)
 
 
 def test_plan_gate_still_blocks_when_a_file_cannot_be_read(monkeypatch):
-    """The original hazard is unchanged: refuse rather than overwrite blind."""
+    """The original hazard is unchanged: refuse rather than overwrite blind.
+
+    The runner ANSWERED and said the path is not there — a per-path error in
+    the shape the real runner returns. (A transport-shaped error is the other
+    case: DEV-762 parks on it, see the next test.)"""
     from coding_model_server import orchestrator_daemon as od
     monkeypatch.setattr(test_runner, "fetch_repo_files",
-                        lambda repo, paths, base_ref: ([], ["gone"]))
+                        lambda repo, paths, base_ref: (
+                            [], [f"{p}: fatal: path '{p}' does not exist in 'main'"
+                                 for p in paths]))
     assert od._unreadable_declared_modifications(
         _spec(""), "test_strategy:\n  repo: electric-sheep\n", MODIFY_SPEC
     ) == ["ElectricSheep/ForcingStrategy.swift"]
+
+
+def test_plan_gate_parks_when_the_runner_is_unreachable_dev762(monkeypatch):
+    """A transport failure is not an unreadable path: after the bounded
+    retries the probe raises PlanProbeOutage instead of blocking the spec."""
+    import pytest
+    from coding_model_server import orchestrator_daemon as od
+    monkeypatch.setattr(od.time, "sleep", lambda s: None)
+    monkeypatch.setattr(test_runner, "fetch_repo_files",
+                        lambda repo, paths, base_ref: ([], ["gone"]))
+    with pytest.raises(od.PlanProbeOutage):
+        od._unreadable_declared_modifications(
+            _spec(""), "test_strategy:\n  repo: electric-sheep\n", MODIFY_SPEC)
 
 
 def test_plan_gate_still_blocks_without_a_registered_repo():

@@ -977,12 +977,47 @@ def _unreadable_declared_modifications(
         # No registered repo to read from — unchanged from before the read path.
         return paths
     try:
-        ctx = _spec_context(db, spec, spec_md, role="plan probe", plan=plan)
-    except Exception as e:  # RunnerOutage included: unreadable is unreadable
+        ctx = _probe_context_with_retry(db, spec, spec_md, plan)
+    except PlanProbeOutage:
+        raise
+    except Exception as e:
         logger.warning("spec %s: could not probe declared modifications (%s)",
                        spec.id, e)
         return paths
     return [p for p in paths if ctx.existing(p) is None]
+
+
+class PlanProbeOutage(RunnerOutage):
+    """The plan probe could not reach the runner after its bounded retries.
+
+    DEV-762: a 30 s tunnel flap during the DEV-492 probe used to read as
+    "every declared path is unreadable" and terminate the spec — run 47's
+    first submission died 23 s before the runner was back. Unreachable is not
+    unreadable; the caller leaves the spec in PENDING_PLAN so the next tick
+    re-runs the planner, exactly as a planner transport error already does.
+    """
+
+
+# DEV-762: the bounded retry that covers the flaps we have measured (the
+# ECONNRESET class on DEV-188 lasts seconds, not hours) before the park.
+PLAN_PROBE_RETRIES = 3
+PLAN_PROBE_RETRY_SECONDS = 10.0
+
+
+def _probe_context_with_retry(db, spec: Spec, spec_md: str, plan: dict):
+    """`_spec_context` for the plan probe, retried on RunnerOutage only."""
+    last: "RunnerOutage | None" = None
+    for attempt in range(PLAN_PROBE_RETRIES + 1):
+        if attempt:
+            logger.warning("spec %s: plan probe found the runner down (%s) — "
+                           "retry %d/%d in %.0fs", spec.id, last, attempt,
+                           PLAN_PROBE_RETRIES, PLAN_PROBE_RETRY_SECONDS)
+            time.sleep(PLAN_PROBE_RETRY_SECONDS)
+        try:
+            return _spec_context(db, spec, spec_md, role="plan probe", plan=plan)
+        except RunnerOutage as e:
+            last = e
+    raise PlanProbeOutage(str(last))
 
 
 
@@ -1197,8 +1232,23 @@ def _accept_plan(db: Database, spec: Spec, spec_dir, result: PlannerYaml) -> Non
     # that does not exist at base_ref is caught before a human reviews the plan,
     # not after the implementer has written an invention over it.
     if not ALLOW_UNREAD_FILE_MODIFICATION:
-        unreadable = _unreadable_declared_modifications(
-            spec, yaml_text, spec_md, db=db)
+        try:
+            unreadable = _unreadable_declared_modifications(
+                spec, yaml_text, spec_md, db=db)
+        except PlanProbeOutage as e:
+            # DEV-762: the runner, not the repository, is what could not
+            # answer. Park by leaving PENDING_PLAN (the planner transport-error
+            # precedent) rather than the DEV-492 terminal block, which is for a
+            # path that genuinely does not exist at base_ref.
+            logger.warning("spec %s: plan probe could not reach the runner "
+                           "after %d retries (%s) — leaving PENDING_PLAN for "
+                           "the next tick", spec.id, PLAN_PROBE_RETRIES, e)
+            db.record_event(
+                EventKind.PLANNER_RAN, spec_id=spec.id,
+                payload={"transient_error": f"RunnerOutage: {e}",
+                         "phase": "plan_probe", "runner_outage": True,
+                         "no_verdict": True})
+            return
         if unreadable:
             _block_plan_for_unreadable_modification(db, spec, unreadable)
             return
