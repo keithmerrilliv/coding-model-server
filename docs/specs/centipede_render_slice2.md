@@ -79,8 +79,10 @@ the projection and by one pixel-asserted render of an adapted board.
    `scorpionSnapshot`). The stored properties are `private` and the diagnostic
    `'world' is inaccessible due to 'private' protection level` means USE THE ACCESSOR, never
    "change the access level".
-3. **Swift Testing rules** (they cost attempts on runs 47 and 48): a `@Test` function that
-   uses `try #require` or any other `try` is declared `throws`. A type used as a
+3. **Swift Testing rules** (they cost attempts on runs 47, 48 and 52): `#require` is ALWAYS
+   written `try #require(...)` — a bare `#require(...)` is the compile error `call can throw
+   but is not marked with 'try'`. A `@Test` function that uses `try` is declared `throws`. A
+   type used as a
    `Dictionary` key or in a `Set` is `Hashable`. Static members referenced from instance
    context are qualified (`Self.x` / `TypeName.x`).
 4. **Swift 6 mode, value types only, `Sendable` on every new public type.** No classes,
@@ -213,13 +215,41 @@ report.
    `state.lives == 2`, `state.wave == 3`.
 3. **The shot is projected.** The same game after one `fire()` and no tick has `.shot` at
    (15, 28) and `entities.count == 9`.
-4. **A seeded game agrees with the core's own accessors.** For `Game(seed: 7)`: every key of
-   `mushroomsSnapshot` maps to `.mushroom(damage: 0, poisoned: false)` in `entities`,
-   `.player` is at (15, 29), every chain's `segments[0]` maps to `.segment(isHead: true)`,
-   and every `BoardCell` key has `0..<30` column and row.
-5. **Precedence.** A spider placed on a mushroom's cell (`Spider(position: Position(column: 10, row: 27), …)`
-   with a `Mushroom()` at the same position, no tick) projects as `.spider` there; a spider
-   placed on the player's cell projects as `.player` there.
+4. **A seeded game agrees with the core's own accessors.** The accessors live on the
+   `Game`, never on the snapshot (`snap.mushroomsSnapshot` does not exist and cost run 52
+   an attempt). Exactly this shape:
+
+   ```swift
+   let g = Game(seed: 7)
+   let snap = g.boardSnapshot()
+   for (pos, m) in g.mushroomsSnapshot {
+       #expect(snap.entities[BoardCell(column: pos.column, row: pos.row)]
+               == .mushroom(damage: m.damageLevel, poisoned: m.poisoned))
+   }
+   #expect(snap.entities[BoardCell(column: 15, row: 29)] == .player)
+   for chain in g.chainsSnapshot {
+       let head = chain.segments[0]
+       #expect(snap.entities[BoardCell(column: head.column, row: head.row)] == .segment(isHead: true))
+   }
+   #expect(snap.entities.keys.allSatisfy { (0..<30).contains($0.column) && (0..<30).contains($0.row) })
+   ```
+5. **Precedence.** Two games, no tick, exactly these:
+
+   ```swift
+   // A: spider on a mushroom's cell → the spider wins
+   let a = Game(world: World(mushrooms: [Position(column: 10, row: 27): Mushroom()], chains: []),
+                gameState: GameState(), playerPosition: Position(column: 15, row: 29),
+                spider: Spider(position: Position(column: 10, row: 27), columnDelta: 1, rowDelta: 1))
+   #expect(a.boardSnapshot().entities[BoardCell(column: 10, row: 27)] == .spider)
+   // B: spider on the player's cell → the player wins
+   let b = Game(world: World(mushrooms: [:], chains: []),
+                gameState: GameState(), playerPosition: Position(column: 15, row: 29),
+                spider: Spider(position: Position(column: 15, row: 29), columnDelta: 1, rowDelta: 1))
+   #expect(b.boardSnapshot().entities[BoardCell(column: 15, row: 29)] == .player)
+   ```
+
+   A game with a mushroom under the PLAYER and no spider tests nothing here; do not write
+   that (run 52's design seam did, and synthesis copied it).
 6. **Adapter maps every drawable kind and drops the rest.** A `BoardSnapshot` built with the
    public init holding one of each `BoardEntity` in distinct cells (the mushroom
    `.mushroom(damage: 2, poisoned: true)`) adapts to a `FrameSnapshot` with
