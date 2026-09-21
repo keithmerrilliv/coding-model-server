@@ -5751,7 +5751,7 @@ def _extract_actionable_test_output(output: str, framework: str, max_chars: int 
         failures = [ln for ln in lines
                     if ("recorded an issue" in ln or "Expectation failed" in ln
                         or "' failed on " in ln or ": error: " in ln
-                        or "XCTAssert" in ln)]
+                        or ": note: " in ln or "XCTAssert" in ln)]
         verdicts = [ln for ln in lines
                     if ("Test run with" in ln or "TEST FAILED" in ln
                         or "TEST SUCCEEDED" in ln or "Executed " in ln)]
