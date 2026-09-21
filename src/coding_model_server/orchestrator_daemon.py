@@ -5742,6 +5742,25 @@ def _extract_actionable_test_output(output: str, framework: str, max_chars: int 
             head = extracted[: max_chars - 1200]
             tail = extracted[-1200:]
             return head + "\n\n[... output truncated ...]\n\n" + tail
+    elif fw in ("swift_test", "xcodebuild_test"):
+        # DEV-792: the failing expectations and the verdict lines, in order,
+        # ahead of anything else — a near-miss repair needs the named test and
+        # its line, not 8,000 chars of passed-case noise.
+        clean = _outcome.ANSI_SGR_RE.sub("", output)
+        lines = clean.splitlines()
+        failures = [ln for ln in lines
+                    if ("recorded an issue" in ln or "Expectation failed" in ln
+                        or "' failed on " in ln or ": error: " in ln
+                        or ": note: " in ln or "XCTAssert" in ln)]
+        verdicts = [ln for ln in lines
+                    if ("Test run with" in ln or "TEST FAILED" in ln
+                        or "TEST SUCCEEDED" in ln or "Executed " in ln)]
+        keep = failures + verdicts
+        if keep:
+            extracted = "\n".join(keep)
+            if len(extracted) <= max_chars:
+                return extracted
+            return extracted[:max_chars]
     elif fw == "node_test":
         # node:test emits TAP: failures are `not ok N - name` lines followed by
         # a YAML diagnostic block; passes (`ok N`) before them are just noise
@@ -6630,6 +6649,40 @@ _SYNTHESIS_REPAIR_MIN_RATE = float(
     os.getenv("AUTONOMOUS_SYNTHESIS_REPAIR_MIN_RATE", "0.8"))
 
 
+# DEV-792: the three Swift summary shapes. `xcodebuild test` prints one
+# "Test case '…' passed|failed" line per case; `swift test` with Swift Testing
+# prints "Test run with N tests … passed|failed" per target plus one
+# "✘ Test name() failed after …" per failing test; XCTest under `swift test`
+# prints "Executed N tests, with M failures". Run 52's synthesis was 30 of 31
+# green and got no repair round because none of these was a "pass rate".
+_XCODEBUILD_CASE_RE = re.compile(
+    r"^Test case '[^']+' (passed|failed) on ", re.MULTILINE)
+_SWIFT_TESTING_RUN_RE = re.compile(r"Test run with (\d+) tests? in ")
+_SWIFT_TESTING_FAILED_RE = re.compile(
+    r"^\s*\S*\s*Test (?!run\b)\S+ failed after ", re.MULTILINE)
+_XCTEST_EXECUTED_RE = re.compile(r"Executed (\d+) tests?, with (\d+) failures?")
+
+
+def _swift_pass_rate(test_output: str) -> "float | None":
+    """Pass fraction from a Swift runner's output, or None (DEV-792)."""
+    text = _outcome.ANSI_SGR_RE.sub("", test_output or "")
+    cases = _XCODEBUILD_CASE_RE.findall(text)
+    if cases:
+        return cases.count("passed") / len(cases)
+    runs = [int(n) for n in _SWIFT_TESTING_RUN_RE.findall(text)]
+    if runs and sum(runs) > 0:
+        total = sum(runs)
+        failed = len(_SWIFT_TESTING_FAILED_RE.findall(text))
+        return max(0.0, total - failed) / total
+    executed = _XCTEST_EXECUTED_RE.findall(text)
+    if executed:
+        total = sum(int(n) for n, _ in executed)
+        failed = sum(int(m) for _, m in executed)
+        if total > 0:
+            return max(0.0, total - failed) / total
+    return None
+
+
 def _test_pass_rate(test_output: str) -> "float | None":
     """Best-effort pass fraction from a runner summary; None if unparseable.
 
@@ -6640,6 +6693,9 @@ def _test_pass_rate(test_output: str) -> "float | None":
     tap_pass = re.search(r"^# pass (\d+)$", test_output, re.MULTILINE)
     if tap_total and tap_pass and int(tap_total.group(1)) > 0:
         return int(tap_pass.group(1)) / int(tap_total.group(1))
+    swift_rate = _swift_pass_rate(test_output)
+    if swift_rate is not None:
+        return swift_rate
     passed = re.search(r"(\d+) passed", test_output)
     failed = re.search(r"(\d+) failed", test_output)
     if passed:
