@@ -115,7 +115,7 @@ PLANNER_SYSTEM_PROMPT = textwrap.dedent("""\
     goal: |
       Multi-line description of what is being built and what success
       looks like. Should match what the user wrote, condensed.
-    language: python              # or swift, typescript, rust, etc.
+    language: python              # or swift, objective-c, objective-c++, typescript, rust, etc.
     target_runtime: "Python 3.10+"
     output_location:
       repo: "path/to/repo or 'new project'"
