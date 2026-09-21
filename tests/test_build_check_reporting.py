@@ -213,3 +213,27 @@ def test_every_recorded_run4_build_failure_is_correctly_classified():
         assert d._detect_build_failure(text, "swift_test", False) is not None
         assert "**compiled**" not in d._build_check_line(False, text, "swift_test")
     assert seen >= 2, f"expected several recorded failures, saw {seen}"
+
+
+# DEV-787: `xcodebuild test` under parallel testing prints per-case lines and
+# the ** TEST FAILED ** verdict and nothing that the older patterns knew.
+XCODEBUILD_PARALLEL_FAIL = """\
+Test case 'AudioLifecycleTests.test_interruption_stops_playback()' passed on 'My Mac - ElectricSheep (1720)' (0.024 seconds)
+Test case 'ProductionDtypeConversionTests/unsupportedDtypeStillContained()' failed on 'My Mac - ElectricSheep (1713)' (1.595 seconds)
+Test case 'GPULayoutTests/size()' passed on 'My Mac - ElectricSheep (1713)' (1.593 seconds)
+\tProductionDtypeConversionTests.unsupportedDtypeStillContained()
+
+** TEST FAILED **
+"""
+
+
+def test_xcodebuild_parallel_output_counts_as_an_observed_run():
+    assert d._observed_a_test_run(XCODEBUILD_PARALLEL_FAIL, "xcodebuild_test") is True
+    assert d._observed_a_test_run("** TEST SUCCEEDED **\n", "xcodebuild_test") is True
+    assert d._observed_a_test_run(REAL_BUILD_FAILURE, "xcodebuild_test") is False
+
+
+def test_xcodebuild_parallel_red_suite_is_reported_as_compiled_not_inconclusive():
+    text = d._build_check_line(False, XCODEBUILD_PARALLEL_FAIL, "xcodebuild_test")
+    assert "inconclusive" not in text
+    assert "compiled" in text
