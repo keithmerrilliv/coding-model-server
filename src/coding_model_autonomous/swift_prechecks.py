@@ -586,6 +586,37 @@ def missing_throws_on_test_functions(
     return violations
 
 
+_REQUIRE_RE = re.compile(r"#require\s*\(")
+
+
+def require_without_try(files: list[tuple[str, str]]) -> list[Violation]:
+    """A `#require(...)` not preceded by `try` / `try?` / `try!` (DEV-791).
+
+    `#require` is a throwing macro; without `try` Swift 6 reports
+    `call can throw but is not marked with 'try'` at a `macro expansion`
+    pseudo-location that nothing downstream could locate. Run 52's retry 3
+    lost the attempt to it. One Violation per offending `#require`, at the
+    compiler's message, so the retry sees the same words the Mac would print.
+    Comments and strings are blanked first, so a `#require` in prose does not
+    count.
+    """
+    violations: list[Violation] = []
+    for path, content in files:
+        if not path.endswith(".swift"):
+            continue
+        blanked = blank_comments_and_strings(content)
+        for m in _REQUIRE_RE.finditer(blanked):
+            before = blanked[:m.start()].rstrip()
+            if re.search(r"\btry[?!]?$", before):
+                continue
+            violations.append(Violation(
+                kind="require_without_try",
+                message=("call can throw but is not marked with 'try' "
+                         "(write `try #require(...)`)"),
+                path=path, line=_line_of(blanked, m.start()), notes=()))
+    return violations
+
+
 # Column-0 struct/class declaration with its inheritance clause up to `{`.
 _TYPE_WITH_CLAUSE_RE = re.compile(
     r"^(?:@[A-Za-z_]\w*(?:\s*\([^)]*\))?[ \t]+)*"
@@ -905,6 +936,7 @@ def run_swift_prechecks(
     violations += unqualified_static_member_references(generated_files)
     # DEV-777: the runs-44–49 classes.
     violations += missing_throws_on_test_functions(generated_files)
+    violations += require_without_try(generated_files)   # DEV-791
     violations += missing_hashable_conformance(generated_files)
     violations += nil_for_non_optional_argument(generated_files)
     violations += main_actor_types_called_from_nonisolated_tests(generated_files)

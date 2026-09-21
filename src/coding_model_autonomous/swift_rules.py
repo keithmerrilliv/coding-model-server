@@ -89,6 +89,16 @@ _LOCATED_RE = re.compile(
     r"^\s*(?P<path>\S.*?\.\w+):(?P<line>\d+):(?P<col>\d+): error: (?P<msg>.+?)\s*$",
     re.MULTILINE,
 )
+# DEV-791: Swift 6 reports an error inside a macro expansion (`#require`,
+# `#expect`) at `macro expansion #name:1:1:` with NO path, and puts the real
+# location on the next line as a note. Run 52's retry 3 (`#require` without
+# `try`) produced nothing the pattern above could locate, so the retry was
+# headlined with the bare "SwiftCompile ... failed" line.
+_MACRO_LOCATED_RE = re.compile(
+    r"^\s*macro expansion #\w+:\d+:\d+: error: (?P<msg>.+?)\s*\n"
+    r"\s*`- (?P<path>\S.*?\.\w+):(?P<line>\d+):(?P<col>\d+): note: expanded code originates here",
+    re.MULTILINE,
+)
 
 
 @dataclass(frozen=True)
@@ -130,7 +140,10 @@ def located_diagnostics(output: str,
     text = ANSI_SGR_RE.sub("", output)
     seen: set = set()
     out: list[LocatedDiagnostic] = []
-    for m in _LOCATED_RE.finditer(text):
+    matches = sorted(
+        list(_LOCATED_RE.finditer(text)) + list(_MACRO_LOCATED_RE.finditer(text)),
+        key=lambda m: m.start())
+    for m in matches:
         key = (m.group("path"), int(m.group("line")), m.group("msg"))
         if key in seen:
             continue
@@ -147,6 +160,9 @@ _FIX_HINTS: "list[tuple[re.Pattern, str]]" = [
     (re.compile(r"static member '(\w+)' cannot be used on instance"),
      "qualify the reference on this line as `Self.{0}` — do not remove "
      "qualifiers anywhere else"),
+    (re.compile(r"call can throw but is not marked with 'try'"),
+     "write `try` in front of that call (`try #require(...)`, `try f()`); the "
+     "enclosing function must be `throws`, or the call sits in a do/catch."),
     (re.compile(r"errors thrown from here are not handled"),
      "declare the enclosing function `throws` (for a test: "
      "`@Test func name() throws {{`)"),
