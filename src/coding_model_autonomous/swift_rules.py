@@ -182,8 +182,16 @@ _FIX_HINTS: "list[tuple[re.Pattern, str]]" = [
      "declaration for it) or the name is misspelled; if the build also "
      "reports a failed emit-module, this is a consequence of that, not the "
      "cause"),
-    (re.compile(r"value of type '(\w+)' has no member '(\w+)'"),
-     "`{0}` has no `{1}` — use the member it actually declares"),
+    (re.compile(r"(?:value of )?type '([\w.]+)' has no member '(\w+)'"),
+     "`{0}` has no `{1}` — that name is invented; use a member `{0}` "
+     "actually declares (for a notification, the `Notification.Name` "
+     "constant, e.g. `.AVAudioEngineConfigurationChange`)"),
+    # Run 50 (spec_aba12b2b) retry 0: `'AVAudioSession' is unavailable in
+    # macOS` twice — an iOS/visionOS-only API used outside its #if branch.
+    (re.compile(r"'([\w.]+)' is unavailable in (\w+)"),
+     "`{0}` does not exist on {1} — wrap the use in "
+     "`#if os(iOS) || os(visionOS)` (with a macOS branch that compiles), do "
+     "not remove the {1} build"),
 ]
 
 
