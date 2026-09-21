@@ -163,6 +163,43 @@ class ResolveResult:
     applied: list[EditApplied] = field(default_factory=list)
 
 
+_CONDITIONAL_LINE_RE = re.compile(r"^\s*#(if|elseif|else)\b(.*)$")
+
+
+def _describe_ambiguity(content_lines: list[str], starts: list[int]) -> str:
+    """Where the copies are, and whether they sit under different `#if`
+    branches (DEV-763 / DEV-777 class 6).
+
+    Run 47 lost two of three attempts to a SEARCH that matched both
+    byte-identical `draw(in:)` bodies of a `#if os(macOS)` / `#elseif os(iOS)`
+    pair; the refusal said "add surrounding lines", which cannot work when
+    the whole enclosing class is duplicated. Naming the branches tells the
+    retry to anchor on a branch-unique line instead. Empty when *starts* is
+    empty (the caller had no positions).
+    """
+    if not starts:
+        return ""
+    lines = ", ".join(str(s + 1) for s in starts)
+    branches: list[str] = []
+    for s in starts:
+        found = None
+        for k in range(s, -1, -1):
+            m = _CONDITIONAL_LINE_RE.match(content_lines[k])
+            if m:
+                found = f"`#{m.group(1)}{m.group(2).strip() and ' ' + m.group(2).strip()}` at line {k + 1}"
+                break
+        branches.append(found or "no #if above")
+    text = f" at lines {lines}"
+    distinct = set(branches)
+    if len(distinct) > 1 and any(b != "no #if above" for b in branches):
+        text += (" — the copies sit under different conditional-compilation "
+                 "branches (" + "; ".join(branches) + "); widening the block "
+                 "will not make it unique, so include a branch-unique line "
+                 "(the #if/#elseif line itself, or a declaration only that "
+                 "branch has, e.g. makeNSView vs makeUIView)")
+    return text
+
+
 def _snippet(text: str, max_lines: int = 4) -> str:
     """A short, indented preview of a SEARCH body for diagnostics."""
     lines = text.splitlines()
@@ -443,10 +480,18 @@ def apply_search_replace(current: str, blocks: list[EditBlock]) -> ApplyResult:
             applied.append(AppliedBlock(idx, TIER_EXACT, 1.0, None))
             continue
         if count > 1:
+            starts, pos = [], 0
+            while True:
+                pos = content.find(block.search, pos)
+                if pos < 0:
+                    break
+                starts.append(content.count("\n", 0, pos))
+                pos += 1
             return ApplyResult(
                 ok=False,
                 error=(f"edit block #{idx}: SEARCH text matches {count} places "
-                       "(ambiguous) — add surrounding lines until it is unique. "
+                       f"(ambiguous){_describe_ambiguity(content.split(chr(10)), starts)}"
+                       " — add surrounding lines until it is unique. "
                        f"The SEARCH was:\n{_snippet(block.search)}"),
                 failed_index=idx, failed_block=block, reason="ambiguous",
                 applied=applied)
@@ -455,13 +500,14 @@ def apply_search_replace(current: str, blocks: list[EditBlock]) -> ApplyResult:
         search_lines = block.search.split("\n")
         replace_lines = block.replace.split("\n") if block.replace != "" else []
 
-        def _ambiguous(tier: str, n: int) -> ApplyResult:
+        def _ambiguous(tier: str, n: int, starts: list[int] = ()) -> ApplyResult:  # type: ignore[assignment]
             return ApplyResult(
                 ok=False,
                 error=(f"edit block #{idx}: SEARCH text matches {n} places "
-                       f"(ambiguous, {tier} match) — add surrounding lines "
-                       "until it is unique. The SEARCH was:\n"
-                       f"{_snippet(block.search)}"),
+                       f"(ambiguous, {tier} match)"
+                       f"{_describe_ambiguity(content_lines, list(starts))}"
+                       " — add surrounding lines until it is unique. "
+                       f"The SEARCH was:\n{_snippet(block.search)}"),
                 failed_index=idx, failed_block=block, reason="ambiguous",
                 applied=applied)
 
@@ -469,7 +515,7 @@ def apply_search_replace(current: str, blocks: list[EditBlock]) -> ApplyResult:
         target = [ln.rstrip() for ln in search_lines]
         hits = _windows_equal(content_lines, target, str.rstrip)
         if len(hits) > 1:
-            return _ambiguous(TIER_TRAILING_WS, len(hits))
+            return _ambiguous(TIER_TRAILING_WS, len(hits), hits)
         if hits:
             content = _splice(content, hits[0], len(search_lines), replace_lines)
             applied.append(AppliedBlock(idx, TIER_TRAILING_WS, 1.0, hits[0] + 1))
@@ -478,7 +524,7 @@ def apply_search_replace(current: str, blocks: list[EditBlock]) -> ApplyResult:
         # Tier 3: indent-relative.
         hits = _indent_relative_windows(content_lines, search_lines)
         if len(hits) > 1:
-            return _ambiguous(TIER_INDENT, len(hits))
+            return _ambiguous(TIER_INDENT, len(hits), hits)
         if hits:
             window = content_lines[hits[0]:hits[0] + len(search_lines)]
             new_lines = _reindent(replace_lines,

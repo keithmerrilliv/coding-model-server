@@ -1,0 +1,96 @@
+#!/usr/bin/env python
+"""Measure the local Swift prechecks against the spec archive (DEV-777).
+
+Runs every detector over every Swift file set in var/tasks_db/specs — the spec
+workspace itself and each retry_history/* directory — and reports, per
+detector, how many sets it fired on, split by what the Mac said about that set:
+
+  build_failed   the directory carries build_failure.txt (a real compiler
+                 verdict exists; a hit here is a candidate TRUE positive)
+  passed         test_output.txt / build_check_output.txt says the suite ran
+                 green (a hit here is a FALSE positive by construction)
+  unknown        neither — never built, or the record is gone
+
+Run it before shipping a new detector (see the memory rule "guards must arm on
+the spec archive") and paste the table on the ticket.
+
+    ./venv/bin/python scripts/sweep_swift_prechecks.py [--show KIND] [--root DIR]
+"""
+from __future__ import annotations
+
+import argparse
+import re
+import sys
+from collections import Counter, defaultdict
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from coding_model_autonomous import swift_prechecks as sp  # noqa: E402
+
+_GREEN = re.compile(r"TEST SUCCEEDED|Test run with \d+ tests? passed|"
+                    r"Executed \d+ tests?, with 0 failures|\b\d+ passed\b")
+
+
+def _verdict(d: Path) -> str:
+    if (d / "build_failure.txt").exists():
+        return "build_failed"
+    for name in ("test_output.txt", "build_check_output.txt"):
+        f = d / name
+        if f.exists():
+            txt = re.sub(r"\x1b\[[0-9;]*m", "", f.read_text(errors="replace"))
+            if _GREEN.search(txt) and "error:" not in txt:
+                return "passed"
+    return "unknown"
+
+
+def _swift_set(d: Path) -> list[tuple[str, str]]:
+    out = []
+    for p in d.rglob("*.swift"):
+        rel = p.relative_to(d)
+        if rel.parts and rel.parts[0] in ("retry_history", "_contained", ".repo_overlay"):
+            continue
+        out.append((str(rel), p.read_text(errors="replace")))
+    return out
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--root", default="var/tasks_db/specs")
+    ap.add_argument("--show", help="print every hit of this detector kind")
+    args = ap.parse_args()
+    root = Path(args.root)
+    dirs: list[Path] = []
+    for spec in sorted(root.glob("spec_*")):
+        dirs.append(spec)
+        rh = spec / "retry_history"
+        if rh.is_dir():
+            dirs.extend(sorted(p for p in rh.iterdir() if p.is_dir()))
+    sets = 0
+    by_kind: dict[str, Counter] = defaultdict(Counter)
+    hits: list[tuple[str, str, sp.Violation]] = []
+    for d in dirs:
+        files = _swift_set(d)
+        if not files:
+            continue
+        sets += 1
+        v = _verdict(d)
+        result = sp.run_swift_prechecks(files)
+        for kind in {x.kind for x in result.violations}:
+            by_kind[kind][v] += 1
+        for x in result.violations:
+            hits.append((str(d.relative_to(root)), v, x))
+    print(f"swift file sets scanned: {sets}")
+    print(f"{'detector':44} {'build_failed':>12} {'passed':>8} {'unknown':>8}")
+    for kind in sorted(by_kind):
+        c = by_kind[kind]
+        print(f"{kind:44} {c['build_failed']:>12} {c['passed']:>8} {c['unknown']:>8}")
+    if args.show:
+        print()
+        for where, v, x in hits:
+            if x.kind == args.show:
+                print(f"[{v}] {where}: {x.path}:{x.line}: {x.message[:90]}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
