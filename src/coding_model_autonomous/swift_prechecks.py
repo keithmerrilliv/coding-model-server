@@ -617,6 +617,81 @@ def require_without_try(files: list[tuple[str, str]]) -> list[Violation]:
     return violations
 
 
+# DEV-784: closures the code hands to these APIs run as nonisolated
+# synchronous contexts. Under SWIFT_DEFAULT_ACTOR_ISOLATION=MainActor every
+# unannotated type is isolated, so a bare instance-method call inside one is
+# `call to main actor-isolated instance method … in a synchronous nonisolated
+# context` — with no `@MainActor` anywhere in the text to warn the model.
+_NONISOLATED_CLOSURE_RE = re.compile(
+    r"(?:\.sink\s*\{"
+    r"|addObserver\s*\((?:[^{}]|\n)*?\)\s*\{"
+    r"|DispatchQueue[^{\n]*?\.async(?:After)?\s*(?:\([^{}\n]*\))?\s*\{"
+    r"|Timer\.scheduledTimer\s*\((?:[^{}]|\n)*?\)\s*\{)")
+_HOP_RE = re.compile(r"\bTask\s*(?:\.detached\s*)?(?:\([^{}]*\))?\s*\{|MainActor\.(?:assumeIsolated|run)\b|\bawait\b")
+_INSTANCE_FUNC_RE = re.compile(
+    r"^[ \t]+(?:@\w+(?:\([^)]*\))?[ \t]+)*(?!static\b|class\b|nonisolated\b)"
+    r"(?:(?:public|internal|fileprivate|private|open|final|override|mutating)[ \t]+)*"
+    r"func[ \t]+([A-Za-z_]\w*)\s*\(", re.MULTILINE)
+
+
+def nonisolated_closure_calls_isolated_method(
+    files: list[tuple[str, str]], default_isolation: "str | None",
+) -> list[Violation]:
+    """Under a default-MainActor target, an instance method of the same file
+    called synchronously inside a NotificationCenter / Combine sink /
+    DispatchQueue / Timer closure with no `Task { @MainActor in … }` or
+    `MainActor.assumeIsolated` hop (DEV-784, run 50's repair round).
+
+    Conservative on purpose: app-target files only (no `Tests/` component),
+    the closure must be introduced by one of the four APIs above, the callee
+    must be an instance `func` declared in the same file, and any hop anywhere
+    in the closure body clears it. One Violation per offending closure.
+    """
+    if not default_isolation or default_isolation.strip().lower() != "mainactor":
+        return []
+    violations: list[Violation] = []
+    for path, content in files:
+        if not path.endswith(".swift") or "Tests/" in path.replace("\\", "/"):
+            continue
+        blanked = blank_comments_and_strings(content)
+        methods = set(_INSTANCE_FUNC_RE.findall(blanked))
+        if not methods:
+            continue
+        call_re = re.compile(r"(?:self\??\.)?\b(" + "|".join(map(re.escape, sorted(methods))) + r")\s*\(")
+        for m in _NONISOLATED_CLOSURE_RE.finditer(blanked):
+            start = m.end() - 1          # the `{`
+            depth = 0; end = None
+            for i in range(start, len(blanked)):
+                ch = blanked[i]
+                if ch == "{": depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        end = i; break
+            if end is None:
+                continue
+            body = blanked[start:end + 1]
+            if _HOP_RE.search(body):
+                continue
+            hit = None
+            for cm in call_re.finditer(body):
+                before = body[max(0, cm.start() - 5):cm.start()]
+                if before.endswith("func "):
+                    continue
+                hit = cm; break
+            if hit is None:
+                continue
+            name = hit.group(1)
+            violations.append(Violation(
+                kind="nonisolated_closure_isolated_call",
+                message=(f"call to main actor-isolated instance method '{name}()' in a "
+                         f"synchronous nonisolated context (the type is isolated by "
+                         f"SWIFT_DEFAULT_ACTOR_ISOLATION=MainActor; wrap the closure body "
+                         f"in Task {{ @MainActor in ... }})"),
+                path=path, line=_line_of(blanked, start + hit.start()), notes=()))
+    return violations
+
+
 # Column-0 struct/class declaration with its inheritance clause up to `{`.
 _TYPE_WITH_CLAUSE_RE = re.compile(
     r"^(?:@[A-Za-z_]\w*(?:\s*\([^)]*\))?[ \t]+)*"
@@ -922,6 +997,7 @@ class SwiftPrecheckResult:
 def run_swift_prechecks(
     generated_files: list[tuple[str, str]],
     context_files: tuple | list = (),
+    default_isolation: "str | None" = None,
 ) -> SwiftPrecheckResult:
     """Run every local Swift pre-check over a generated file set.
 
@@ -940,4 +1016,6 @@ def run_swift_prechecks(
     violations += missing_hashable_conformance(generated_files)
     violations += nil_for_non_optional_argument(generated_files)
     violations += main_actor_types_called_from_nonisolated_tests(generated_files)
+    # DEV-784: only when the spec's test_strategy declares the target's default.
+    violations += nonisolated_closure_calls_isolated_method(generated_files, default_isolation)
     return SwiftPrecheckResult(violations=violations)

@@ -186,6 +186,7 @@ report.
     scheme: ElectricSheep
     destination: "platform=macOS"
     filter: ElectricSheepTests
+    default_actor_isolation: MainActor
     skip_filter: ElectricSheepTests/DtypeContainmentTests,ElectricSheepTests/ProductionDtypeConversionTests
     protected_paths:
       - ElectricSheepTests/AudioscapeStateTests.swift

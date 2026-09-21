@@ -573,7 +573,8 @@ def _spec_declared_test_strategy(spec_md: str) -> dict:
 # SUBSTITUTED value is worse than a dropped one because it is well-formed and
 # plausible and survives every structural check.
 _OPERATOR_STRATEGY_KEYS = ("repo", "protected_paths", "base_ref", "filter",
-                           "execution_target", "framework", "skip_filter")
+                           "execution_target", "framework", "skip_filter",
+                           "default_actor_isolation")   # DEV-784
 
 
 def _overlay_operator_test_strategy(yaml_text: str, spec_md: str,
@@ -2116,6 +2117,9 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
                        spec.id, len(unreadable), ctx.base_ref,
                        ", ".join(p for p, _, _ in unreadable))
 
+    standing_rules = swift_rules.render_default_isolation_rule(
+        _default_actor_isolation(spec))   # DEV-784
+
     def _architect_prompt(existing, reference, omitted_e=None, omitted_r=None):
         return build_architect_message(
             spec_md, rejection_notes=rejection_notes, plan_yaml=plan_yaml,
@@ -2123,7 +2127,8 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
             approval_conditions=plan_conditions,
             omitted_existing=omitted_e, omitted_reference=omitted_r,
             unresolved=unresolved, unreadable=unreadable,
-            base_ref=ctx.base_ref, tools=use_tools)
+            base_ref=ctx.base_ref, tools=use_tools,
+            standing_rules=standing_rules or None)
 
     # DEV-633: the architect's editable render was the pipeline's one entirely
     # unbudgeted file section — a raw join of every modified file into a model
@@ -2876,6 +2881,9 @@ def _generate_implementation(
     # not the budget-trimmed render.
     unresolved = _unresolved_for(view)
 
+    standing_rules = swift_rules.render_default_isolation_rule(
+        _default_actor_isolation(spec))   # DEV-784
+
     def _implementer_prompt(existing, reference, omitted_e=None, omitted_r=None):
         return build_implementer_message(
             spec_md, design_md, rejection_notes=rejection_notes,
@@ -2885,7 +2893,8 @@ def _generate_implementation(
             unresolved=unresolved,
             edit_mode=executor.DIFF_BASED_EDITS and bool(existing),
             new_files=new_files,
-            omitted_existing=omitted_e, omitted_reference=omitted_r)
+            omitted_existing=omitted_e, omitted_reference=omitted_r,
+            standing_rules=standing_rules or None)
 
     # DEV-633: budget the two file sections against the window that will
     # actually receive them, BEFORE rendering. fixed_chars is what this exact
@@ -4066,6 +4075,21 @@ def _normalize_generated_files(db: Database, spec: Spec, task, files, role: str,
     return normalized
 
 
+def _default_actor_isolation(spec: Spec) -> "str | None":
+    """The target's `SWIFT_DEFAULT_ACTOR_ISOLATION`, as the spec's operator
+    test_strategy declares it (`default_actor_isolation: MainActor`), or None
+    (DEV-784). Electric Sheep's app target is default-isolated; nothing in a
+    served file says so."""
+    try:
+        ts = _load_plan(spec).get("test_strategy")
+    except Exception:
+        return None
+    if not isinstance(ts, dict):
+        return None
+    v = ts.get("default_actor_isolation")
+    return str(v) if v else None
+
+
 def _local_swift_precheck(db: Database, spec: Spec, task, files,
                           protected_files) -> "tuple[str | None, str]":
     """Statically-decidable Swift errors, caught before the ~300s Mac dispatch.
@@ -4087,7 +4111,9 @@ def _local_swift_precheck(db: Database, spec: Spec, task, files,
     Never raises: a static lint must not be able to stall a spec.
     """
     try:
-        result = swift_prechecks.run_swift_prechecks(files, protected_files or [])
+        result = swift_prechecks.run_swift_prechecks(
+            files, protected_files or [],
+            default_isolation=_default_actor_isolation(spec))
     except Exception as e:  # never let the check itself break a generation
         logger.warning("spec %s: local Swift pre-check errored (%s) — "
                        "falling through to the Mac build check", spec.id, e)

@@ -167,11 +167,13 @@ _FIX_HINTS: "list[tuple[re.Pattern, str]]" = [
      "declare the enclosing function `throws` (for a test: "
      "`@Test func name() throws {{`)"),
     (re.compile(r"main actor-isolated .* (?:in a synchronous nonisolated "
-                r"context|from a nonisolated context)"),
-     "annotate the ENCLOSING declaration `@MainActor` (a test: "
-     "`@MainActor func name() async throws {{`) and `await` the call — never "
-     "mark the callee `nonisolated`, and every helper that test calls needs "
-     "the same annotation"),
+                r"context|from a nonisolated)"),
+     "if the cited line is inside a closure handed to NotificationCenter, a "
+     "Combine sink, DispatchQueue or Timer, wrap that closure's body in "
+     "`Task { @MainActor in ... }` (or `MainActor.assumeIsolated { }` when it "
+     "is known to run on main); otherwise annotate the ENCLOSING declaration "
+     "`@MainActor` (a test method becomes `@MainActor func test…() async "
+     "throws`) — never the callee (DEV-784)"),
     (re.compile(r"call to main actor-isolated"),
      "annotate the ENCLOSING declaration `@MainActor` (a test: "
      "`@MainActor func name() async throws {{`) and `await` the call — never "
@@ -334,3 +336,27 @@ def filter_repair_to_cited(repair_files: "list[tuple[str, str]]",
             res.kept.append((rel, content))
             res.untouched.append(rel)
     return res
+
+
+# DEV-784: rendered only when the spec's test_strategy declares the target's
+# default isolation, so every other prompt stays byte-identical.
+def render_default_isolation_rule(isolation: "str | None") -> str:
+    if not isolation or isolation.strip().lower() != "mainactor":
+        return ""
+    return (
+        "## This target is default-isolated to the main actor\n\n"
+        "The project builds with `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`: "
+        "EVERY unannotated declaration in the app target is `@MainActor`, with "
+        "no annotation in the text to show it. Consequences:\n"
+        "- A closure handed to `NotificationCenter.addObserver(forName:…using:)`, "
+        "a Combine `.sink { }`, `DispatchQueue….async { }` or a `Timer` runs as a "
+        "nonisolated synchronous context. Calling an instance method or touching "
+        "a property inside it is the error `call to main actor-isolated instance "
+        "method … in a synchronous nonisolated context`. Hop first: "
+        "`Task { @MainActor in … }`, or `MainActor.assumeIsolated { }` when the "
+        "closure is known to run on main.\n"
+        "- Do not add `@MainActor` to types (redundant) and do not add "
+        "`nonisolated` to anything that touches their state.\n"
+        "- The TEST target is NOT default-isolated: a test that constructs or "
+        "calls an app-target type is `@MainActor func test…() async throws`.\n\n"
+    )

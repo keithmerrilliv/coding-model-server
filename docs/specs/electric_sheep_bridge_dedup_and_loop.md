@@ -155,6 +155,7 @@ A green build is NOT sufficient — the tests below are the gate.
     scheme: ElectricSheep
     destination: "platform=macOS"
     filter: ElectricSheepTests
+    default_actor_isolation: MainActor
     skip_filter: ElectricSheepTests/DtypeContainmentTests
     protected_paths:
       - ElectricSheep/AudioManager.swift

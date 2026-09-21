@@ -311,6 +311,7 @@ declared `@MainActor … async throws`.
     scheme: ElectricSheep
     destination: "platform=macOS"
     filter: ElectricSheepTests
+    default_actor_isolation: MainActor
     skip_filter: ElectricSheepTests/DtypeContainmentTests
 
 ## Constraints
