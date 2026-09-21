@@ -4525,17 +4525,9 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
         if build_reason is not None:
             ArtifactLedger.open(db, spec, spec_dir).note(
                 "build_failure.txt", build_output)
-            actionable = _extract_actionable_test_output(
-                build_output, ts_for_build["framework"])
-            feedback = (
-                f"## The code does not compile\n\n"
-                f"No review was performed — the build failed, so there is nothing "
-                f"to review yet. First compiler diagnostic:\n\n"
-                f"    {build_reason}\n\n"
-                f"{_diagnostic_completeness_note(build_output)}"
-                f"{_reemit_instruction('Fix every diagnostic below and re-emit ALL files.')}\n\n"
-                f"```\n{actionable}\n```\n"
-            )
+            feedback = _build_failure_feedback(
+                build_output, build_reason, ts_for_build["framework"],
+                [p for p, _ in result.files])
         else:
             # DEV-547: compiled, but on proof the code contradicts itself.
             ArtifactLedger.open(db, spec, spec_dir).note(
@@ -4734,6 +4726,36 @@ def _unattributed_errors(output: str) -> list[str]:
             seen.add(msg)
             out.append(msg)
     return out
+
+
+def _build_failure_feedback(build_output: str, build_reason: str,
+                            framework: str, artifact_paths: "list[str]") -> str:
+    """The rejection note an implementer retry gets after a failed build.
+
+    DEV-778: the located diagnostics are listed with the ONE fix each asks
+    for (the same `_FIX_HINTS` table the repair round uses), so the retry is
+    told what the compiler meant, not only what it said. DEV-768: the whole
+    note is built from ANSI-stripped output — run 48's note headlined
+    "INCOMPLETE DIAGNOSTICS — no located error" while a coloured
+    `path:line:col: error:` sat in the pasted tail, because the scans ran on
+    the raw text. The headline prefers the first LOCATED diagnostic over a
+    bare `error: SwiftCompile … failed` line for the same reason.
+    """
+    clean = _outcome.ANSI_SGR_RE.sub("", build_output or "")
+    cited = swift_rules.located_diagnostics(clean, artifact_paths)
+    headline = (f"{cited[0].located()}: error: {cited[0].message}"
+                if cited else build_reason)
+    actionable = _extract_actionable_test_output(clean, framework)
+    return (
+        f"## The code does not compile\n\n"
+        f"No review was performed — the build failed, so there is nothing "
+        f"to review yet. First compiler diagnostic:\n\n"
+        f"    {headline}\n\n"
+        f"{_diagnostic_completeness_note(clean)}"
+        f"{swift_rules.render_cited_diagnostics(cited, repair=False)}"
+        f"{_reemit_instruction('Fix every diagnostic below and re-emit ALL files.')}\n\n"
+        f"```\n{actionable}\n```\n"
+    )
 
 
 def _diagnostic_completeness_note(output: str) -> str:

@@ -40,6 +40,10 @@ ANSI_SGR_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 # ── 1. The standing paragraph ────────────────────────────────────────────────
 
+# FROZEN as of DEV-778 (2026-09-20): a new diagnostic class goes into
+# _FIX_HINTS (reactive, rendered only when the diagnostic is present) and
+# swift_prechecks (detected before the build) — NOT into this paragraph,
+# which every Swift prompt pays for whether or not the class is at issue.
 _SWIFT_RULES = (
     "## Swift rules — MANDATORY\n\n"
     "Each of these has cost a full attempt; the compiler's message for each is "
@@ -148,9 +152,20 @@ _FIX_HINTS: "list[tuple[re.Pattern, str]]" = [
      "`@Test func name() throws {{`)"),
     (re.compile(r"main actor-isolated .* (?:in a synchronous nonisolated "
                 r"context|from a nonisolated context)"),
-     "annotate the ENCLOSING declaration `@MainActor`"),
+     "annotate the ENCLOSING declaration `@MainActor` (a test: "
+     "`@MainActor func name() async throws {{`) and `await` the call — never "
+     "mark the callee `nonisolated`, and every helper that test calls needs "
+     "the same annotation"),
     (re.compile(r"call to main actor-isolated"),
-     "annotate the ENCLOSING declaration `@MainActor`"),
+     "annotate the ENCLOSING declaration `@MainActor` (a test: "
+     "`@MainActor func name() async throws {{`) and `await` the call — never "
+     "mark the callee `nonisolated`"),
+    (re.compile(r"'nil' is not compatible with expected argument type '([^']+)'"),
+     "the parameter is not optional — pass a `{0}` value (for an OptionSet "
+     "such as `MTLResourceOptions`, `[]`)"),
+    (re.compile(r"invalid redeclaration of '(\w+)'"),
+     "delete this duplicate declaration of `{0}` and use the one that "
+     "already exists — never rename one copy to dodge the clash"),
     (re.compile(r"requires that '(\w+)' conform to '(\w+)'"),
      "add `: {1}` to the declaration of `{0}`"),
     (re.compile(r"missing return in .* expected to return"),
@@ -162,8 +177,11 @@ _FIX_HINTS: "list[tuple[re.Pattern, str]]" = [
                 r"expected '([^']+)'\)"),
      "use the labels `{1}`"),
     (re.compile(r"cannot find '(\w+)' in scope"),
-     "`{0}` is undeclared here — add the import or declaration it needs, "
-     "or fix the spelling"),
+     "`{0}` is not declared in any file you were given — it lives in a file "
+     "outside your set (use it as declared there; do NOT invent a "
+     "declaration for it) or the name is misspelled; if the build also "
+     "reports a failed emit-module, this is a consequence of that, not the "
+     "cause"),
     (re.compile(r"value of type '(\w+)' has no member '(\w+)'"),
      "`{0}` has no `{1}` — use the member it actually declares"),
 ]
@@ -181,9 +199,17 @@ def fix_hint(message: str) -> str | None:
     return None
 
 
-def render_cited_diagnostics(diags: "list[LocatedDiagnostic]") -> str:
-    """The section the repair prompt gets: every cited location with its
-    hint, and the rule that edits must land on them."""
+def render_cited_diagnostics(diags: "list[LocatedDiagnostic]",
+                             *, repair: bool = True) -> str:
+    """Every cited location with its hint (DEV-778: rendered ONLY for the
+    diagnostics actually present), followed by the rule for this prompt.
+
+    ``repair=True`` is the synthesis repair round (DEV-767): edits must land
+    on cited files and lines or the repair is refused. ``repair=False`` is
+    the implementer's build-failure retry, where whole-file re-emission is
+    the contract and other files are legal, so the rule is softer: change
+    the named lines, and nothing a diagnostic does not require.
+    """
     if not diags:
         return ""
     lines = ["## Cited locations — your edits MUST land here\n\n"]
@@ -193,12 +219,20 @@ def render_cited_diagnostics(diags: "list[LocatedDiagnostic]") -> str:
         if hint:
             lines.append(f"  → fix: {hint}")
         lines.append("")
-    lines.append(
-        "Emit a <<<FILE: path>>> block ONLY for files listed above, and make "
-        "sure each block changes at least one of its cited lines. A block for "
-        "any other file is discarded before the build; a repair that changes "
-        "no cited line is not built at all.\n\n"
-    )
+    if repair:
+        lines.append(
+            "Emit a <<<FILE: path>>> block ONLY for files listed above, and make "
+            "sure each block changes at least one of its cited lines. A block for "
+            "any other file is discarded before the build; a repair that changes "
+            "no cited line is not built at all.\n\n"
+        )
+    else:
+        lines.append(
+            "Each `→ fix` is the ONE edit that diagnostic asks for; apply it on "
+            "the line named (or on the declaration it points at). Do not "
+            "rewrite lines no diagnostic names, and do not restructure a "
+            "function to avoid a one-token fix.\n\n"
+        )
     return "\n".join(lines)
 
 

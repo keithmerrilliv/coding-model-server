@@ -161,3 +161,74 @@ def test_cited_file_absent_from_workspace_is_kept():
                                ["New.swift"])
     res = sr.filter_repair_to_cited([("New.swift", "fixed")], {"New.swift": None}, d)
     assert res.kept == [("New.swift", "fixed")] and not res.refuse()
+
+
+# ── DEV-778: the hint table pinned on the real diagnostic text, both prompts ─
+
+RUN49_NIL = ("/Users/km4/w/spec_4baf2650/Sources/CentipedeRender/OffscreenRenderer.swift:158:126: "
+             "\x1b[1;31merror: \x1b[1;39m'nil' is not compatible with expected argument type "
+             "'MTLResourceOptions'\x1b[0;0m\n")
+RUN44_ACTOR = ("/Users/km4/w/spec_86fec6ac/ElectricSheepTests/AudioLifecycleTests.swift:48:18: error: "
+               "call to main actor-isolated initializer 'init()' in a synchronous nonisolated context\n"
+               "/Users/km4/w/spec_86fec6ac/ElectricSheep/AudioManager.swift:19:25: error: "
+               "main actor-isolated property 'notificationObservers' can not be referenced from a "
+               "nonisolated context\n")
+RUN47_STATIC = ("/Users/km4/w/spec_ffe89fdd/ElectricSheep/HalluRenderer.swift:191:41: error: "
+                "static member 'maxFramesInFlight' cannot be used on instance of type 'HalluRenderer'\n")
+RUN10_REDECL = "/w/Sources/Game/Player.swift:2:6: error: invalid redeclaration of 'Direction'\n"
+RUN42_SCOPE = "/w/ElectricSheep/App.swift:30:9: error: cannot find 'MetricsParticleBridge' in scope\n"
+
+
+def test_every_row_matches_its_run_s_text_and_only_its_row():
+    cases = {
+        RUN49_NIL: ("pass a `MTLResourceOptions` value", "not optional"),
+        RUN47_STATIC: ("Self.maxFramesInFlight", "do not remove"),
+        RUN10_REDECL: ("duplicate declaration of `Direction`", "never rename"),
+        RUN42_SCOPE: ("`MetricsParticleBridge` is not declared", "do NOT invent"),
+    }
+    for text, (a, b) in cases.items():
+        d = sr.located_diagnostics(text)
+        assert len(d) == 1, text
+        hint = sr.fix_hint(d[0].message)
+        assert hint and a in hint and b in hint, (text, hint)
+    actor = sr.located_diagnostics(RUN44_ACTOR)
+    assert len(actor) == 2
+    for d in actor:
+        hint = sr.fix_hint(d.message)
+        assert "@MainActor" in hint and "async throws" in hint and "never" in hint
+    assert sr.fix_hint("errors thrown from here are not handled").startswith("declare the enclosing function `throws`")
+
+
+def test_retry_mode_renders_only_present_rows_and_a_softer_rule():
+    diags = sr.located_diagnostics(RUN49_NIL + RUN47_STATIC)
+    out = sr.render_cited_diagnostics(diags, repair=False)
+    assert out.count("→ fix:") == 2
+    assert "MTLResourceOptions" in out and "Self.maxFramesInFlight" in out
+    assert "@MainActor" not in out and "throws" not in out       # absent classes stay absent
+    assert "not built at all" not in out                         # the repair rule
+    assert "ONE edit that diagnostic asks for" in out
+    assert sr.render_cited_diagnostics([], repair=False) == ""
+
+
+def test_implementer_build_failure_note_carries_hints_and_a_located_headline():
+    """DEV-778 + DEV-768: run 48's shape — the raw output is coloured, the bare
+    `error: SwiftCompile … failed` line comes first, and the real
+    `path:line:col: error:` sits further down."""
+    import coding_model_server.orchestrator_daemon as d
+    raw = ("error: SwiftCompile normal arm64 /w/Sources/CentipedeRender/OffscreenRenderer.swift "
+           "failed with a nonzero exit code\n" + RUN49_NIL + "error: Build failed\n")
+    note = d._build_failure_feedback(
+        raw, "SwiftCompile normal arm64 … failed with a nonzero exit code",
+        "swift_test", ["Sources/CentipedeRender/OffscreenRenderer.swift"])
+    assert "First compiler diagnostic:\n\n    Sources/CentipedeRender/OffscreenRenderer.swift:158: error: 'nil'" in note
+    assert "## Cited locations" in note
+    assert "→ fix: the parameter is not optional" in note
+    assert "No located error was reported at all" not in note   # the DEV-768 false banner
+    assert "\x1b[" not in note                                    # nothing coloured survives
+    # No located diagnostic at all: the headline falls back to build_reason and
+    # the cited section is absent — a non-Swift or emit-module-only failure.
+    bare = d._build_failure_feedback("error: emit-module command failed\n",
+                                     "emit-module command failed", "swift_test", [])
+    assert "First compiler diagnostic:\n\n    emit-module command failed" in bare
+    assert "## Cited locations" not in bare
+    assert "No located error was reported at all" in bare
