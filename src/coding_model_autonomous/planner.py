@@ -143,6 +143,9 @@ PLANNER_SYSTEM_PROMPT = textwrap.dedent("""\
       # tests are (DEV-394). Name the unit-test target, or a narrower
       # Target/Class/testMethod path.
       filter: ElectricSheepTests
+      # Copy verbatim when the spec's test_strategy has it: the app target's
+      # SWIFT_DEFAULT_ACTOR_ISOLATION, which the prechecks and prompts consult.
+      default_actor_isolation: MainActor
     constraints:
       dependencies_allowed: true   # external packages permitted?
       notes: "any other constraints from the spec"

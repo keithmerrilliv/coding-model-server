@@ -53,6 +53,21 @@ def _swift_set(d: Path) -> list[tuple[str, str]]:
     return out
 
 
+def _isolation_for(d: Path, root: Path) -> "str | None":
+    """DEV-784: Electric Sheep's app target is default-MainActor; read the
+    set's spec plan (the parent spec's for retry_history entries)."""
+    spec = d if d.parent == root else d.parent.parent
+    plan = spec / "plan.yaml"
+    try:
+        import yaml
+        ts = (yaml.safe_load(plan.read_text()) or {}).get("test_strategy") or {}
+    except Exception:
+        return None
+    if ts.get("default_actor_isolation"):
+        return str(ts["default_actor_isolation"])
+    return "MainActor" if ts.get("repo") == "electric-sheep" else None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default="var/tasks_db/specs")
@@ -74,7 +89,7 @@ def main() -> int:
             continue
         sets += 1
         v = _verdict(d)
-        result = sp.run_swift_prechecks(files)
+        result = sp.run_swift_prechecks(files, default_isolation=_isolation_for(d, root))
         for kind in {x.kind for x in result.violations}:
             by_kind[kind][v] += 1
         for x in result.violations:

@@ -306,6 +306,7 @@ calls as written.
     scheme: ElectricSheep
     destination: "platform=macOS"
     filter: ElectricSheepTests
+    default_actor_isolation: MainActor
     skip_filter: ElectricSheepTests/DtypeContainmentTests
     protected_paths:
       - ElectricSheep/TokenMetrics.swift

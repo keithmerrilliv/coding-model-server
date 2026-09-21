@@ -1994,6 +1994,7 @@ def build_architect_message(spec_md: str,
                             unreadable: list[tuple[str, str, str]] | None = None,
                             base_ref: str | None = None,
                             tools: bool = False,
+                            standing_rules: str | None = None,
                             ) -> list[dict[str, str]]:
     user_parts: list[str] = []
     # On a re-run (design-review rejection or supervisor design-revision), the
@@ -2115,6 +2116,8 @@ def build_architect_message(spec_md: str,
             "in the specification but absent there was struck on purpose "
             "(DEV-490)."
         )
+    if standing_rules:   # DEV-784
+        user_parts.append("\n\n" + standing_rules)
     return [
         {"role": "system", "content": ARCHITECT_SYSTEM_PROMPT},
         {"role": "user", "content": "\n".join(user_parts)},
@@ -2388,6 +2391,7 @@ def build_implementer_message(
     omitted_existing: list[str] | None = None,
     omitted_reference: list[str] | None = None,
     unresolved: list[str] | None = None,
+    standing_rules: str | None = None,
 ) -> list[dict[str, str]]:
     # DEV-581: edit-mode only changes anything when there ARE existing files to
     # edit. With no existing files the response is all new whole files, so the
@@ -2450,6 +2454,8 @@ def build_implementer_message(
         [p for p, _ in (existing_files or [])] + list(new_files or []))
     if swift_rules:
         user_parts.append("\n\n" + swift_rules)
+    if standing_rules:   # DEV-784
+        user_parts.append("\n\n" + standing_rules)
     if reference_files or omitted_reference:
         user_parts.append("\n\n")
         user_parts.append(_render_reference_files(reference_files or [],

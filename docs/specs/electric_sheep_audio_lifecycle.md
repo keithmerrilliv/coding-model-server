@@ -147,6 +147,7 @@ bare filename is not shorthand; it is the defect class of DEV-601.
     scheme: ElectricSheep
     destination: "platform=macOS"
     filter: ElectricSheepTests
+    default_actor_isolation: MainActor
     skip_filter: ElectricSheepTests/DtypeContainmentTests,ElectricSheepTests/ProductionDtypeConversionTests
     protected_paths:
       - ElectricSheep/ContentView.swift
