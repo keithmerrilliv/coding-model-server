@@ -232,3 +232,13 @@ def test_implementer_build_failure_note_carries_hints_and_a_located_headline():
     assert "First compiler diagnostic:\n\n    emit-module command failed" in bare
     assert "## Cited locations" not in bare
     assert "No located error was reported at all" in bare
+
+
+def test_run50_rows_type_has_no_member_and_unavailable_on_platform():
+    """Run 50 retry 0 (spec_aba12b2b): two diagnostics the table did not know."""
+    a = sr.fix_hint("type 'AVAudioEngine' has no member 'configurationChangeNotification'")
+    assert a and "`AVAudioEngine` has no `configurationChangeNotification`" in a and "invented" in a
+    b = sr.fix_hint("'AVAudioSession' is unavailable in macOS")
+    assert b and "#if os(iOS) || os(visionOS)" in b and "macOS" in b
+    # the older spelling still maps to the same row
+    assert "has no `foo`" in sr.fix_hint("value of type 'Bar' has no member 'foo'")
