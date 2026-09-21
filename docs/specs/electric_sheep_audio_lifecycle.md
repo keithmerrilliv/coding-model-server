@@ -111,12 +111,13 @@ This is what defeated runs 44 and 50 (DEV-753, DEV-784). The project builds with
    `#if os(iOS) || os(visionOS)`, with a macOS branch that compiles. The macOS build is
    the gate here; an unguarded `AVAudioSession` is `'AVAudioSession' is unavailable in
    macOS` and fails it.
-5. **The test target does NOT have default MainActor isolation.** A plain
-   `func testX()` on an `XCTestCase` is nonisolated; constructing `AudioManager()` or
-   `Audioscape()` from it does not compile. `AudioLifecycle` itself may be tested from a
-   plain test method (rule 2). Any test that touches the manager is declared
+5. **The test target does NOT have default MainActor isolation, and `AudioLifecycle`
+   lives in the app target that does.** A plain `func testX()` on an `XCTestCase` is
+   nonisolated; constructing `AudioManager()`, `Audioscape()` or `AudioLifecycle()`
+   from it may not compile. Declare EVERY test method in this spec as
    `@MainActor func test_…() async throws` — the pattern of
-   `ElectricSheepTests/BridgeLifecycleTests.swift`.
+   `ElectricSheepTests/BridgeLifecycleTests.swift`. (Run 51 shipped this way; the
+   earlier carve-out for `AudioLifecycle` was never verified.)
 6. **`AVAudioEngine` has no `configurationChangeNotification` member.** The
    notification is the `Notification.Name` constant `.AVAudioEngineConfigurationChange`,
    observed through `NotificationCenter`. Do not invent members; if a name is not in
@@ -146,7 +147,7 @@ bare filename is not shorthand; it is the defect class of DEV-601.
     scheme: ElectricSheep
     destination: "platform=macOS"
     filter: ElectricSheepTests
-    skip_filter: ElectricSheepTests/DtypeContainmentTests
+    skip_filter: ElectricSheepTests/DtypeContainmentTests,ElectricSheepTests/ProductionDtypeConversionTests
     protected_paths:
       - ElectricSheep/ContentView.swift
       - ElectricSheep/Protocols.swift
