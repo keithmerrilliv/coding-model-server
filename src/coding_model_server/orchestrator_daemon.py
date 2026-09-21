@@ -5473,11 +5473,17 @@ def _route_build_failure_to_architect(db: Database, spec: Spec, task, spec_dir,
 # passing suite to FAIL) but useless for deciding what to tell a reviewer.
 # swift-testing prints "✔/✘ Test run with N tests passed/failed after ..."
 # and XCTest prints "Executed N tests, with M failures" plus "Test Suite '...'
-# passed/failed". Matching any of them is evidence tests actually executed.
+# passed/failed". `xcodebuild test` under parallel testing prints none of
+# those: only one "Test case 'Suite.name()' passed on 'My Mac ...'" line per
+# case and the "** TEST SUCCEEDED **" / "** TEST FAILED **" verdict (DEV-787,
+# run 51 was told "inconclusive" over a 65-case run). Matching any of them is
+# evidence tests actually executed.
 _SWIFT_SUMMARY_RE = re.compile(
     r"Test run with \d+ test"
     r"|Executed \d+ test"
-    r"|Test Suite '[^']*' (?:passed|failed)",
+    r"|Test Suite '[^']*' (?:passed|failed)"
+    r"|Test case '[^']+' (?:passed|failed)"
+    r"|\*\*\s*TEST (?:SUCCEEDED|FAILED)\s*\*\*",
     re.MULTILINE)
 
 
@@ -5486,9 +5492,8 @@ def _observed_a_test_run(output: str, framework: str) -> bool:
 
     Wording only — this never changes control flow, so a miss costs a vaguer
     gate prompt rather than a wrongly-failed suite. That asymmetry is
-    deliberate: no Swift suite has ever passed on this pipeline, so the Swift
-    patterns above are unvalidated against a real green run, and the only safe
-    place for an unvalidated pattern is somewhere it cannot fail the build.
+    deliberate: a pattern that is wrong here can only make the prompt vaguer,
+    so it is the one safe place for one.
     """
     if not output or not output.strip():
         return False
