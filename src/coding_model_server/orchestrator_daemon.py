@@ -2562,6 +2562,8 @@ def _run_design_review(db: Database, spec: Spec, task, spec_dir,
             "reviewer",
             executor.build_design_review_message(spec_md, design_md),
             agent=executor.DESIGN_REVIEW_AGENT,
+            memory_query=executor.spec_memory_query(spec_md),  # DEV-497
+            language=_spec_language(spec),
             max_tokens=executor.DESIGN_REVIEW_MAX_TOKENS,
             meta=meta,
         )
@@ -2918,8 +2920,13 @@ def _generate_implementation(
                 spec.id, impl_max_tokens, n_files,
                 " [diff-based edits]" if edit_mode else "")
     meta: dict = {}
+    # DEV-497: the single-call path retrieved on its last user message — the
+    # DEV-546 conditions block plus the spec preamble — the DEV-489 defect
+    # back again. The title is the query, as the architect already does.
     raw = call_agent("implementer", messages, agent=chosen_agent,
-                     max_tokens=impl_max_tokens, meta=meta)
+                     max_tokens=impl_max_tokens, meta=meta,
+                     memory_query=executor.spec_memory_query(spec_md),
+                     language=_spec_language(spec))
     _note_truncation(db, spec, task, "implementer", meta, impl_max_tokens)
     if tally is not None:
         executor.accumulate_agent_fields(tally, meta)
@@ -3529,6 +3536,8 @@ def _generate_via_manifest(
             "implementer", manifest_messages,
             agent=chosen_agent, max_tokens=executor.MANIFEST_MAX_TOKENS,
             meta=meta,
+            memory_query=executor.spec_memory_query(spec_md),   # DEV-497
+            language=_spec_language(spec),
         )
         _note_truncation(db, spec, task, "manifest", meta,
                          executor.MANIFEST_MAX_TOKENS)
@@ -6002,7 +6011,9 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
                                    executor.PRIOR_ARTIFACTS_MAX_CHARS)])
     messages = _reviewer_prompt(alloc.files("code"), alloc.dropped("code"))
     meta: dict = {}
-    raw = call_agent("reviewer", messages, meta=meta)
+    raw = call_agent("reviewer", messages, meta=meta,
+                     memory_query=executor.spec_memory_query(spec_md),  # DEV-497
+                     language=_spec_language(spec))
     _note_truncation(db, spec, task, "reviewer", meta, executor.REVIEWER_MAX_TOKENS)
     result = parse_reviewer_response(raw)
 
@@ -6769,7 +6780,9 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
         meta = {}
         try:
             raw = call_agent("implementer", messages, agent=_SYNTHESIS_AGENT,
-                             max_tokens=synth_max_tokens, meta=meta)
+                             max_tokens=synth_max_tokens, meta=meta,
+                             memory_query=executor.spec_memory_query(spec_md),  # DEV-497
+                             language=_spec_language(spec))
             break
         except Exception as exc:
             # Backstop: the allocator's chars/token estimate is a guess and
@@ -6935,7 +6948,9 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
     try:
         repair_raw = call_agent("implementer", repair_messages,
                                 agent=_SYNTHESIS_AGENT,
-                                max_tokens=synth_max_tokens, meta=repair_meta)
+                                max_tokens=synth_max_tokens, meta=repair_meta,
+                                memory_query=executor.spec_memory_query(spec_md),  # DEV-497
+                                language=_spec_language(spec))
     except Exception as exc:
         # DEV-651: `return False, test_output` used to fall through here, and
         # that is the signature of "the tests failed" — so a dead server on
