@@ -157,7 +157,10 @@ report.
 1. **Identity below the knee.** `AudioscapeState.limit(0) == 0`, `limit(0.5) == 0.5`,
    `limit(-0.5) == -0.5`, `limit(0.8) == 0.8`, `limit(-0.8) == -0.8` (accuracy 1e-7).
 2. **Bounded above it.** For each `x` in `[1.0, 2.0, 5.0, 100.0, 1_000_000.0]`:
-   `limit(x) > 0.8`, `limit(x) < 1.0`, and `limit(-x) == -limit(x)` (accuracy 1e-7).
+   `limit(x) > 0.8`, `limit(x) <= 1.0`, and `limit(-x) == -limit(x)` (accuracy 1e-7).
+   (`<=`, not `<`: `tanhf` saturates to exactly `1.0` in 32-bit float once its argument
+   passes ~9, i.e. for `x >= 2.8`; full scale is the bound, and run 54 lost an attempt to
+   a `<` here.)
 3. **Continuous and monotonic.** `limit(0.8001) >= 0.8`, `limit(0.8001) - 0.8 < 1e-3`,
    and `limit(1.0) < limit(2.0)`, `limit(2.0) < limit(5.0)`.
 4. **Quiet material passes through.** A fresh `AudioscapeState()`, one
@@ -166,7 +169,7 @@ report.
    engages; combined with criterion 1 the output is exactly the unlimited sum).
 5. **The burst is bounded.** A fresh `AudioscapeState()`, `applyStrike(modeIdx: m,
    strength: 1.0, brightness: 1.0)` for every `m` in `0..<8`, one
-   `render(frameCount: 512, buffers:)`: `peakAbs` is `< 1.0` AND `> 0.8` (the limiter
+   `render(frameCount: 512, buffers:)`: `peakAbs` is `<= 1.0` AND `> 0.8` (the limiter
    engaged on real signal). On `main` this peak is 2.05.
 6. **Existing behaviour intact.** `ElectricSheepTests/AudioscapeStateTests.swift` is
    unmodified and its four tests pass; the whole `ElectricSheepTests` suite is green under
