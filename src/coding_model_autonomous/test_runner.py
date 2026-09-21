@@ -1680,7 +1680,10 @@ def _count_pytest_tests(source: str) -> int:
     return count
 
 
-_SWIFT_FUNC_TEST_RE = re.compile(r'\bfunc\s+test[A-Z]\w*\s*\(')
+# DEV-751: XCTest discovers ANY method whose name begins with `test` —
+# `testFoo` and `test_foo` both run. The former `test[A-Z]` form read run 44's
+# twelve snake_case tests as zero and under-counted 37 of 386 archived files.
+_SWIFT_FUNC_TEST_RE = re.compile(r'\bfunc\s+test\w*\s*\(')
 _SWIFT_ATTRIBUTE_RE = re.compile(r'^\s*@Test\b')
 
 
