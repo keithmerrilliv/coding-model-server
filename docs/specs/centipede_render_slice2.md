@@ -213,8 +213,17 @@ report.
    `.segment(isHead: false)` at (4, 0) and (3, 0), `.player` at (15, 29), `.spider` at
    (10, 27), `.flea` at (7, 4), `.scorpion` at (0, 12); `state.score == 10`,
    `state.lives == 2`, `state.wave == 3`.
-3. **The shot is projected.** The same game after one `fire()` and no tick has `.shot` at
-   (15, 28) and `entities.count == 9`.
+3. **The shot is projected.** Exactly this shape (runs 52 and 53 both reached for it):
+
+   ```swift
+   var game = Game(world: World(mushrooms: [:], chains: []),
+                   gameState: GameState(), playerPosition: Position(column: 15, row: 29))
+   game.fire()
+   let snap = game.boardSnapshot()
+   #expect(snap.entities.count == 2)
+   #expect(snap.entities[BoardCell(column: 15, row: 28)] == .shot)
+   #expect(snap.entities[BoardCell(column: 15, row: 29)] == .player)
+   ```
 4. **A seeded game agrees with the core's own accessors.** The accessors live on the
    `Game`, never on the snapshot (`snap.mushroomsSnapshot` does not exist and cost run 52
    an attempt). Exactly this shape:
