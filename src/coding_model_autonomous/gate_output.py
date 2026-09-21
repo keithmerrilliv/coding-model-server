@@ -42,6 +42,16 @@ _VERDICTS = (
     (re.compile(r"\*\*\s*BUILD SUCCEEDED\s*\*\*"), "BUILD SUCCEEDED"),
     (re.compile(r"\*\*\s*BUILD FAILED\s*\*\*"), "BUILD FAILED"),
 )
+# DEV-774: `swift test` has no `** TEST SUCCEEDED **`. Swift Testing prints one
+# run-level line per runner ("✔ Test run with 5 tests in 1 suite passed after
+# 0.064 seconds."; a mixed target prints a second for the XCTest half), and
+# XCTest under `swift test` prints "Test Suite 'All tests' passed/failed". Run
+# 49's release gate read "No framework verdict found" beside correct counts.
+_SWIFT_TESTING_RUN = re.compile(
+    r"^[✔✘◇\s]*Test run with \d+ tests? in \d+ suites? (passed|failed)\b",
+    re.MULTILINE)
+_XCTEST_ALL_SUITE = re.compile(
+    r"^Test Suite 'All tests' (passed|failed) at", re.MULTILINE)
 # Compiler/link errors, so a build failure names its cause rather than making
 # the reviewer scroll for it.
 _COMPILE_ERROR = re.compile(
@@ -77,6 +87,11 @@ def summarize_test_output(output: str) -> TestSummary:
         if pattern.search(text):
             s.verdict = label
             break
+    if s.verdict is None:
+        runs = _SWIFT_TESTING_RUN.findall(text) + _XCTEST_ALL_SUITE.findall(text)
+        if runs:
+            # One failed runner fails the run; only all-passed is a pass.
+            s.verdict = "TEST RUN FAILED" if "failed" in runs else "TEST RUN PASSED"
 
     for name, status in _XCTEST_CASE.findall(text):
         (s.passed if status == "passed" else s.failed).append(name)

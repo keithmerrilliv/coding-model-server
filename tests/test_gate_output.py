@@ -116,3 +116,44 @@ class TestNoRegression:
     @pytest.mark.parametrize("junk", ["", None, "   \n\n"])
     def test_junk_is_survivable(self, junk):
         assert isinstance(render_for_gate(junk), str)
+
+
+# ── DEV-774: `swift test` verdicts (Swift Testing run lines, XCTest 'All tests')
+
+RUN49_SWIFT_TEST = """Build complete! (12.3s)
+Test Suite 'All tests' started at 2026-09-20 11:39:01.100.
+Test Case '-[CentipedeCoreTests.GameTests testShotDestroysSpider]' passed (0.001 seconds).
+Test Suite 'All tests' passed at 2026-09-20 11:39:01.400.
+\t Executed 20 tests, with 0 failures (0 unexpected) in 0.3 (0.3) seconds
+◇ Test run started.
+✔ Test "criterion2_emptyFrame" passed after 0.012 seconds.
+✔ Test "criterion3_oneMushroomExtent" passed after 0.010 seconds.
+✔ Suite OffscreenRendererTests passed after 0.064 seconds.
+✔ Test run with 5 tests in 1 suite passed after 0.064 seconds.
+✔ Test run with 20 tests in 0 suites passed after 0.001 seconds.
+"""
+
+
+def test_swift_test_output_yields_a_pass_verdict_dev774():
+    from coding_model_autonomous.gate_output import render_for_gate, summarize_test_output
+    s = summarize_test_output(RUN49_SWIFT_TEST)
+    assert s.verdict == "TEST RUN PASSED"
+    out = render_for_gate(RUN49_SWIFT_TEST)
+    assert out.startswith("### Test result\n\n**TEST RUN PASSED**")
+    assert "No framework verdict found" not in out
+
+
+def test_one_failed_swift_testing_runner_fails_the_verdict_dev774():
+    from coding_model_autonomous.gate_output import summarize_test_output
+    failed = RUN49_SWIFT_TEST.replace(
+        "✔ Test run with 5 tests in 1 suite passed after 0.064 seconds.",
+        "✘ Test run with 5 tests in 1 suite failed after 0.064 seconds with 1 issue.")
+    assert summarize_test_output(failed).verdict == "TEST RUN FAILED"
+    xc_failed = RUN49_SWIFT_TEST.replace("'All tests' passed at", "'All tests' failed at")
+    assert summarize_test_output(xc_failed).verdict == "TEST RUN FAILED"
+
+
+def test_xcodebuild_and_pytest_verdicts_unchanged_dev774():
+    from coding_model_autonomous.gate_output import summarize_test_output
+    assert summarize_test_output("** TEST SUCCEEDED **\n" + RUN49_SWIFT_TEST).verdict == "TEST SUCCEEDED"
+    assert summarize_test_output("=== 3 passed in 0.1s ===\n").verdict is None
