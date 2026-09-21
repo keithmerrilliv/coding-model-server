@@ -2860,6 +2860,16 @@ def _generate_implementation(
     # new ones — the prompt names each path's mandatory form so a NEW path
     # never draws SEARCH/REPLACE blocks (five of run 21's eleven rotations).
     new_files = view.new_files
+    # DEV-790: on a retry, the previous attempt's NEW files are served as
+    # editable content — a cited one-line fix becomes a one-line SEARCH/REPLACE
+    # instead of a five-file regeneration by a model that never saw them.
+    prior_new, new_files = _prior_new_files_as_editable(
+        spec_dir, task.retry_count, new_files)
+    editable_seed = list(view.existing_files) + prior_new
+    if prior_new:
+        logger.info("spec %s: retry %d — %d prior-attempt new file(s) served as "
+                    "editable content: %s (DEV-790)", spec.id, task.retry_count,
+                    len(prior_new), ", ".join(p for p, _ in prior_new))
     impl_max_tokens = executor.implementer_max_tokens_for(design_md)
     # DEV-698: the implementer writes the stubs and meets the compiler, so it
     # needs this more than the architect did. Computed from the full context,
@@ -2887,7 +2897,7 @@ def _generate_implementation(
         fixed_chars=_message_chars(_implementer_prompt([], [])),
         completion_tokens=impl_max_tokens, agent=chosen_agent,
         sections=[
-            _context.Section(_context.SECTION_EDITABLE, view.existing_files,
+            _context.Section(_context.SECTION_EDITABLE, editable_seed,
                              executor.EXISTING_FILES_MAX_CHARS),
             _context.Section(_context.SECTION_PROTECTED, view.reference_files,
                              executor.PROTECTED_FILES_MAX_CHARS),
@@ -5137,6 +5147,34 @@ def _route_unappliable_edits(db: Database, spec: Spec, task,
         FailureClass.UNAPPLIABLE_EDITS, "implementer", "apply",
         "; ".join(e.splitlines()[0] for e in errors[:3]), feedback=feedback,
         extra={"blocks": len(errors)}))
+
+
+def _prior_new_files_as_editable(
+    spec_dir, retry_count: int, new_files: "list[str]"
+) -> "tuple[list[tuple[str, str]], list[str]]":
+    """Split the plan's NEW paths into (served-as-editable, still-new) on a
+    single-call retry (DEV-790).
+
+    Retry 0 sees only files that exist at base_ref; every planned NEW path is
+    emitted whole. From retry 1 on, the previous attempt's version of each
+    such path sits in the newest ``retry_history/retry_<N>/`` snapshot, so it
+    is returned as ``(path, content)`` for the editable section — anchorable
+    with SEARCH/REPLACE and shown under EDIT ONLY like any existing file —
+    and dropped from the still-new list. A path no snapshot holds stays new.
+    Run 52's retry 1 lost an attempt to SEARCH/REPLACE against files it was
+    never shown; run 53's retry 1 omitted a cited file it had never seen.
+    """
+    if retry_count <= 0 or not new_files:
+        return [], list(new_files)
+    served: "list[tuple[str, str]]" = []
+    still_new: "list[str]" = []
+    for rel in new_files:
+        content = _newest_snapshot_content(spec_dir, rel)
+        if content is None:
+            still_new.append(rel)
+        else:
+            served.append((rel, content))
+    return served, still_new
 
 
 def _newest_snapshot_content(spec_dir, rel_path: str) -> "str | None":
