@@ -120,6 +120,18 @@ def _edit_distance(a: str, b: str, limit: int) -> int:
 _NOT_A_PATH = re.compile(r"""[\s'"`|&;$()<>*?\\]""")
 
 
+_QUOTES = "`'\""
+
+
+def unquote_path(path: str) -> str:
+    """*path* without surrounding backticks/quotes and trailing punctuation
+    (DEV-786). A bare path comes back unchanged."""
+    p = (path or "").strip()
+    while len(p) >= 2 and p[0] in _QUOTES and p[-1] == p[0]:
+        p = p[1:-1].strip()
+    return p.rstrip(",;:").strip()
+
+
 def is_plausible_path(candidate: str) -> bool:
     """False for a change-surface cell that is prose or a command, not a path."""
     c = (candidate or "").strip()
@@ -287,34 +299,50 @@ def resolve_plan_paths(plan: dict, exists: Callable[[str], bool],
     declared = list(declared_paths)
 
     seen: dict[str, PathResolution] = {}
-    for _, _, _, path in entries:
-        if path in seen:
-            report.resolutions.append(seen[path])
-            continue
-        if is_placeholder(path):
-            res = PathResolution(path, "placeholder")
-        elif is_run_artifact(path) or exists(path):
-            res = PathResolution(path, "resolved")
+    def _classify(p: str) -> PathResolution:
+        if is_placeholder(p):
+            res = PathResolution(p, "placeholder")
+        elif is_run_artifact(p) or exists(p):
+            res = PathResolution(p, "resolved")
         else:
-            hits = [c for c in correction_candidates(path, directories) if exists(c)]
+            hits = [c for c in correction_candidates(p, directories) if exists(c)]
             if len(hits) == 1:
-                res = PathResolution(path, "corrected", corrected_to=hits[0],
+                res = PathResolution(p, "corrected", corrected_to=hits[0],
                                      source="directory")
             elif len(hits) > 1:
-                res = PathResolution(path, "new", ambiguous=hits,
+                res = PathResolution(p, "new", ambiguous=hits,
                                      source="directory")
             else:
                 # DEV-733: the repository had nothing to say, which is also
                 # what a typo in a NEW file's name looks like. The spec did.
-                near = declared_near_misses(path, declared, exclude=plan_own)
+                near = declared_near_misses(p, declared, exclude=plan_own)
                 if len(near) == 1:
-                    res = PathResolution(path, "corrected", corrected_to=near[0],
+                    res = PathResolution(p, "corrected", corrected_to=near[0],
                                          source="declared")
                 elif len(near) > 1:
-                    res = PathResolution(path, "new", ambiguous=near,
+                    res = PathResolution(p, "new", ambiguous=near,
                                          source="declared")
                 else:
-                    res = PathResolution(path, "new")
+                    res = PathResolution(p, "new")
+        return res
+
+    for _, _, _, path in entries:
+        if path in seen:
+            report.resolutions.append(seen[path])
+            continue
+        # DEV-786: the planner copies change-surface cells WITH their
+        # markdown backticks (run 51: five correct paths, each `quoted`).
+        # Classify the bare path, and record the unquoting as a correction so
+        # the plan the gate sees is the bare path.
+        bare = unquote_path(path)
+        res = _classify(bare)
+        if bare != path and res.status != "placeholder":
+            target = res.corrected_to if res.status == "corrected" else bare
+            res = PathResolution(path, "corrected", corrected_to=target,
+                                 ambiguous=list(res.ambiguous),
+                                 source="unquoted" + ("+" + res.source if res.source else ""))
+        elif bare != path:
+            res = PathResolution(path, "placeholder")
         seen[path] = res
         report.resolutions.append(res)
     return report
