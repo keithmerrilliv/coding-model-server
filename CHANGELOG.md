@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.3.0 — unreleased
+## v0.3.0 — 2026-09-20
 
 The serving release. `tools/llama-server` moves from the pinned August build (`a94d563`) to upstream **v0.4.1**, and the architect stops paying for prompt depth. Nothing in the pipeline changed; what changed is the substrate underneath all eleven agents. Numbers below are **managed-path** figures — measured through the coding-model-server exactly as the pipeline calls it — not standalone bench numbers, because the two are not comparable and the gap between them is unexplained ([DEV-742](https://keith-merrill4.atlassian.net/browse/DEV-742)).
 
