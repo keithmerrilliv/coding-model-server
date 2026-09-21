@@ -327,6 +327,20 @@ _CALL_NOISE = frozenset("""
 """.split())
 
 
+# DEV-775: symbols a module import PROVIDES. `Package(` in Package.swift is
+# declared by PackageDescription, never by a repository file, so the scan
+# reported it as unresolved on every SwiftPM dispatch (five times on run 49).
+# Keyed by the imported module; applied only to files that import it.
+_MODULE_PROVIDED: dict[str, frozenset] = {
+    "PackageDescription": frozenset("""
+        Package Target Product Dependency Platform SupportedPlatform Version
+        SwiftSetting CSetting CXXSetting LinkerSetting Resource PackageDescription
+        BuildSettingCondition LanguageTag SwiftLanguageMode SwiftLanguageVersion
+        CLanguageStandard CXXLanguageStandard PluginCapability PluginPermission
+        """.split()),
+}
+_IMPORT_RE = re.compile(r"^\s*import\s+([A-Za-z_]\w*)", re.MULTILINE)
+
 # Comments and string literals are prose, and prose is full of words followed
 # by a bracket: "Returns (", "Approve (", "the block (". Scanning them produced
 # 330 false positives on one real stored context, which would have flooded the
@@ -382,6 +396,8 @@ def unresolved_symbols(editable: dict, served: dict) -> list[str]:
     called: set[str] = set()
     for source in editable.values():
         called.update(_BARE_CALL_RE.findall(_strip_prose(source)))
+        for module in _IMPORT_RE.findall(source):
+            declared.update(_MODULE_PROVIDED.get(module, ()))
     names = sorted(
         n for n in called - declared - _CALL_NOISE - _KEYWORDS
         if not n.isupper()                        # SCREAMING_CASE is a constant

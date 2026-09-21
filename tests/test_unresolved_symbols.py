@@ -207,3 +207,34 @@ def test_a_healthy_context_costs_the_implementer_no_prompt():
 def test_the_implementer_list_truncates_like_the_architect_one():
     body = _impl([f"Thing{i}" for i in range(25)])
     assert "and 5 more" in body
+
+
+# ── DEV-775: a symbol the imported module provides is not unresolved ─────────
+
+RUN49_PACKAGE = """// swift-tools-version:6.0
+import PackageDescription
+
+let package = Package(
+    name: "Centipede",
+    platforms: [.macOS(.v15)],
+    targets: [
+        .target(name: "CentipedeRender"),
+        .testTarget(name: "CentipedeRenderTests", dependencies: ["CentipedeRender"]),
+    ]
+)
+"""
+
+
+def test_package_swift_reports_nothing_dev775():
+    from coding_model_autonomous.context import unresolved_symbols
+    assert unresolved_symbols({"Package.swift": RUN49_PACKAGE},
+                              {"Package.swift": RUN49_PACKAGE}) == []
+
+
+def test_module_allowance_is_scoped_to_the_importing_file_dev775():
+    from coding_model_autonomous.context import unresolved_symbols
+    # Run 42's shape stays reported: a repository type nothing served declares.
+    app = "import SwiftUI\nlet b = MetricsParticleBridge()\nlet p = Package()\n"
+    got = unresolved_symbols({"App.swift": app}, {"App.swift": app})
+    assert "MetricsParticleBridge" in got
+    assert "Package" in got          # no PackageDescription import here
