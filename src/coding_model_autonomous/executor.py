@@ -1542,12 +1542,37 @@ def _dedupe_files_last_wins(
     return deduped, duplicates
 
 
+# DEV-782: the whole-file template's own placeholder line, as the prompt
+# prints it (`<complete file content>` and the longer "— NOT a diff" form).
+# Run 50 retry 1 copied it verbatim above an otherwise-correct file and lost
+# the attempt to "expressions are not allowed at the top level".
+_TEMPLATE_PLACEHOLDER_LINE_RE = re.compile(
+    r"^[ \t]*<complete file content[^\n>]*>[ \t]*$", re.IGNORECASE)
+
+
+def _strip_template_placeholder(content: str) -> str:
+    """Drop a leading or trailing template placeholder line (DEV-782).
+
+    Only the exact template line, only at the edges: a file that legitimately
+    begins with `<` (XML, HTML) is untouched, and a placeholder in the middle
+    of a file is the model's own content and stays visible to the build.
+    """
+    lines = content.split("\n")
+    while lines and _TEMPLATE_PLACEHOLDER_LINE_RE.match(lines[0]):
+        lines.pop(0)
+    while lines and _TEMPLATE_PLACEHOLDER_LINE_RE.match(lines[-1]):
+        lines.pop()
+    return "\n".join(lines)
+
+
 def parse_implementer_response(text: str) -> ImplementerResult | ParseError:
     cleaned = _strip_thinking(text)
     matches = _FILE_RE.findall(cleaned)
     if not matches:
         return ParseError("No <<<FILE: path>>>…<<<END_FILE>>> blocks found", text)
-    raw_files = [(path.strip(), _strip_markdown_fence(content)) for path, content in matches]
+    raw_files = [(path.strip(),
+                  _strip_template_placeholder(_strip_markdown_fence(content)))
+                 for path, content in matches]
     # DEV-655, defence in depth behind the prompt fix above: a block whose
     # whole body is `...`/`…`/whitespace is an echoed template, not a file the
     # model composed. It is dropped and NAMED, never silently — an empty
