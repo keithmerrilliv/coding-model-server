@@ -259,11 +259,10 @@ def _wrap_in_sandbox(
 # 77s short of the old 900s ceiling, so a passing test was seconds away from being
 # reported as a timeout.
 #
-# DEV-752, 2026-09-21: 1200 -> 2400. Run 44's cold MLX resolve exhausted the
-# resolve budget and then the rest of the 1200s, and the dispatch returned with no
-# test result at all. The runner now refuses rather than starting a doomed test
-# (server.resolve_budget, MIN_TEST_BUDGET), and this is the headroom that makes
-# refusing rare instead of routine.
+# DEV-752 considered raising this and did not: the Mac's phase timings showed run
+# 44 was a starved host, not a slow resolve, and a bigger ceiling only lets a
+# starved run burn longer before reporting. The runner now refuses rather than
+# starting a doomed test (server.resolve_budget, MIN_TEST_BUDGET).
 #
 # test_timeouts_agree_across_hosts pins the two tables together.
 DEFAULT_TIMEOUTS: dict[str, int] = {
@@ -273,7 +272,7 @@ DEFAULT_TIMEOUTS: dict[str, int] = {
     "vitest": 180,
     "node_test": 120,
     "swift_test": 300,
-    "xcodebuild_test": 2400,
+    "xcodebuild_test": 1200,
 }
 
 # Frameworks whose tests import from `node_modules`, so the spec needs a

@@ -83,9 +83,9 @@ def test_the_dispatch_hands_the_vm_a_capped_budget_and_a_floor(client, monkeypat
               "scheme": "Demo"},
     )
     assert resp.status_code == 200
-    assert seen["timeout"] == 2400                      # the DEV-752 ceiling
-    assert seen["resolve_timeout"] == server.resolve_budget(2400)
-    assert seen["min_test_budget"] == min(server.MIN_TEST_BUDGET, 2400)
+    assert seen["timeout"] == 1200                      # unchanged, deliberately
+    assert seen["resolve_timeout"] == server.resolve_budget(1200)
+    assert seen["min_test_budget"] == min(server.MIN_TEST_BUDGET, 1200)
     assert seen["resolve_timeout"] + seen["min_test_budget"] <= seen["timeout"]
 
 
@@ -104,13 +104,17 @@ def test_host_path_refuses_to_start_a_test_after_a_resolve_timeout(monkeypatch, 
     req = types.SimpleNamespace(framework="xcodebuild_test")
     passed, output, exit_code = server._run_on_host(
         req, tmp_path, ["xcodebuild", "test"],
-        ["xcodebuild", "-resolvePackageDependencies"], 2400)
+        ["xcodebuild", "-resolvePackageDependencies"], 1200)
 
     assert passed is False
     assert exit_code is None, "None marks infrastructure, not a verdict"
-    assert "package resolution timed out" in output
     assert "no test was run" in output
     assert len(calls) == 1, "the test command must never have been spawned"
+    # DEV-752's second correction: the message must not send the reader after
+    # SwiftPM. Two agents lost hours to "package resolution timed out".
+    assert "package resolution timed out" not in output
+    assert "starved" in output and "unreachable" in output
+    assert "NOT evidence that the dependency graph is slow" in output
 
 
 def test_host_path_still_tolerates_a_resolve_that_merely_fails(monkeypatch, tmp_path):
@@ -128,7 +132,7 @@ def test_host_path_still_tolerates_a_resolve_that_merely_fails(monkeypatch, tmp_
     req = types.SimpleNamespace(framework="xcodebuild_test")
     passed, output, exit_code = server._run_on_host(
         req, tmp_path, ["xcodebuild", "test"],
-        ["xcodebuild", "-resolvePackageDependencies"], 2400)
+        ["xcodebuild", "-resolvePackageDependencies"], 1200)
 
     assert passed is True and exit_code == 0
     assert "package resolution failed" in output
@@ -158,3 +162,30 @@ def test_an_unconfigured_cache_is_said_so_in_the_output(monkeypatch):
     """The diagnosis run 44 needed, in the artifact rather than the Mac's log."""
     monkeypatch.setattr(Config, "VM_PACKAGE_CACHE", "")
     assert vm._package_cache_dir() is None
+
+
+# ── the evidence that settled run 44, carried in the artifact ────────────────
+
+def test_the_guidance_names_the_causes_actually_in_doubt():
+    """Run 44 was a starved host; the old wording named SwiftPM and nothing else,
+    and two separate agents built two wrong mechanisms on it."""
+    g = vm.RESOLVE_TIMEOUT_GUIDANCE
+    assert "starved" in g, "host contention is the known cause and must be first"
+    assert "unreachable" in g and "SSH" in g
+    assert "cache" in g
+    assert "Raising the timeout is not the fix" in g
+
+
+def test_phase_timings_render_for_the_artifact():
+    """boot/sync/cache push/resolve durations belong in the output, not only in
+    the Mac's local log — that asymmetry is what made run 44 undiagnosable from
+    this host."""
+    import re
+    src = (vm.__file__ and open(vm.__file__).read()) or ""
+    assert "_mark(\"boot\"" in src and "_mark(\"sync\"" in src
+    assert "_mark(\"cache push\"" in src and "_mark(\"resolve\"" in src
+    assert "_mark(\"test\"" in src
+    # every post-cache return path reports them
+    assert src.count("_report()") >= 5
+    assert not re.search(r"return None, notes \+", src), (
+        "a return that bypasses _report() loses the timings it was added for")

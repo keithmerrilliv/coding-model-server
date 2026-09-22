@@ -121,6 +121,27 @@ def _package_cache_dir() -> "Path | None":
     return cache
 
 
+# DEV-752: what a blown resolve budget actually means. The old message said
+# "package resolution timed out", and twice that sent an agent hunting SwiftPM
+# — once to a slow-link theory, once to SSH key material — when the cause was a
+# foreground game starving the VM host. The subsystem named first is the one
+# that gets investigated, so name the ones actually in doubt.
+RESOLVE_TIMEOUT_GUIDANCE = (
+    "This is an infrastructure failure on the runner host, NOT a verdict on the "
+    "code under test and NOT evidence that the dependency graph is slow.\n"
+    "On a healthy host this whole dispatch finishes in about 107s, so a blown "
+    "resolve budget means one of:\n"
+    "  - the host is starved (a foreground app competing for CPU/IO has taken "
+    "a cache push from ~5s to minutes before now);\n"
+    "  - the guest is unreachable or SSH into it is failing, which surfaces "
+    "here because every in-guest step runs over SSH;\n"
+    "  - the warm package cache is missing or stale, so the graph is being "
+    "fetched over guest egress.\n"
+    "The phase timings above say which. Raising the timeout is not the fix "
+    "(DEV-752).\n"
+)
+
+
 def _cache_summary(cache: Path) -> str:
     """What the warm cache covers, in one line for the artifact (DEV-752).
 
@@ -324,13 +345,28 @@ def run_tests_in_vm(worktree: Path, resolve_cmd: "list[str] | None",
     resolve_output = ""
     # DEV-752: everything the reader needs to tell an infrastructure failure
     # from a code failure, carried in the ARTIFACT rather than this host's log.
+    # Run 44 was diagnosed from exactly these numbers — cache push 4.8s on a
+    # healthy host, 4m31s while a game held the foreground — and they existed
+    # only in the Mac's own log, so two agents built two wrong mechanisms from
+    # the artifact text instead. A starved host has a shape; show it.
     notes = ""
+    phases: "list[tuple[str, float]]" = []
+
+    def _mark(name: str, started: float) -> None:
+        phases.append((name, time.monotonic() - started))
+
+    def _report() -> str:
+        if not phases:
+            return notes
+        line = ", ".join(f"{n} {d:.1f}s" for n, d in phases)
+        return f"[vm] phases: {line}\n{notes}"
     # Discarding `tart run`'s log on an infrastructure failure throws away the
     # only account of what the guest was doing. Cleared once the test itself
     # returns a verdict; every other exit keeps the log and says where it is.
     keep_boot_log = True
     try:
         sweep_leaked_vms(warnings)
+        t_boot = time.monotonic()
         with _ACTIVE_LOCK:
             _ACTIVE_VMS.add(name)
         clone = subprocess.run(["tart", "clone", Config.VM_IMAGE, name],
@@ -353,7 +389,9 @@ def run_tests_in_vm(worktree: Path, resolve_cmd: "list[str] | None",
         except VMError as e:
             return None, f"[vm] {e}"
         logger.info("vm %s up at %s", name, ip)
+        _mark("boot", t_boot)
 
+        t_sync = time.monotonic()
         sync = subprocess.run(
             ["sshpass", "-p", Config.VM_SSH_PASSWORD, "rsync", "-a", "--delete",
              "-e", "ssh " + " ".join(_SSH_OPTS),
@@ -361,6 +399,7 @@ def run_tests_in_vm(worktree: Path, resolve_cmd: "list[str] | None",
             capture_output=True, text=True, timeout=SYNC_TIMEOUT)
         if sync.returncode != 0:
             return None, f"[vm] worktree sync failed: {sync.stderr.strip()}"
+        _mark("sync", t_sync)
 
         # A warm clone cache, when one is configured, so resolution reads from
         # disk instead of re-fetching the graph over slow guest egress
@@ -374,6 +413,7 @@ def run_tests_in_vm(worktree: Path, resolve_cmd: "list[str] | None",
                       "(set CODING_MODEL_RUNNER_VM_PACKAGE_CACHE)\n")
         else:
             covers = _cache_summary(cache)
+            t_cache = time.monotonic()
             pushed = subprocess.run(
                 ["sshpass", "-p", Config.VM_SSH_PASSWORD, "rsync", "-a",
                  "-e", "ssh " + " ".join(_SSH_OPTS),
@@ -388,11 +428,13 @@ def run_tests_in_vm(worktree: Path, resolve_cmd: "list[str] | None",
             else:
                 logger.info("pushed warm package cache from %s (%s)", cache, covers)
                 notes += f"[vm] warm SwiftPM cache pushed from {cache} — {covers}\n"
+            _mark("cache push", t_cache)
 
         if resolve_cmd is not None:
             # Same contract as the host pre-step (DEV-294): a failed resolve
             # is non-fatal — the build may succeed from what the worktree
             # already carries — but it must be visible in the output.
+            t_resolve = time.monotonic()
             try:
                 rr = subprocess.run(
                     [*_ssh_base(ip), _guest_sh(resolve_cmd, GUEST_WORKTREE)],
@@ -408,29 +450,28 @@ def run_tests_in_vm(worktree: Path, resolve_cmd: "list[str] | None",
                 # the build can only fail slowly and report nothing; starting it
                 # spends the test budget to reach a gate with no verdict. Run 44
                 # did exactly that. None means infrastructure, not a verdict.
-                logger.error("in-vm package resolution timed out after %ds — "
+                logger.error("in-vm resolve step exceeded its %ds budget — "
                              "failing the dispatch rather than starting a "
                              "doomed test", resolve_timeout)
-                return None, notes + (
-                    f"[package resolution timed out after {resolve_timeout}s]\n\n"
-                    "The dependency graph did not resolve, so no test was run. "
-                    "This is an infrastructure failure on the runner host, not "
-                    "a verdict on the code under test (DEV-752): warm the "
-                    "SwiftPM cache, or raise "
-                    "CODING_MODEL_RUNNER_RESOLVE_TIMEOUT.\n")
+                _mark("resolve", t_resolve)
+                return None, _report() + (
+                    f"\n[resolve step exceeded its {resolve_timeout}s budget "
+                    "— no test was run]\n\n" + RESOLVE_TIMEOUT_GUIDANCE)
+            _mark("resolve", t_resolve)
 
         remaining = deadline - time.monotonic()
         if remaining < max(1, min_test_budget):
             # DEV-752: the same refusal one step later. A test started with
             # less than its floor cannot finish, and the timeout it returns
             # reads as the code's fault rather than the overhead's.
-            return None, notes + resolve_output + (
+            return None, _report() + resolve_output + (
                 f"[only {max(0, int(remaining))}s of the {timeout}s budget "
                 f"remained after boot, sync and resolve — below the "
                 f"{min_test_budget}s floor, so no test was started]\n\n"
                 "This is an infrastructure failure on the runner host, not a "
                 "verdict on the code under test (DEV-752): warm the SwiftPM "
                 "cache, or raise the framework timeout.\n")
+        t_test = time.monotonic()
         try:
             tr = subprocess.run(
                 [*_ssh_base(ip), _guest_sh(cmd, GUEST_WORKTREE)],
@@ -438,16 +479,17 @@ def run_tests_in_vm(worktree: Path, resolve_cmd: "list[str] | None",
         except subprocess.TimeoutExpired as e:
             def _text(x: "bytes | str | None") -> str:
                 return x.decode() if isinstance(x, bytes) else (x or "")
-            return None, (notes + resolve_output +
+            return None, (_report() + resolve_output +
                           f"Tests timed out after {timeout}s\n"
                           f"{_text(e.stdout)}\n{_text(e.stderr)}")
         # ssh propagates the remote command's exit status; 255 is ssh's OWN
         # transport failure, which would otherwise masquerade as a test fail.
         if tr.returncode == 255:
-            return None, (notes + resolve_output + "[vm] ssh transport failed "
+            return None, (_report() + resolve_output + "[vm] ssh transport failed "
                           f"mid-run\n{tr.stdout}\n{tr.stderr}")
         keep_boot_log = False
-        return tr.returncode, (notes + resolve_output + (tr.stdout or "") + "\n" +
+        _mark("test", t_test)
+        return tr.returncode, (_report() + resolve_output + (tr.stdout or "") + "\n" +
                                (tr.stderr or ""))
     finally:
         try:
