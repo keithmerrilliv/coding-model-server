@@ -253,11 +253,17 @@ def _wrap_in_sandbox(
 # 42 dispatched at 900s while the Mac was prepared to allow 1200s. The record said
 # the problem was fixed, which is worse than it being open.
 #
-# The 1200 itself is the runner's reasoning: the VM path spends the budget on
+# The value itself is the runner's reasoning: the VM path spends the budget on
 # boot, worktree sync and package resolution before the test starts, and a resolve
-# that times out alone costs 300s — one run reached 823.4s of overhead, 77s short
-# of the old ceiling, so a passing test was seconds away from being reported as a
-# timeout.
+# that times out alone costs its whole budget — one run reached 823.4s of overhead,
+# 77s short of the old 900s ceiling, so a passing test was seconds away from being
+# reported as a timeout.
+#
+# DEV-752, 2026-09-21: 1200 -> 2400. Run 44's cold MLX resolve exhausted the
+# resolve budget and then the rest of the 1200s, and the dispatch returned with no
+# test result at all. The runner now refuses rather than starting a doomed test
+# (server.resolve_budget, MIN_TEST_BUDGET), and this is the headroom that makes
+# refusing rare instead of routine.
 #
 # test_timeouts_agree_across_hosts pins the two tables together.
 DEFAULT_TIMEOUTS: dict[str, int] = {
@@ -267,7 +273,7 @@ DEFAULT_TIMEOUTS: dict[str, int] = {
     "vitest": 180,
     "node_test": 120,
     "swift_test": 300,
-    "xcodebuild_test": 1200,
+    "xcodebuild_test": 2400,
 }
 
 # Frameworks whose tests import from `node_modules`, so the spec needs a

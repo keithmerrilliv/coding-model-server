@@ -12,13 +12,22 @@ logger = logging.getLogger("mac_runner.frameworks")
 #
 # The VM path spends this budget on boot, worktree sync and package resolution
 # before the test starts (vm.py sets its deadline at dispatch, not at the test
-# step). A resolve that times out alone costs RESOLVE_TIMEOUT — 300s — and one
-# such run came within 77s of the old 900s ceiling with 823.4s elapsed, so a
-# passing test was a few seconds of overhead away from being reported as a
-# timeout. 1200s keeps that overhead from deciding the verdict.
+# step). A resolve that times out alone costs RESOLVE_TIMEOUT, and one such run
+# came within 77s of the old 900s ceiling with 823.4s elapsed, so a passing test
+# was a few seconds of overhead away from being reported as a timeout.
+#
+# DEV-752, 2026-09-21: 1200s was still not enough. Run 44's cold resolve of
+# Electric Sheep's MLX graph exhausted the resolve budget AND the rest of the
+# 1200s, and the run reached a code-review gate having never executed a test.
+# Two changes together: this ceiling doubles, and server.py now caps the resolve
+# budget so it cannot leave the test phase less than MIN_TEST_BUDGET. Raising
+# this alone would only have moved the cliff.
+#
+# MUST AGREE with test_runner.DEFAULT_TIMEOUTS on the caller: the effective
+# budget is the minimum of the two (test_timeouts_agree_across_hosts).
 DEFAULT_TIMEOUTS: dict[str, int] = {
     "swift_test": 300,
-    "xcodebuild_test": 1200,
+    "xcodebuild_test": 2400,
 }
 
 

@@ -46,7 +46,29 @@ app = FastAPI(title="coding-model mac-runner", version="0.1.0")
 # Cap on the unsandboxed package-resolution pre-step (DEV-294). Bounded
 # separately from the test timeout: resolution can hit the network, and a hung
 # fetch should not consume the whole budget the actual test run needs.
-RESOLVE_TIMEOUT = int(os.getenv("CODING_MODEL_RUNNER_RESOLVE_TIMEOUT", "300"))
+#
+# DEV-752: 300s was not enough for a cold MLX graph over a slow link, so the
+# resolve failed AND the doomed test that followed ate the rest of the wall.
+# The ceiling rises, but `resolve_budget` below is what makes the rise safe.
+RESOLVE_TIMEOUT = int(os.getenv("CODING_MODEL_RUNNER_RESOLVE_TIMEOUT", "900"))
+
+# The test phase's floor. Boot, worktree sync and resolution all precede the
+# test inside one wall-clock budget, so without a floor a slow pre-step silently
+# spends the tests' time and the dispatch returns with no verdict at all — run
+# 44 reached a code-review gate that way (DEV-752). Below this, the dispatch is
+# an infrastructure failure by name rather than a test result by omission.
+MIN_TEST_BUDGET = int(os.getenv("CODING_MODEL_RUNNER_MIN_TEST_BUDGET", "600"))
+
+
+def resolve_budget(timeout: int) -> int:
+    """Seconds the resolve pre-step may take without starving the test (DEV-752).
+
+    Never more than RESOLVE_TIMEOUT, never so much that fewer than
+    MIN_TEST_BUDGET seconds remain, and never below a floor of 60s — a budget
+    of zero would report every resolve as a timeout and tell the reader
+    nothing about the packages.
+    """
+    return max(60, min(RESOLVE_TIMEOUT, timeout - MIN_TEST_BUDGET))
 
 # Above this, a failure's output is test output and belongs to the caller;
 # at or below it, the failure is infrastructure and the runner log should
@@ -465,7 +487,8 @@ def run_tests_endpoint(req: RunTestsRequest) -> RunTestsResponse:
                 exit_code, output = vm.run_tests_in_vm(
                     wt, resolve_cmd, cmd,
                     timeout=timeout,
-                    resolve_timeout=min(timeout, RESOLVE_TIMEOUT),
+                    resolve_timeout=resolve_budget(timeout),
+                    min_test_budget=min(MIN_TEST_BUDGET, timeout),
                     warnings=integration_warnings,
                 )
                 passed = exit_code == 0
@@ -521,10 +544,11 @@ def _run_on_host(req: RunTestsRequest, wt: Path, cmd: list[str],
     if resolve_cmd is not None:
         logger.info("resolving packages (unsandboxed): %s",
                     " ".join(resolve_cmd))
+        budget = resolve_budget(timeout)
         try:
             rr = subprocess.run(
                 resolve_cmd, cwd=wt, capture_output=True, text=True,
-                timeout=min(timeout, RESOLVE_TIMEOUT),
+                timeout=budget,
             )
             if rr.returncode != 0:
                 # Not fatal on its own: the build may still succeed from
@@ -537,8 +561,20 @@ def _run_on_host(req: RunTestsRequest, wt: Path, cmd: list[str],
                     "[package resolution failed — the build may fail "
                     f"for this reason]\n{rr.stdout}\n{rr.stderr}\n\n")
         except subprocess.TimeoutExpired:
-            logger.warning("package resolution timed out")
-            resolve_output = "[package resolution timed out]\n\n"
+            # DEV-752: fatal, unlike a non-zero exit. A resolve that ran out of
+            # time has not populated the cache, so the build that follows can
+            # only fail slowly and report nothing; starting it spends the test
+            # budget to reach a gate with no verdict. Exit code None marks this
+            # as infrastructure, not a verdict on the code.
+            logger.error("package resolution timed out after %ds — failing the "
+                         "dispatch rather than starting a doomed test", budget)
+            return False, (
+                f"[package resolution timed out after {budget}s]\n\n"
+                "The dependency graph did not resolve, so no test was run. "
+                "This is an infrastructure failure on the runner host, not a "
+                "verdict on the code under test (DEV-752): warm the SwiftPM "
+                "cache, or raise CODING_MODEL_RUNNER_RESOLVE_TIMEOUT.\n"
+            ), None
         except FileNotFoundError:
             logger.error("%s not found on PATH", resolve_cmd[0])
             resolve_output = f"[{resolve_cmd[0]!r} not found on PATH]\n\n"

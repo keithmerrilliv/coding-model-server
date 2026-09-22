@@ -121,6 +121,27 @@ def _package_cache_dir() -> "Path | None":
     return cache
 
 
+def _cache_summary(cache: Path) -> str:
+    """What the warm cache covers, in one line for the artifact (DEV-752).
+
+    Run 44's diagnosis needed to know whether the push landed and whether it
+    held the current pins, and neither was knowable without SSH to the Mac
+    because the only record was this host's local log. The names come from the
+    `checkouts/` subdirectory SwiftPM keeps under a cloned-packages path, or
+    from the directory itself when it is laid out some other way.
+    """
+    root = cache / "checkouts" if (cache / "checkouts").is_dir() else cache
+    try:
+        names = sorted(p.name for p in root.iterdir() if not p.name.startswith("."))
+    except OSError as exc:
+        return f"unreadable ({exc})"
+    if not names:
+        return "empty"
+    shown = ", ".join(names[:8])
+    more = f" (+{len(names) - 8} more)" if len(names) > 8 else ""
+    return f"{len(names)} package(s): {shown}{more}"
+
+
 def _guest_sh(cmd: list[str], cwd: str) -> str:
     """One shell word per argument, run from *cwd* in the guest.
 
@@ -274,6 +295,7 @@ def _destroy(name: str, boot_proc: "subprocess.Popen | None",
 def run_tests_in_vm(worktree: Path, resolve_cmd: "list[str] | None",
                     cmd: list[str], *, timeout: int,
                     resolve_timeout: int,
+                    min_test_budget: int = 0,
                     warnings: "list[str] | None" = None
                     ) -> "tuple[int | None, str]":
     """Run one test dispatch inside a throwaway VM; ALWAYS destroys it.
@@ -300,6 +322,9 @@ def run_tests_in_vm(worktree: Path, resolve_cmd: "list[str] | None",
     boot_log: "Path | None" = None
     deadline = time.monotonic() + timeout
     resolve_output = ""
+    # DEV-752: everything the reader needs to tell an infrastructure failure
+    # from a code failure, carried in the ARTIFACT rather than this host's log.
+    notes = ""
     # Discarding `tart run`'s log on an infrastructure failure throws away the
     # only account of what the guest was doing. Cleared once the test itself
     # returns a verdict; every other exit keeps the log and says where it is.
@@ -343,7 +368,12 @@ def run_tests_in_vm(worktree: Path, resolve_cmd: "list[str] | None",
         # cache that fails to copy costs speed, not correctness — the guest
         # falls back to fetching, which is what it did before this existed.
         cache = _package_cache_dir()
-        if cache is not None:
+        if cache is None:
+            notes += ("[vm] no warm SwiftPM cache configured — the guest "
+                      "resolves the whole graph over its own egress "
+                      "(set CODING_MODEL_RUNNER_VM_PACKAGE_CACHE)\n")
+        else:
+            covers = _cache_summary(cache)
             pushed = subprocess.run(
                 ["sshpass", "-p", Config.VM_SSH_PASSWORD, "rsync", "-a",
                  "-e", "ssh " + " ".join(_SSH_OPTS),
@@ -353,8 +383,11 @@ def run_tests_in_vm(worktree: Path, resolve_cmd: "list[str] | None",
             if pushed.returncode != 0:
                 logger.warning("package cache push failed (resolving from the "
                                "network instead): %s", pushed.stderr.strip())
+                notes += ("[vm] warm SwiftPM cache push FAILED, resolving from "
+                          f"the network instead: {pushed.stderr.strip()}\n")
             else:
-                logger.info("pushed warm package cache from %s", cache)
+                logger.info("pushed warm package cache from %s (%s)", cache, covers)
+                notes += f"[vm] warm SwiftPM cache pushed from {cache} — {covers}\n"
 
         if resolve_cmd is not None:
             # Same contract as the host pre-step (DEV-294): a failed resolve
@@ -371,14 +404,33 @@ def run_tests_in_vm(worktree: Path, resolve_cmd: "list[str] | None",
                         "[package resolution failed — the build may fail "
                         f"for this reason]\n{rr.stdout}\n{rr.stderr}\n\n")
             except subprocess.TimeoutExpired:
-                logger.warning("in-vm package resolution timed out")
-                resolve_output = "[package resolution timed out]\n\n"
+                # DEV-752: fatal, unlike a non-zero exit. Nothing resolved, so
+                # the build can only fail slowly and report nothing; starting it
+                # spends the test budget to reach a gate with no verdict. Run 44
+                # did exactly that. None means infrastructure, not a verdict.
+                logger.error("in-vm package resolution timed out after %ds — "
+                             "failing the dispatch rather than starting a "
+                             "doomed test", resolve_timeout)
+                return None, notes + (
+                    f"[package resolution timed out after {resolve_timeout}s]\n\n"
+                    "The dependency graph did not resolve, so no test was run. "
+                    "This is an infrastructure failure on the runner host, not "
+                    "a verdict on the code under test (DEV-752): warm the "
+                    "SwiftPM cache, or raise "
+                    "CODING_MODEL_RUNNER_RESOLVE_TIMEOUT.\n")
 
         remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return None, resolve_output + (
-                f"Tests timed out after {timeout}s (boot/sync/resolve "
-                "consumed the whole budget)")
+        if remaining < max(1, min_test_budget):
+            # DEV-752: the same refusal one step later. A test started with
+            # less than its floor cannot finish, and the timeout it returns
+            # reads as the code's fault rather than the overhead's.
+            return None, notes + resolve_output + (
+                f"[only {max(0, int(remaining))}s of the {timeout}s budget "
+                f"remained after boot, sync and resolve — below the "
+                f"{min_test_budget}s floor, so no test was started]\n\n"
+                "This is an infrastructure failure on the runner host, not a "
+                "verdict on the code under test (DEV-752): warm the SwiftPM "
+                "cache, or raise the framework timeout.\n")
         try:
             tr = subprocess.run(
                 [*_ssh_base(ip), _guest_sh(cmd, GUEST_WORKTREE)],
@@ -386,16 +438,16 @@ def run_tests_in_vm(worktree: Path, resolve_cmd: "list[str] | None",
         except subprocess.TimeoutExpired as e:
             def _text(x: "bytes | str | None") -> str:
                 return x.decode() if isinstance(x, bytes) else (x or "")
-            return None, (resolve_output +
+            return None, (notes + resolve_output +
                           f"Tests timed out after {timeout}s\n"
                           f"{_text(e.stdout)}\n{_text(e.stderr)}")
         # ssh propagates the remote command's exit status; 255 is ssh's OWN
         # transport failure, which would otherwise masquerade as a test fail.
         if tr.returncode == 255:
-            return None, (resolve_output + "[vm] ssh transport failed "
+            return None, (notes + resolve_output + "[vm] ssh transport failed "
                           f"mid-run\n{tr.stdout}\n{tr.stderr}")
         keep_boot_log = False
-        return tr.returncode, (resolve_output + (tr.stdout or "") + "\n" +
+        return tr.returncode, (notes + resolve_output + (tr.stdout or "") + "\n" +
                                (tr.stderr or ""))
     finally:
         try:
