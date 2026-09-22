@@ -424,9 +424,12 @@ def test_xcodebuild_dispatches_into_a_vm_not_onto_the_host(client, monkeypatch):
     seen = {}
 
     def fake_vm_run(wt, resolve_cmd, cmd, *, timeout, resolve_timeout,
-                    warnings=None):
+                    min_test_budget=0, warnings=None):
         seen["resolve_cmd"] = resolve_cmd
         seen["cmd"] = cmd
+        seen["timeout"] = timeout
+        seen["resolve_timeout"] = resolve_timeout
+        seen["min_test_budget"] = min_test_budget
         # DEV-705: the VM layer reports a leaked teardown on the response, so
         # the dispatch must hand it the request's own warnings list.
         seen["warnings"] = warnings
