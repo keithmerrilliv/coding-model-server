@@ -437,6 +437,23 @@ coding-model-autonomous swap-reset              # Clear a wedged model swap with
 
 **Human in the loop:** Every major transition requires your explicit approval — the system blocks at review gates until you approve or reject. Rejection notes feed back into the agent for a retry. If Jira is configured (`JIRA_*` env vars), gates sync to a Jira board with native email notifications so you can approve from anywhere.
 
+**Jira is optional, and it is a shared, rate-limited dependency.** Leave `JIRA_URL`
+unset and the pipeline uses an in-memory `FakeJiraClient`; nothing external is
+touched and nothing is lost. When you do configure it, the orchestrator's own sync
+and any interactive session you run both authenticate as the *same* Atlassian
+account and share one concurrency budget. Two of them working at once — a daemon
+mirroring gates while you or an agent read and comment from another machine — makes
+calls time out on both sides. The timeouts cluster rather than arriving evenly,
+which is what tells you it is contention and not an outage.
+
+Two rules follow, and the second one bites:
+
+- **A timed-out write may still have landed.** Verify with a cheap keyed read
+  before re-sending anything. Retrying blind is how you get duplicate issues and
+  duplicate comments.
+- **Do not interleave Jira calls with a long local job.** Finish the local work,
+  then do the Jira pass in one burst, batching queries by key where you can.
+
 **Sandboxed tests:** LLM-generated tests run under bubblewrap (`--unshare-all`)
 with a seccomp-BPF filter. Set `CODING_MODEL_ALLOW_UNSANDBOXED_TESTS=1` to opt
 out (not recommended — tests then run with the orchestrator's privileges).
