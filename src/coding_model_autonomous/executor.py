@@ -965,9 +965,16 @@ REVIEWER_SYSTEM_PROMPT = textwrap.dedent("""\
         <anything the implementer should know on retry>
         <<<END_REVIEW>>>
 
+    `### Verdict` and `### Verdict Evidence` are two separate required
+    headings and neither replaces the other. `### Verdict` carries the single
+    word PASS or FAIL on the line below it; `### Verdict Evidence` carries the
+    reasons. A review holding only `### Verdict Evidence` has stated no
+    verdict at all: it is not read as a FAIL, it is sent back to you unread.
+
     # Verdict Evidence (REQUIRED, parsed by the orchestrator)
 
     Empty or missing evidence forces FAIL — an unanchored verdict is rejected.
+    This section is IN ADDITION TO `### Verdict`, never instead of it.
 
     For PASS: one line per acceptance criterion mapped to its test:
         - <criterion text> → <test_file.py::test_function_name>
@@ -1340,6 +1347,25 @@ _VERDICT_EVIDENCE_RE = re.compile(
 )
 
 
+def _missing_verdict_reason(review_md: str) -> str:
+    """Why no verdict was found, naming the near miss when there is one.
+
+    `### Verdict Evidence` sits directly below `### Verdict` in the template
+    and satisfies neither regex for the other, so a reviewer that writes only
+    the longer heading looks — to the old code — exactly like one that
+    deliberately failed the work. Say which of the two it actually wrote
+    (DEV-807).
+    """
+    base = ("No '### Verdict' heading followed by PASS or FAIL in the "
+            "<<<REVIEW>>> block")
+    if _VERDICT_EVIDENCE_RE.search(review_md):
+        return (f"{base}. The block does have '### Verdict Evidence', which is "
+                "a separate, additional section: it records WHY and does not "
+                "state the verdict. Write both headings — '### Verdict' with "
+                "PASS or FAIL on the next line, then '### Verdict Evidence'.")
+    return f"{base}. State it on a line of its own under '### Verdict'."
+
+
 @dataclass
 class ArchitectResult:
     design_md: str
@@ -1610,9 +1636,20 @@ def parse_reviewer_response(text: str) -> ReviewerResult | ParseError:
         return ParseError("No <<<REVIEW>>>…<<<END_REVIEW>>> block found", text)
     review_md = review_match.group(1).strip()
 
-    # Extract verdict
+    # Extract verdict. DEV-807: a MISSING heading is NOT a FAIL. "The reviewer
+    # rejected this" and "the reviewer never said" are different facts, and
+    # DEV-629 exists to stop them being collapsed. Returning a ParseError sends
+    # it through the classifier, which re-runs the reviewer on its own small
+    # budget instead of charging the implementer for a heading nobody typed.
+    # Run 56's reviewer wrote "No issues found", mapped all six criteria in a
+    # full evidence block, and was recorded as a rejection over a 71-passed,
+    # 0-failed suite; only DEV-560's adjudication gate stopped that becoming a
+    # retry. Inferring PASS from the absence is the other way to get this
+    # wrong, and DEV-405 is why we do not: silence is not approval either.
     verdict_match = _VERDICT_RE.search(review_md)
-    verdict = verdict_match.group(1).upper() if verdict_match else "FAIL"
+    if not verdict_match:
+        return ParseError(_missing_verdict_reason(review_md), text)
+    verdict = verdict_match.group(1).upper()
 
     # Layer 3 (anti-hallucination guard): the reviewer must back its verdict
     # with structured evidence — acceptance-criterion → test mapping for PASS,

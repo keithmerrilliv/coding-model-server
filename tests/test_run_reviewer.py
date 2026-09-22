@@ -351,3 +351,47 @@ def test_fail_verdict_is_not_double_annotated(db, spec_and_task):
     report = (spec_dir / "failure_report.md").read_text()
     assert "overridden" not in report, (
         "an honest FAIL needs no reconciliation banner")
+
+
+def test_a_missing_verdict_heading_rereads_the_reviewer_and_charges_nobody(
+        db, spec_and_task):
+    """DEV-807, end to end through the REAL parser.
+
+    Run 56's reviewer found no issues, mapped every criterion, and skipped the
+    `### Verdict` heading. That used to be recorded as a FAIL verdict on a
+    71-passed, 0-failed suite. It must instead be no verdict: the reviewer
+    re-runs on its own budget and the implementer's attempts are untouched.
+    """
+    spec, task, spec_dir = spec_and_task
+    impl = db.create_task(spec_id=spec.id, agent="implementer",
+                          role="implementer", title="implement")
+    before = db.get_task(impl.id).retry_count
+
+    raw = (
+        "<<<REVIEW>>>\n"
+        "## Code Review\n"
+        "### Issues Found\n"
+        "No issues found.\n"
+        "### Verdict Evidence\n"
+        "- criterion 1 -> tests/test_demo.py::test_ok\n"
+        "### Notes\n"
+        "All acceptance criteria are satisfied.\n"
+        "<<<END_REVIEW>>>\n"
+    )
+    with mock.patch.object(d, "call_agent", return_value=raw), \
+            mock.patch.object(d, "build_reviewer_message", return_value=[]):
+        d._run_reviewer(db, spec, task, spec_dir)
+
+    # The reviewer is asked again; the spec lives on; no gate was opened, so
+    # nobody is asked to adjudicate a verdict that was never stated.
+    assert db.get_task(task.id).status is TaskStatus.PENDING
+    assert db.get_spec(spec.id).status is SpecStatus.EXECUTING
+    assert db.list_open_gates(spec.id) == []
+    # The implementation was not judged, so it was not charged.
+    assert db.get_task(impl.id).retry_count == before
+
+    # And the dump says which heading was missing, rather than leaving the
+    # operator to read the regex as I had to.
+    dump = (spec_dir / "reviewer_failed_response.txt").read_text()
+    assert "### Verdict" in dump
+    assert "Verdict Evidence" in dump
