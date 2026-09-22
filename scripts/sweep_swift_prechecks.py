@@ -32,14 +32,27 @@ _GREEN = re.compile(r"TEST SUCCEEDED|Test run with \d+ tests? passed|"
 
 
 def _verdict(d: Path) -> str:
+    """The set's LAST word from the Mac, not its most flattering one.
+
+    The outputs are ordered newest-authority first and the FIRST that exists
+    decides. Falling through to an older one let a superseded green mask a
+    later red: spec_7ff43f1f/retry_2's build check passed at 19:55, the
+    reviewer's dispatch failed at 20:04 with `invalid redeclaration`, and the
+    old loop skipped the red test_output.txt (it contains "error:") to report
+    the stale green build_check_output.txt as `passed`. That turned a correct
+    precheck hit into a phantom false positive in the table this script exists
+    to produce.
+    """
     if (d / "build_failure.txt").exists():
         return "build_failed"
     for name in ("test_output.txt", "build_check_output.txt"):
         f = d / name
-        if f.exists():
-            txt = re.sub(r"\x1b\[[0-9;]*m", "", f.read_text(errors="replace"))
-            if _GREEN.search(txt) and "error:" not in txt:
-                return "passed"
+        if not f.exists():
+            continue
+        txt = re.sub(r"\x1b\[[0-9;]*m", "", f.read_text(errors="replace"))
+        if "error:" in txt:
+            return "build_failed"
+        return "passed" if _GREEN.search(txt) else "unknown"
     return "unknown"
 
 
