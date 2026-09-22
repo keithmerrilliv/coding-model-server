@@ -6140,11 +6140,19 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
             raw, meta, role="reviewer", parse_reason=result.reason,
             strip_thinking=executor._strip_thinking)
         assert failure is not None
+        # DEV-807: this used to assert "likely truncation" whatever the
+        # reason, which is a guess presented as a finding and is simply false
+        # for a reviewer that answered in full but skipped a required heading.
+        # Name the cause we actually observed.
+        cause = ("the response was cut off at the token limit"
+                 if meta.get("truncated")
+                 else "the response did not follow the output contract")
         failure.feedback = (
             f"The reviewer could not produce a parseable review after "
-            f"{task.retry_count + 1} attempt(s) (likely truncation: {result.reason}). "
-            f"The implementation was NOT actually reviewed — re-examine the code, "
-            f"or revise the design if the spec is hard to satisfy.")
+            f"{task.retry_count + 1} attempt(s): {cause}. {result.reason} "
+            f"The implementation was NOT actually reviewed, so nothing here "
+            f"says it is wrong — re-examine the code against the acceptance "
+            f"criteria, or revise the design if the spec is hard to satisfy.")
         _dispose(db, spec, task, failure)
         return
 
