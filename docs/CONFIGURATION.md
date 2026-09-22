@@ -264,6 +264,13 @@ an in-memory `FakeJiraClient` and nothing external is touched.
 | `JIRA_SYNC_POLL_INTERVAL` | *(see `jira_sync.py`)* | Seconds between inbound-sync polls. |
 | `JIRA_SYNC_BATCH_SIZE` | *(see `jira_sync.py`)* | Issues fetched per poll. |
 
+**Contention.** The daemon's sync and any interactive session share one Atlassian
+account and one concurrency budget. Running both at once makes API calls time out
+on both sides, in clusters rather than evenly — that pattern is contention, not an
+outage. A timed-out *write* may still have landed, so verify with a keyed read
+before re-sending or you will file duplicates. Raising `JIRA_SYNC_POLL_INTERVAL`
+gives an interactive session more room when you are working the board by hand.
+
 ### Dashboard (`scripts/serve_dashboard.py`)
 | Variable | Default | Description |
 |----------|---------|-------------|
