@@ -16,18 +16,18 @@ logger = logging.getLogger("mac_runner.frameworks")
 # came within 77s of the old 900s ceiling with 823.4s elapsed, so a passing test
 # was a few seconds of overhead away from being reported as a timeout.
 #
-# DEV-752, 2026-09-21: 1200s was still not enough. Run 44's cold resolve of
-# Electric Sheep's MLX graph exhausted the resolve budget AND the rest of the
-# 1200s, and the run reached a code-review gate having never executed a test.
-# Two changes together: this ceiling doubles, and server.py now caps the resolve
-# budget so it cannot leave the test phase less than MIN_TEST_BUDGET. Raising
-# this alone would only have moved the cliff.
+# DEV-752 considered doubling this and did NOT. Run 44 looked like a cold MLX
+# resolve; the Mac's phase timings showed a foreground game starving the VM,
+# with both healthy passes finishing in ~107s. A bigger ceiling would only let
+# a starved run burn twice as long before saying so, which is the opposite of
+# what that ticket wants. The budget is adequate; what was missing is a
+# dispatch that fails fast and names the right subsystem.
 #
 # MUST AGREE with test_runner.DEFAULT_TIMEOUTS on the caller: the effective
 # budget is the minimum of the two (test_timeouts_agree_across_hosts).
 DEFAULT_TIMEOUTS: dict[str, int] = {
     "swift_test": 300,
-    "xcodebuild_test": 2400,
+    "xcodebuild_test": 1200,
 }
 
 

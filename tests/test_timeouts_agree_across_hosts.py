@@ -48,11 +48,12 @@ def test_timeouts_agree_across_hosts():
     )
 
 
-def test_xcodebuild_carries_the_dev752_budget():
+def test_xcodebuild_carries_the_dev705_budget():
     """The specific value the ticket is about, pinned on both sides.
 
-    DEV-705 set 1200; DEV-752 raised it to 2400 after run 44 spent the whole
-    1200 on a cold MLX resolve and reached a gate with no test result.
+    DEV-705 set 1200 and DEV-752 deliberately left it there: run 44's failure
+    was a starved host, not a slow resolve, and a bigger ceiling only lengthens
+    the wait before a starved dispatch reports.
     """
-    assert CALLER["xcodebuild_test"] == 2400
-    assert _runner_timeouts()["xcodebuild_test"] == 2400
+    assert CALLER["xcodebuild_test"] == 1200
+    assert _runner_timeouts()["xcodebuild_test"] == 1200

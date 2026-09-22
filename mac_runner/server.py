@@ -47,10 +47,11 @@ app = FastAPI(title="coding-model mac-runner", version="0.1.0")
 # separately from the test timeout: resolution can hit the network, and a hung
 # fetch should not consume the whole budget the actual test run needs.
 #
-# DEV-752: 300s was not enough for a cold MLX graph over a slow link, so the
-# resolve failed AND the doomed test that followed ate the rest of the wall.
-# The ceiling rises, but `resolve_budget` below is what makes the rise safe.
-RESOLVE_TIMEOUT = int(os.getenv("CODING_MODEL_RUNNER_RESOLVE_TIMEOUT", "900"))
+# DEV-752 left this at 300 on the evidence: on a healthy host the whole VM
+# dispatch finishes in ~107s, and 300 is generous. When it IS exceeded the host
+# is starved or the guest is unreachable, and a longer ceiling only delays that
+# news. `resolve_budget` below stops it eating the test's time regardless.
+RESOLVE_TIMEOUT = int(os.getenv("CODING_MODEL_RUNNER_RESOLVE_TIMEOUT", "300"))
 
 # The test phase's floor. Boot, worktree sync and resolution all precede the
 # test inside one wall-clock budget, so without a floor a slow pre-step silently
@@ -569,12 +570,8 @@ def _run_on_host(req: RunTestsRequest, wt: Path, cmd: list[str],
             logger.error("package resolution timed out after %ds — failing the "
                          "dispatch rather than starting a doomed test", budget)
             return False, (
-                f"[package resolution timed out after {budget}s]\n\n"
-                "The dependency graph did not resolve, so no test was run. "
-                "This is an infrastructure failure on the runner host, not a "
-                "verdict on the code under test (DEV-752): warm the SwiftPM "
-                "cache, or raise CODING_MODEL_RUNNER_RESOLVE_TIMEOUT.\n"
-            ), None
+                f"[resolve step exceeded its {budget}s budget — no test was "
+                "run]\n\n" + vm.RESOLVE_TIMEOUT_GUIDANCE), None
         except FileNotFoundError:
             logger.error("%s not found on PATH", resolve_cmd[0])
             resolve_output = f"[{resolve_cmd[0]!r} not found on PATH]\n\n"
