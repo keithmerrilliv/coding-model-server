@@ -1235,6 +1235,59 @@ def is_runner_unreachable(output: str) -> bool:
     return RUNNER_UNREACHABLE in (output or "")
 
 
+def runner_version() -> "dict | None":
+    """What the Mac runner is serving, or None when it cannot say (DEV-805).
+
+    `mac_runner/*` deploys on the Mac alone, so a merge here changes nothing
+    there until somebody pulls. Twice that has been invisible: DEV-705's
+    timeout raise was inert for a day while the record called it fixed, and
+    DEV-752's runner-side half could not be confirmed from this host at all.
+
+    None on any failure, including an older runner with no such route — this
+    is telemetry about the dispatch and must never be able to stop one.
+    """
+    try:
+        resp = _SESSION.get(
+            f"{MAC_RUNNER_URL.rstrip('/')}/v1/version",
+            headers={"X-Runner-Key": MAC_RUNNER_API_KEY}, timeout=15,
+        )
+    except requests.RequestException:
+        return None
+    if resp.status_code != 200:
+        return None
+    try:
+        return resp.json()
+    except ValueError:
+        return None
+
+
+def _log_runner_version(framework: str, timeout: int) -> None:
+    """One line per dispatch naming the runner's commit, and a warning when its
+    timeout table disagrees with ours.
+
+    The effective budget is the MINIMUM of the two tables, so a raise on one
+    host alone is inert. Saying which value will actually apply costs one line
+    and is the whole of what DEV-705 lost a day to.
+    """
+    info = runner_version()
+    if info is None:
+        logger.info("mac-runner version: unknown (no /v1/version route — the "
+                    "runner predates DEV-805, so mac_runner fixes merged since "
+                    "cannot be confirmed live from here)")
+        return
+    commit = (info.get("commit") or "unknown")[:12]
+    dirty = " DIRTY" if info.get("dirty") else ""
+    logger.info("mac-runner version: %s%s", commit, dirty)
+    theirs = (info.get("timeouts") or {}).get(framework)
+    ours = DEFAULT_TIMEOUTS.get(framework)
+    if theirs is not None and ours is not None and theirs != ours:
+        logger.warning(
+            "mac-runner's %s default is %ds and ours is %ds — the effective "
+            "budget is the minimum, so whichever table was raised alone is "
+            "inert (DEV-705/DEV-805). This dispatch asks for %ds.",
+            framework, theirs, ours, timeout)
+
+
 def _dispatch_with_retry(url: str, payload: dict, headers: dict,
                          http_timeout: int):
     """POST to the runner, retrying transport failures with bounded backoff.
@@ -1323,6 +1376,7 @@ def _run_mac_runner_tests(
 
     url = f"{MAC_RUNNER_URL.rstrip('/')}/v1/run_tests"
     headers = {"X-Runner-Key": MAC_RUNNER_API_KEY}
+    _log_runner_version(framework, timeout)
     # Give the HTTP call headroom beyond the test timeout so the runner can
     # finish packaging the response even on a long run.
     http_timeout = timeout + 30

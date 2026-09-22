@@ -299,6 +299,51 @@ async def health() -> dict:
     return {"status": "ok"}
 
 
+def _runner_commit() -> "tuple[str | None, bool | None]":
+    """This checkout's HEAD and whether it is dirty, or (None, None).
+
+    None is honest: a deployment need not be a git checkout, and a version
+    that guesses is worse than one that abstains.
+    """
+    root = Path(__file__).resolve().parent.parent
+    try:
+        head = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=10)
+        if head.returncode != 0:
+            return None, None
+        status = subprocess.run(
+            ["git", "-C", str(root), "status", "--porcelain"],
+            capture_output=True, text=True, timeout=10)
+        dirty = bool(status.stdout.strip()) if status.returncode == 0 else None
+        return head.stdout.strip(), dirty
+    except (OSError, subprocess.SubprocessError):
+        return None, None
+
+
+@app.get("/v1/version", dependencies=[Depends(verify_runner_key)])
+async def version() -> dict:
+    """What code this runner is actually serving (DEV-805).
+
+    `mac_runner/*` deploys on the Mac and nowhere else, so a fix merged on the
+    orchestrator host is inert here until somebody pulls. That has bitten
+    twice: DEV-705's timeout raise sat inert for a day while the record said it
+    was fixed, and DEV-752's whole runner-side half had no way to be confirmed
+    from the caller. Reporting the commit makes "is it live?" answerable
+    instead of assumed.
+
+    `timeouts` is here for the related trap: the effective budget is the
+    MINIMUM of this table and the caller's, so a raise on one host alone does
+    nothing. The caller compares them at dispatch and says so.
+    """
+    commit, dirty = _runner_commit()
+    return {
+        "commit": commit,
+        "dirty": dirty,
+        "timeouts": dict(DEFAULT_TIMEOUTS),
+    }
+
+
 @app.get("/v1/repos", dependencies=[Depends(verify_runner_key)])
 async def list_repos() -> dict:
     """Registered repo names — authenticated (see health())."""
