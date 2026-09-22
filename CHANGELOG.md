@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.4.0 — unreleased
+## v0.4.0 — 2026-09-22
 
 The Swift-loop release ([DEV-776](https://keith-merrill4.atlassian.net/browse/DEV-776)): the implementer loop learns the compiler's shape, and retrieval is measured on the role that writes the code.
 
