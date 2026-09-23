@@ -1544,11 +1544,32 @@ def fetch_repo_files(
             headers={"X-Runner-Key": MAC_RUNNER_API_KEY}, timeout=timeout,
         )
     except requests.RequestException as e:
-        return [], [f"could not reach the runner's read path: {e}"]
+        problem = f"could not reach the runner's read path: {e}"
+        logger.warning("read_files: repo=%s ref=%s requested=%d FAILED — %s",
+                       repo, base_ref, len(paths), problem)
+        return [], [problem]
+    # Every early return below is a whole-fetch failure, and each one used to
+    # be silent: the caller folds it into `problems` and the pass continues
+    # with less context than it asked for. 747 auth rejections accumulated
+    # this way with no line in either host's log. Log before returning, so the
+    # count is recoverable from the journal rather than only from the runner's
+    # access log.
     if resp.status_code == 404:
-        return [], ["runner has no /v1/read_files route (needs redeploy)"]
+        problem = "runner has no /v1/read_files route (needs redeploy)"
+        logger.warning("read_files: repo=%s ref=%s requested=%d FAILED — %s",
+                       repo, base_ref, len(paths), problem)
+        return [], [problem]
     if resp.status_code != 200:
-        return [], [f"read_files HTTP {resp.status_code}: {resp.text[:300]}"]
+        problem = f"read_files HTTP {resp.status_code}: {resp.text[:300]}"
+        hint = ""
+        if resp.status_code == 401:
+            hint = (" — the runner rejected this host's key; check that "
+                    "MAC_RUNNER_API_KEY here matches CODING_MODEL_RUNNER_API_KEY "
+                    "on the Mac, and that no second mac_runner.server is "
+                    "answering this port locally")
+        logger.warning("read_files: repo=%s ref=%s requested=%d FAILED — %s%s",
+                       repo, base_ref, len(paths), problem, hint)
+        return [], [problem]
     try:
         data = resp.json()
     except ValueError:

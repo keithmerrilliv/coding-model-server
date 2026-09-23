@@ -8,6 +8,7 @@ implementer retry feedback.
 """
 from __future__ import annotations
 
+import hashlib
 import hmac
 import logging
 import os
@@ -17,7 +18,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from . import vm
@@ -280,12 +281,40 @@ def _ref_state(repo: Path, ref: str) -> RepoRefState:
     )
 
 
-async def verify_runner_key(x_runner_key: Optional[str] = Header(None)) -> None:
+def _key_fingerprint(value: str) -> str:
+    """First 8 hex of sha256, or "absent". Never reversible, and never a
+    prefix of the key itself — a prefix would leak with every rejection."""
+    if not value:
+        return "absent"
+    return hashlib.sha256(value.encode()).hexdigest()[:8]
+
+
+async def verify_runner_key(
+    request: Request, x_runner_key: Optional[str] = Header(None),
+) -> None:
     if not Config.API_KEY:
         if Config.ALLOW_UNAUTH:
             return
         raise HTTPException(500, "runner misconfigured: CODING_MODEL_RUNNER_API_KEY is empty")
     if not x_runner_key or not hmac.compare_digest(x_runner_key, Config.API_KEY):
+        # A rejection used to leave no trace at all: 747 of them accumulated
+        # over nine days, invisible on both sides, because the client swallows
+        # a non-200 into a soft "problems" entry (DEV-620) and the server said
+        # nothing. Name the caller and say WHICH failure it was — an absent
+        # header is a client that never loaded its env, a mismatched one is a
+        # rotation or a second runner answering the same port.
+        # One compact line, because there may be hundreds: "absent" is a
+        # caller that never loaded its key, a fingerprint that differs from the
+        # expected one is two hosts disagreeing. The remedy belongs in the
+        # client's own log, which fires once per fetch rather than per request.
+        client = request.client
+        logger.warning(
+            "AUTH REJECTED %s %s from %s:%s — presented %s, expected %s",
+            request.method, request.url.path,
+            client.host if client else "?", client.port if client else "?",
+            _key_fingerprint(x_runner_key or ""),
+            _key_fingerprint(Config.API_KEY),
+        )
         raise HTTPException(401, "invalid or missing runner key")
 
 
@@ -710,6 +739,21 @@ def unlock_signing_keychain() -> bool:
 
 def main() -> None:
     import uvicorn
+
+    if sys.platform != "darwin" and not Config.ALLOW_NON_DARWIN:
+        logger.error(
+            "mac_runner.server refuses to start on %s. This process IS the Mac "
+            "in the pipeline's provenance model: it serves files from the Mac's "
+            "clone and builds with the Mac's toolchain. On the Linux host it "
+            "binds the same loopback port the Mac's reverse tunnel publishes "
+            "there, so the orchestrator reads a Linux clone while every log "
+            "line still says Mac runner (the DEV-674 / DEV-701 class of "
+            "defect). If that is what you want — the runner-shim stopgap, for "
+            "serving reads while the tunnel is down — set "
+            "CODING_MODEL_RUNNER_ALLOW_NON_DARWIN=1 to declare it.",
+            sys.platform,
+        )
+        sys.exit(1)
 
     if not Config.API_KEY and not Config.ALLOW_UNAUTH:
         logger.error(
