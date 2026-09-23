@@ -83,6 +83,15 @@ intended here: `ImmersiveRenderLoop` and `HalluRenderer` are main-actor today, a
 driver must be too. **Do NOT mark the new types `nonisolated`.** Tests that call them are
 `@MainActor`.
 
+### Prior work this spec absorbs
+
+DEV-591 was fixed once already, in `ad802a0` on branch `DEV-586-DEV-588-stereo-eye-fix`
+(2026-08-14), and **that commit never reached `main`**. Its three ideas are carried over
+here: layouts queried with `.foveationEnabled`, texture choice keyed off the configured
+layout, and per-view rate-map indexing with a fallback. Its `AtmosphereRenderTests.swift`
+and the `private(set)` change to `HalluRenderer` are NOT part of this spec —
+`HalluRenderer.swift` is protected here — and are left for a follow-up.
+
 ## Required change
 
 ### `ElectricSheep/ImmersiveFrameDriver.swift` (new, platform-neutral — no `#if`)
@@ -181,9 +190,33 @@ enum ImmersivePass {
 ### `ElectricSheep/ImmersiveRenderLoop.swift` (modified — replace `runLoop()` whole, add one method)
 
 This file is visionOS-only and **no gate in this run can compile it**. Transcribe exactly.
-Replace the entire `private func runLoop() async { ... }` (current lines 69–181) with the
-two methods below. Change nothing else in the file: not the compositor configuration, not
-`init`, not `start()`, not `snapshotAndUpload()`.
+Two edits, and nothing else in the file changes — not `init`, not `start()`, not
+`snapshotAndUpload()`.
+
+**Edit 1 — the compositor configuration (current lines 24–27).** Replace
+
+```swift
+        configuration.isFoveationEnabled = capabilities.supportsFoveation
+
+        let options = LayerRenderer.Capabilities.SupportedLayoutsOptions()
+```
+
+with
+
+```swift
+        let foveation = capabilities.supportsFoveation
+        configuration.isFoveationEnabled = foveation
+
+        // The valid layouts depend on whether foveation is on, so ask under the same
+        // terms the layer is then built with (DEV-591).
+        var options = LayerRenderer.Capabilities.SupportedLayoutsOptions()
+        if foveation { options.insert(.foveationEnabled) }
+```
+
+The two lines after it (`let layouts = ...` and `configuration.layout = ...`) stay.
+
+**Edit 2 — replace the entire `private func runLoop() async { ... }`** (current lines
+69–181) with the two methods below.
 
 ```swift
     private func runLoop() async {
@@ -246,27 +279,31 @@ two methods below. Change nothing else in the file: not the compositor configura
         commandBuffer: MTLCommandBuffer
     ) {
         let model = simd_float4x4(1)
+        let layered = layerRenderer.configuration.layout == .layered
 
         for drawable in drawables {
             drawable.deviceAnchor = deviceAnchor
 
             let viewCount = drawable.views.count
-            let textureCount = drawable.colorTextures.count
-            // Layered layout: ONE array texture, one slice per view. Dedicated layout
-            // (the fallback at line 28): one texture per view, no slices. The old code
-            // always used colorTextures[0] and so drew both eyes into one texture on the
-            // dedicated layout.
-            let layered = textureCount == 1 && viewCount > 1
             let rateMaps = drawable.rasterizationRateMaps
 
             for viewIndex in 0..<viewCount {
-                let textureIndex = layered ? 0 : min(viewIndex, textureCount - 1)
+                // Which texture an eye draws into is a property of the LAYOUT, not of
+                // how many views there are: `.layered` packs both eyes into array slices
+                // of one texture, `.dedicated` gives each eye its own. Deciding it from
+                // views.count sets slice 1 on a non-array texture under `.dedicated`, an
+                // invalid pass the encoder guard swallows, and an eye goes missing.
+                let textureIndex = layered ? 0 : viewIndex
+                guard textureIndex < drawable.colorTextures.count,
+                      textureIndex < drawable.depthTextures.count
+                else { continue }
 
-                // DEV-591: bind the compositor's rate map for the texture this view
-                // draws into. Behaviour is confirmed on device, not here.
+                // DEV-591: bind the compositor's rate map, per view with a fallback to
+                // the first — correct whether the layered layout reports one map or one
+                // per view. Behaviour is confirmed on device, not here.
                 let rateMap: (any MTLRasterizationRateMap)? = rateMaps.isEmpty
                     ? nil
-                    : rateMaps[min(textureIndex, rateMaps.count - 1)]
+                    : (viewIndex < rateMaps.count ? rateMaps[viewIndex] : rateMaps[0])
 
                 let renderPassDesc = ImmersivePass.descriptor(
                     color: drawable.colorTextures[textureIndex],
@@ -362,7 +399,7 @@ file elsewhere is never compiled.
 | Path | Change |
 | --- | --- |
 | `ElectricSheep/ImmersiveFrameDriver.swift` | new (transcribe as given) |
-| `ElectricSheep/ImmersiveRenderLoop.swift` | modified (`runLoop()` replaced, `encode(...)` added, as given) |
+| `ElectricSheep/ImmersiveRenderLoop.swift` | modified (layout query; `runLoop()` replaced; `encode(...)` added — as given) |
 | `ElectricSheepTests/ImmersiveFrameDriverTests.swift` | new |
 
 The three protected files below are served read-only; do not edit them.
@@ -457,4 +494,7 @@ A green build is NOT sufficient — the tests are the gate. Criteria 1–6 do no
   one map per texture and leaves the per-eye question to the device.
 - **The dedicated-layout texture choice changes behaviour** on that fallback only: each
   view now draws into its own texture instead of both into `colorTextures[0]`. The Vision
-  Pro takes the layered branch (line 28 prefers it), where behaviour is unchanged.
+  Pro negotiates the layered layout, where the texture choice is unchanged.
+- **The layout query now carries the foveation option.** If that changes the negotiated
+  layout on device, the encode path follows `configuration.layout`, so it stays
+  consistent either way.
