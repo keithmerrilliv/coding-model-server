@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Shipped
+
+- [DEV-811](https://keith-merrill4.atlassian.net/browse/DEV-811) — an auth rejection on the Mac runner now names itself on both hosts. 747 of 1,050 `read_files` requests were refused 401 across nine days and left no trace anywhere but the runner's access log: the server logged nothing on a rejection, and `fetch_repo_files` returned the non-200 as a soft `problems` entry without logging, so the orchestrator's journal held zero lines and `RunnerOutage` was never raised once. The reads degraded silently and each execution pass carried on with less context than it asked for. A rejection now logs the caller, the endpoint, and the presented key as `absent` or as a fingerprint against the expected one, never the key or a prefix of it. `fetch_repo_files` logs every whole-fetch failure before returning, and a 401 names both causes to check; the fail-soft shape [DEV-620](https://keith-merrill4.atlassian.net/browse/DEV-620) depends on is unchanged. One contributor is confirmed and one is not: zooshly's `coding-model-runner-shim` unit runs this same server on Linux against a Linux clone, and its own journal shows it rejecting reads — the [DEV-701](https://keith-merrill4.atlassian.net/browse/DEV-701) provenance failure wearing the Mac's name. It is a deliberate stopgap, so `main()` now refuses to start off Darwin unless `CODING_MODEL_RUNNER_ALLOW_NON_DARWIN=1` declares it. Whether the shim accounts for all 747, and whether any delivered artefact was harmed by a degraded fetch, **cannot be established**: nothing recorded enough to attribute them, which is the defect itself.
+
 ## v0.4.0 — 2026-09-22
 
 The Swift-loop release ([DEV-776](https://keith-merrill4.atlassian.net/browse/DEV-776)): the implementer loop learns the compiler's shape, and retrieval is measured on the role that writes the code.

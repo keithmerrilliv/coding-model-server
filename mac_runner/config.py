@@ -36,6 +36,20 @@ class Config:
     PORT = int(os.getenv("CODING_MODEL_RUNNER_PORT", "5050"))
     API_KEY = os.getenv("CODING_MODEL_RUNNER_API_KEY", "")
     ALLOW_UNAUTH = os.getenv("CODING_MODEL_RUNNER_ALLOW_UNAUTH", "").lower() in ("1", "true", "yes")
+    # This runner IS the Mac in the pipeline's provenance model: every file it
+    # serves is meant to come from the Mac's clone, and every build from the
+    # Mac's toolchain. Run on the Linux host it answers the same loopback port
+    # the Mac's reverse tunnel publishes there, so the orchestrator reads a
+    # Linux clone while every log line still says "Mac runner" — the DEV-674 /
+    # DEV-701 class of defect, with nothing to see.
+    #
+    # That deployment is a real stopgap, not a mistake: zooshly carries a
+    # `coding-model-runner-shim` unit for serving reads while the tunnel is
+    # down. What made it dangerous was being indistinguishable from the Mac.
+    # So it now has to be declared rather than merely started — main() refuses
+    # off Darwin unless this is set.
+    ALLOW_NON_DARWIN = os.getenv(
+        "CODING_MODEL_RUNNER_ALLOW_NON_DARWIN", "").lower() in ("1", "true", "yes")
     WORKTREE_ROOT = Path(os.getenv(
         "CODING_MODEL_RUNNER_WORKTREE_ROOT",
         str(Path.home() / "Library" / "Caches" / "coding-model-runner" / "worktrees"),
