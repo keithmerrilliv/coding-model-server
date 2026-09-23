@@ -2,7 +2,7 @@
 
 Jira: DEV-589 (drawables queried before `startSubmission`), DEV-757 (the immersive path
 never takes a triple-buffer slot), DEV-591 (foveation enabled, rate map never bound).
-Epic DEV-443. Repo `electric-sheep`, `main` = `1ae39e3` (run 56's delivery). Every fact
+Epic DEV-443. Repo `electric-sheep`, `main` = `cf0b42d` (DEV-812, on top of run 56's `1ae39e3`; neither touched the files below). Every fact
 below was read from that commit before this spec was written; do not re-derive them.
 
 ## Why this spec is shaped the way it is
