@@ -95,6 +95,7 @@ because every one of them is a VRAM-budget decision that has been measured.
 | `AUTONOMOUS_REVIEWER_TIMEOUT` | `2700` | Seconds. |
 | `AUTONOMOUS_PLANNER_MAX_TOKENS` | `4000` | Token budget for planner output. |
 | `AUTONOMOUS_ARCHITECT_MAX_TOKENS` | `8000` | Token budget for architect output. |
+| `AUTONOMOUS_ARCHITECT_RETRY_MAX_TOKENS` | twice `AUTONOMOUS_ARCHITECT_MAX_TOKENS` | Token budget for an architect **rejection retry**. A retry reasons over the previous design and the feedback before re-deriving it, and reasoning shares the budget with the answer; run 46's first pass needed 4,879 tokens and its retry ran out at 10,000 (DEV-760). |
 | `AUTONOMOUS_REVIEWER_MAX_TOKENS` | `16000` | Token budget for reviewer output. |
 | `AUTONOMOUS_MAX_RETRIES` | `5` | Per-task budget of charged attempts (verdicts — section 6 of `docs/PIPELINE.md`). The implementer's exhaustion hands to synthesis, never straight to FAILED; no-verdict failures do not count against it. |
 
