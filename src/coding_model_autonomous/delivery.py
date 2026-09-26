@@ -62,26 +62,35 @@ def test_names(source: str) -> set:
     return names
 
 
-def stale_base_refusal(repo: Path, deliverable: "list[str]", spec_dir: Path,
-                       base_files: "dict[str, str] | None") -> "str | None":
-    """Why this delivery must not be pushed as-is, or None (DEV-756).
+@dataclass(frozen=True)
+class BaseAssessment:
+    """What delivery found comparing the artifact with the default branch."""
+    refusal: "str | None"
+    # Tests renamed on a current base: allowed, and shown on the delivery
+    # (DEV-810). One line per file.
+    renames: "tuple[str, ...]" = ()
 
-    A pipeline branch is a SNAPSHOT of files written against base_ref, copied
-    onto whatever the default branch is at delivery time. Once main has moved
-    past that base, copying the snapshot deletes main's newer content — three
-    of four open Centipede branches were pure deletions by the time anyone
-    looked, and slice 8 removed six tests present in its own base. Two checks,
-    both computed against the freshly cloned default branch:
 
-      * a delivered file would REMOVE a test function main currently has;
-      * a delivered file differs from main's copy AND main's copy differs from
-        the base copy the artifact was written against — main moved under the
-        file, and the snapshot would overwrite that movement unseen.
+def assess_base(repo: Path, deliverable: "list[str]", spec_dir: Path,
+                base_files: "dict[str, str] | None",
+                base_is_current: "bool | None" = None) -> BaseAssessment:
+    """Judge a delivery against the freshly cloned default branch (DEV-756).
 
-    The second needs the base copy (context.json's editable set); without it
-    only the first runs. Both name every offending file.
+    DEV-810: a test name that vanishes from a file whose test count holds or
+    grows is a probable RENAME, not a deletion — run 57 renamed
+    `adapterMapsEveryDrawableKindAndDropsShot` because the slice made the shot
+    reach the screen, and was refused as a "stale base" on a base that had not
+    moved. So the diagnosis now follows the evidence:
+
+      * "stale base" only when the base is known to differ from main;
+      * a rename on a CURRENT base is the artifact's own reviewed change and is
+        delivered, with both name lists on the record;
+      * a deletion (names gone AND the count fell) is refused on any base;
+      * a rename on a stale or unrecorded base is refused, named as a probable
+        rename, because decay and intent cannot be told apart there.
     """
-    removed: list[str] = []
+    deletions: list[str] = []
+    renames: list[str] = []
     moved: list[str] = []
     for rel in deliverable:
         current = repo / rel
@@ -89,28 +98,67 @@ def stale_base_refusal(repo: Path, deliverable: "list[str]", spec_dir: Path,
             continue          # new file on main: nothing to regress
         main_src = current.read_text(errors="replace")
         ours = (spec_dir / rel).read_text(errors="replace")
-        lost = sorted(test_names(main_src) - test_names(ours))
+        main_names, our_names = test_names(main_src), test_names(ours)
+        lost = sorted(main_names - our_names)
         if lost:
-            removed.append(f"  {rel}: removes {len(lost)} test(s) main has: "
-                           + ", ".join(lost[:8])
-                           + (" …" if len(lost) > 8 else ""))
+            gained = sorted(our_names - main_names)
+            counts = f"test count {len(main_names)} → {len(our_names)}"
+            if len(our_names) >= len(main_names):
+                renames.append(f"  {rel}: probable rename ({counts}) — gone: "
+                               + ", ".join(lost[:8])
+                               + (" …" if len(lost) > 8 else "")
+                               + "; new: " + (", ".join(gained[:8]) or "none"))
+            else:
+                deletions.append(f"  {rel}: removes {len(lost)} test(s) main has "
+                                 f"({counts}): " + ", ".join(lost[:8])
+                                 + (" …" if len(lost) > 8 else ""))
         base_src = (base_files or {}).get(rel)
         if base_src is not None and main_src != base_src and main_src != ours:
             moved.append(f"  {rel}: main changed since the base this artifact "
                          "was written against")
-    if not removed and not moved:
-        return None
-    lines = ["REFUSED — stale base; nothing was pushed (DEV-756)."]
-    if removed:
+    if not deletions and not moved and (not renames or base_is_current):
+        return BaseAssessment(None, tuple(renames))
+
+    if base_is_current:
+        lines = ["REFUSED — the artifact removes tests the default branch has; "
+                 "nothing was pushed. The base is current, so this is the "
+                 "artifact's own change, not decay (DEV-756/DEV-810)."]
+    elif base_is_current is False or moved:
+        lines = ["REFUSED — stale base; nothing was pushed (DEV-756)."]
+    else:
+        lines = ["REFUSED — base not recorded, so decay cannot be ruled out; "
+                 "nothing was pushed (DEV-756/DEV-810)."]
+    if deletions:
         lines.append("Delivering would REMOVE tests the default branch has:")
-        lines += removed
+        lines += deletions
+    if renames:
+        lines.append("Test names that would disappear while the file keeps as "
+                     "many tests (probable renames — check them):")
+        lines += renames
     if moved:
         lines.append("The default branch moved under these files since base_ref, "
                      "and the artifact would overwrite that movement:")
         lines += moved
-    lines.append("Re-run the spec against current main, or rebase the artifact "
-                 "by hand; the workspace copy is unchanged.")
-    return "\n".join(lines)
+    if base_is_current:
+        lines.append("Re-running against main would reproduce this. If the "
+                     "removal is intended, review the diff and deliver by hand; "
+                     "otherwise reject the artifact. The workspace copy is "
+                     "unchanged.")
+    elif base_is_current is False or moved:
+        lines.append("Re-run the spec against current main, or rebase the "
+                     "artifact by hand; the workspace copy is unchanged.")
+    else:
+        lines.append("If the names above are intended renames, deliver by hand "
+                     "after reviewing the diff; the workspace copy is unchanged.")
+    return BaseAssessment("\n".join(lines), tuple(renames))
+
+
+def stale_base_refusal(repo: Path, deliverable: "list[str]", spec_dir: Path,
+                       base_files: "dict[str, str] | None",
+                       base_is_current: "bool | None" = None) -> "str | None":
+    """The refusal half of :func:`assess_base` (the DEV-756 entry point)."""
+    return assess_base(repo, deliverable, spec_dir, base_files,
+                       base_is_current).refusal
 
 
 def _base_from_context(spec_dir: Path) -> "tuple[str | None, dict[str, str]]":
@@ -343,13 +391,17 @@ def deliver_spec(spec_id: str, spec_title: str, spec_dir: Path,
         base_sha, base_files = _base_from_context(spec_dir)
         # DEV-756: refuse a snapshot that has decayed into a deletion, and
         # record the base so the check is computable after the fact.
-        stale = stale_base_refusal(repo, deliverable, spec_dir, base_files)
+        base_is_current = (base_sha == head) if base_sha else None
+        assessment = assess_base(repo, deliverable, spec_dir, base_files,
+                                 base_is_current)
+        stale = assessment.refusal
         try:
             (spec_dir / DELIVERY_BASE).write_text(json.dumps({
                 "branch": branch, "base_sha": base_sha,
                 "default_branch_sha_at_delivery": head,
-                "base_is_current": (base_sha == head) if base_sha else None,
+                "base_is_current": base_is_current,
                 "files": deliverable, "refused": bool(stale),
+                "renamed_tests": [r.strip() for r in assessment.renames],
             }, indent=2) + "\n")
         except OSError as e:
             logger.warning("could not write %s: %s", DELIVERY_BASE, e)
@@ -388,6 +440,9 @@ def deliver_spec(spec_id: str, spec_title: str, spec_dir: Path,
                    + (f", base {base_sha[:12]}"
                       + (" (current)" if base_sha == head else " (main moved; no delivered file affected)")
                       if base_sha else ""))
+        if assessment.renames:
+            detail += ("; tests renamed on a current base (DEV-810):\n"
+                       + "\n".join(assessment.renames))
         return DeliveryResult("pushed", detail, branch=branch)
     except Exception as e:  # never let delivery take down the tick
         return DeliveryResult("failed", f"{type(e).__name__}: {e}")
