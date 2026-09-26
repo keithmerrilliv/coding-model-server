@@ -196,9 +196,13 @@ def parse_seams(design_md: str) -> list[Seam]:
     return seams
 
 
-# A served file declaring a Swift value type at top level.
+# A served file declaring a Swift value type at top level. Column 0 only
+# (DEV-822): run 61's `HallucinationEngine.swift` is a `final class` whose only
+# enums, `ModelState` and `AvailableModel`, are nested inside it. Matching any
+# indentation read them as the file's value types and demanded a struct-or-class
+# decision about a class — the design's new state went on the class, and said so.
 _VALUE_TYPE_DECL_RE = re.compile(
-    r"^\s*(?:public |internal |fileprivate |private |final )*"
+    r"^(?:public |internal |fileprivate |private |final )*"
     r"(struct|enum)\s+(\w+)", re.MULTILINE)
 
 # Saying what a type IS. Matched near the TYPE NAME, never document-wide: run
@@ -763,6 +767,15 @@ def _check_readonly(seam: Seam, readonly: set[str]) -> list[Finding]:
 _NO_FIXTURE_RE = re.compile(r"^\(?\s*none\b", re.IGNORECASE)
 
 
+# DEV-822: "setup: (continues from C5a state)". The check is RIGHT to fire —
+# run 61's implementer wrote C5b as its own test and lost C5a's state — but the
+# generic "names no API" message never said what was wrong, so both revision
+# rounds left the continuations in place. Only the message changes.
+_CONTINUATION_RE = re.compile(
+    r"\b(?:continu\w*|same as|following|as in|reus\w*)\b.*?\b(C\d+[a-z]?)\b",
+    re.IGNORECASE)
+
+
 def _real_spans(step: str) -> bool:
     """At least one backticked span that is neither elided nor vacuous."""
     return any(not _is_placeholder_span(s) and not _is_vacuous_span(s)
@@ -818,6 +831,21 @@ def _check_names_a_call(seam: Seam) -> list[Finding]:
                 vacuous.append(label)
 
     findings: list[Finding] = []
+    continued = (_CONTINUATION_RE.search(seam.setup)
+                 if "setup" in prose else None)
+    if continued:
+        label = continued.group(1)
+        findings.append(Finding(
+            kind=KIND_PROSE_SEAM,
+            criterion=seam.criterion,
+            detail=(
+                f"the setup step continues from {label} instead of naming its "
+                f"calls. Implementers write every seam as an independent test, "
+                f"so a continuation loses {label}'s state — run 61's C5b test "
+                f"dropped it and could not pass. Restate {label}'s setup and act "
+                f"calls in full, in backticks, as this seam's setup."),
+        ))
+        prose = [p for p in prose if p != "setup"]
     if prose:
         findings.append(Finding(
             kind=KIND_PROSE_SEAM,

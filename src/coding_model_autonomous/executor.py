@@ -682,6 +682,9 @@ ARCHITECT_SYSTEM_PROMPT = textwrap.dedent("""\
 
        One seam per criterion. A criterion checked in several steps may be
        split into lettered sub-seams (`C6a`, `C6b`); they count as one.
+       Every seam becomes its own test, so never write a setup as a
+       continuation ("continues from C5a", "same as C7a"): restate the
+       earlier seam's calls in full, or the test starts from nothing.
 
        Never satisfy this section with a call that does not exist. A seam
        naming `xcodebuild_build(...)`, `XCTestSuite.allTestCases(...)` or

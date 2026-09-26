@@ -138,6 +138,25 @@ def test_exhausted_budget_carries_the_findings_onto_the_gate(db, spec_task):
     assert db.get_task(task.id).status is TaskStatus.BLOCKED_ON_REVIEW
 
 
+def test_each_round_records_its_findings_text(db, spec_task):
+    """DEV-822: run 61's round-1 `file_without_type` could never be judged —
+    the feedback file and the design are both overwritten by the next round,
+    and the event kept only the kinds. The text now rides on the event."""
+    spec, task, spec_dir = spec_task
+    _run_architect(db, spec, task, spec_dir,
+                   [_finding(text="C5b's setup continues from C5a"),
+                    _finding("file_without_type", "Engine.swift declares no type")])
+
+    [ev] = [e for e in db.list_events_by_kind(spec_id=spec.id,
+                                              kind=EventKind.AGENT_RAN)
+            if json.loads(e.payload_json).get("role") == "testability_check"]
+    details = json.loads(ev.payload_json)["details"]
+    assert details == [
+        "prose_seam Criterion 4: C5b's setup continues from C5a",
+        "file_without_type Criterion 4: Engine.swift declares no type",
+    ]
+
+
 def test_carrying_to_the_gate_does_not_burn_an_architect_retry(db, spec_task):
     spec, task, spec_dir = spec_task
     _record_round(db, spec, task, executor.TESTABILITY_CHECK_MAX_ROUNDS)
