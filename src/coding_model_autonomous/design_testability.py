@@ -757,6 +757,26 @@ def _check_readonly(seam: Seam, readonly: set[str]) -> list[Finding]:
     return findings
 
 
+# DEV-809: "setup: (none — static palette lookup)". A static function or a
+# helper that builds its own state needs no fixture, and prose_seam burned both
+# revision rounds on run 57 and two more on run 60 demanding a call for it.
+_NO_FIXTURE_RE = re.compile(r"^\(?\s*none\b", re.IGNORECASE)
+
+
+def _real_spans(step: str) -> bool:
+    """At least one backticked span that is neither elided nor vacuous."""
+    return any(not _is_placeholder_span(s) and not _is_vacuous_span(s)
+               for s in _code_spans(step))
+
+
+def _declares_no_fixture(seam: Seam) -> bool:
+    """An explicitly empty setup, accepted only when act AND assert are real
+    calls — so "none" cannot stand in for a criterion with no reachable API,
+    which is the DEV-710 direction this hatch must not open."""
+    return (bool(_NO_FIXTURE_RE.match(seam.setup.strip()))
+            and _real_spans(seam.act) and _real_spans(seam.assert_))
+
+
 def _check_names_a_call(seam: Seam) -> list[Finding]:
     """DEV-523: every seam step must name a call, not describe one.
 
@@ -785,6 +805,8 @@ def _check_names_a_call(seam: Seam) -> list[Finding]:
             continue  # empty steps are Seam.missing()'s business, not ours
         spans = _code_spans(step)
         if not spans:
+            if label == "setup" and _declares_no_fixture(seam):
+                continue
             prose.append(label)
         elif all(_is_placeholder_span(s) for s in spans):
             elided.append(label)
@@ -866,6 +888,23 @@ def _check_seam_imports(design_md: str, seams: list[Seam]) -> list[Finding]:
     return []
 
 
+_SUB_SEAM_RE = re.compile(r"^(.*\d)[a-z]$")
+
+
+def _criterion_count(seams: "list[Seam]") -> int:
+    """Seams counted per criterion: `C6a` and `C6b` are one. Only lettered
+    labels are grouped, so two seams both labelled `C1` still count twice."""
+    plain = 0
+    grouped: set = set()
+    for s in seams:
+        m = _SUB_SEAM_RE.match(s.criterion.strip())
+        if m:
+            grouped.add(m.group(1))
+        else:
+            plain += 1
+    return plain + len(grouped)
+
+
 def check_design_testability(design_md: str) -> list[Finding]:
     """Findings for a design whose checklist its own API cannot carry out.
 
@@ -920,10 +959,14 @@ def check_design_testability(design_md: str) -> list[Finding]:
     seam_bearing = [c for c in criteria if not is_suite_level_text(c)]
     # A suite-level SEAM entry is a marker, not a seam; count only real ones.
     real_seams = [s for s in seams if not is_suite_level(s)]
-    if len(real_seams) != len(seam_bearing) and len(seams) != len(criteria):
+    # DEV-809: lettered sub-seams (C6a, C6b) are steps of one criterion. Run
+    # 60 split two criteria that way and was told "9 need a seam but 13 were
+    # emitted" for a design with exactly one seam per criterion.
+    seam_count = _criterion_count(real_seams)
+    if seam_count != len(seam_bearing) and len(seams) != len(criteria):
         skipped = len(criteria) - len(seam_bearing)
         detail = (f"{len(seam_bearing)} acceptance criteria need a seam but "
-                  f"{len(seams)} were emitted. Emit exactly one seam per "
+                  f"{seam_count} were emitted. Emit exactly one seam per "
                   f"criterion, in checklist order.")
         if skipped:
             detail += (f" ({skipped} criterion/criteria are marked "
@@ -1010,6 +1053,63 @@ _STDLIB = frozenset({
 })
 
 
+_FILE_LINE_RE = re.compile(r"\b\w+\.(?:swift|py|ts|tsx|js|kt|java|go|rs)\b")
+
+
+def _types_named_beside_a_file(design_md: str) -> set[str]:
+    """Types a File Structure line places in a file it names — DEV-809.
+
+    Run 60 declared `OffsetStubStrategy` as a file-private test helper and
+    wrote `ForcingIntensityTests.swift — new: XCTest suite with
+    OffsetStubStrategy helpers`, and was told the type had no file. A type
+    named on the same line as a file is allocated to that file; a type named
+    nowhere in File Structure still is not.
+    """
+    body = _section(design_md, FILE_STRUCTURE_HEADING)
+    housed: set[str] = set()
+    for line in body.splitlines():
+        if not _FILE_LINE_RE.search(line):
+            continue
+        verb = bool(_HOUSING_VERB_RE.search(line))
+        for name in set(re.findall(r"\b([A-Z]\w*)\b", line)):
+            n = re.escape(name)
+            if (verb
+                    or re.search(rf"\b(?:{_DECL_WORDS})\s+{n}\b", line)
+                    or re.search(rf"\b{n}\s+(?:{_DECL_WORDS}|types?|helpers?"
+                                 rf"|extensions?)\b", line)
+                    or re.search(rf"\b{n}\s*,\s*[A-Z]\w*|\b[A-Z]\w*\s*,\s*"
+                                 rf"(?:and\s+)?{n}\b", line)
+                    or re.search(rf"\b{n}\+\w+\.\w+\b", line)):
+                housed.add(name)
+    return housed
+
+
+# A mention is not an allocation: `World.swift — add removeMushroom(at:
+# Position)` uses Position, it does not house it. Only these say a line puts a
+# type in its file.
+_DECL_WORDS = "struct|class|enum|protocol|actor|typealias|interface|extension"
+_HOUSING_VERB_RE = re.compile(
+    r"(?i)\b(?:declares?|defines?|created|new\s*:|contains|holds|houses"
+    r"|modif(?:y|ies))\b")
+
+
+_HEADING_TYPE_RE = re.compile(r"^#{3,6}\s+`?([A-Z]\w*)`?(?:\s*\(.*\))?\s*$")
+
+
+def _heading_types(design_md: str) -> set[str]:
+    """Types declared by a Data Models subheading — DEV-809.
+
+    Run 60 declared `HallucinationForcer` as `### HallucinationForcer (existing
+    type, reference declaration)` over a members table, and was told Data
+    Models never declares it. Only a heading that IS a type name (optionally
+    with a parenthetical) counts; prose headings do not. Used only by the
+    completeness check, so it never widens what the seam rules resolve.
+    """
+    body = _section(design_md, DATA_MODELS_HEADING)
+    return {m.group(1) for line in body.splitlines()
+            if (m := _HEADING_TYPE_RE.match(line.strip()))}
+
+
 def check_design_completeness(design_md: str) -> list[Finding]:
     """Findings where the design's types and its files disagree — DEV-509.
 
@@ -1041,15 +1141,16 @@ def check_design_completeness(design_md: str) -> list[Finding]:
     """
     if is_python_design(design_md):
         return []
-    declared = declared_types(design_md)
+    declared = declared_types(design_md) | _heading_types(design_md)
     files = allocated_files(design_md)
+    housed = _types_named_beside_a_file(design_md)
     findings: list[Finding] = []
 
     # No File Structure section, or one that parsed to nothing, means we cannot
     # tell "allocated nowhere" from "we failed to read it". Judging every
     # declared type unallocated on that basis would reject a whole design over
     # a parsing gap, so this direction stays silent instead.
-    for name in sorted(top_level_types(design_md) - files) if files else ():
+    for name in sorted(top_level_types(design_md) - files - housed) if files else ():
         findings.append(Finding(
             kind=KIND_TYPE_WITHOUT_FILE,
             criterion="",
