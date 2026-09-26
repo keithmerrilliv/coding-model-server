@@ -81,6 +81,45 @@ class VMError(RuntimeError):
     pass
 
 
+# DEV-817: twice a guest refused an ssh login moments after _wait_for_ssh's
+# probe had logged in ("Permission denied (publickey,password,
+# keyboard-interactive)" on the worktree sync, runs 59 and 60), while every
+# other dispatch on the same host and image passed. The likeliest cause is the
+# guest's auth still settling after first boot, but the runner log never said
+# how far apart the probe and the refusal were. So: retry an auth refusal only,
+# after short waits, and put each refusal's offset from the probe in the
+# artifact. Any other rsync failure fails at once, as before.
+AUTH_RETRY_DELAYS = (2, 4, 8)
+_AUTH_REFUSAL = "permission denied"
+
+
+def _rsync_to_guest(args: "list[str]", ready_at: float,
+                    what: str) -> "tuple[subprocess.CompletedProcess, str]":
+    """Run one rsync to the guest; returns (result, note for the artifact)."""
+    result = subprocess.run(args, capture_output=True, text=True,
+                            timeout=SYNC_TIMEOUT)
+    refused_at: "list[float]" = []
+    for delay in AUTH_RETRY_DELAYS:
+        if (result.returncode == 0
+                or _AUTH_REFUSAL not in (result.stderr or "").lower()):
+            break
+        refused_at.append(time.monotonic() - ready_at)
+        logger.warning("%s: guest refused ssh auth %.1fs after the boot probe "
+                       "logged in — retrying in %ds (DEV-817)", what,
+                       refused_at[-1], delay)
+        time.sleep(delay)
+        result = subprocess.run(args, capture_output=True, text=True,
+                                timeout=SYNC_TIMEOUT)
+    if not refused_at:
+        return result, ""
+    offsets = ", ".join(f"+{s:.1f}s" for s in refused_at)
+    outcome = ("then accepted it" if result.returncode == 0
+               else "and was still refusing when the retries ran out")
+    return result, (f"[vm] {what}: the guest refused ssh auth "
+                    f"{len(refused_at)} time(s) after the boot probe logged "
+                    f"in (at {offsets}), {outcome} (DEV-817)\n")
+
+
 def vm_available() -> "str | None":
     """None when VM dispatch can proceed, else a human-actionable reason."""
     if shutil.which("tart") is None:
@@ -389,16 +428,18 @@ def run_tests_in_vm(worktree: Path, resolve_cmd: "list[str] | None",
         except VMError as e:
             return None, f"[vm] {e}"
         logger.info("vm %s up at %s", name, ip)
+        ready_at = time.monotonic()
         _mark("boot", t_boot)
 
         t_sync = time.monotonic()
-        sync = subprocess.run(
+        sync, note = _rsync_to_guest(
             ["sshpass", "-p", Config.VM_SSH_PASSWORD, "rsync", "-a", "--delete",
              "-e", "ssh " + " ".join(_SSH_OPTS),
              f"{worktree}/", f"{Config.VM_SSH_USER}@{ip}:{GUEST_WORKTREE}/"],
-            capture_output=True, text=True, timeout=SYNC_TIMEOUT)
+            ready_at, "worktree sync")
+        notes += note
         if sync.returncode != 0:
-            return None, f"[vm] worktree sync failed: {sync.stderr.strip()}"
+            return None, note + f"[vm] worktree sync failed: {sync.stderr.strip()}"
         _mark("sync", t_sync)
 
         # A warm clone cache, when one is configured, so resolution reads from
@@ -414,12 +455,13 @@ def run_tests_in_vm(worktree: Path, resolve_cmd: "list[str] | None",
         else:
             covers = _cache_summary(cache)
             t_cache = time.monotonic()
-            pushed = subprocess.run(
+            pushed, note = _rsync_to_guest(
                 ["sshpass", "-p", Config.VM_SSH_PASSWORD, "rsync", "-a",
                  "-e", "ssh " + " ".join(_SSH_OPTS),
                  f"{cache}/",
                  f"{Config.VM_SSH_USER}@{ip}:{GUEST_PKG_CACHE}/"],
-                capture_output=True, text=True, timeout=SYNC_TIMEOUT)
+                ready_at, "package cache push")
+            notes += note
             if pushed.returncode != 0:
                 logger.warning("package cache push failed (resolving from the "
                                "network instead): %s", pushed.stderr.strip())

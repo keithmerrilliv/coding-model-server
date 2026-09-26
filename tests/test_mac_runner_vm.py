@@ -364,3 +364,83 @@ def test_a_failed_cache_push_costs_speed_not_the_run(tmp_path, monkeypatch):
     assert "guest tests ok" in output
     # The test still ran despite the push failing.
     assert any("xcodebuild test" in " ".join(c) for c in calls)
+
+
+# Run 60's reviewer dispatch, verbatim (DEV-817).
+_AUTH_REFUSED = ("admin@192.0.2.21: Permission denied "
+                 "(publickey,password,keyboard-interactive).\n"
+                 "rsync: connection unexpectedly closed (0 bytes received so far) "
+                 "[sender]\n")
+
+
+def _worktree_syncs(calls):
+    return [c for c in _rsync_calls(calls)
+            if any(vm.GUEST_WORKTREE in part for part in c)]
+
+
+def _refuse_sync(times, stderr=_AUTH_REFUSED):
+    """Refuse the worktree sync *times* times with *stderr*, then behave."""
+    left = [times]
+
+    def behave(cmd):
+        if (any("rsync" in p for p in cmd)
+                and any(vm.GUEST_WORKTREE in p for p in cmd) and left[0] > 0):
+            left[0] -= 1
+            return subprocess.CompletedProcess(cmd, 23, stdout="", stderr=stderr)
+        return _happy(cmd)
+    return behave
+
+
+def test_an_auth_refusal_right_after_boot_is_retried_and_recorded(
+        tmp_path, monkeypatch):
+    """DEV-817: two refusals, then the guest accepts. The run proceeds, and the
+    artifact says how far after the boot probe each refusal came."""
+    slept = []
+    monkeypatch.setattr(vm.time, "sleep", slept.append)
+    calls = _wire(monkeypatch, _refuse_sync(2))
+
+    exit_code, output = _dispatch(tmp_path)
+
+    assert exit_code == 0
+    assert "guest tests ok" in output
+    assert len(_worktree_syncs(calls)) == 3
+    assert slept == list(vm.AUTH_RETRY_DELAYS[:2])
+    assert "refused ssh auth 2 time(s)" in output
+    assert "then accepted it" in output
+    assert "worktree sync failed" not in output
+
+
+def test_a_guest_that_keeps_refusing_still_fails_as_infrastructure(
+        tmp_path, monkeypatch):
+    """The retries are bounded, and the failure keeps DEV-705's phrase so the
+    classifier still calls it infrastructure, not the code's fault."""
+    monkeypatch.setattr(vm.time, "sleep", lambda s: None)
+    calls = _wire(monkeypatch, _refuse_sync(99))
+
+    exit_code, output = _dispatch(tmp_path)
+
+    assert exit_code is None
+    assert len(_worktree_syncs(calls)) == 1 + len(vm.AUTH_RETRY_DELAYS)
+    assert "[vm] worktree sync failed: admin@192.0.2.21: Permission denied" in output
+    assert "still refusing when the retries ran out" in output
+    assert not [c for c in calls if "xcodebuild test" in c[-1]]
+    assert [c[:2] for c in _teardown_calls(calls)] == [
+        ["tart", "stop"], ["tart", "delete"]]
+
+
+def test_a_sync_failure_that_is_not_an_auth_refusal_is_not_retried(
+        tmp_path, monkeypatch):
+    """Only the auth race is retried. A full disk is not going to clear in
+    fourteen seconds, and retrying it would only delay the report."""
+    slept = []
+    monkeypatch.setattr(vm.time, "sleep", slept.append)
+    calls = _wire(monkeypatch, _refuse_sync(
+        1, stderr="rsync: write failed: No space left on device (28)\n"))
+
+    exit_code, output = _dispatch(tmp_path)
+
+    assert exit_code is None
+    assert len(_worktree_syncs(calls)) == 1
+    assert slept == []
+    assert "No space left on device" in output
+    assert "DEV-817" not in output
