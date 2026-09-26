@@ -697,6 +697,16 @@ ARCHITECT_SYSTEM_PROMPT = textwrap.dedent("""\
        `suite-level` in the criterion text and give it NO seam. The check will
        skip it, and a human can still see what you claimed.
 
+       A criterion that needs NO FIXTURE — a static function, a pure lookup,
+       a helper that builds its own state — writes `setup: (none)` and says
+       why after it, e.g. `setup: (none — static lookup)`. That is accepted
+       only when its act and assert are real calls in backticks. Never invent
+       a constructor to fill the setup step: `let palette = Palette()` on an
+       uninhabited enum does not compile.
+
+       One seam per criterion. A criterion checked in several steps may be
+       split into lettered sub-seams (`C6a`, `C6b`); they count as one.
+
        Never satisfy this section with a call that does not exist. A seam
        naming `xcodebuild_build(...)`, `XCTestSuite.allTestCases(...)` or
        `git_diff(...)` is worse than an honest `suite-level` marker: it looks
