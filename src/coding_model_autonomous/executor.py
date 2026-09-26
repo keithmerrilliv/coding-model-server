@@ -1168,6 +1168,7 @@ def agent_event_fields(meta: Optional[dict]) -> dict:
         key: meta[key]
         for key in ("agent", "duration_ms", "prompt_tokens",
                     "completion_tokens", "total_tokens", "calls",
+                    "max_call_prompt_tokens",
                     "reasoning_chars", "visible_chars")
         if meta.get(key) is not None
     }
@@ -1217,6 +1218,13 @@ def accumulate_agent_fields(tally: dict, meta: Optional[dict]) -> dict:
         if val is not None:
             tally[key] = tally.get(key, 0) + val
     tally["calls"] = tally.get("calls", 0) + 1
+    # DEV-823: the SUM answers "what did this attempt cost"; it does not answer
+    # "will the next prompt fit a window", which is a per-call question. Run
+    # 61's fit check read 71,399 summed over five calls as one prompt, ruled
+    # out every 64K agent, and sent an ~18K-token retry to deep_implementer.
+    if meta.get("prompt_tokens") is not None:
+        tally["max_call_prompt_tokens"] = max(
+            tally.get("max_call_prompt_tokens", 0), meta["prompt_tokens"])
     # Any truncated call taints the attempt: the file it was writing is
     # half-finished regardless of how the remaining calls went.
     if meta.get("truncated"):
