@@ -386,53 +386,6 @@ Update these after each retrieval step. They help you stay organized and efficie
         cpu_moe=True, n_cpu_moe=26, n_ubatch=3584,
     )
 
-    # DEVSTRAL: Devstral Small 2 24B Q4_K_M — DEV-414 fast-tier candidate.
-    # Dense 24B (mistral3, 40 blocks), so unlike every MoE above it fits
-    # almost entirely in the RTX 5080's VRAM: 13.7 GB weights + Q8_0 KV.
-    # n_ctx is the tight dimension — 8 KV-heads x 128 x 40 blocks ~= 85 KB/token
-    # at Q8_0. 16K ctx measured 358 MiB free (under the vram guard's 500 MiB
-    # cushion); 14K keeps the margin above it.
-    # --jinja: mistral3 needs its embedded Mistral template, not chatml.
-    # No logit_bias: the Qwen tool-call token ids don't exist in this vocab.
-    #
-    # DEV-748, 2026-09-19 — 14336 -> 12288 with n_cpu_ffn=1. The cushion note
-    # above stopped being true without anything noticing: a load measured
-    # 25 MiB free, not 500+. Nothing regressed — ~595 MiB of this box's VRAM is
-    # now held permanently by desktop software (sunshine, Xorg, the dashboard
-    # browser), which is most of the margin the 14K rung was sized to leave.
-    # The rung was right when it was written and the environment moved under it.
-    #
-    # Measured (standalone, v0.4.1, same 9,625-token prompt each arm):
-    #     config                       free MiB   decode      fits 9.6K prompt
-    #     14336, no offload (before)         46   46.68 t/s   yes
-    #      8192, no offload                 559   51.61       NO — 400s
-    #     10240, no offload                 388   46.52       yes
-    #     12288, n_cpu_ffn=1               503   36.38       yes   <- this
-    #     14336, n_cpu_ffn=2               644   30.01       yes
-    #     14336, n_cpu_ffn=4             1,266   23.25       yes
-    #
-    # Two currencies buy headroom here and they are NOT interchangeable.
-    # Shrinking the window costs no decode at all, but 8192 cannot hold a
-    # realistic implementer prompt — the deep call returned
-    # "request (9625 tokens) exceeds the available context size". Offloading
-    # FFN keeps the window and costs ~5.4 ms/token per layer. This rung spends
-    # a little of both: one layer plus a 2K trim clears the cushion at -22%
-    # decode, where the cheapest all-offload option that clears it cost -36%.
-    #
-    # UNLIKE the architect (DEV-742), --n-cpu-ffn is a PURE COST here. Devstral
-    # is 100% GPU-resident, so every offloaded layer is new CPU work rather
-    # than a rearrangement of work already on the CPU. Same flag, opposite
-    # sign. Do not generalise the architect's result to a resident model.
-    # 65536 parity with the other implementers was priced and rejected:
-    # n_cpu_ffn=20 gives 1,490 MiB free at 8.89 t/s, slower than the architect.
-    _DENSE_24B_DEVSTRAL = _create_model_config(
-        'MODEL_PATH_24B_DEVSTRAL',
-        f'{_MODELS_ROOT}/unsloth/Devstral-Small-2-24B-Instruct-2512-GGUF/Devstral-Small-2-24B-Instruct-2512-Q4_K_M.gguf',
-        41, 12288, 2048,
-        n_cpu_ffn=1,
-        server_extra_args=['--jinja'],
-    )
-
     # NEXT: Qwen3-Coder-Next-Q8_0 (80B MoE with 3B active params)
     # Very smart but runs mostly on system RAM (slow). Native 256k context enabled.
     # ngl=48 (--cpu-moe): 8,304 MiB free. All 48 attention layers on GPU.
@@ -1095,19 +1048,6 @@ Update these after each retrieval step. They help you stay organized and efficie
             'Implementer — Coder-30B Q4_K_M (3B/30B MoE, 64K ctx Q8_0, ngl=49 n_cpu_moe=26, fast)',
             _IMPLEMENTER_SYSTEM_PROMPT,
             _MOE_30B_FAST,
-            executor=True
-        ),
-        # DEV-414 outcome (2026-08-03, blind counterbalanced, judge=claude-sdk,
-        # artifacts var/eval_dev414_*): beat fast_implementer 4-3-1 on quality
-        # and finished the 8-task set 16% faster on wall clock via concision
-        # (4893 vs 5831 tok) despite 7% slower decode (53.3 vs 57.3 tok/s).
-        # Kept registered as the quality-edge option for short-context work;
-        # NOT repointing the pipeline's "low" tier — that costs 64K -> 14K ctx,
-        # unsafe without prompt-size telemetry for low-tier executor runs.
-        'devstral_implementer': _create_agent_config(
-            'Implementer — Devstral Small 2 24B Q4_K_M (dense, 14K ctx Q8_0, ngl=41 VRAM-resident, DEV-414 eval)',
-            _IMPLEMENTER_SYSTEM_PROMPT,
-            _DENSE_24B_DEVSTRAL,
             executor=True
         ),
         # NB: `architect` (the interactive role) is no longer a standalone entry —

@@ -238,9 +238,8 @@ predates [DEV-744](https://keith-merrill4.atlassian.net/browse/DEV-744).
 `decide()` function call) and never gets marker-based shell tools.
 `brainstorm` has no tools at all.
 
-Four eval-only agents are also registered (so they appear in `/v1/models`) but
-are left out of the table above: `devstral_implementer` (Devstral Small 2 24B,
-DEV-414 eval), `dense_architect_nothink` (`dense_architect` with
+Three eval-only agents are also registered (so they appear in `/v1/models`) but
+are left out of the table above: `dense_architect_nothink` (`dense_architect` with
 `enable_thinking=False`, the DEV-556 eval arm), `qwen38_architect`
 (Qwen3.8-27B with embedded MTP, the DEV-615 architect-eval candidate), and
 `glimmer_architect` (Muse-Glimmer-30B, the DEV-692 architect candidate — 64K
