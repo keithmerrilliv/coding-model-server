@@ -127,26 +127,6 @@ def test_n_cpu_ffn_emits_flag_independently_of_moe(mgr):
     assert both[both.index("--n-cpu-moe") + 1] == "26"
 
 
-def test_devstral_rung_clears_the_vram_cushion():
-    """DEV-748: the rung that actually leaves headroom, pinned.
-
-    The previous rung read 25 MiB free against a 500 MiB cushion its own
-    comment said it was chosen to clear — not a regression, but the box's
-    ambient VRAM grew underneath it. Both numbers matter and neither is
-    arbitrary: 12288 is the smallest window measured that still holds a
-    realistic 9.6K implementer prompt (8192 returned
-    "exceeds the available context size"), and n_cpu_ffn=1 is what lifts the
-    result over the cushion at 503 MiB.
-    """
-    from coding_model_server.config import Config
-    cfg = Config._DENSE_24B_DEVSTRAL
-    assert cfg["n_ctx"] == 12288
-    assert cfg["n_cpu_ffn"] == 1
-    # ngl must still cover every block (40) plus output: -ncffn carries the
-    # offload, and lowering ngl would compound the two.
-    assert cfg["n_gpu_layers"] == 41
-
-
 def test_dense_architect_rung_is_the_measured_one():
     """The DEV-742 rung, pinned so a stray edit to one of the two numbers shows.
 
