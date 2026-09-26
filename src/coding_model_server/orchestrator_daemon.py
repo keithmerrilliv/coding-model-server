@@ -2410,6 +2410,14 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
                         payload={"role": "testability_check",
                                  "model_call": False,
                                  "findings": len(findings), "kinds": kinds,
+                                 # DEV-822: the text, not just the kinds. The
+                                 # feedback file is overwritten each round and
+                                 # the design with it, so run 61's round-1
+                                 # file_without_type could never be judged.
+                                 "details": [
+                                     (f"{f.kind} {f.criterion}: "
+                                      f"{f.detail}")[:300]
+                                     for f in findings[:20]],
                                  "rounds_used": rounds_used,
                                  "revised": may_revise})
         if may_revise:
