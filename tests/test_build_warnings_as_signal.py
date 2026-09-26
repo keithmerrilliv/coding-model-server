@@ -196,8 +196,11 @@ def _run(db, spec, task, spec_dir, *, build_passed, build_output,
     strategy = {"framework": "swift_test", "repo": "centipede"}
     if protected is not None:
         strategy["protected_paths"] = protected
+    # The context stage reads the repo's files from the runner; stubbed so the
+    # suite never reaches the live Mac through the loopback tunnel.
     with mock.patch.object(d, "_generate_implementation", return_value=result), \
          mock.patch.object(d, "_load_plan", return_value={"test_strategy": strategy}), \
+         mock.patch.object(d.test_runner, "fetch_repo_files", return_value=([], [])), \
          mock.patch.object(d, "_run_tests_with_guard",
                            return_value=(build_passed, build_output)):
         d._run_implementer(db, spec, task, spec_dir)

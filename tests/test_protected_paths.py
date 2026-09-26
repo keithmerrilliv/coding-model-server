@@ -115,8 +115,11 @@ def _run_implementer(db, *, emitted, protected):
     result = ImplementerResult(files=[(p, "content") for p in emitted], raw="")
     strategy = {"framework": "swift_test", "repo": "centipede",
                 "protected_paths": protected}
+    # The context stage reads the repo's files from the runner; stubbed so the
+    # suite never reaches the live Mac through the loopback tunnel.
     with mock.patch.object(d, "_generate_implementation", return_value=result), \
          mock.patch.object(d, "_load_plan", return_value={"test_strategy": strategy}), \
+         mock.patch.object(d.test_runner, "fetch_repo_files", return_value=([], [])), \
          mock.patch.object(d, "_run_tests_with_guard",
                            return_value=(True, "Executed 2 tests")):
         d._run_implementer(db, db.get_spec(spec.id), db.get_task(task.id), spec_dir)
