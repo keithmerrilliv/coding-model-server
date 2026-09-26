@@ -212,6 +212,17 @@ def build_completion_response(model_id: str, text: str, usage: Dict[str, int],
     message: Dict[str, Any] = {"role": "assistant", "content": text}
     if tool_calls:
         message["tool_calls"] = tool_calls
+    out_usage = {
+        "prompt_tokens": usage['prompt_tokens'],
+        "completion_tokens": usage['completion_tokens'],
+        "total_tokens": usage['total_tokens'],
+    }
+    # DEV-760: how much of the completion was reasoning versus visible answer,
+    # in characters (the server has no tokenizer for the split). Absent when a
+    # backend did not measure it, so a missing number never reads as zero.
+    for key in ("reasoning_chars", "visible_chars"):
+        if isinstance(usage.get(key), int):
+            out_usage[key] = usage[key]
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
         "object": "chat.completion",
@@ -222,11 +233,7 @@ def build_completion_response(model_id: str, text: str, usage: Dict[str, int],
             "message": message,
             "finish_reason": finish_reason
         }],
-        "usage": {
-            "prompt_tokens": usage['prompt_tokens'],
-            "completion_tokens": usage['completion_tokens'],
-            "total_tokens": usage['total_tokens']
-        }
+        "usage": out_usage,
     }
 
 

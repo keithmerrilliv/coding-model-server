@@ -64,6 +64,16 @@ _BACKOFFS = (10.0, 30.0, 60.0)
 _BUSY_WAIT_CAP = float(os.getenv("AUTONOMOUS_BUSY_WAIT_CAP", "0")) or None
 
 
+def is_reasoning_only(resp) -> bool:
+    """A 502 from DEV-617's guard: tokens spent, nothing visible (DEV-760).
+
+    Matched on the server's own wording, because every other 502 here
+    ("upstream inference error", a crashed child) is transient and must keep
+    its backoff."""
+    return (getattr(resp, "status_code", None) == 502
+            and "reasoning-only response" in (getattr(resp, "text", "") or ""))
+
+
 def _headers() -> dict:
     headers = {"Content-Type": "application/json"}
     if ADMIN_API_KEY:
@@ -177,6 +187,17 @@ def post_chat_completion(model, messages, *, timeout, skip_memory=True,
                     resp.text[:120].replace("\n", " "),
                 )
             continue
+        if is_reasoning_only(resp):
+            # DEV-760: the model spent its whole budget thinking. That is
+            # deterministic, not transient — run 46 re-sent the identical call
+            # three more times and got the identical 502 each time, 40 minutes
+            # of GPU for nothing. Hand it back at once so the caller's own
+            # retry, which can change the budget or the prompt, decides.
+            logger.warning(
+                "post_chat_completion: reasoning-only 502 is budget exhaustion, "
+                "not a transient failure — not re-sending the same request: %s",
+                resp.text[:200].replace("\n", " "))
+            break
         if attempt == len(_BACKOFFS):
             break
         if wait_s is not None:

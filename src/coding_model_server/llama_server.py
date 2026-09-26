@@ -1791,9 +1791,17 @@ class LlamaServerManager:
             else:
                 text = strip_thinking(text)
             tool_calls = message.get("tool_calls")
-            usage = result.get("usage", {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
+            usage = dict(result.get("usage") or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
+            # DEV-760: the reasoning/visible split, so a budget spent thinking
+            # is a query rather than a journal read. Reasoning arrives either
+            # as a separate field (--reasoning-format deepseek) or inline and
+            # stripped above; both count.
+            raw_content = message.get("content") or ""
+            usage["reasoning_chars"] = (len(message.get("reasoning_content") or "")
+                                        + max(0, len(raw_content) - len(text)))
+            usage["visible_chars"] = len(text)
             _reject_reasoning_only_completion(
-                text, tool_calls, usage, message.get("content") or "", rid)
+                text, tool_calls, usage, raw_content, rid)
 
             with self.lock:
                 self.last_request_time = time.time()

@@ -435,7 +435,23 @@ def classify_exception(exc: BaseException, *, role: str,
         return Failure(FailureClass.TRANSPORT, role, source, f"{name}: {exc}",
                        exc_type=name, phase=phase)
     if isinstance(exc, requests.HTTPError):
-        status = getattr(getattr(exc, "response", None), "status_code", None)
+        resp = getattr(exc, "response", None)
+        status = getattr(resp, "status_code", None)
+        body = getattr(resp, "text", "") or ""
+        if status == 502 and "reasoning-only response" in body:
+            # DEV-760: DEV-617's guard — the model spent its whole budget
+            # thinking. That is an empty completion, not a server refusal, and
+            # requests' own message ("502 Server Error: Bad Gateway") drops the
+            # spent-token count the server put in the body. Keep the body, so
+            # every occurrence is a query rather than a journal read.
+            try:
+                detail = str(resp.json().get("detail") or body)
+            except ValueError:
+                detail = body
+            return Failure(FailureClass.EMPTY_COMPLETION, role, source,
+                           detail[:300], rotate=True, exc_type=name,
+                           phase=phase,
+                           extra={"status": status, "reasoning_only": True})
         # A 4xx is about THIS request against THIS agent (413: the prompt
         # does not fit its window) — rotate. A 5xx is the server mid-crash —
         # the same agent will do once it is back.

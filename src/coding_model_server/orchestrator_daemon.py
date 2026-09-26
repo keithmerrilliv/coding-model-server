@@ -2044,6 +2044,9 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
     # regenerating the same document.
     rejection_notes = (_latest_architect_feedback(db, spec, spec_dir)
                        if task.retry_count > 0 else None)
+    # DEV-760: a revision reasons over the old design and the feedback before
+    # re-deriving the whole document, so it gets more room than a first pass.
+    arch_max_tokens = executor.architect_max_tokens(bool(rejection_notes))
     # DEV-631/DEV-530: the architect has one agent, so its levers are the
     # feedback and the prompt; the record says whether a revision round
     # actually carries anything new.
@@ -2139,7 +2142,7 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
     alloc = _prompt_budget(
         spec.id, "architect",
         fixed_chars=_message_chars(_architect_prompt([], [])),
-        completion_tokens=executor.ARCHITECT_MAX_TOKENS,
+        completion_tokens=arch_max_tokens,
         agent=executor.role_to_agent("architect"),
         sections=[
             _context.Section(_context.SECTION_EDITABLE, view.existing_files,
@@ -2181,9 +2184,9 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
     for attempt in range(1, max_attempts + 1):
         meta: dict = {}
         raw = call_agent("architect", messages, meta=meta,
+                         max_tokens=arch_max_tokens,
                          memory_query=memory_query, language=language)
-        _note_truncation(db, spec, task, "architect", meta,
-                         executor.ARCHITECT_MAX_TOKENS)
+        _note_truncation(db, spec, task, "architect", meta, arch_max_tokens)
         # DEV-714: a reply that asks for files is answered and re-sent. A fresh
         # budget per parse attempt, because a retry is a fresh conversation and
         # would otherwise inherit a spend it never made. The loop cannot run
@@ -2205,9 +2208,9 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
                      {"role": "user", "content": answer}]
             meta = {}
             raw = call_agent("architect", convo, meta=meta,
+                             max_tokens=arch_max_tokens,
                              memory_query=memory_query, language=language)
-            _note_truncation(db, spec, task, "architect", meta,
-                             executor.ARCHITECT_MAX_TOKENS)
+            _note_truncation(db, spec, task, "architect", meta, arch_max_tokens)
         tool_fields = (architect_tools.summary(budget) if budget is not None
                        else {})
         if budget is not None and budget.rounds_used:
