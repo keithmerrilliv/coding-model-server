@@ -214,7 +214,7 @@ def _window(agent):
 
 class TestRotateAmongFits:
     def test_eligible_agents_keeps_rotation_order_and_drops_small_windows(self):
-        assert rp.eligible_agents(70_000, _window) == ["deep_implementer", "moe_implementer"]
+        assert rp.eligible_agents(70_000, _window) == ["moe_implementer", "deep_implementer"]
         assert rp.eligible_agents(10_000, _window) == rp._IMPLEMENTER_ROTATION
 
     def test_no_known_window_fits_means_none_not_empty(self):
@@ -227,13 +227,16 @@ class TestRotateAmongFits:
                                      eligible=["deep_implementer"]) == "deep_implementer"
 
     def test_two_eligible_agents_alternate_in_rotation_order(self):
+        # Chain order since DEV-821 puts moe before deep, so the two alternate
+        # starting from index 1 of [moe, deep].
         picks = [rp._rotation_pick("fast_implementer", r, eligible=["deep_implementer", "moe_implementer"])
                  for r in (1, 2, 3, 4)]
-        assert picks == ["moe_implementer", "deep_implementer", "moe_implementer", "deep_implementer"]
+        assert picks == ["deep_implementer", "moe_implementer", "deep_implementer", "moe_implementer"]
 
     def test_without_eligibility_the_rotation_is_unchanged(self):
-        assert rp._rotation_pick("implementer", 1) == "deep_implementer"
-        assert rp._rotation_pick("implementer", 1, eligible=None) == "deep_implementer"
+        # DEV-821: retry 1 after `implementer` is Glimmer, not deep.
+        assert rp._rotation_pick("implementer", 1) == "glimmer_implementer"
+        assert rp._rotation_pick("implementer", 1, eligible=None) == "glimmer_implementer"
 
     def test_previous_prompt_tokens_reads_the_newest_implementer_generation(self, db, spec_task):
         spec, task = spec_task
