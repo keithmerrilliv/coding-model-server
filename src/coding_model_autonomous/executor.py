@@ -371,9 +371,10 @@ def artifact_path(spec_dir: Path, rel_path: str) -> Path:
     /work/abc-evil/x as nested under /work/abc, so a sibling-prefix dir
     escape would not be caught. is_relative_to compares path components.
 
-    Separate from _write_artifact so a caller that needs to *read* what is
-    currently at a path — the DEV-541 pre-repair snapshot — resolves it the
-    same way the write will, rather than reimplementing the rules and drifting.
+    Every write goes through the artifact ledger (DEV-642); this is kept apart
+    so a caller that needs to *read* what is currently at a path — the DEV-541
+    pre-repair snapshot — resolves it the same way the write will, rather than
+    reimplementing the rules and drifting.
     """
     # Strip leading slashes only — do NOT use lstrip("./") which eats
     # individual chars and would normalize "../../../x" into "x".
@@ -408,49 +409,6 @@ def _count_declarations(content: str) -> int:
                 count += 1
                 break
     return count
-
-
-def _write_artifact(
-    spec_dir: Path,
-    rel_path: str,
-    content: str,
-    *,
-    prior_writes: list[tuple[str, str]] | None = None,
-    role: str | None = None,
-) -> Path | None:
-    """Write a file to the spec workspace with path-traversal protection.
-
-    When *prior_writes* and *role* are both provided, enforces collision and
-    emptying guards before writing to disk.
-    """
-    abs_path = artifact_path(spec_dir, rel_path)
-
-    # Guard activation: both must be present
-    if prior_writes is not None and role is not None:
-        # 1. Collision check
-        for pw_path, pw_role in prior_writes:
-            if pw_path == rel_path and pw_role != role:
-                logger.warning(
-                    "collision_refused: path=%s existing_role=%s attempted_role=%s",
-                    rel_path, pw_role, role,
-                )
-                return None
-
-        # 2. Emptying check
-        if abs_path.exists():
-            old_content = abs_path.read_text()
-            old_decl_count = _count_declarations(old_content)
-            new_decl_count = _count_declarations(content)
-            if old_decl_count > 0 and new_decl_count == 0:
-                logger.warning(
-                    "emptying_refused: path=%s role=%s (had %d declarations, new has 0)",
-                    rel_path, role, old_decl_count,
-                )
-                return None
-
-    abs_path.parent.mkdir(parents=True, exist_ok=True)
-    abs_path.write_text(content)
-    return abs_path
 
 
 def role_to_agent(role: str) -> str:

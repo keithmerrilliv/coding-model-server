@@ -65,7 +65,14 @@ def test_counting_occurrences_not_classes_is_what_catches_run_8():
     assert len(od._attributed_diagnostics(BETTER)) == 1
 
 
-def test_artifact_path_resolves_like_write_artifact():
+def _write(spec_dir: Path, rel: str, content: str) -> None:
+    """Seed a workspace file, resolved exactly as the ledger resolves writes."""
+    target = executor.artifact_path(spec_dir, rel)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content)
+
+
+def test_artifact_path_resolves_like_the_ledger_write():
     """The snapshot must resolve paths the same way the write does."""
     root = Path("/tmp/spec")
     assert executor.artifact_path(root, "a/b.swift") == Path("/tmp/spec/a/b.swift")
@@ -94,7 +101,7 @@ def _run_repair_tail(tmp_path, monkeypatch, repair_output, files_before,
     Returns (passed, output, db, on-disk file contents).
     """
     for rel, content in files_before.items():
-        executor._write_artifact(tmp_path, rel, content)
+        _write(tmp_path, rel, content)
 
     calls = {"n": 0}
 
@@ -115,7 +122,7 @@ def _run_repair_tail(tmp_path, monkeypatch, repair_output, files_before,
     # Mirror of the production tail; kept in this shape so the assertions below
     # describe the decision, not the plumbing around it.
     for rel, content in repair_files:
-        executor._write_artifact(tmp_path, rel, content)
+        _write(tmp_path, rel, content)
     passed, out = fake_guard(None, tmp_path, None, None, output_label="",
                              fail_log="")
     post_diags = od._attributed_diagnostics(out)
