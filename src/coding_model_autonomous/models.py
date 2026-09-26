@@ -136,6 +136,7 @@ EVENT_PAYLOAD_SCHEMAS: dict = {
             "status": "HTTP status for http_refusal",
             "module": "the module the sandbox could not import (sandbox_provisioning)",
             "vm_infrastructure": "sandbox_provisioning: the test VM never ran the code (DEV-705)",
+            "reasoning_only": "empty_completion: the model spent its budget thinking — a reasoning-only 502 (DEV-760)",
             "missing": "planned outputs the attempt did not produce (DEV-645)",
             "blocks": "unappliable edit blocks (DEV-581)",
             "warnings": "blocking compiler warnings (DEV-547)",

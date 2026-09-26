@@ -219,6 +219,21 @@ IMPLEMENTER_TIMEOUT = float(os.getenv("AUTONOMOUS_IMPLEMENTER_TIMEOUT", "1800"))
 REVIEWER_TIMEOUT = float(os.getenv("AUTONOMOUS_REVIEWER_TIMEOUT", "2700"))
 
 ARCHITECT_MAX_TOKENS = int(os.getenv("AUTONOMOUS_ARCHITECT_MAX_TOKENS", "8000"))
+# DEV-760: a rejection retry is a harder generation than the first pass. It
+# must hold the previous design and the feedback and still re-derive the whole
+# document, and since DEV-556 its reasoning shares this budget with the answer.
+# Run 46 (spec_c6f4902f): the first pass finished a 9,505-byte design in 4,879
+# completion tokens; the retry spent 10,000 four times and its last call was
+# cut off forty words into the correct design. So a retry gets twice the room.
+ARCHITECT_RETRY_MAX_TOKENS = int(os.getenv(
+    "AUTONOMOUS_ARCHITECT_RETRY_MAX_TOKENS", str(2 * ARCHITECT_MAX_TOKENS)))
+
+
+def architect_max_tokens(is_retry: bool) -> int:
+    """The architect's completion budget for a first pass or a retry."""
+    return ARCHITECT_RETRY_MAX_TOKENS if is_retry else ARCHITECT_MAX_TOKENS
+
+
 IMPLEMENTER_MAX_TOKENS = int(os.getenv("AUTONOMOUS_IMPLEMENTER_MAX_TOKENS", "16000"))
 REVIEWER_MAX_TOKENS = int(os.getenv("AUTONOMOUS_REVIEWER_MAX_TOKENS", "16000"))
 
@@ -1133,6 +1148,11 @@ def call_agent(
                 val = usage.get(key)
                 if isinstance(val, int) and val >= 0:
                     meta[key] = val
+        # DEV-760: reasoning versus visible output, measured by the server.
+        for key in ("reasoning_chars", "visible_chars"):
+            val = usage.get(key)
+            if isinstance(val, int) and val >= 0:
+                meta[key] = val
         try:
             fr = (data["choices"][0].get("finish_reason") or "").lower()
         except (KeyError, IndexError, AttributeError):
@@ -1183,7 +1203,8 @@ def agent_event_fields(meta: Optional[dict]) -> dict:
     out = {
         key: meta[key]
         for key in ("agent", "duration_ms", "prompt_tokens",
-                    "completion_tokens", "total_tokens", "calls")
+                    "completion_tokens", "total_tokens", "calls",
+                    "reasoning_chars", "visible_chars")
         if meta.get(key) is not None
     }
     # Carried because it changes how an attempt reads: a truncated response is
