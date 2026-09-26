@@ -6066,6 +6066,30 @@ def _run_reviewer_tests(db: Database, spec: Spec, task, spec_dir,
     return tests_passed, test_output
 
 
+def _reviewer_run_had_no_verdict(db: Database, spec: Spec, task,
+                                 test_output: str) -> bool:
+    """Dispose a red reviewer run that never ran the code; True if it did.
+
+    DEV-816: DEV-705's classifier guarded only the implementer's build check.
+    Run 60's reviewer dispatch died at VM setup ("[vm] worktree sync failed:
+    ... Permission denied") and the red run was charged to the implementer as
+    TESTS_FAILED — a byte-perfect retry 0 discarded, two attempts spent. An
+    unreachable runner took the same road. Both are no-verdicts here: the
+    reviewer task is requeued uncharged and dispose parks it past the cap.
+    """
+    failure = classify_test_run(
+        test_output, role="reviewer", passed=False, build_reason=None,
+        unreachable=test_runner.is_runner_unreachable(test_output),
+        phase="review")
+    if failure is None or failure.outcome is not _outcome.Outcome.NO_VERDICT:
+        return False
+    logger.warning("spec %s: reviewer test run produced no verdict (%s: %s) — "
+                   "requeued, nobody charged (DEV-816)", spec.id,
+                   failure.cls.value, failure.detail)
+    _dispose(db, spec, task, failure)
+    return True
+
+
 def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
     spec_md = (spec_dir / spec.source_md_path).read_text()
     design_path = spec_dir / "design.md"
@@ -6251,6 +6275,9 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
         tests_passed, test_output = _run_reviewer_tests(
             db, spec, task, spec_dir, framework, test_strategy,
         )
+        if not tests_passed and _reviewer_run_had_no_verdict(
+                db, spec, task, test_output):
+            return
         if not tests_passed and result.test_files:
             tests_passed, test_output = _arbitrate_reviewer_only_failures(
                 spec, spec_dir, framework, test_strategy, result, test_output,

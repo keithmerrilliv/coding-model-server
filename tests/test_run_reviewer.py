@@ -395,3 +395,55 @@ def test_a_missing_verdict_heading_rereads_the_reviewer_and_charges_nobody(
     dump = (spec_dir / "reviewer_failed_response.txt").read_text()
     assert "### Verdict" in dump
     assert "Verdict Evidence" in dump
+
+
+# Run 60's reviewer dispatch, verbatim: the VM never came up far enough to run
+# anything, so the output is infrastructure and nothing else.
+_VM_SYNC_REFUSAL = (
+    "[vm] worktree sync failed: admin@192.168.64.2: Permission denied "
+    "(publickey,password,keyboard-interactive).\n"
+    "rsync: connection unexpectedly closed (0 bytes received so far) [sender]\n"
+)
+
+
+def _no_verdict_run(db, spec, task, spec_dir, test_output):
+    impl = db.create_task(spec_id=spec.id, agent="implementer",
+                          role="implementer", title="implement")
+    before = db.get_task(impl.id).retry_count
+    with mock.patch.object(d, "_attempt_retry") as retry:
+        _run(db, spec, task, spec_dir,
+             verdict="PASS", tests_pass=False, test_output=test_output)
+    return impl, before, retry
+
+
+@pytest.mark.parametrize("test_output", [
+    _VM_SYNC_REFUSAL,
+    "mac-runner unreachable: connection refused\n",
+], ids=["vm_never_ran", "runner_unreachable"])
+def test_a_reviewer_run_that_never_ran_the_code_charges_nobody(
+        db, spec_and_task, test_output):
+    """DEV-816. The pipeline recorded run 60's refusal as TESTS_FAILED and
+    charged the implementer, discarding a byte-perfect retry 0. DEV-705's
+    classifier guarded only the build check. Here it must be a no-verdict:
+    the reviewer requeues, no retry is attempted, the implementer is
+    untouched, and no gate asks a human to judge a run that did not happen."""
+    spec, task, spec_dir = spec_and_task
+    impl, before, retry = _no_verdict_run(db, spec, task, spec_dir, test_output)
+
+    retry.assert_not_called()
+    assert db.get_task(task.id).status is TaskStatus.PENDING
+    assert db.get_task(impl.id).retry_count == before
+    assert db.list_open_gates(spec.id) == []
+    assert db.get_spec(spec.id).status is SpecStatus.EXECUTING
+
+
+def test_a_real_red_run_that_mentions_the_vm_is_still_a_verdict(db, spec_and_task):
+    """The negative control. A suite that ran and failed is a verdict even if
+    a `[vm]` line rides along — DEV-705's rule: a test result outranks the
+    prefix. Without this the fix could launder every real failure."""
+    spec, task, spec_dir = spec_and_task
+    output = ("[vm] phases: boot 12s, sync 3s, resolve 40s, test 90s\n"
+              "Test case 'FooTests.test_bar()' failed on 'My Mac' (0.01 seconds)\n"
+              "** TEST FAILED **\n")
+    _, _, retry = _no_verdict_run(db, spec, task, spec_dir, output)
+    retry.assert_called_once()
