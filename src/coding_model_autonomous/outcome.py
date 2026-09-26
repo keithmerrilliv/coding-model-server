@@ -438,7 +438,7 @@ def classify_exception(exc: BaseException, *, role: str,
         resp = getattr(exc, "response", None)
         status = getattr(resp, "status_code", None)
         body = getattr(resp, "text", "") or ""
-        if status == 502 and "reasoning-only response" in body:
+        if resp is not None and status == 502 and "reasoning-only response" in body:
             # DEV-760: DEV-617's guard — the model spent its whole budget
             # thinking. That is an empty completion, not a server refusal, and
             # requests' own message ("502 Server Error: Bad Gateway") drops the
