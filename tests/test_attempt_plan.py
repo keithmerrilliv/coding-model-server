@@ -227,11 +227,12 @@ class TestRotateAmongFits:
                                      eligible=["deep_implementer"]) == "deep_implementer"
 
     def test_two_eligible_agents_alternate_in_rotation_order(self):
-        # Chain order since DEV-821 puts moe before deep, so the two alternate
-        # starting from index 1 of [moe, deep].
+        # Chain order since DEV-821 puts moe before deep. fast_implementer made
+        # attempt 0 and does not fit, so retry 1 takes the FIRST agent that
+        # does (DEV-823: counting from index 1 skipped moe and ran deep).
         picks = [rp._rotation_pick("fast_implementer", r, eligible=["deep_implementer", "moe_implementer"])
                  for r in (1, 2, 3, 4)]
-        assert picks == ["deep_implementer", "moe_implementer", "deep_implementer", "moe_implementer"]
+        assert picks == ["moe_implementer", "deep_implementer", "moe_implementer", "deep_implementer"]
 
     def test_without_eligibility_the_rotation_is_unchanged(self):
         # DEV-821: retry 1 after `implementer` is Glimmer, not deep.

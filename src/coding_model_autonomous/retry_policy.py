@@ -249,9 +249,15 @@ def eligible_agents(needed_tokens: int, window_of: Any,
 
 
 def previous_prompt_tokens(db: Database, spec_id: str, role: str) -> Optional[int]:
-    """prompt_tokens of the newest AGENT_RAN for *role* on this spec, or None.
+    """The largest single prompt of the newest AGENT_RAN for *role*, or None.
     The next attempt's prompt is the same spec, the same design and a little
-    more feedback: the last one is the best estimate there is."""
+    more feedback: the last one is the best estimate there is.
+
+    DEV-823: a manifest-mode attempt is several calls, and its `prompt_tokens`
+    is their SUM. Every call has to fit the window on its own, so the estimate
+    is the largest one. A multi-call event from before that was recorded has
+    no per-call figure; it answers None ("cannot tell"), and the dispatch-time
+    budget check guards the real fit, as it does on a first attempt."""
     try:
         events = db.list_events_by_kind(spec_id=spec_id, kind=EventKind.AGENT_RAN, limit=200)
     except Exception:
@@ -260,6 +266,10 @@ def previous_prompt_tokens(db: Database, spec_id: str, role: str) -> Optional[in
         p = _outcome._payload(ev)
         if p.get("role") == role and p.get("prompt_tokens"):
             try:
+                if p.get("max_call_prompt_tokens"):
+                    return int(p["max_call_prompt_tokens"])
+                if int(p.get("calls") or 1) > 1:
+                    return None
                 return int(p["prompt_tokens"])
             except (TypeError, ValueError):
                 continue
@@ -290,7 +300,13 @@ def _rotation_pick(initial_agent: "str | None", retry_count: int,
         # DEV-676: rotate only among the agents whose window holds the
         # prompt, in the same order, so every retry is a real change of
         # model — or, with one eligible agent, an honest repeat.
-        chain = [a for a in chain if a in eligible] or list(eligible)
+        filtered = [a for a in chain if a in eligible] or list(eligible)
+        if chain[0] not in filtered:
+            # DEV-823: the offset below counts from chain[0], the agent that
+            # made attempt 0. When the filter removed it, index 1 skips the
+            # first agent that fits — [moe, deep] went to deep on retry 1.
+            return filtered[(retry_count - 1) % len(filtered)]
+        chain = filtered
     return chain[retry_count % len(chain)]
 
 
