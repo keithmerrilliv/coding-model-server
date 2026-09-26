@@ -214,9 +214,15 @@ def _select_implementer_agent(spec_dir) -> "str | None":
 # test_implementer_calls_are_single_turn pins that property — if the implementer
 # ever gains a tool loop, it fails, and this membership must be revisited before
 # the loop ships.
+# DEV-821 (Keith, 2026-09-26): deep_implementer is LAST — the window fallback,
+# not the first retry. From 2026-09-13 to 09-26 it made 38 attempts and
+# delivered none, 18 of them from the slot directly after `implementer`;
+# glimmer delivered 4 of 14 from later, harder slots (DEV-720). It stays in the
+# chain because its 256K window is the only one some self-target prompts fit,
+# and eligible_agents() still routes those to it (sole_fit).
 _IMPLEMENTER_ROTATION = [
-    "implementer", "deep_implementer", "glimmer_implementer",
-    "moe_implementer", "fast_implementer",
+    "implementer", "glimmer_implementer", "moe_implementer",
+    "fast_implementer", "deep_implementer",
 ]
 
 

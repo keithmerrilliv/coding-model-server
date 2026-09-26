@@ -512,10 +512,13 @@ def implementer_max_tokens_for(design_md: str) -> int:
 # the env-default IMPLEMENTER_AGENT. Telemetry is deferred — see
 # ~/.claude/projects/.../memory/project_implementer_telemetry.md.
 
+# DEV-821: "high" no longer means deep_implementer — its five "high" first picks
+# between 2026-09-13 and 09-26 all failed (DEV-720). deep stays recommendable
+# (ALLOWED_IMPLEMENTER_AGENTS) and is the rotation's window fallback.
 TIER_TO_IMPLEMENTER = {
     "low": "fast_implementer",
     "medium": "implementer",
-    "high": "deep_implementer",
+    "high": "implementer",
     "extreme": "moe_implementer",
 }
 

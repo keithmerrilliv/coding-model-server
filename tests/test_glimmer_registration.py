@@ -73,12 +73,27 @@ def test_the_architect_arm_is_not_in_the_implementer_rotation():
     assert "glimmer_architect" not in _IMPLEMENTER_ROTATION
 
 
-def test_the_implementer_arm_sits_directly_behind_deep():
-    """DEV-692 item 3: Keith's placement. Third in the chain, which is also the
-    position that separates the two Qwen families instead of stacking a fourth
-    consecutive one."""
-    assert _IMPLEMENTER_ROTATION.index("glimmer_implementer") == \
-        _IMPLEMENTER_ROTATION.index("deep_implementer") + 1
+def test_the_implementer_arm_is_the_first_retry():
+    """DEV-821 (Keith, 2026-09-26) supersedes DEV-692 item 3's third place:
+    Glimmer is now directly behind `implementer`, so it takes retry 1. It still
+    separates the Qwen families, and it is still retry-only (the next test)."""
+    assert _IMPLEMENTER_ROTATION[:2] == ["implementer", "glimmer_implementer"]
+
+
+def test_deep_is_the_window_fallback_not_a_retry_slot():
+    """DEV-821: deep_implementer delivered 0 of 38 attempts (DEV-720), so it is
+    last in the chain and no complexity tier defaults to it. It stays in the
+    rotation because its 256K window is the only fit for some prompts."""
+    from coding_model_autonomous import retry_policy as rp
+    assert _IMPLEMENTER_ROTATION[-1] == "deep_implementer"
+    assert "deep_implementer" not in TIER_TO_IMPLEMENTER.values()
+    windows = {"implementer": 65536, "glimmer_implementer": 131072,
+               "moe_implementer": 65536, "fast_implementer": 65536,
+               "deep_implementer": 262144}
+    # A prompt only deep's window holds still reaches it, and only it.
+    assert rp.eligible_agents(200_000, windows.get) == ["deep_implementer"]
+    assert rp._rotation_pick("implementer", 1,
+                             eligible=["deep_implementer"]) == "deep_implementer"
 
 
 @pytest.mark.parametrize("agent", GLIMMER)
