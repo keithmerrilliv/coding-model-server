@@ -258,10 +258,10 @@ MAX_RETRIES = int(os.getenv("AUTONOMOUS_MAX_RETRIES", "5"))
 # SEARCH/REPLACE edit blocks for files that ALREADY EXIST (their current content
 # is shown in the prompt) instead of re-emitting the whole file, which the model
 # corrupts on large files and re-corrupts on every retry. New files keep
-# whole-file emission. Default OFF: with the flag off, the implement path is
-# byte-identical to the pre-DEV-581 whole-file behaviour, so this can be A/B'd
-# before adoption and merged/deployed safely. Mirrors the BLOCK_ON_BUILD_WARNINGS
-# env-flag convention (a single truthy env read at import).
+# whole-file emission. Default ON, the value production has run since DEV-581
+# (DEV-836 moved the code default to match). 0 is the rollback lever: the
+# implement path is then byte-identical to the pre-DEV-581 whole-file
+# behaviour, and the seam tier pins it off. See docs/EDITS.md.
 DIFF_BASED_EDITS = os.getenv(
     "AUTONOMOUS_DIFF_BASED_EDITS", "1").lower() in ("1", "true", "yes")
 

@@ -115,6 +115,9 @@ Three consequences that shape everything else:
   code. Python and Node suites run locally instead, confined by bubblewrap with
   a seccomp filter, because they are LLM-written code executing on the host.
 
+See also [SERVING.md](SERVING.md): how the server admits, refuses and carries
+out a model swap.
+
 ---
 
 ## 3. Inside `executing`: tasks and gates
@@ -208,6 +211,10 @@ cannot help because the defect is in the design.
 it; the default (`auto`) takes manifest mode when the design enumerates
 `AUTONOMOUS_MANIFEST_FILE_THRESHOLD` (8) or more files — or 8 or more declared
 units, the guard for designs whose file list understates their size.
+
+See also [EDITS.md](EDITS.md): how an existing file is edited with anchored
+SEARCH/REPLACE blocks instead of re-emitted, and what an edit that does not
+apply costs.
 
 ### The artifact ledger
 
@@ -344,6 +351,81 @@ its fields are fixed and listed in section 11.
 The supervisor, when enabled, is consulted inside `dispose` for rejected
 gates and failed test runs only, and only its own decisions bypass the table.
 
+### Inside `dispose`
+
+The whole of `outcome.dispose`, from a classified `Failure` to the action it
+takes. The rounded boxes are the `Disposition.action` values it returns.
+
+```mermaid
+flowchart TD
+    F[/"classified Failure"/] --> ENDED{"spec already done,<br/>failed or cancelled?"}
+    ENDED -->|yes| DISC(["discarded<br/>nothing recorded, DEV-678"])
+    ENDED -->|no| OUT{"failure.outcome"}
+    OUT -->|terminal| TERM
+
+    OUT -->|no-verdict| CAP{"consecutive no-verdicts on this<br/>attempt, this one included,<br/>more than Failure.cap?"}
+    CAP -->|yes| PARK(["park<br/>task-bound clarification gate"])
+    CAP -->|no| ROT{"failure.rotate?"}
+    ROT -->|yes| ROTATE(["rotate<br/>PENDING, retry_count unchanged,<br/>next pick moves one agent on"])
+    ROT -->|no| REQ(["requeue<br/>PENDING, retry_count unchanged"])
+
+    OUT -->|verdict| SUP{"supervisor on, source is<br/>gate or tests, and it acts?"}
+    SUP -->|yes| HAND(["handled"])
+    SUP -->|no| WHO{"who pays?<br/>charge_role, else role"}
+    WHO -->|architect| ACAP{"architect retry_count<br/>at MAX_RETRIES?"}
+    ACAP -->|"yes: design_exhausted"| TERM
+    ACAP -->|no| ACH(["charge the architect"])
+    WHO -->|reviewer| RCAP{"reviewer retry_count below<br/>REVIEWER_PARSE_RETRIES?"}
+    RCAP -->|yes| RCH(["charge the reviewer<br/>re-run it"])
+    RCAP -->|"no: becomes tests_failed"| IMPL
+    WHO -->|implementer| IMPL{"implementer task exists?"}
+    IMPL -->|"no: aborted"| TERM
+    IMPL -->|yes| INV{"synthesis hook present, and<br/>2+ agents produced this coarse key,<br/>or the sole-fit agent did twice?"}
+    INV -->|yes| SYN
+    INV -->|no| BUD{"implementer retry_count<br/>at MAX_RETRIES?"}
+    BUD -->|yes| SYN{"hooks.synthesize"}
+    BUD -->|no| ICH(["charge the implementer<br/>rejected code_review gate<br/>carries the feedback"])
+    SYN -->|"release gate opened, or the<br/>synthesis call was a no-verdict"| SYND(["synthesize"])
+    SYN -->|"no hook, no reviewer task,<br/>or synthesis failed: synthesis_failed"| TERM
+
+    TERM(["terminal<br/>task FAILED, every other task closed,<br/>spec FAILED"])
+```
+
+Every box but `discarded` writes a `failure_classified` row whose
+`disposition` is the box's name; `handled` is recorded as `supervisor`. A
+synthesis that ends the spec writes two rows, `synthesize` and then
+`terminal`. `rotate` does not pick the next agent itself; the row it writes
+is what `outcome.rotation_offset` counts at the next dispatch (section 7).
+The caps come from `Failure.cap`: `AUTONOMOUS_NO_VERDICT_CAP` (5) unless
+`_CAPS` names the class and phase, and none at all for `shutdown`. An
+architect charge also writes the feedback to `design_review_feedback.md`; an
+implementer charge also sets the reviewer task back to PENDING.
+
+**Loops that bound themselves outside `dispose`.** Four budgets are enforced
+in `orchestrator_daemon.py`, each by counting its own records through
+`outcome.count_own_records` (DEV-838). That function reads every row of the
+loop's events, and when the count cannot be read it logs by the cap's name
+and returns 0 (DEV-630). None of the four uses `retry_count`, which human
+rejections and upstream routing share (DEV-558, DEV-545).
+
+| Loop | Counts | Cap | Past the cap |
+|---|---|---|---|
+| `_planner_no_verdict` | planner-phase no-verdict `failure_classified` rows | `Failure.cap` (the planner has no task row, so `dispose` cannot) | the spec parks in `needs_clarification` |
+| `_crash_recoveries_used` | the task's `crash_recovery` records | `MAX_RETRIES` | `outcome.terminate`, `aborted`. Each recovery still increments `retry_count` |
+| `_testability_rounds_used` | `testability_check` records with `revised` | `AUTONOMOUS_TESTABILITY_CHECK_MAX_ROUNDS` (2) | the findings go onto the design gate; each round charged the architect through `record_local_charge` |
+| `_harness_retry` | `harness_guard` records | `_HARNESS_FREE_RETRIES` (2) | the normal, charged retry path |
+
+Two of these used to leak. The testability count read only the 20 newest
+`agent_ran` rows, so a late architect pass could lose its early rounds. The
+harness count lived in a workspace file that the retry wipe deletes, so from
+`retry_count` 1 on it restarted on every pass. Both now count events.
+
+The upstream route to the architect (`_route_build_failure_to_architect`) and
+the design review also route themselves and record through
+`record_local_charge`.
+
+### A build failure, end to end
+
 Same failure, three destinations, decided by evidence rather than by state.
 
 ```mermaid
@@ -351,22 +433,25 @@ Same failure, three destinations, decided by evidence rather than by state.
 flowchart TD
     F[/build failed/] --> Q1{"same diagnostic as the<br/>previous attempt — by text,<br/>class or named symbol —<br/>AND the architect has<br/>retries left?"}
     Q1 -->|yes| A[route to ARCHITECT<br/>implementer NOT charged<br/>architect IS charged]
-    Q1 -->|no| INV{"same coarse key<br/>(class · phase · file)<br/>from 2+ distinct agents?"}
+    Q1 -->|no| INV{"same coarse key from<br/>2+ distinct agents, or twice<br/>from the sole-fit agent?<br/>key: class · phase · file ·<br/>compiler message"}
     INV -->|yes| S
     INV -->|no| Q2{implementer<br/>retry_count &lt; 5?}
     Q2 -->|yes| I[retry IMPLEMENTER<br/>charged, notes attached]
     Q2 -->|no| S[SYNTHESIS<br/>merge every attempt]
     S --> Q3{"what does the merge's<br/>own build say?"}
+    Q3 -->|suite passed| RG([release_approval gate])
     Q3 -->|"build failed<br/>(recognised diagnostic)"| R1[repair round<br/>aimed at the diagnostic]
     Q3 -->|"compiled, no summary,<br/>blocking warning"| R1B[repair round<br/>aimed at the warning]
     Q3 -->|"suite ran, ≥80% pass"| R2[repair round<br/>aimed at the failures]
-    Q3 -->|"suite ran, &lt;80%"| X([fail — too far from passing<br/>to be worth a call])
+    Q3 -->|"suite ran, &lt;80%:<br/>too far to be worth a call"| X([spec fails<br/>synthesis_failed])
     Q3 -->|"no summary, no diagnostic,<br/>no warning"| X2([no repair — the runner is<br/>suspect, not the code;<br/>the failure stands])
-    R1 --> V{did the repair<br/>strictly reduce diagnostics?}
+    R1 --> V{"did the repair pass, or leave<br/>strictly fewer diagnostics and<br/>none on a protected symbol?"}
     R1B --> V
     R2 --> V
     V -->|yes| K[keep it]
     V -->|no| RB[ROLL BACK<br/>restore pre-repair files]
+    K -->|suite passed| RG
+    K -->|still failing| X
     RB --> X
 ```
 
@@ -380,11 +465,17 @@ disables). "Not charged" refers to the implementer: the architect's own
 loop from being free.
 
 The invariance edge is the rotation admitting its one lever did not move
-anything: the identity is the *coarse key* — class, phase and the file the
-failure is about, never the volatile particulars (which edit block, what
-similarity score) — and the trigger is two different agents producing it, not
-two attempts in a row (run 29 produced six distinct signatures while failing
-the same way twice, with an unrelated failure between). Synthesis is where it
+anything: the identity is the *coarse key* (`outcome.coarse_key`) — class,
+phase and the repository-relative file the failure is about, never the
+volatile particulars (which edit block, what similarity score) — and the
+trigger is two different agents producing it, not two attempts in a row (run
+29 produced six distinct signatures while failing the same way twice, with an
+unrelated failure between). A build failure's key also carries the first
+compiler message, normalised: every attempt on a modify-spec touches the same
+files, so class and file alone made two unrelated defects in one file look
+like one (run 50, DEV-783). When the fit check leaves only one agent that can
+hold the prompt (`sole_fit`, section 8), there is no second model to pull, so
+the same key twice from that agent is invariant too (DEV-676). Synthesis is where it
 goes because merging six near-misses has delivered where the rotation could
 not (run 26); parking would ask a human to solve something the pipeline can.
 
@@ -437,6 +528,87 @@ table to read first when a run ends somewhere surprising.
    parks the task behind a gate that names the infrastructure. Every one is a
    `failure_classified` row (section 11), so "how much did infrastructure cost
    this run" is a query.
+
+### Which agent makes attempt N
+
+`MAX_RETRIES` bounds how many implementer attempts there are; the rotation
+decides who makes each one. Attempt 0 goes to the architect's pick. Every
+later attempt walks a fixed chain, `retry_policy._IMPLEMENTER_ROTATION`:
+`implementer`, `glimmer_implementer`, `moe_implementer`, `fast_implementer`,
+`deep_implementer` (DEV-821). `deep_implementer` is last because it is the
+window fallback: its 256K window is the only one some self-target prompts
+fit, so the fit check still reaches it when nothing else holds the prompt.
+
+```mermaid
+sequenceDiagram
+    participant D as daemon<br/>_run_implementer
+    participant RP as retry_policy
+    participant OC as outcome
+    participant EV as events
+    participant CX as context.plan_dispatch
+    participant S as model server
+
+    D->>RP: choose_agent
+    Note over RP: anchor: complexity.json's recommendation or tier,<br/>else the role default (AUTONOMOUS_IMPLEMENTER_AGENT)
+    opt retry_count above 0
+        RP->>EV: newest implementer agent_ran
+        Note over RP: eligible: agents whose n_ctx holds that prompt plus the completion
+    end
+    RP->>OC: rotation_offset
+    OC->>EV: no-verdicts on this attempt that asked to rotate
+    OC-->>RP: k
+    Note over RP: _rotation_pick at retry_count plus k,<br/>then the random arm on ROTATION_RANDOM_FRACTION of calls
+    RP-->>D: AgentChoice: agent, assignment, eligible, needed tokens
+    D->>RP: plan_attempt, inject_difference
+    RP-->>D: the next untried agent, only if every lever repeats an earlier attempt
+    D->>EV: attempt_planned, with the assignment
+    D->>CX: the chosen agent, the rotation as candidates
+    CX-->>D: the first agent whose window holds the whole prompt
+    opt the dispatch moved
+        D->>EV: a second attempt_planned, assignment rerouted
+    end
+    D->>S: call_agent
+    alt 4xx such as 413, truncated, or empty
+        S-->>D: no verdict
+        D->>OC: dispose, disposition rotate, so k grows by one
+    end
+```
+
+The chain always starts from the attempt-0 agent and continues in chain
+order, so the tier decides the whole sequence. A retry's index is its
+`retry_count` plus `k`; attempt 5 wraps to the first agent again.
+
+| Attempt-0 agent | How it is chosen | Attempts 1 to 4 |
+|---|---|---|
+| `implementer` | tier `medium` or `high`, or no `complexity.json` | glimmer, moe, fast, deep |
+| `fast_implementer` | tier `low` | implementer, glimmer, moe, deep |
+| `moe_implementer` | tier `extreme` | implementer, glimmer, fast, deep |
+| `deep_implementer` | only when the architect recommends it by name | implementer, glimmer, moe, fast |
+
+`glimmer_implementer` is retry-only: it is in the chain but not in
+`TIER_TO_IMPLEMENTER` or `ALLOWED_IMPLEMENTER_AGENTS`, so it never makes
+attempt 0. When the eligible set drops the attempt-0 agent, the offset counts
+from the first eligible agent instead (DEV-823). With one eligible agent the
+assignment is `sole_fit`, and diagram 6's invariance edge treats a repeat on
+it as final.
+
+`retry_policy.choose_agent()` makes the pick (DEV-838). Two later steps can
+still move a dispatch, and each records that it did:
+
+- `inject_difference` (DEV-631) swaps in the next untried agent when the plan
+  repeats an earlier attempt on every lever.
+- `context.plan_dispatch` (DEV-633) escalates to a larger window when the
+  prompt outgrows the chosen one. It is called through the daemon's
+  `_prompt_budget` in `_generate_implementation` (single call) and
+  `_generate_one_file` (per file), and through `_ctx_capable_agent` in
+  `_generate_via_manifest`. All three record a move as a reroute.
+
+The architect and reviewer have fixed picks with no rotation
+(`executor.role_to_agent`), and so does synthesis (`_SYNTHESIS_AGENT`,
+`AUTONOMOUS_SYNTHESIS_AGENT`, default `deep_reviewer`).
+
+What the model server does when the chosen agent is not the one loaded is in
+[SERVING.md](SERVING.md).
 
 ---
 

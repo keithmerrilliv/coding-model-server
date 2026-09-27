@@ -466,10 +466,14 @@ Two mechanisms, both optional:
 
 For an RTX 5080 (16,303 MiB):
 
-- The loader refuses a **reload** that would leave less than `_VRAM_MARGIN_MIB`
-  (500 MiB) free. A config tuned so tight that it clears the first load but not
-  a reload will brick the server after the idle watchdog reaps the child — this
-  happened at `implementer` `n_cpu_moe=18` and is why it now sits at 20.
+- The loader refuses a **reload** only when free VRAM is below the agent's
+  footprint as measured on its last successful load. `_VRAM_MARGIN_MIB`
+  (500 MiB) on top of that is advisory: a load that fits but leaves less than
+  the margin logs a warning and proceeds. It used to be a hard floor, and a
+  config tuned so tight that it cleared the first load but not a reload bricked
+  the server after the idle watchdog reaped the child — that happened at
+  `implementer` `n_cpu_moe=18` and is why it now sits at 20. See
+  [SERVING.md](SERVING.md).
 - Leave ~**1.4 GB** free in practice: that is the observed floor for a
   *model swap* (the incoming child allocates before the outgoing one has fully
   released).
