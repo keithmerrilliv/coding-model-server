@@ -242,6 +242,10 @@ A clean start prints `Connected to <your server IP>` and no
 
 ## 7. Set up the Mac runner (Mac only)
 
+> **The living guide is now [MAC_RUNNER.md](MAC_RUNNER.md)**: install, update,
+> the two-host deploy rule and the VM path for `xcodebuild_test` (DEV-705,
+> DEV-836). This section is kept as the record of the original setup.
+
 Swift and Xcode tests can't run on Linux, so the orchestrator dispatches
 them over HTTP to a `mac_runner` service on your Mac. Code lives at
 `mac_runner/` in this repo.
@@ -431,7 +435,7 @@ list.
 - **Shell is not workspace-confined**: `WRITE_FILE` / `EDIT_FILE` are hard-confined to the workspace (see `CODING_MODEL_WORKSPACE` in `docs/CONFIGURATION.md`), and shell commands *run* with the workspace as their CWD — but that is a default, not a jail. With `shell=True` a command can still `cd` out and write anywhere the user can. Confining it needs the same sandboxing the item above calls for.
 - **Scraping SSRF**: `scraping/*` and `ingest_url_content` accept arbitrary URLs and follow redirects. Not addressed in this pass.
 - **Rate limiting**: still none. A misbehaving client can DoS the server even when authenticated.
-- **Mac runner sandbox is disabled in practice**: DEV-126's `sandbox-exec` wrapper exists and defaults on, but app-hosted XCTest cannot run inside it (DEV-403 — even a permissive profile hangs the test-runner handshake), so the runner currently sets `CODING_MODEL_RUNNER_SANDBOX=0` and Swift/Xcode test code executes with the runner user's privileges. Containment needs a low-privilege runner user or a VM, and re-enabling also needs the signing keychain reissued (DEV-415).
+- ~~**Mac runner sandbox is disabled in practice**~~ **Resolved (DEV-422, DEV-705):** app-hosted XCTest cannot run under `sandbox-exec` (DEV-403), so `xcodebuild_test` now runs in a throwaway tart VM, and `swift_test` runs under the `sandbox-exec` profile with the sandbox switch on. See [MAC_RUNNER.md](MAC_RUNNER.md).
 - **`EnvironmentFile=-` fails open**: the systemd units tolerate a missing env file by design (the leading dash). If the `.env` is ever moved or mistyped, the server starts with an empty `ADMIN_API_KEY` instead of failing loudly. The lifespan guard in `runtime.py` catches this (it refuses to boot unauthenticated), but the units themselves will not complain — check `journalctl` after any change to the env path.
 - **pbxproj editing for Xcode projects without existing XCTest targets**: not supported yet — the planner must target projects that already have a test target. SPM (`swift_test`) handles add-new-tests fine via text edits to `Package.swift`.
 - **Binary patches**: the orchestrator ships UTF-8 files only; binary assets (images, asset catalogs) can't currently be added/modified by the LLM. Worktree bases carry whatever binaries exist at `base_ref`.

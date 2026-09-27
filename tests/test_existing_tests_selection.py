@@ -406,6 +406,7 @@ def _head_file(rel: str) -> str:
                           capture_output=True, text=True, check=True).stdout
 
 
+@pytest.mark.slow
 @pytest.mark.skipif(not tr._sandbox_available(), reason="bwrap sandbox unavailable")
 @pytest.mark.skipif(shutil.which("git") is None, reason="git unavailable")
 class TestInTheRealSandbox:

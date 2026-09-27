@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.6.0 — unreleased
+
+The layering release ([DEV-835](https://keith-merrill4.atlassian.net/browse/DEV-835)): imports point one way, each decision has one home, and language-specific logic sits behind one interface.
+
+### Shipped
+
+- [DEV-836](https://keith-merrill4.atlassian.net/browse/DEV-836) — phase T0, the facts an operator reads. Three documented defaults were wrong and now match the code: `MEMORY_RELEVANCE_THRESHOLD` (0.52), `AUTONOMOUS_DESIGN_REVIEW` (0; TUTORIAL said design review was on by default), and `CODING_MODEL_SERVER_IP`, which the interactive client defaulted to `192.0.2.10`, an address that can never route; both clients now default to `127.0.0.1`. `AUTONOMOUS_DIFF_BASED_EDITS` now defaults to 1, the value production has run since DEV-581. The README narrates every release instead of stopping at v0.2.0, lists all 23 autonomous modules, and no longer says CUDA 13.x is broken (production runs 13.2; DEV-703, DEV-745). `QWEN.md` becomes `AGENTS.md`, with how a change gets in. New `docs/MAC_RUNNER.md` holds the Mac runner's install and update and the two-host deploy rule behind DEV-705 and DEV-752; `SECURITY_MIGRATION.md` §7 points to it and its "sandbox disabled in practice" item is marked resolved. PIPELINE.md's lifecycle diagram gains the six transitions it was missing (infrastructure park, defensive failure, supervisor replan, operator cancel from each state), and a table of the four guards around a test dispatch. The live-`npm install` tests are marked `network`: the merge gate skips them and CI still runs them, taking the gate's pytest from 52 s to 33 s; the registry probe moved from import time into the tests that need it. Ten one-off scripts moved to `scripts/archive/`; `scripts/README.md` names every live one; `auto_approve_gates.py`, which approves every gate without a human, now refuses unless `CODING_MODEL_ALLOW_AUTO_APPROVE=1`. Locally, deleting 208 merged branches and a `gc` took `.git` from 5.6 GB to 93 MB.
+
 ## v0.5.0 — 2026-09-27
 
 The honest-guards release ([DEV-818](https://keith-merrill4.atlassian.net/browse/DEV-818)): a guard reports what it observed and names a cause only when it has actually isolated one. Runs 56 to 68 all reached release approval. Nine were pushed by the pipeline and four were delivered by hand, one because of a false stale-base refusal fixed by DEV-810, and three because LLab had no delivery remote until 2026-09-27. LLab joined Electric Sheep and Centipede as a third target, and is tested through Swift's C++ interop.

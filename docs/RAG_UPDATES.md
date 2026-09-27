@@ -248,7 +248,7 @@ The `POST /v1/memory` endpoint enforces a `max_length=200_000` character limit o
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CODING_MODEL_MEMORY_DB` | `<repo>/var/memory_db` | ChromaDB persistence directory |
-| `MEMORY_RELEVANCE_THRESHOLD` | 0.6 | Max cosine distance for inclusion |
+| `MEMORY_RELEVANCE_THRESHOLD` | 0.52 | Max cosine distance for inclusion (was 0.6 until DEV-834) |
 | `PDF_CHUNK_SIZE` | 1000 | Character chunk size for PDF ingestion |
 | `PDF_CHUNK_OVERLAP` | 200 | Overlap between PDF chunks |
 | `ADMIN_API_KEY` | *(required)* | API key for `X-Admin-Key` / `Bearer` authentication |

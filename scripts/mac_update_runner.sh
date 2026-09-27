@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # DEV-705 — bring the Mac runner up to date and reclaim leaked tart VMs.
 #
-#   RUN ON THE MAC (macbook-pro), from the runner's checkout:
+#   RUN ON THE MAC RUNNER HOST (the Mac Studio since 2026-09-25), from the
+#   runner's checkout:
 #     bash scripts/mac_update_runner.sh            # show what it would do
 #     bash scripts/mac_update_runner.sh --execute  # pull, reclaim, restart
 #
