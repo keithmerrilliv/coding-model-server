@@ -3767,6 +3767,165 @@ def _record_tested_manifest(spec_dir: Path, files: "list[tuple[str, str]]",
                      spec_dir, exc_info=True)
 
 
+@dataclasses.dataclass
+class BuildCheck:
+    """What the pre-gate build check found (DEV-429). ``requeued`` means the
+    check already put the task down because the runner is unreachable
+    (DEV-538), and the caller has nothing left to do."""
+    reason: "str | None" = None       # a compiler diagnostic, or None
+    output: str = ""
+    passed: "bool | None" = None      # None: no check ran
+    framework: str = ""
+    blocking_warnings: list = dataclasses.field(default_factory=list)
+    split: Any = None                 # test_runner.parse_test_split's reading
+    strategy: Any = None              # the plan's test_strategy
+    requeued: bool = False
+
+
+def _pre_gate_build_check(db: Database, spec: Spec, task, spec_dir: Path,
+                          files: list, protected_files) -> BuildCheck:
+    # DEV-429: build the code before asking a human to review it. A gate that
+    # opens on code which cannot compile spends the expensive resource (the
+    # reviewer) on something the free one (the compiler) already decided. The
+    # reviewer/test task that would have caught it sits PENDING *behind* this
+    # gate, so without this the ordering is inverted.
+    #
+    # A dispatch that errors out (Mac asleep, key missing, network) must not
+    # burn a retry: _detect_build_failure only fires on a recognised compiler
+    # diagnostic, and everything else falls through to the normal gate.
+    build_reason = None
+    build_output = ""
+    build_passed = None
+    build_framework = ""
+    build_warnings: list = []
+    blocking_warnings: list = []
+    test_split = None
+    ts_for_build = _load_plan(spec).get("test_strategy")
+    if isinstance(ts_for_build, dict) and ts_for_build.get("framework"):
+        fw = build_framework = ts_for_build["framework"]
+        # DEV-512: statically-decidable Swift errors are caught here, before the
+        # ~300s Mac dispatch. A hit takes the SAME build_reason path a real
+        # compiler diagnostic would (its report is swiftc-shaped), so the whole
+        # routing/retry machinery below is unchanged — we just skip the runner.
+        # Gated to the Swift frameworks: the checks and the "does not compile"
+        # feedback only make sense for a Swift build.
+        precheck_failed = False
+        if fw.lower() in ("swift_test", "xcodebuild_test"):
+            build_reason, build_output = _local_swift_precheck(
+                db, spec, task, files, protected_files)
+            if build_reason is not None:
+                build_passed = False
+                precheck_failed = True  # its own event is recorded in the helper
+
+        # Only dispatch — and only record the dispatch's own TEST_RAN event —
+        # when the local pre-check let the code through.
+        if not precheck_failed:
+            try:
+                build_passed, build_output = _run_tests_with_guard(
+                    spec.id, spec_dir, fw, ts_for_build,
+                    output_label="Pre-gate build check output:",
+                    fail_log=("spec %s: pre-gate build check failed structural "
+                              "validation (%s)"),
+                )
+                build_reason = _detect_build_failure(build_output, fw, build_passed)
+                # DEV-547: warnings are only consulted when nothing failed to
+                # compile. A real diagnostic is strictly better feedback, and
+                # stacking the two would bury it.
+                build_warnings = _parse_build_warnings(
+                    build_output, ts_for_build.get("protected_paths"))
+                if build_reason is None and BLOCK_ON_BUILD_WARNINGS:
+                    blocking_warnings = [w for w in build_warnings if w.blocking]
+            except Exception as e:  # never let the check itself stall the spec
+                logger.warning("spec %s: pre-gate build check errored (%s) — "
+                               "falling through to the review gate", spec.id, e)
+                build_reason = None
+                blocking_warnings = []
+
+            build_payload = {"phase": "pre_gate_build_check",
+                             "passed": build_passed if not build_reason else False,
+                             # DEV-536 (via DEV-630): the runner's overwrite
+                             # detector was produced and never consumed. It now
+                             # heads the output (see test_runner) and is
+                             # queryable here, so a silent regression of the
+                             # read path is detectable after the fact.
+                             "suspected_reconstruction":
+                                 test_runner.RECONSTRUCTION_MARKER
+                                 in (build_output or "")[:2000],
+                             "build_failed": build_reason is not None,
+                             # DEV-547/DEV-529: warnings become queryable
+                             # rather than living only in the raw log.
+                             "warnings": len(build_warnings),
+                             "blocking_warnings": [
+                                 {"path": w.path, "line": w.line,
+                                  "diag_id": w.diag_id,
+                                  "message": w.message}
+                                 for w in blocking_warnings],
+                             # DEV-548: "compiled then crashed" is its own
+                             # outcome and DEV-529's taxonomy will want it
+                             # separated from a build failure.
+                             "test_process_crashed":
+                                 _detect_test_process_crash(build_output),
+                             "retry": task.retry_count}
+            # DEV-675: which results were the spec's own tests and which
+            # were the repository's, so "the suite passed" is a count the
+            # gate and the event both carry.
+            test_split = test_runner.parse_test_split(build_output)
+            if test_split is not None:
+                build_payload.update(test_split.payload())
+            # DEV-602 split B: a passing check records exactly what it
+            # verified, into the same payload this event carries. A failing
+            # check records nothing and leaves any prior manifest untouched.
+            if build_passed and not build_reason:
+                _record_tested_manifest(spec_dir, files, build_payload)
+            db.record_event(EventKind.TEST_RAN, spec_id=spec.id, task_id=task.id,
+                            payload=build_payload)
+
+        # DEV-478: keep the runner's own words whatever the outcome. Previously
+        # this was written only on the diagnostic path below, so the one case
+        # where the reviewer most needs it — the check ran, something failed,
+        # and it was not a recognised compiler diagnostic — kept nothing. The
+        # reviewer's own test_output.txt is written by _run_reviewer_tests,
+        # which sits *behind* this gate and has not run.
+        if build_output:
+            ArtifactLedger.open(db, spec, spec_dir).note(
+                "build_check_output.txt", build_output)
+            db.create_artifact(spec_id=spec.id, task_id=task.id,
+                               kind=ArtifactKind.TEST_REPORT,
+                               path="build_check_output.txt")
+
+        # DEV-477: neither a summary nor a diagnostic means the check told us
+        # nothing — an infrastructure fault, not a verdict on the code.
+        #
+        # DEV-548 carves out the case where it told us plenty: a build that
+        # completed and then took a signal. That is a runtime defect with a
+        # clean compile behind it, so it is neither inconclusive nor an
+        # infrastructure fault, and it must not be requeued as one.
+        if (build_passed is False and build_reason is None
+                and _detect_test_process_crash(build_output)):
+            logger.warning(
+                "spec %s: pre-gate build check compiled and then crashed — %s; "
+                "this is a runtime defect, not a build failure",
+                spec.id, _detect_test_process_crash(build_output))
+        elif (build_passed is False and build_reason is None
+                and not _observed_a_test_run(build_output, fw)):
+            logger.warning(
+                "spec %s: pre-gate build check is inconclusive — no test "
+                "summary and no compiler diagnostic in %d chars of output; "
+                "the build is unverified, not confirmed",
+                spec.id, len(build_output))
+            # DEV-538: and now act on it. Opening a code_review gate here asks
+            # the most expensive, slowest resource in the system to adjudicate
+            # a question no one has the evidence to answer, and then waits
+            # forever — run 8 sat on exactly this for 3930 minutes across three
+            # reboots. The runner comes back on its own, so the right move is
+            # to put the work down and pick it up again.
+            if test_runner.is_runner_unreachable(build_output):
+                if _requeue_for_unreachable_runner(db, spec, task):
+                    return BuildCheck(requeued=True)
+    return BuildCheck(build_reason, build_output, build_passed, build_framework,
+                      blocking_warnings, test_split, ts_for_build)
+
+
 def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
     # Wipe artifacts from earlier retries so the new implementer starts
     # from a clean slate. No-op on retry-0.
@@ -4021,144 +4180,14 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
         _route_missing_planned_outputs(db, spec, task, spec_md, missing_planned)
         return
 
-    # DEV-429: build the code before asking a human to review it. A gate that
-    # opens on code which cannot compile spends the expensive resource (the
-    # reviewer) on something the free one (the compiler) already decided. The
-    # reviewer/test task that would have caught it sits PENDING *behind* this
-    # gate, so without this the ordering is inverted.
-    #
-    # A dispatch that errors out (Mac asleep, key missing, network) must not
-    # burn a retry: _detect_build_failure only fires on a recognised compiler
-    # diagnostic, and everything else falls through to the normal gate.
-    build_reason = None
-    build_output = ""
-    build_passed = None
-    build_framework = ""
-    build_warnings: list = []
-    blocking_warnings: list = []
-    test_split = None
-    ts_for_build = _load_plan(spec).get("test_strategy")
-    if isinstance(ts_for_build, dict) and ts_for_build.get("framework"):
-        fw = build_framework = ts_for_build["framework"]
-        # DEV-512: statically-decidable Swift errors are caught here, before the
-        # ~300s Mac dispatch. A hit takes the SAME build_reason path a real
-        # compiler diagnostic would (its report is swiftc-shaped), so the whole
-        # routing/retry machinery below is unchanged — we just skip the runner.
-        # Gated to the Swift frameworks: the checks and the "does not compile"
-        # feedback only make sense for a Swift build.
-        precheck_failed = False
-        if fw.lower() in ("swift_test", "xcodebuild_test"):
-            build_reason, build_output = _local_swift_precheck(
-                db, spec, task, result.files, protected_files)
-            if build_reason is not None:
-                build_passed = False
-                precheck_failed = True  # its own event is recorded in the helper
-
-        # Only dispatch — and only record the dispatch's own TEST_RAN event —
-        # when the local pre-check let the code through.
-        if not precheck_failed:
-            try:
-                build_passed, build_output = _run_tests_with_guard(
-                    spec.id, spec_dir, fw, ts_for_build,
-                    output_label="Pre-gate build check output:",
-                    fail_log=("spec %s: pre-gate build check failed structural "
-                              "validation (%s)"),
-                )
-                build_reason = _detect_build_failure(build_output, fw, build_passed)
-                # DEV-547: warnings are only consulted when nothing failed to
-                # compile. A real diagnostic is strictly better feedback, and
-                # stacking the two would bury it.
-                build_warnings = _parse_build_warnings(
-                    build_output, ts_for_build.get("protected_paths"))
-                if build_reason is None and BLOCK_ON_BUILD_WARNINGS:
-                    blocking_warnings = [w for w in build_warnings if w.blocking]
-            except Exception as e:  # never let the check itself stall the spec
-                logger.warning("spec %s: pre-gate build check errored (%s) — "
-                               "falling through to the review gate", spec.id, e)
-                build_reason = None
-                blocking_warnings = []
-
-            build_payload = {"phase": "pre_gate_build_check",
-                             "passed": build_passed if not build_reason else False,
-                             # DEV-536 (via DEV-630): the runner's overwrite
-                             # detector was produced and never consumed. It now
-                             # heads the output (see test_runner) and is
-                             # queryable here, so a silent regression of the
-                             # read path is detectable after the fact.
-                             "suspected_reconstruction":
-                                 test_runner.RECONSTRUCTION_MARKER
-                                 in (build_output or "")[:2000],
-                             "build_failed": build_reason is not None,
-                             # DEV-547/DEV-529: warnings become queryable
-                             # rather than living only in the raw log.
-                             "warnings": len(build_warnings),
-                             "blocking_warnings": [
-                                 {"path": w.path, "line": w.line,
-                                  "diag_id": w.diag_id,
-                                  "message": w.message}
-                                 for w in blocking_warnings],
-                             # DEV-548: "compiled then crashed" is its own
-                             # outcome and DEV-529's taxonomy will want it
-                             # separated from a build failure.
-                             "test_process_crashed":
-                                 _detect_test_process_crash(build_output),
-                             "retry": task.retry_count}
-            # DEV-675: which results were the spec's own tests and which
-            # were the repository's, so "the suite passed" is a count the
-            # gate and the event both carry.
-            test_split = test_runner.parse_test_split(build_output)
-            if test_split is not None:
-                build_payload.update(test_split.payload())
-            # DEV-602 split B: a passing check records exactly what it
-            # verified, into the same payload this event carries. A failing
-            # check records nothing and leaves any prior manifest untouched.
-            if build_passed and not build_reason:
-                _record_tested_manifest(spec_dir, result.files, build_payload)
-            db.record_event(EventKind.TEST_RAN, spec_id=spec.id, task_id=task.id,
-                            payload=build_payload)
-
-        # DEV-478: keep the runner's own words whatever the outcome. Previously
-        # this was written only on the diagnostic path below, so the one case
-        # where the reviewer most needs it — the check ran, something failed,
-        # and it was not a recognised compiler diagnostic — kept nothing. The
-        # reviewer's own test_output.txt is written by _run_reviewer_tests,
-        # which sits *behind* this gate and has not run.
-        if build_output:
-            ArtifactLedger.open(db, spec, spec_dir).note(
-                "build_check_output.txt", build_output)
-            db.create_artifact(spec_id=spec.id, task_id=task.id,
-                               kind=ArtifactKind.TEST_REPORT,
-                               path="build_check_output.txt")
-
-        # DEV-477: neither a summary nor a diagnostic means the check told us
-        # nothing — an infrastructure fault, not a verdict on the code.
-        #
-        # DEV-548 carves out the case where it told us plenty: a build that
-        # completed and then took a signal. That is a runtime defect with a
-        # clean compile behind it, so it is neither inconclusive nor an
-        # infrastructure fault, and it must not be requeued as one.
-        if (build_passed is False and build_reason is None
-                and _detect_test_process_crash(build_output)):
-            logger.warning(
-                "spec %s: pre-gate build check compiled and then crashed — %s; "
-                "this is a runtime defect, not a build failure",
-                spec.id, _detect_test_process_crash(build_output))
-        elif (build_passed is False and build_reason is None
-                and not _observed_a_test_run(build_output, fw)):
-            logger.warning(
-                "spec %s: pre-gate build check is inconclusive — no test "
-                "summary and no compiler diagnostic in %d chars of output; "
-                "the build is unverified, not confirmed",
-                spec.id, len(build_output))
-            # DEV-538: and now act on it. Opening a code_review gate here asks
-            # the most expensive, slowest resource in the system to adjudicate
-            # a question no one has the evidence to answer, and then waits
-            # forever — run 8 sat on exactly this for 3930 minutes across three
-            # reboots. The runner comes back on its own, so the right move is
-            # to put the work down and pick it up again.
-            if test_runner.is_runner_unreachable(build_output):
-                if _requeue_for_unreachable_runner(db, spec, task):
-                    return
+    check = _pre_gate_build_check(db, spec, task, spec_dir, result.files,
+                                  protected_files)
+    if check.requeued:
+        return
+    build_reason, build_output, build_passed = (check.reason, check.output,
+                                                check.passed)
+    build_framework, blocking_warnings = check.framework, check.blocking_warnings
+    test_split, ts_for_build = check.split, check.strategy
 
     # DEV-675: a repository test that passes at base_ref and fails on this
     # attempt is a verdict on the attempt — it broke behaviour that was
