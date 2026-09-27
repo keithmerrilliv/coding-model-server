@@ -153,14 +153,6 @@ def assess_base(repo: Path, deliverable: "list[str]", spec_dir: Path,
     return BaseAssessment("\n".join(lines), tuple(renames))
 
 
-def stale_base_refusal(repo: Path, deliverable: "list[str]", spec_dir: Path,
-                       base_files: "dict[str, str] | None",
-                       base_is_current: "bool | None" = None) -> "str | None":
-    """The refusal half of :func:`assess_base` (the DEV-756 entry point)."""
-    return assess_base(repo, deliverable, spec_dir, base_files,
-                       base_is_current).refusal
-
-
 def _base_from_context(spec_dir: Path) -> "tuple[str | None, dict[str, str]]":
     """(base sha, base file contents) from the spec's persisted context, or
     (None, {}) when there is none — pre-DEV-701 workspaces and tests."""

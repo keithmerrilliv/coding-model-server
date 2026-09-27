@@ -26,14 +26,15 @@ import textwrap
 import time
 from collections import Counter
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Optional
 
 import yaml
 
-from coding_model_server.streaming import strip_thinking as _server_strip_thinking
-
 from ._http import post_chat_completion
+from .retry_policy import ALLOWED_IMPLEMENTER_AGENTS, TIER_TO_IMPLEMENTER  # noqa: F401
+from .thinking import strip_thinking as _server_strip_thinking
+# Re-exported: the daemon and tests call executor.artifact_path (DEV-837 moved it).
+from .workspace import _count_declarations, artifact_path  # noqa: F401
 from .swift_rules import render_swift_rules, render_cited_diagnostics
 
 logger = logging.getLogger("orchestrator.executor")
@@ -360,57 +361,6 @@ def _strip_thinking(text: str) -> str:
     return _server_strip_thinking(text).strip()
 
 
-def artifact_path(spec_dir: Path, rel_path: str) -> Path:
-    """Resolve a spec-relative artifact path, rejecting traversal.
-
-    Strips leading ``/`` so models can't write absolute paths (Python's
-    ``Path / "/abs"`` would discard the left operand). Then resolves
-    symlinks and checks the result is still under ``spec_dir``.
-
-    Uses Path.is_relative_to (not str.startswith): the latter would treat
-    /work/abc-evil/x as nested under /work/abc, so a sibling-prefix dir
-    escape would not be caught. is_relative_to compares path components.
-
-    Every write goes through the artifact ledger (DEV-642); this is kept apart
-    so a caller that needs to *read* what is currently at a path — the DEV-541
-    pre-repair snapshot — resolves it the same way the write will, rather than
-    reimplementing the rules and drifting.
-    """
-    # Strip leading slashes only — do NOT use lstrip("./") which eats
-    # individual chars and would normalize "../../../x" into "x".
-    while rel_path.startswith("/"):
-        rel_path = rel_path[1:]
-    spec_root = spec_dir.resolve()
-    abs_path = (spec_dir / rel_path).resolve()
-    if not abs_path.is_relative_to(spec_root):
-        raise ValueError(f"Path traversal rejected: {rel_path}")
-    return abs_path
-
-
-# Keywords for declaration detection (line-start scan)
-_DECLARATION_KEYWORDS = ("async def", "def", "class", "func", "struct", "@Test")
-
-
-def _count_declarations(content: str) -> int:
-    """Count code declarations in *content* using line-start keyword scan."""
-    count = 0
-    for line in content.splitlines():
-        stripped = line.lstrip()
-        if not stripped:
-            continue
-        for kw in sorted(_DECLARATION_KEYWORDS, key=len, reverse=True):
-            if stripped.startswith(kw):
-                # Ensure whole-word match (not followed by alphanumeric or underscore)
-                end_idx = len(kw)
-                if end_idx < len(stripped):
-                    nxt = stripped[end_idx]
-                    if nxt.isalnum() or nxt == "_":
-                        continue
-                count += 1
-                break
-    return count
-
-
 def role_to_agent(role: str) -> str:
     return ROLE_TO_AGENT.get(role, IMPLEMENTER_AGENT)
 
@@ -512,19 +462,8 @@ def implementer_max_tokens_for(design_md: str) -> int:
 # the env-default IMPLEMENTER_AGENT. Telemetry is deferred — see
 # ~/.claude/projects/.../memory/project_implementer_telemetry.md.
 
-# DEV-821: "high" no longer means deep_implementer — its five "high" first picks
-# between 2026-09-13 and 09-26 all failed (DEV-720). deep stays recommendable
-# (ALLOWED_IMPLEMENTER_AGENTS) and is the rotation's window fallback.
-TIER_TO_IMPLEMENTER = {
-    "low": "fast_implementer",
-    "medium": "implementer",
-    "high": "implementer",
-    "extreme": "moe_implementer",
-}
-
-ALLOWED_IMPLEMENTER_AGENTS = {
-    "fast_implementer", "implementer", "deep_implementer", "moe_implementer",
-}
+# The tier map and the allow-list live in retry_policy, beside the rotation
+# they feed, so the kernel never has to import this module (DEV-837).
 
 
 # ── System prompts ───────────────────────────────────────────────────────────

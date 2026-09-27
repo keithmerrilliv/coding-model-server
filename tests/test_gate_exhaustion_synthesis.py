@@ -65,7 +65,7 @@ def _reject_at_gate(db, spec, impl_task, *, tests_pass, notes="not good enough")
                               return_value=(tests_pass,
                                             "1 passed in 0.01s" if tests_pass
                                             else "1 failed in 0.01s")):
-        d._legacy_handle_gate_rejection(db, spec, db.get_task(impl_task.id), gate)
+        d._handle_gate_rejection(db, spec, db.get_task(impl_task.id), gate)
 
 
 def test_gate_exhaustion_reaches_synthesis_and_opens_release_gate(db, exhausted_spec):
@@ -99,7 +99,7 @@ def test_no_reviewer_task_falls_back_to_failing(db):
                           gate_type=GateType.CODE_REVIEW, prompt_md="## Code review")
     db.respond_to_gate(gate.id, "rejected", notes="no")
     with mock.patch.object(d, "MAX_RETRIES", 0):
-        d._legacy_handle_gate_rejection(db, db.get_spec(spec.id),
+        d._handle_gate_rejection(db, db.get_spec(spec.id),
                                         db.get_task(impl_task.id),
                                         db.get_gate(gate.id))
     assert db.get_spec(spec.id).status is SpecStatus.FAILED
@@ -113,7 +113,7 @@ def test_below_max_retries_is_unchanged(db, exhausted_spec):
                           gate_type=GateType.CODE_REVIEW, prompt_md="## Code review")
     db.respond_to_gate(gate.id, "rejected", notes="fix it")
     with mock.patch.object(d, "MAX_RETRIES", 5):
-        d._legacy_handle_gate_rejection(db, spec, db.get_task(impl_task.id),
+        d._handle_gate_rejection(db, spec, db.get_task(impl_task.id),
                                         db.get_gate(gate.id))
     assert db.get_task(impl_task.id).status is TaskStatus.PENDING
     assert db.get_task(impl_task.id).retry_count == 1

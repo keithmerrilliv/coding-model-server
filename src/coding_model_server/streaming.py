@@ -1,47 +1,16 @@
 """Thinking-tag stripping and OpenAI-compatible response/chunk builders.
 
-Extracted from server.py for organization. No external dependencies beyond
-the standard library.
+Extracted from server.py for organization. The completed-text stripper,
+strip_thinking, lives in coding_model_autonomous.thinking so that both the
+server and the pipeline use one implementation without the pipeline importing
+the server (DEV-837); it is re-exported here. The streaming state machine,
+ThinkingStripper, stays here because only the server streams.
 """
-import re
 import time
 import uuid
 from typing import Any, Dict, List, Optional
 
-
-# ============================================================================
-# Thinking Tag Stripping
-# ============================================================================
-
-# Models with --reasoning-format none still emit thinking content in raw text.
-# Three patterns observed:
-#   1. Full block:    <think>reasoning...</think>actual response
-#   2. Orphan close:  reasoning...</think>actual response  (Jinja consumed <think>)
-#   3. Unclosed open: <think>reasoning...  (truncated by max_tokens, no </think>)
-_THINK_FULL_RE = re.compile(r'<think>.*?</think>\s*', re.DOTALL)
-_THINK_ORPHAN_RE = re.compile(r'^.*?</think>\s*', re.DOTALL)
-_THINK_UNCLOSED_RE = re.compile(r'<think>(?:(?!</think>).)*$', re.DOTALL)
-_REACT_RE = re.compile(r'<REACT>.*?</REACT>\s*', re.DOTALL)
-
-
-def strip_thinking(text: str) -> str:
-    """Remove thinking/reasoning content from completed text.
-
-    Short-circuit when no marker is present — the common case for non-
-    reasoning models. Substring checks are far cheaper than four DOTALL
-    regex passes over a 30K-token response.
-    """
-    has_think = '<think>' in text or '</think>' in text
-    has_react = '<REACT>' in text
-    if not has_think and not has_react:
-        return text
-    if has_think:
-        text = _THINK_FULL_RE.sub('', text)
-        text = _THINK_ORPHAN_RE.sub('', text)
-        text = _THINK_UNCLOSED_RE.sub('', text)  # Truncated thinking (hit max_tokens)
-    if has_react:
-        text = _REACT_RE.sub('', text)  # Qwen3.5 reasoning blocks
-    return text
+from coding_model_autonomous.thinking import strip_thinking  # noqa: F401 (re-export)
 
 
 class ThinkingStripper:

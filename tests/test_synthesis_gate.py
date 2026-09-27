@@ -54,7 +54,7 @@ def exhausted_spec(db):
 
 
 def _run_retry(db, spec, reviewer_task, *, tests_pass, test_output):
-    """Drive _legacy_attempt_retry into the synthesis branch with mocks."""
+    """Drive _attempt_retry (supervisor off) into the synthesis branch with mocks."""
     synth_result = SimpleNamespace(
         files=[("impl.py", "def f():\n    return 2\n")],
     )
@@ -65,7 +65,7 @@ def _run_retry(db, spec, reviewer_task, *, tests_pass, test_output):
                               return_value=synth_result), \
             mock.patch.object(d, "run_tests",
                               return_value=(tests_pass, test_output)):
-        d._legacy_attempt_retry(db, spec, reviewer_task, "tests kept failing")
+        d._attempt_retry(db, spec, reviewer_task, "tests kept failing")
 
 
 def test_synthesis_pass_creates_release_gate_not_done(db, exhausted_spec):

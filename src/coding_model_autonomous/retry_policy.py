@@ -7,11 +7,12 @@ reading back prior attempts and supervisor directives. None of them touch the
 daemon's globals, so they are now exercisable without importing the daemon and
 triggering its import-time load_dotenv()/basicConfig().
 
-Deliberately NOT moved: _attempt_retry, _legacy_attempt_retry and
-_retry_role_with_feedback. Those drive the state machine — they call
-_apply_supervisor_decision, _build_supervisor_context and _run_synthesis — so
-moving them would either drag half the daemon along or introduce an import
-cycle. This module has no edges back into the daemon.
+Deliberately NOT moved: _attempt_retry and _retry_role_with_feedback. Those
+drive the state machine — they call _apply_supervisor_decision,
+_build_supervisor_context and _run_synthesis — so moving them would either drag
+half the daemon along or introduce an import cycle. This module has no edges
+back into the daemon, and none into executor either: the tier map lives here
+(DEV-837), so the kernel loads without the agent layer.
 """
 from __future__ import annotations
 
@@ -28,7 +29,6 @@ from typing import Any, Iterable, Optional
 from . import outcome as _outcome
 from . import supervisor as _supervisor
 from .db import Database
-from .executor import ALLOWED_IMPLEMENTER_AGENTS, TIER_TO_IMPLEMENTER
 from .models import EventKind
 from .context import CONTEXT_FILE
 from .workspace import LEDGER_FILE, attempt_files_from_ledger, read_entries
@@ -160,6 +160,22 @@ def _clean_spec_dir_for_retry(spec_dir: Path, retry_count: int) -> None:
         "spec dir cleaned for retry=%d (snapshot retry_%d, %d items removed, %d preserved)",
         retry_count, retry_count - 1, removed, len(_PRESERVE_ON_RETRY),
     )
+
+
+# The architect's COMPLEXITY block names a tier and may recommend an agent.
+# DEV-821: "high" no longer means deep_implementer — its five "high" first picks
+# between 2026-09-13 and 09-26 all failed (DEV-720). deep stays recommendable
+# (ALLOWED_IMPLEMENTER_AGENTS) and is the rotation's window fallback.
+TIER_TO_IMPLEMENTER = {
+    "low": "fast_implementer",
+    "medium": "implementer",
+    "high": "implementer",
+    "extreme": "moe_implementer",
+}
+
+ALLOWED_IMPLEMENTER_AGENTS = {
+    "fast_implementer", "implementer", "deep_implementer", "moe_implementer",
+}
 
 
 def _select_implementer_agent(spec_dir) -> "str | None":

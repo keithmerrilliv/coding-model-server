@@ -25,7 +25,7 @@ from dataclasses import dataclass
 
 from coding_model_autonomous._http import post_chat_completion
 from coding_model_autonomous.executor import accumulate_agent_fields
-from coding_model_server.streaming import strip_thinking as _server_strip_thinking
+from coding_model_autonomous.thinking import strip_thinking as _server_strip_thinking
 
 logger = logging.getLogger(__name__)
 

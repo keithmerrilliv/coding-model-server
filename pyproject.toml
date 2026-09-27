@@ -32,7 +32,7 @@ dependencies = [
     "pyyaml>=6.0",
     # Soft: orchestrator falls back to FakeJiraClient if missing.
     "atlassian-python-api>=4.0.0",
-    # Soft: /review and Phase b skip the relevant judge if missing or unkeyed.
+    # Soft: the client's /review and scripts/eval_agents.py skip a judge if missing or unkeyed.
     "anthropic>=0.40.0",
     "google-genai>=1.0.0",
     # Soft: the subscription-auth Claude judge (external_judges.call_claude_sdk);

@@ -996,7 +996,11 @@ def close_spec_tasks(db: Any, spec_id: str, failed_task_id: Optional[str]) -> li
 
 def terminate(db: Any, spec: Any, task: Any, failure: Failure) -> Disposition:
     """The one terminal branch: fail the task, close every other task, fail
-    the spec, record why."""
+    the spec, record why.
+
+    The daemon's structural aborts (no tasks, bad plan, missing workspace)
+    end here too (DEV-652): not agent failures, but a spec that ends leaves
+    ONE row saying why, and no in-flight task is left open (DEV-532)."""
     logger.error("spec %s: TERMINAL (%s) — %s", spec.id, failure.cls.value,
                  failure.detail.splitlines()[0] if failure.detail else "")
     task_id = getattr(task, "id", None)
