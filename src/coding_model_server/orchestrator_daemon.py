@@ -394,22 +394,11 @@ def _planner_no_verdict(db: Database, spec: Spec, failure: Failure) -> None:
     """A planner-stage no-verdict: stay in PENDING_PLAN (the next tick
     re-runs the planner) up to the cap, then ask a human via a
     clarification gate — the same channel a planner question uses."""
-    prior = 0
-    try:
-        for ev in db.list_events_by_kind(spec_id=spec.id,
-                                         kind=EventKind.FAILURE_CLASSIFIED,
-                                         limit=100):
-            payload = json.loads(ev.payload_json or "{}")
-            if payload.get("phase") == "planner" and \
-                    payload.get("outcome") == _outcome.Outcome.NO_VERDICT.value:
-                prior += 1
-    except Exception as exc:
-        # DEV-630: the planner's no-verdict cap reads as 'unused' when it
-        # cannot be read. Still 0, never silently.
-        logger.warning("spec %s: could not count planner no-verdicts (%s) — "
-                       "the planner cap is NOT enforced this tick (DEV-630)",
-                       spec.id, exc)
-        prior = 0
+    prior = _outcome.count_own_records(
+        db, spec.id, EventKind.FAILURE_CLASSIFIED,
+        lambda p: (p.get("phase") == "planner" and
+                   p.get("outcome") == _outcome.Outcome.NO_VERDICT.value),
+        what="planner cap")
     consecutive = prior + 1
     cap = failure.cap
     base = {"role": "planner", "outcome": failure.outcome.value,
@@ -1389,29 +1378,10 @@ def _crash_recoveries_used(db: Database, spec_id: str, task_id: str) -> int:
     recovered before this shipped carry no marker and so read as 0 — under-
     counting, which errs toward tolerance rather than toward discarding work.
     """
-    used = 0
-    try:
-        events = db.list_events_by_kind(spec_id=spec_id,
-                                        kind=EventKind.AGENT_RAN, limit=500)
-    except Exception as exc:
-        # DEV-630: a cap that cannot be read must not read as "unused". This
-        # is the crash-recovery bound; returning 0 here silently lifts it for
-        # this tick. Still 0 — failing closed would park every spec on a
-        # transient read error — but never silently.
-        logger.warning("spec %s: could not count crash recoveries (%s) — the "
-                       "recovery cap is NOT enforced this tick (DEV-630)",
-                       spec_id, exc)
-        return 0
-    for ev in events:
-        if ev.task_id != task_id:
-            continue
-        try:
-            payload = json.loads(ev.payload_json or "{}")
-        except (TypeError, ValueError):
-            continue
-        if payload.get("role") == "crash_recovery":
-            used += 1
-    return used
+    return _outcome.count_own_records(
+        db, spec_id, EventKind.AGENT_RAN,
+        lambda p: p.get("role") == "crash_recovery",
+        what="recovery cap", task_id=task_id)
 
 
 def _process_executing(db: Database, spec: Spec) -> None:
@@ -1676,25 +1646,10 @@ def _testability_rounds_used(db: Database, spec_id: str) -> int:
     reasons that had nothing to do with it — on run 9 both rounds were spent
     before a human saw any design at all.
     """
-    used = 0
-    try:
-        events = db.list_events_by_kind(spec_id=spec_id,
-                                        kind=EventKind.AGENT_RAN)
-    except Exception as exc:
-        # DEV-630: as for the crash-recovery cap — the testability check's
-        # revision budget reads as "unspent" whenever it cannot be read.
-        logger.warning("spec %s: could not count testability rounds (%s) — "
-                       "the revision cap is NOT enforced this tick (DEV-630)",
-                       spec_id, exc)
-        return 0
-    for ev in events:
-        try:
-            payload = json.loads(ev.payload_json or "{}")
-        except (TypeError, ValueError):
-            continue
-        if payload.get("role") == "testability_check" and payload.get("revised"):
-            used += 1
-    return used
+    return _outcome.count_own_records(
+        db, spec_id, EventKind.AGENT_RAN,
+        lambda p: p.get("role") == "testability_check" and bool(p.get("revised")),
+        what="revision cap")
 
 
 def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
@@ -6226,11 +6181,11 @@ def _harness_retry(db: Database, spec: Spec, task, spec_dir: Path,
     budget for this spec is spent — the caller then falls through to the
     normal (budgeted) retry path.
     """
-    counter_path = spec_dir / "harness_retries.json"
-    try:
-        used = json.loads(counter_path.read_text()).get("used", 0)
-    except (OSError, ValueError):
-        used = 0
+    # Counted from the guard's own events: a file in spec_dir was deleted by
+    # every post-retry wipe, so the cap never bound after one charged retry.
+    used = _outcome.count_own_records(
+        db, spec.id, EventKind.AGENT_RAN,
+        lambda p: p.get("role") == "harness_guard", what="free harness-retry cap")
     if used >= _HARNESS_FREE_RETRIES:
         logger.warning("spec %s: harness defect again but free harness "
                        "retries exhausted (%d) — counting against the "
@@ -6255,11 +6210,6 @@ def _harness_retry(db: Database, spec: Spec, task, spec_dir: Path,
     )
     ArtifactLedger.open(db, spec, spec_dir).note(
         "failure_report.md", failure_detail)
-    try:
-        counter_path.write_text(json.dumps({"used": used + 1}))
-    except OSError as e:
-        logger.warning("spec %s: could not persist harness retry counter: %s",
-                       spec.id, e)
 
     # Same feedback channel _retry_role_with_feedback uses for implementer
     # retries — a rejected CODE_REVIEW gate — minus the budget increment.
