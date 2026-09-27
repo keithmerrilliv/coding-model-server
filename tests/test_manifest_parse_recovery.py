@@ -205,3 +205,29 @@ def test_an_unwritable_spec_dir_does_not_break_the_run(db, spec_task):
                 res = d._generate_via_manifest(db, spec, task, spec_dir, "S", "D",
                                                "implementer", [], None)
     assert isinstance(res, ParseError)
+
+
+# ── DEV-838: a manifest call the fit check moved says so ─────────────────────
+
+def test_a_moved_manifest_call_is_recorded_as_a_reroute(db, spec_task):
+    """The single-call and per-file paths record a reroute when the prompt
+    allocator moves the dispatch; the manifest call moved silently, so the
+    attempt's record named an agent that never ran (DEV-676)."""
+    from coding_model_autonomous.retry_policy import (
+        plan_attempt, previous_plans, record_attempt_plan)
+    spec, task, spec_dir = spec_task
+    plan = plan_attempt(db, spec.id, task, role="implementer",
+                        agent="fast_implementer", feedback=None,
+                        prompt_inputs=("D", ""), strategy=None,
+                        assignment="rotation")
+    record_attempt_plan(db, spec.id, task, plan, [])
+    with mock.patch.object(d, "_ctx_capable_agent",
+                           return_value="deep_implementer"), \
+            mock.patch.object(d, "call_agent", side_effect=[GOOD, FILE_T]):
+        d._generate_via_manifest(db, spec, task, spec_dir, "S", "D",
+                                 "fast_implementer", [], None)
+    latest = previous_plans(db, spec.id, task.id)[0]
+    assert latest["agent"] == "deep_implementer"
+    assert latest["assignment"] == "rerouted"
+    assert latest["planned_agent"] == "fast_implementer"
+    assert db.get_task(task.id).agent == "deep_implementer"
