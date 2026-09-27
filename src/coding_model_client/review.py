@@ -39,7 +39,7 @@ from coding_model_client.http import post_chat_completion
 
 CLAUDE_MODEL = os.getenv("REVIEW_CLAUDE_MODEL", "claude-sonnet-4-6")
 GEMINI_MODEL = os.getenv("REVIEW_GEMINI_MODEL", "gemini-3-pro")
-CODING_MODEL_REVIEWER_AGENT = os.getenv("REVIEW_CODING_MODEL_REVIEWER_AGENT", "reviewer")
+CODING_MODEL_REVIEWER_AGENT = os.getenv("REVIEW_CODING_MODEL_REVIEWER_AGENT", "deep_reviewer")
 CODING_MODEL_DEEP_REVIEWER_AGENT = os.getenv("REVIEW_CODING_MODEL_DEEP_REVIEWER_AGENT", "deep_reviewer")
 
 REVIEW_TIMEOUT = float(os.getenv("REVIEW_TIMEOUT", "120"))

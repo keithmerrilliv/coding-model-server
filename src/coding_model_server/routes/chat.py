@@ -451,9 +451,9 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
 
         _maybe_inject_few_shot(request, agent_config)
         # Jinja template variables (DEV-556). The agent carries the default so
-        # the roster holds the decision — `dense_architect_nothink` is the same
-        # GGUF with enable_thinking off — and an explicit request value wins, so
-        # a caller can override per call without a second roster entry. Both
+        # the roster holds the decision — an entry can pin enable_thinking off
+        # for a GGUF another entry serves with it on — and an explicit request
+        # value wins, so a caller can override per call without a second entry. Both
         # unset sends nothing, which is what every request did before this.
         chat_template_kwargs = (request.chat_template_kwargs
                                 or agent_config.get('chat_template_kwargs'))

@@ -242,9 +242,16 @@ class TestDaemonWiring:
         assert d._agent_ctx_limit("deep_implementer") == 262_144
         assert d._agent_ctx_limit("no_such_agent") is None
 
-    def test_the_reasoning_reserve_is_read_from_the_server_args(self):
-        """qwen38_architect ships --reasoning-budget 4096 (DEV-616)."""
-        assert d._agent_reasoning_reserve("qwen38_architect") == 4096
+    def test_the_reasoning_reserve_is_read_from_the_server_args(self, monkeypatch):
+        """An agent served with --reasoning-budget reserves it (DEV-616). No
+        agent on today's roster carries the flag, so this registers one."""
+        from coding_model_server.config import Config, _create_agent_config
+        base = Config.AGENTS["dense_architect"]["model_config"]
+        cfg = dict(base, server_extra_args=[
+            *(base.get("server_extra_args") or []), "--reasoning-budget", "4096"])
+        monkeypatch.setitem(Config.AGENTS, "test_budgeted", _create_agent_config(
+            "t", "p", cfg))
+        assert d._agent_reasoning_reserve("test_budgeted") == 4096
 
     def test_an_agent_without_a_reasoning_budget_reserves_nothing(self):
         assert d._agent_reasoning_reserve("deep_implementer") == 0

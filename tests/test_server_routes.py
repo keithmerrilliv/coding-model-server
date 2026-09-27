@@ -84,7 +84,7 @@ def test_list_models_returns_agents():
     ids = {m["id"] for m in body["data"]}
     # A couple of stable agents that should always be present.
     assert "implementer" in ids
-    assert "reviewer" in ids
+    assert "deep_reviewer" in ids
 
 
 def test_root_metadata():

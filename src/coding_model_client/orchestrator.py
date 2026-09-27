@@ -36,7 +36,9 @@ def set_tool_functions(process_fn, extract_fn, execute_fn):
 # we send an OpenAI `tools` array with the request and dispatch any returned
 # `tool_calls` instead of relying on <<<TAG>>> marker parsing. Only
 # REMOTE_EXEC has been migrated; every other tool still flows through markers.
-NATIVE_TOOLS_AGENTS = {"native_implementer"}
+# Empty since DEV-839 retired native_implementer (GLM-4.7-Flash), the only
+# agent it was built for; add an agent here to use the prototype again.
+NATIVE_TOOLS_AGENTS: set[str] = set()
 
 _REMOTE_EXEC_TOOL_SCHEMA = {
     "type": "function",

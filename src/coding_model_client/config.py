@@ -127,20 +127,13 @@ THEME_STYLES = {
     "deep_implementer":  {"color": COLORS['GREEN'],   "icon": "\U0001f9e0", "prompt": "Deep Impl"},
     "fast_implementer":  {"color": COLORS['GREEN'],   "icon": "\u23e9",     "prompt": "Fast Impl"},
     "architect":         {"color": COLORS['HEADER'],  "icon": "\U0001f3d7\ufe0f", "prompt": "Architect"},
-    "reviewer":          {"color": COLORS['CYAN'],    "icon": "\U0001f50d", "prompt": "Reviewer"},
-    "debugger":          {"color": COLORS['FAIL'],    "icon": "\U0001f41e", "prompt": "Debugger"},
     "moe_implementer":   {"color": COLORS['GREEN'],   "icon": "\U0001f319", "prompt": "MoE Impl"},
-    "moe_architect":     {"color": COLORS['HEADER'],  "icon": "\U0001f319", "prompt": "MoE Arch"},
     "dense_architect":     {"color": COLORS['HEADER'],  "icon": "\U0001f3af", "prompt": "Dense Arch"},
-    "brainstorm":          {"color": COLORS['WARNING'], "icon": "\u26a1",     "prompt": "Brainstorm"},
-    "native_implementer":               {"color": COLORS['GREEN'],   "icon": "\U0001f30a", "prompt": "Native"},
     # DEV-154: these two existed in the server registry but not here, so
     # they rendered with the default robot theme.
     "deep_reviewer":     {"color": COLORS['CYAN'],    "icon": "\U0001f52c", "prompt": "Deep Review"},
     "supervisor":        {"color": COLORS['HEADER'],  "icon": "\U0001f9ed", "prompt": "Supervisor"},
-    # DEV-692: Muse-Glimmer eval arms. Registered but not routed, so these only
-    # render when someone pins them by env or addresses them directly.
-    "glimmer_architect":   {"color": COLORS['HEADER'],  "icon": "\u2728",     "prompt": "Glimmer Arch"},
+    # DEV-692: Muse-Glimmer, a retry-only slot in the implementer rotation.
     "glimmer_implementer": {"color": COLORS['GREEN'],   "icon": "\u2728",     "prompt": "Glimmer Impl"},
     "default":           {"color": COLORS['WARNING'], "icon": "\U0001f916", "prompt": "Agent"},
 }

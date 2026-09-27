@@ -13,9 +13,10 @@ tokens and 30.5 minutes to emit ~500 tokens of design; attempt 2 wrote the whole
 design in 5369 (DEV-543). Six of twenty architect calls across runs 10-12
 truncated, every one exactly at the ceiling, whatever the ceiling was.
 
-So the knob gets built and the decision gets measured. `dense_architect_nothink`
-is the second arm: same GGUF, same prompt, reasoning suppressed — which makes
-the head-to-head a roster comparison with no model swap and no second download.
+So the knob got built and the decision got measured: `dense_architect_nothink`,
+the same GGUF with reasoning suppressed, was the second arm until thinking-on
+became policy (2026-09-15); DEV-839 retired it on usage telemetry. The knob
+stays, for the next eval arm that needs a template variable.
 
 What these tests pin is that the knob is INERT until something opts in. The
 whole roster runs through `_build_request_payload`, so a key appearing where it
@@ -91,20 +92,6 @@ def test_the_incumbent_architect_opts_into_nothing():
     assert Config.AGENTS["dense_architect"].get("chat_template_kwargs") is None
 
 
-def test_the_eval_arm_suppresses_thinking():
-    assert (Config.AGENTS["dense_architect_nothink"]["chat_template_kwargs"]
-            == {"enable_thinking": False})
-
-
-def test_both_arms_are_the_same_model_and_the_same_prompt():
-    """The point of the design: one GGUF, so the eval needs no model swap
-    (DEV-491) and the two arms differ in exactly one variable."""
-    a, b = Config.AGENTS["dense_architect"], Config.AGENTS["dense_architect_nothink"]
-    assert a["model_config"] is b["model_config"]
-    assert a["system_prompt"] == b["system_prompt"]
-    assert a.get("executor") == b.get("executor")
-
-
 def test_the_agent_config_copies_the_mapping():
     """Two agents sharing one dict would let a mutation of either rewrite the
     other's request."""
@@ -122,6 +109,20 @@ def test_an_agent_that_passes_nothing_carries_no_key(falsy):
 
 # ── the route resolves agent default vs request override ─────────────────────
 
+NOTHINK = "test_architect_nothink"
+
+
+@pytest.fixture
+def nothink_arm(monkeypatch):
+    """An eval arm the way one is registered: dense_architect's GGUF and
+    prompt, with enable_thinking off by default."""
+    base = Config.AGENTS["dense_architect"]
+    monkeypatch.setitem(Config.AGENTS, NOTHINK, _create_agent_config(
+        "test arm", base["system_prompt"], base["model_config"], executor=True,
+        chat_template_kwargs={"enable_thinking": False}))
+    return NOTHINK
+
+
 def _resolve(monkeypatch, model, **kwargs):
     """Drive the real route and report what it handed the proxy."""
     _, fake_mgr = drive_chat(monkeypatch, model=model, messages=[
@@ -129,19 +130,20 @@ def _resolve(monkeypatch, model, **kwargs):
     return fake_mgr.proxy_sync.call_args.kwargs["chat_template_kwargs"]
 
 
-def test_the_agents_default_is_used_when_the_request_says_nothing(monkeypatch):
-    assert _resolve(monkeypatch, "dense_architect_nothink") == {
-        "enable_thinking": False}
+def test_the_agents_default_is_used_when_the_request_says_nothing(
+        monkeypatch, nothink_arm):
+    assert _resolve(monkeypatch, nothink_arm) == {"enable_thinking": False}
 
 
 def test_an_agent_without_a_default_sends_nothing(monkeypatch):
     assert _resolve(monkeypatch, "dense_architect") is None
 
 
-def test_an_explicit_request_value_overrides_the_agents_default(monkeypatch):
+def test_an_explicit_request_value_overrides_the_agents_default(
+        monkeypatch, nothink_arm):
     """So one call can be run the other way without a second roster entry —
     which is also how a thinking-off architect is re-enabled for one design."""
-    assert _resolve(monkeypatch, "dense_architect_nothink",
+    assert _resolve(monkeypatch, nothink_arm,
                     chat_template_kwargs={"enable_thinking": True}) == {
         "enable_thinking": True}
 

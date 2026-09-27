@@ -26,7 +26,7 @@ def test_known_agent_limits_come_from_config():
 
 
 def test_alias_resolves_before_lookup():
-    assert d._agent_ctx_limit("m25_implementer") == d._agent_ctx_limit("moe_implementer")
+    assert d._agent_ctx_limit("architect") == d._agent_ctx_limit("dense_architect")
 
 
 def test_unknown_agent_is_none():

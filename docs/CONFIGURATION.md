@@ -47,7 +47,7 @@ whatever `.env.example` happens to ship.
 | `LLAMA_ORPHAN_SLOT_REAP_S` | `120` | How long an in-flight reservation with no proxy executing behind it may persist before the swap guard reaps it as a leak (a request abandoned by a cancelled spec, DEV-582). Real work is never reaped. `coding-model-autonomous swap-reset` does it on demand (DEV-583). |
 | `MODEL_N_THREADS` | `24` | CPU threads for token generation (physical cores) |
 | `MODEL_N_THREADS_BATCH` | `32` | CPU threads for prompt prefill (all threads incl. HT) |
-| `MODEL_PATH_*` | *(per-config)* | Override a model's GGUF path. One var per model config: `MODEL_PATH_35B`, `MODEL_PATH_27B`, `MODEL_PATH_30B_TURBO`, `MODEL_PATH_30B_FAST`, `MODEL_PATH_30B_HD`, `MODEL_PATH_30B_FLASH`, `MODEL_PATH_80B_Q8`, `MODEL_PATH_122B`, `MODEL_PATH_230B`, `MODEL_PATH_HYBRID_30B`, `MODEL_PATH_27B_38`. (`MODEL_PATH_480B_ULTRA` is gone — the 480B config was retired by DEV-99 and nothing reads it.) |
+| `MODEL_PATH_*` | *(per-config)* | Override a model's GGUF path. One var per model config: `MODEL_PATH_35B`, `MODEL_PATH_27B`, `MODEL_PATH_30B_FAST`, `MODEL_PATH_80B_Q8`, `MODEL_PATH_122B`, `MODEL_PATH_230B`, `MODEL_PATH_MUSE_GLIMMER_30B`. |
 
 `n_ctx`, `n_batch`, `n_ubatch`, `ngl` and the KV types are **not** env-tunable —
 they are literals in each model config (see [Per-Model Configuration](#per-model-configuration)),
@@ -87,7 +87,7 @@ because every one of them is a VRAM-budget decision that has been measured.
 | `AUTONOMOUS_ARCHITECT_AGENT` | `dense_architect` | Agent for the design phase. |
 | `AUTONOMOUS_ARCHITECT_TOOLS` | `1` | Let the architect read repository files it was not served, with `<<<READ_FILE>>>` (DEV-714). Read-only, at most 3 rounds, capped by whatever the prompt budget leaves free. Set `0` to withdraw the offer. |
 | `AUTONOMOUS_IMPLEMENTER_AGENT` | `implementer` | First-attempt implementer only when the architect makes **no** recommendation; in practice the recommendation wins (33 of 33 first picks from 2026-09-13 to 09-26). Do not set it to `deep_implementer`: it is the rotation's window fallback, not a first pick (DEV-821). |
-| `AUTONOMOUS_REVIEWER_AGENT` | `reviewer` | Reviewer agent; usually overridden to `deep_reviewer` in `.env`. |
+| `AUTONOMOUS_REVIEWER_AGENT` | `deep_reviewer` | Reviewer agent. |
 | `AUTONOMOUS_SYNTHESIS_AGENT` | `deep_reviewer` | Agent that synthesizes per-file implementation output. |
 | `AUTONOMOUS_PLANNER_TIMEOUT` | `900` | Seconds. Must be ≤ `LLAMA_SERVER_REQUEST_TIMEOUT`. |
 | `AUTONOMOUS_ARCHITECT_TIMEOUT` | `2700` | Seconds. |
@@ -185,7 +185,7 @@ architect and the implementer):
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `AUTONOMOUS_DESIGN_REVIEW` | `0` | Master switch. Off by default; set to `1` to have a reviewer critique each design before the design gate. |
-| `AUTONOMOUS_DESIGN_REVIEW_AGENT` | `reviewer` | Agent that reviews the architect's design. |
+| `AUTONOMOUS_DESIGN_REVIEW_AGENT` | `deep_reviewer` | Agent that reviews the architect's design. |
 | `AUTONOMOUS_DESIGN_REVIEW_MAX_TOKENS` | `8000` | Token budget for the design review. |
 | `AUTONOMOUS_DESIGN_REVIEW_MAX_REVISIONS` | `1` | How many times the architect may revise before escalating. |
 
@@ -244,7 +244,7 @@ Gemini, and two local agents. A judge whose key or SDK is missing is skipped.
 | `GEMINI_API_KEY` / `GOOGLE_API_KEY` | *(unset)* | Enables the Gemini judge (and Phase b's Gemini provider). |
 | `REVIEW_CLAUDE_MODEL` | `claude-sonnet-4-6` | Claude model for the review judge. |
 | `REVIEW_GEMINI_MODEL` | `gemini-3-pro` | Gemini model for the review judge. |
-| `REVIEW_CODING_MODEL_REVIEWER_AGENT` | `reviewer` | First local judge. |
+| `REVIEW_CODING_MODEL_REVIEWER_AGENT` | `deep_reviewer` | First local judge. |
 | `REVIEW_CODING_MODEL_DEEP_REVIEWER_AGENT` | `deep_reviewer` | Second local judge. |
 | `REVIEW_TIMEOUT` | `120` | Seconds per judge. |
 | `REVIEW_MAX_TOKENS` | `2000` | Output cap per judge. |
