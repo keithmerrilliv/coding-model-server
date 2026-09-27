@@ -15,18 +15,10 @@ cancelled path too.
 import asyncio
 from unittest import mock
 
+from chat_harness import FakeRequest
 from coding_model_server.routes import chat
 from coding_model_server.runtime import AdmissionController
 from coding_model_server.schemas import ChatCompletionRequest, ChatMessage
-
-
-class _FakeState:
-    pass
-
-
-class _FakeRequest:
-    def __init__(self):
-        self.state = _FakeState()
 
 
 def _drive_stream(monkeypatch, admission):
@@ -49,7 +41,7 @@ def _drive_stream(monkeypatch, admission):
         messages=[ChatMessage(role="user", content="hi")],
         stream=True,
     )
-    return asyncio.run(chat.chat_completions(request, _FakeRequest()))
+    return asyncio.run(chat.chat_completions(request, FakeRequest()))
 
 
 def test_once_wrapper_runs_exactly_once():
@@ -158,7 +150,7 @@ def test_in_band_error_chunk_is_recorded_as_a_failure(monkeypatch):
         messages=[ChatMessage(role="user", content="hi")],
         stream=True,
     )
-    resp = asyncio.run(chat_mod.chat_completions(request, _FakeRequest()))
+    resp = asyncio.run(chat_mod.chat_completions(request, FakeRequest()))
 
     async def _drain():
         async for _ in resp.body_iterator:

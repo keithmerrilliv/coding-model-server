@@ -87,3 +87,28 @@ def db(tmp_path):
                         workspace_root=tmp_path / "ws")
     yield database
     database.close_all()
+
+
+@pytest.fixture
+def runner_client(tmp_path, monkeypatch):
+    """Factory for a TestClient on the Mac runner app, keyed ``test-key``.
+
+    ``runner_client(repo)`` registers ``repo`` as project ``proj`` in
+    tmp_path/repos.yml; with no repo, REPOS_FILE points there but nothing is
+    written. Keyword arguments patch further Config attributes, e.g.
+    ``SANDBOX=False`` — each test module states exactly what it needs."""
+    from fastapi.testclient import TestClient
+    from mac_runner import server
+    from mac_runner.config import Config
+
+    def make(repo=None, **config):
+        repos_file = tmp_path / "repos.yml"
+        if repo is not None:
+            repos_file.write_text(f"repos:\n  proj:\n    path: {repo}\n")
+        monkeypatch.setattr(Config, "REPOS_FILE", repos_file)
+        monkeypatch.setattr(Config, "API_KEY", "test-key")
+        for name, value in config.items():
+            monkeypatch.setattr(Config, name, value)
+        return TestClient(server.app)
+
+    return make

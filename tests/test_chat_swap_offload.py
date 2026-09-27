@@ -20,8 +20,8 @@ RuntimeError. proxy_sync (chat.py already offloads it) is the positive control.
 import asyncio
 from unittest import mock
 
+from chat_harness import drive_chat
 from coding_model_server.routes import chat
-from coding_model_server.schemas import ChatCompletionRequest, ChatMessage
 
 
 def _has_running_loop() -> bool:
@@ -30,15 +30,6 @@ def _has_running_loop() -> bool:
         return True
     except RuntimeError:
         return False
-
-
-class _FakeState:
-    pass
-
-
-class _FakeRequest:
-    def __init__(self):
-        self.state = _FakeState()
 
 
 def _run_chat(monkeypatch, *, memory=None):
@@ -65,16 +56,7 @@ def _run_chat(monkeypatch, *, memory=None):
     fake_mgr.tokenize.side_effect = _record_tokenize
     fake_mgr.proxy_sync.side_effect = _record_proxy_sync
 
-    monkeypatch.setattr(chat, "llama_server_manager", fake_mgr)
-    monkeypatch.setattr(chat, "chat_admission", mock.Mock())
-    monkeypatch.setattr(chat.runtime.services, "memory", memory, raising=False)
-
-    request = ChatCompletionRequest(
-        model="implementer",
-        messages=[ChatMessage(role="user", content="hello")],
-        stream=False,
-    )
-    result = asyncio.run(chat.chat_completions(request, _FakeRequest()))
+    result, _ = drive_chat(monkeypatch, memory=memory, manager=fake_mgr)
     return result, observed, fake_mgr
 
 

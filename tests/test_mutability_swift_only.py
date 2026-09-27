@@ -8,13 +8,11 @@ type" was a C++ enum, and DEV-828's single-type rule charged the design's new
 a revision round deciding whether a C++ enum "remains a struct".
 """
 
-from pathlib import Path
-
+from fixture_files import load_fixture
 from coding_model_autonomous import design_testability as dt
 
-FIXTURES = Path(__file__).parent / "fixtures"
-DESIGN = (FIXTURES / "dev831_run66_design.md").read_text(encoding="utf-8")
-HEADER = (FIXTURES / "dev831_LSystem.h").read_text(encoding="utf-8")
+DESIGN = load_fixture("dev831_run66_design.md")
+HEADER = load_fixture("dev831_LSystem.h")
 HEADER_PATH = "LLab Shared/Generator/LSystem.h"
 
 
@@ -30,7 +28,7 @@ def test_non_swift_sources_declare_no_value_types():
                                             "struct Point { float x; };\n"}) == {}
 
 
-ROUND2 = (FIXTURES / "dev831_run66_round2_design.md").read_text(encoding="utf-8")
+ROUND2 = load_fixture("dev831_run66_round2_design.md")
 
 
 def test_run66_round2_c_family_design_raises_no_completeness_finding():

@@ -18,10 +18,8 @@ import subprocess
 from unittest import mock
 
 import pytest
-from fastapi.testclient import TestClient
 
 from mac_runner import server
-from mac_runner.config import Config
 
 
 def _git(path, *args, **kw):
@@ -140,16 +138,11 @@ def test_git_failing_outright_degrades_to_unknown_rather_than_raising(upstream, 
 # ── the endpoint carries it ──────────────────────────────────────────────────
 
 @pytest.fixture
-def client(tmp_path, upstream, monkeypatch):
+def client(upstream, runner_client):
     _, _, clone = upstream
-    repos_file = tmp_path / "repos.yml"
-    repos_file.write_text(f"repos:\n  proj:\n    path: {clone}\n")
-    monkeypatch.setattr(Config, "REPOS_FILE", repos_file)
-    monkeypatch.setattr(Config, "API_KEY", "test-key")
-    monkeypatch.setattr(Config, "SANDBOX", False)
-    monkeypatch.setattr(Config, "VM", False)
+    made = runner_client(clone, SANDBOX=False, VM=False)
     server._REMOTE_CACHE.clear()
-    return TestClient(server.app)
+    return made
 
 
 def test_read_files_reports_the_commit_it_served(client):

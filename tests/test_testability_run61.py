@@ -13,11 +13,9 @@ Two findings, two different verdicts:
 
 The fixture is run 61's final design.md, byte for byte.
 """
-from pathlib import Path
-
+from fixture_files import load_fixture
 from coding_model_autonomous import design_testability as dt
 
-FIXTURE = Path(__file__).parent / "fixtures" / "dev822_run61_design.md"
 ENGINE_PATH = "ElectricSheep/HallucinationEngine.swift"
 
 # The shape of ES main 57eee4a's HallucinationEngine.swift: a class, with both
@@ -45,7 +43,7 @@ final class HallucinationEngine {
 
 
 def _design() -> str:
-    return FIXTURE.read_text()
+    return load_fixture("dev822_run61_design.md")
 
 
 # ── undeclared_mutability: a misdiagnosis, fixed ─────────────────────────────

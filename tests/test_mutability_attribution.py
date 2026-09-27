@@ -6,14 +6,12 @@ rounds on `GridPosition` and `CellKind`, the file's other two value types,
 which the design never touched. The fixtures are run 64's final design.md and
 the FrameSnapshot.swift it was served (Centipede e09322a), byte for byte.
 """
-from pathlib import Path
-
+from fixture_files import load_fixture
 from coding_model_autonomous import design_testability as dt
 
-FIXTURES = Path(__file__).parent / "fixtures"
-DESIGN = (FIXTURES / "dev828_run64_design.md").read_text()
+DESIGN = load_fixture("dev828_run64_design.md")
 PATH = "Sources/CentipedeRender/FrameSnapshot.swift"
-SERVED = {PATH: (FIXTURES / "dev828_FrameSnapshot.swift").read_text()}
+SERVED = {PATH: load_fixture("dev828_FrameSnapshot.swift")}
 CONTRACT = "// FrameSnapshot remains a struct; ALL stored properties are mutable vars:"
 
 

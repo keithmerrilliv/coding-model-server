@@ -18,7 +18,6 @@ import subprocess
 import types
 
 import pytest
-from fastapi.testclient import TestClient
 
 from mac_runner import server
 from mac_runner.config import Config
@@ -41,20 +40,15 @@ def repo(tmp_path):
 
 
 @pytest.fixture
-def client(tmp_path, repo, monkeypatch):
-    repos_file = tmp_path / "repos.yml"
-    repos_file.write_text(f"repos:\n  proj:\n    path: {repo}\n")
-    monkeypatch.setattr(Config, "REPOS_FILE", repos_file)
-    monkeypatch.setattr(Config, "API_KEY", "test-key")
-    monkeypatch.setattr(Config, "WORKTREE_ROOT", tmp_path / "wt")
-    monkeypatch.setattr(Config, "DERIVED_DATA", tmp_path / "dd")
-    # Off by default so command assertions stay platform-independent; the
-    # DEV-126 sandbox tests opt in explicitly.
-    monkeypatch.setattr(Config, "SANDBOX", False)
-    # Same for VM containment (DEV-422): host-path tests must not depend on
-    # tart existing; the VM tests opt in and stub the vm module.
-    monkeypatch.setattr(Config, "VM", False)
-    return TestClient(server.app)
+def client(tmp_path, repo, runner_client):
+    return runner_client(
+        repo, WORKTREE_ROOT=tmp_path / "wt", DERIVED_DATA=tmp_path / "dd",
+        # Off by default so command assertions stay platform-independent; the
+        # DEV-126 sandbox tests opt in explicitly.
+        SANDBOX=False,
+        # Same for VM containment (DEV-422): host-path tests must not depend
+        # on tart existing; the VM tests opt in and stub the vm module.
+        VM=False)
 
 
 def _fake_subprocess(monkeypatch, run):
