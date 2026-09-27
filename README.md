@@ -225,14 +225,11 @@ for method, prefill figures, and the caveat about raw-vs-proxy numbers).
 | `implementer` | Default implementation | Qwen3.6-35B-A3B UD-Q4_K_M | 3B/35B | 64K | Q8_0 | ngl 41, n_cpu_moe 20 | 75.5 |
 | `deep_implementer` | Deep reasoning | Qwen3-Coder-Next Q8_0 | 3B/80B | 256K | Q8_0 | ngl 48, cpu_moe | 26.9 |
 | `fast_implementer` | Fast implementation | Qwen3-Coder-30B Q4_K_M | 3B/30B | 64K | Q8_0 | ngl 49, n_cpu_moe 26 | 58.2 |
-| `debugger` | Debugging | Qwen3-Coder-30B Q4_K_M | 3B/30B | 128K | Q8_0 | ngl 49, cpu_moe | 37.1 |
-| `reviewer` | Code review | Qwen3-Coder-30B Q8_0 | 3B/30B | 192K | Q8_0 | ngl 49, cpu_moe | 26.0 |
-| `deep_reviewer` | Deep judgment | Qwen3.5-122B-A10B Q4_K_M | 10B/122B | 256K | Q8_0 | ngl 49, cpu_moe | 20.0 |
+| `deep_reviewer` | Reviewer, synthesis | Qwen3.5-122B-A10B Q4_K_M | 10B/122B | 256K | Q8_0 | ngl 49, cpu_moe | 20.0 |
 | `dense_architect` | Planner + architect (interactive `architect` alias) | Qwen3.6-27B MTP Q4_K_M (dense) | 27B dense | 64K | Q4_0 | ngl 66, **n_cpu_ffn 33**, MTP speculative decode | 17.4 † |
 | `supervisor` | Retry/fail/replan decisions | Qwen3.6-27B MTP Q4_K_M (dense) | 27B dense | 64K | Q4_0 | ngl 66, **n_cpu_ffn 33**, MTP speculative decode | 11.4 ‡ |
-| `moe_implementer` / `moe_architect` | Implementation / architecture | MiniMax M2.5 Q4_K_M | 10B/230B | 116K | Q4_0 | ngl 62, cpu_moe | 11.2 |
-| `brainstorm` | Fastest brainstorm | Nemotron-3-Nano Q4_K_M | 3.5B/30B | **1M** | Q8_0 | ngl 52, cpu_moe | 40.1 |
-| `native_implementer` | Implementation (native tools) | GLM-4.7-Flash Q4_K_M | 3B/30B | 64K | Q8_0 | ngl 47, n_cpu_moe 20 | 59.7 |
+| `moe_implementer` | Implementation | MiniMax M2.5 Q4_K_M | 10B/230B | 116K | Q4_0 | ngl 62, cpu_moe | 11.2 |
+| `glimmer_implementer` | Retry-only implementation | Muse-Glimmer-30B UD-Q4_K_XL | 3B/30B | 64K | Q4_0 | ngl 40, `--swa-full` | 13.2 § |
 
 † Measured 2026-09-19 through the managed path on a 53,333-token architect
 prompt ([DEV-744](https://keith-merrill4.atlassian.net/browse/DEV-744)); the old
@@ -245,59 +242,53 @@ comparable to it — re-measuring the roster on one basis is
 changed identically, but only the architect was re-measured. This figure
 predates [DEV-744](https://keith-merrill4.atlassian.net/browse/DEV-744).
 
+§ From the DEV-727 re-sweep, which drove llama-server directly rather than
+through the proxy, so it reads a little high against the other rows.
+
 `supervisor` is decision-only: it is always called with native tools (a
 `decide()` function call) and never gets marker-based shell tools.
-`brainstorm` has no tools at all.
 
-Three eval-only agents are also registered (so they appear in `/v1/models`) but
-are left out of the table above: `dense_architect_nothink` (`dense_architect` with
-`enable_thinking=False`, the DEV-556 eval arm), `qwen38_architect`
-(Qwen3.8-27B with embedded MTP, the DEV-615 architect-eval candidate), and
-`glimmer_architect` (Muse-Glimmer-30B, the DEV-692 architect candidate — 64K
-Q4_0 ctx, ngl 40 `--swa-full`, 13.2 decode).
+**The roster is what the telemetry says is used.** `scripts/agent_usage.py`
+reads every request the server logged, the pipeline's own events, and what the
+daemon would dispatch to; an agent nothing wires and nothing has requested for
+a week is retired. DEV-839 retired eight that way (`reviewer`, `debugger`,
+`moe_architect`, `brainstorm`, `native_implementer`, and the eval arms
+`dense_architect_nothink`, `qwen38_architect` and `glimmer_architect`), along
+with their model files. A new model joins as an agent entry, gets evaluated,
+and leaves the same way if it does not earn a slot.
 
-`glimmer_implementer` is the same model in the implementer prompt, and since
-DEV-692 item 3 it **is** routed: it sits in the implementer rotation directly
-behind `deep_implementer`, the first Meta model the rotation has had. That
-membership is **retry-only** — it is deliberately absent from
+`glimmer_implementer` is the first Meta model the rotation has had, directly
+behind `implementer` (DEV-821). That membership is **retry-only** — it is deliberately absent from
 `ALLOWED_IMPLEMENTER_AGENTS` and the complexity-tier map, so neither an
 architect recommendation nor a tier default can put it on attempt 1. Attempt 1
 is the only attempt whose agent is chosen rather than rotated into, which makes
 it the only one comparable across runs (DEV-431), and keeping a new model off it
 leaves that comparison intact.
 
-`glimmer_architect` stays unrouted, and for a concrete reason: DEV-727 found
-that Glimmer 500s inside llama-server whenever it emits a tool call in harmony
-recipient syntax, which it starts doing once a conversation carries a tool
-result — round 1 of the architect's DEV-714 tool loop. The implementer never
-builds that shape (one fresh `[system, user]` pair per call), which is what
-makes the rotation membership safe; a test pins that property so a future
-implementer tool loop cannot ship without revisiting it. `ARCHITECT_AGENT` still
-points at `dense_architect`; reach the architect arm by pinning
-`AUTONOMOUS_ARCHITECT_AGENT=glimmer_architect`, or address either directly.
-Registration is also what arms the prompt-fit check — the allocator reads each
-agent's window off its config — so even an unrouted agent is a known quantity to
-the router rather than an unknown one. Note that Muse **Spark** itself is hosted
+Glimmer never served as the architect: DEV-727 found that it 500s inside
+llama-server whenever it emits a tool call in harmony recipient syntax, which it
+starts doing once a conversation carries a tool result — round 1 of the
+architect's DEV-714 tool loop. The implementer never builds that shape (one
+fresh `[system, user]` pair per call), which is what makes the rotation
+membership safe; a test pins that property so a future implementer tool loop
+cannot ship without revisiting it. Registration is also what arms the
+prompt-fit check — the allocator reads each agent's window off its config. Note that Muse **Spark** itself is hosted
 and cannot be served here; Glimmer is its open-weight distill, and there is
 deliberately no `spark` alias.
 
 **Expert offload.** `cpu_moe=True` (`--cpu-moe`) keeps *all* MoE expert weights
 on CPU. `n_cpu_moe=N` (`--n-cpu-moe N`) keeps only the first N layers' experts
 on CPU and pushes the rest onto the GPU — faster decode, bounded by VRAM. The
-three agents tuned with `n_cpu_moe` trade context for decode speed; see the
-per-config comments in `config.py`, which record the measurements. Nemotron's
-Mamba-hybrid architecture (only 6/52 layers need a KV cache) allows a full 1M
-native context on an RTX 5080. KV-cache preference is Q8_0 wherever it fits —
+agents tuned with `n_cpu_moe` trade context for decode speed; see the
+per-config comments in `config.py`, which record the measurements. KV-cache preference is Q8_0 wherever it fits —
 KV-quant noise produces diffuse quality degradation that is harder to manage
 than a smaller context.
 
-**Legacy names** resolve server-side (`Config.AGENT_ALIASES`) — the API's
-`request.model` and the `.env` `AUTONOMOUS_*_AGENT` defaults accept them, though
-they aren't listed in `/v1/models`:
-`architect` → `dense_architect`, `q36_architect` → `dense_architect_nothink`,
-`m25_architect` → `moe_architect`, `m25_implementer` → `moe_implementer`,
-`glm` → `native_implementer`, `nemotron` → `brainstorm`,
-`glimmer` → `glimmer_implementer`. The interactive client
+**One alias** resolves server-side (`Config.AGENT_ALIASES`):
+`architect` → `dense_architect`. The API's `request.model` and the `.env`
+`AUTONOMOUS_*_AGENT` settings accept it, though it isn't listed in
+`/v1/models`; the six model-versioned aliases had no requests and were retired
+with DEV-839. The interactive client
 (`--model`, `/agent`, `@name`) currently needs the canonical name.
 
 ## Client Commands
@@ -334,7 +325,7 @@ they aren't listed in `/v1/models`:
 ### Tools
 | Command | Description |
 |---------|-------------|
-| `/review` | Fan the uncommitted git diff out to 4 judges (Claude, Gemini, `reviewer`, `deep_reviewer`) |
+| `/review` | Fan the uncommitted git diff out to 4 judges (Claude, Gemini, `implementer`, `deep_reviewer`) |
 | `/ingest <path>` | Ingest a PDF into RAG memory (`local:` prefix for client-side files) |
 | `/ingest-code <dir>` | Ingest a codebase with AST-aware chunking |
 | `/apple <tool> <args>` | Apple Deep Docs MCP (server-side) |

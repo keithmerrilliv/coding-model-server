@@ -2,7 +2,8 @@
 
 Sends the current uncommitted git diff to four reviewers in parallel —
 Claude (subscription), Gemini (subscription), the local Coding Model
-``reviewer`` agent (Coder-30B-A3B), and the local Coding Model ``deep_reviewer``
+``implementer`` agent (Qwen3.6-35B-A3B; the ``reviewer`` agent that held this
+slot was retired by DEV-839), and the local Coding Model ``deep_reviewer``
 agent (Qwen3.5-122B-A10B) — and renders their verdicts as sequential
 vertical blocks with colored headers. The human reconciles; there is
 no synthesizer.
@@ -39,7 +40,7 @@ from coding_model_client.http import post_chat_completion
 
 CLAUDE_MODEL = os.getenv("REVIEW_CLAUDE_MODEL", "claude-sonnet-4-6")
 GEMINI_MODEL = os.getenv("REVIEW_GEMINI_MODEL", "gemini-3-pro")
-CODING_MODEL_REVIEWER_AGENT = os.getenv("REVIEW_CODING_MODEL_REVIEWER_AGENT", "deep_reviewer")
+CODING_MODEL_REVIEWER_AGENT = os.getenv("REVIEW_CODING_MODEL_REVIEWER_AGENT", "implementer")
 CODING_MODEL_DEEP_REVIEWER_AGENT = os.getenv("REVIEW_CODING_MODEL_DEEP_REVIEWER_AGENT", "deep_reviewer")
 
 REVIEW_TIMEOUT = float(os.getenv("REVIEW_TIMEOUT", "120"))

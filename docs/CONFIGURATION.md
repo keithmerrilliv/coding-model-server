@@ -244,7 +244,7 @@ Gemini, and two local agents. A judge whose key or SDK is missing is skipped.
 | `GEMINI_API_KEY` / `GOOGLE_API_KEY` | *(unset)* | Enables the Gemini judge (and Phase b's Gemini provider). |
 | `REVIEW_CLAUDE_MODEL` | `claude-sonnet-4-6` | Claude model for the review judge. |
 | `REVIEW_GEMINI_MODEL` | `gemini-3-pro` | Gemini model for the review judge. |
-| `REVIEW_CODING_MODEL_REVIEWER_AGENT` | `deep_reviewer` | First local judge. |
+| `REVIEW_CODING_MODEL_REVIEWER_AGENT` | `implementer` | First local judge; a different model from the second. |
 | `REVIEW_CODING_MODEL_DEEP_REVIEWER_AGENT` | `deep_reviewer` | Second local judge. |
 | `REVIEW_TIMEOUT` | `120` | Seconds per judge. |
 | `REVIEW_MAX_TOKENS` | `2000` | Output cap per judge. |

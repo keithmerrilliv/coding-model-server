@@ -34,8 +34,8 @@ because several agents share a GGUF with different runtimes, and a path-only
 check once let the second agent run on the first one's config.
 
 If the signature matches and the child is alive, the request reuses it. That
-is why `dense_architect`, `dense_architect_nothink` and `supervisor` never
-swap between each other: they share one signature. Anything else is a swap.
+is why `dense_architect` and `supervisor` never swap between each other: they
+share one signature. Anything else is a swap.
 
 `n_cpu_moe` and `n_cpu_ffn` are not in the signature. Today no two agents
 share a signature while differing in either, so nothing depends on it; an
