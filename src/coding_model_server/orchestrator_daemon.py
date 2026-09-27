@@ -44,7 +44,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable, NamedTuple
+from typing import Any, Iterable
 
 import requests
 from dotenv import load_dotenv
@@ -132,6 +132,7 @@ from coding_model_autonomous.workspace import (
     ACTION_RENAMED, ATTEMPT_ROLES, REFUSALS, ArtifactLedger,
 )
 from coding_model_autonomous import outcome as _outcome
+from coding_model_autonomous import diagnostics as _diagnostics
 from coding_model_autonomous import context as _context
 from coding_model_autonomous.test_strategy import (  # DEV-837: moved out
     overlay_operator_test_strategy as _overlay_operator_test_strategy,
@@ -2661,134 +2662,49 @@ def _load_prior_manifest_run(spec_dir, retry_count: int):
 TARGETED_RETRY_MAX_REPEATS = int(
     os.getenv("AUTONOMOUS_TARGETED_RETRY_MAX_REPEATS", "1"))
 
-# The diagnostics parsers live beside the failure stream now (DEV-631).
-_attributed_diagnostics = _outcome.attributed_diagnostics
-_diagnostic_messages = _outcome.diagnostic_messages
+# Every parser of compiler and test-runner output lives in diagnostics.py
+# (DEV-838). The daemon keeps its old names for them, because its call sites
+# and the tests use those names.
+_attributed_diagnostics = _diagnostics.attributed_diagnostics
+_diagnostic_messages = _diagnostics.diagnostic_messages
+# Compiler warnings as signal (DEV-547).
+_BUILD_WARNING_RE = _diagnostics.BUILD_WARNING_RE
+_WARNING_DIAG_ID_RE = _diagnostics.WARNING_DIAG_ID_RE
+_BLOCKING_WARNING_RES = _diagnostics.BLOCKING_WARNING_RES
+BuildWarning = _diagnostics.BuildWarning
+_short_diagnostic_path = _diagnostics.short_diagnostic_path
+_parse_build_warnings = _diagnostics.parse_build_warnings
+_blocking_build_warnings = _diagnostics.blocking_build_warnings
+# The build verdict: failed, completed, crashed, inconclusive.
+_BUILD_FAILURE_RES = _diagnostics.BUILD_FAILURE_RES
+_ATTRIBUTED_ERROR_RE = _diagnostics.ATTRIBUTED_ERROR_RE
+_BARE_ERROR_RE = _diagnostics.BARE_ERROR_RE
+_unattributed_errors = _diagnostics.unattributed_errors
+_BUILD_COMPLETE_RES = _diagnostics.BUILD_COMPLETE_RES
+_LINE_ATTRIBUTED_RE = _diagnostics.LINE_ATTRIBUTED_RE
+_COMPILE_STAGE_ERROR_RE = _diagnostics.COMPILE_STAGE_ERROR_RE
+_TEST_PROCESS_CRASH_RE = _diagnostics.TEST_PROCESS_CRASH_RE
+_detect_test_process_crash = _diagnostics.detect_test_process_crash
+_detect_build_failure = _diagnostics.detect_build_failure
+_PYTEST_SUMMARY_RE = _diagnostics.PYTEST_SUMMARY_RE
+_NODE_TEST_SUMMARY_RE = _diagnostics.NODE_TEST_SUMMARY_RE
+_VITEST_SUMMARY_RE = _diagnostics.VITEST_SUMMARY_RE
+_validate_test_output_structure = _diagnostics.validate_test_output_structure
+_SWIFT_SUMMARY_RE = _diagnostics.SWIFT_SUMMARY_RE
+_observed_a_test_run = _diagnostics.observed_a_test_run
+# Pass rates (DEV-406, DEV-792).
+_XCODEBUILD_CASE_RE = _diagnostics.XCODEBUILD_CASE_RE
+_SWIFT_TESTING_RUN_RE = _diagnostics.SWIFT_TESTING_RUN_COUNT_RE
+_SWIFT_TESTING_FAILED_RE = _diagnostics.SWIFT_TESTING_FAILED_RE
+_XCTEST_EXECUTED_RE = _diagnostics.XCTEST_EXECUTED_RE
+_swift_pass_rate = _diagnostics.swift_pass_rate
+_test_pass_rate = _diagnostics.pass_rate
 
-
-# ── Compiler warnings as signal (DEV-547) ────────────────────────────────────
-#
-# Run 9 of DEV-102 compiled, launched all 19 tests, and died on a runtime trap
-# with zero tests completed. The defect was one inverted conditional that
-# emptied `chains` on every step(), and the compiler had already named it, on
-# the line, in output we captured and parsed:
-#
-#   World.swift:238:20: warning: value 'updateIdx' was defined but never used;
-#                       consider replacing with boolean test [#no-usage]
-#
-# Errors drive control flow throughout this module; warnings were carried along
-# as text and read by nobody. For model-written code that is the wrong trade.
-# The warning classes a human reviewer learns to skim past are precisely the
-# fingerprints of a model emitting confused control flow.
-_BUILD_WARNING_RE = re.compile(
-    r"^\s*(\S.*?):(\d+):(\d+): warning: (.+)$", re.MULTILINE)
-
-# The trailing `[#no-usage]` id modern Swift appends. Absent on older
-# toolchains and on most other compilers, so it is recorded when present and
-# never required for a match.
-_WARNING_DIAG_ID_RE = re.compile(r"\s*\[#([\w.-]+)\]\s*$")
-
-# Deliberately narrow. A false positive costs a full implementer generation
-# plus a runner dispatch, so this holds only classes where the compiler has
-# *proved* that the code contradicts its apparent intent. Style warnings a
-# human would rightly ignore — "never mutated; consider changing to 'let'",
-# "was never used; consider replacing with '_'" on a loop index — are recorded
-# and deliberately NOT blocked.
-_BLOCKING_WARNING_RES = (
-    # `if let x = <expr>` where x is never read. Swift emits this only when the
-    # binding is pointless, which means the condition is not testing what it
-    # appears to test. Run 9's defect, verbatim.
-    re.compile(r"was defined but never used", re.I),
-    # A branch the model wrote and then made unreachable.
-    re.compile(r"will never be executed", re.I),
-    # A condition the compiler can fold to a constant.
-    re.compile(r"comparison .*?always (?:true|false)", re.I),
-    re.compile(r"condition is always (?:true|false)", re.I),
-)
 
 # Kept switchable: this is the first check in the pipeline that can reject an
 # attempt whose build *succeeded*, so it needs a way off without a deploy.
 BLOCK_ON_BUILD_WARNINGS = os.getenv(
     "AUTONOMOUS_BLOCK_ON_BUILD_WARNINGS", "1").lower() not in ("0", "false", "no")
-
-
-class BuildWarning(NamedTuple):
-    """One `path:line:col: warning:` diagnostic lifted from a build."""
-    path: str          # repo-relative where derivable, else as emitted
-    line: int
-    column: int
-    diag_id: str       # "no-usage" etc., "" when the toolchain emits none
-    message: str       # id stripped
-    blocking: bool
-
-    def located(self) -> str:
-        return f"{self.path}:{self.line}:{self.column}"
-
-
-def _short_diagnostic_path(path: str) -> str:
-    """Drop the per-dispatch worktree prefix, keeping the repo-relative tail.
-
-    Runner paths look like
-    `/Users/youruser/…/worktrees/spec_9ff962b9-09f0ad65/Sources/CentipedeCore/World.swift`
-    and the prefix changes on every dispatch, so it is noise in an artifact and
-    breaks any comparison against `protected_paths`.
-    """
-    norm = (path or "").replace("\\", "/")
-    marker = "/worktrees/"
-    idx = norm.find(marker)
-    if idx == -1:
-        return norm
-    tail = norm[idx + len(marker):]
-    # …/worktrees/<dispatch-dir>/<repo-relative path>
-    parts = tail.split("/", 1)
-    return parts[1] if len(parts) == 2 else norm
-
-
-def _parse_build_warnings(output: str,
-                          protected_paths=None) -> "list[BuildWarning]":
-    """Every located warning in *output*, flagged for whether it should block.
-
-    A warning on a protected path is never blocking: the pipeline cannot edit
-    those files, so rejecting an attempt over one would loop forever (DEV-427
-    drops them before dispatch, so the worktree holds `main`'s copy).
-
-    The caret echo line the compiler prints under a diagnostic repeats the
-    message verbatim but carries no `path:line:col`, so it never matches and
-    no de-duplication is needed for it.
-    """
-    if not output:
-        return []
-    protected = {str(p).strip().lstrip("./")
-                 for p in (protected_paths or []) if p}
-    seen = set()
-    found: list[BuildWarning] = []
-    for match in _BUILD_WARNING_RE.finditer(output):
-        raw_path, line, column, message = match.groups()
-        message = message.strip()
-        diag_id = ""
-        id_match = _WARNING_DIAG_ID_RE.search(message)
-        if id_match:
-            diag_id = id_match.group(1)
-            message = _WARNING_DIAG_ID_RE.sub("", message).strip()
-        path = _short_diagnostic_path(raw_path)
-        key = (path, line, column, message)
-        if key in seen:
-            continue
-        seen.add(key)
-        on_protected = path in protected or any(
-            path.endswith("/" + p) for p in protected)
-        blocking = not on_protected and any(
-            r.search(message) for r in _BLOCKING_WARNING_RES)
-        found.append(BuildWarning(path, int(line), int(column),
-                                  diag_id, message, blocking))
-    return found
-
-
-def _blocking_build_warnings(output: str,
-                             protected_paths=None) -> "list[BuildWarning]":
-    """The subset of _parse_build_warnings that should reject an attempt."""
-    return [w for w in _parse_build_warnings(output, protected_paths)
-            if w.blocking]
 
 
 def _format_build_warnings(warnings: "list[BuildWarning]") -> str:
@@ -3832,12 +3748,14 @@ def _pre_gate_build_check(db: Database, spec: Spec, task, spec_dir: Path,
                     fail_log=("spec %s: pre-gate build check failed structural "
                               "validation (%s)"),
                 )
-                build_reason = _detect_build_failure(build_output, fw, build_passed)
+                report = _diagnostics.read(
+                    build_output, fw, passed=build_passed,
+                    protected_paths=ts_for_build.get("protected_paths"))
+                build_reason = report.build_failure
                 # DEV-547: warnings are only consulted when nothing failed to
                 # compile. A real diagnostic is strictly better feedback, and
                 # stacking the two would bury it.
-                build_warnings = _parse_build_warnings(
-                    build_output, ts_for_build.get("protected_paths"))
+                build_warnings = list(report.warnings)
                 if build_reason is None and BLOCK_ON_BUILD_WARNINGS:
                     blocking_warnings = [w for w in build_warnings if w.blocking]
             except Exception as e:  # never let the check itself stall the spec
@@ -4357,71 +4275,6 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
                 spec.id, len(result.files), task.retry_count)
 
 
-# Pytest summary line: e.g. "1 passed in 0.01s", "2 failed, 3 passed in 0.5s",
-# "5 errors in 1.0s". We only care that *some* outcome count is reported.
-_PYTEST_SUMMARY_RE = re.compile(
-    r"\b\d+\s+(passed|failed|error|errors|skipped|xfailed|xpassed|deselected)\b",
-    re.IGNORECASE,
-)
-# Node's built-in test runner (node:test) TAP footer: lines like
-# "# tests 2", "# pass 1", "# fail 1". Any one of these confirms a real run.
-_NODE_TEST_SUMMARY_RE = re.compile(r"^# (?:tests|pass|fail)\s+\d+", re.MULTILINE)
-# Vitest summary block (DEV-104):
-#     Test Files  1 passed (1)
-#          Tests  3 passed (3)
-# Deliberately anchored on the "Tests"/"Test Files" counter rather than the
-# `Test Files` line alone: vitest prints "Test Files  no tests" when it
-# collects nothing, which must NOT read as a successful run. Requiring a
-# digit-led outcome means an empty collection fails the guard.
-_VITEST_SUMMARY_RE = re.compile(
-    r"^\s*(?:Test Files|Tests)\s+\d+\s+(?:passed|failed|skipped|todo)",
-    re.MULTILINE,
-)
-
-# DEV-429: signatures of a *build* failure, as opposed to a test failure. The
-# distinction matters because a build failure needs no human judgement — the
-# compiler already said what is wrong — so it must never open a code_review
-# gate. Swift emits `path:line:col: error: message` for every diagnostic and
-# prints nothing of the sort when the build succeeds and only assertions fail.
-# Python's equivalent is a collection/import error, which likewise means the
-# suite never ran.
-_BUILD_FAILURE_RES = {
-    "swift_test": re.compile(r"^.*:\d+:\d+: error: |^error: ", re.MULTILINE),
-    "xcodebuild_test": re.compile(
-        r"^.*:\d+:\d+: error: |^error: |The following build commands failed",
-        re.MULTILINE),
-    "pytest": re.compile(
-        r"^E\s+(?:ImportError|ModuleNotFoundError|SyntaxError|IndentationError|NameError)|"
-        r"^ERROR collecting |^!+ Interrupted: \d+ errors? during collection",
-        re.MULTILINE),
-}
-_BUILD_FAILURE_RES["python"] = _BUILD_FAILURE_RES["pytest"]
-
-
-# DEV-435: an `error:` the compiler emitted with no file:line in front of it.
-# `swift build` reports a failed emit-module job as a bare
-# "error: emit-module command failed with exit code 1 (use -v to see
-# invocation)" and swallows the underlying diagnostic. Nothing downstream can
-# act on that: the retry's file selection keys off cited paths and finds none,
-# so it attributes the failure entirely to whatever cascade errors DID carry a
-# location — usually the test files that can no longer see the module.
-_ATTRIBUTED_ERROR_RE = _outcome.ATTRIBUTED_ERROR_RE
-_BARE_ERROR_RE = re.compile(r"^error: (.+)$", re.MULTILINE)
-
-
-def _unattributed_errors(output: str) -> list[str]:
-    """`error:` lines carrying no file:line, oldest first, deduped."""
-    if not output:
-        return []
-    seen, out = set(), []
-    for match in _BARE_ERROR_RE.finditer(output):
-        msg = match.group(1).strip()
-        if msg and msg not in seen:
-            seen.add(msg)
-            out.append(msg)
-    return out
-
-
 def _build_failure_feedback(build_output: str, build_reason: str,
                             framework: str, artifact_paths: "list[str]") -> str:
     """The rejection note an implementer retry gets after a failed build.
@@ -4435,7 +4288,7 @@ def _build_failure_feedback(build_output: str, build_reason: str,
     the raw text. The headline prefers the first LOCATED diagnostic over a
     bare `error: SwiftCompile … failed` line for the same reason.
     """
-    clean = _outcome.ANSI_SGR_RE.sub("", build_output or "")
+    clean = _diagnostics.ANSI_SGR_RE.sub("", build_output or "")
     cited = swift_rules.located_diagnostics(clean, artifact_paths)
     headline = (f"{cited[0].located()}: error: {cited[0].message}"
                 if cited else build_reason)
@@ -4482,100 +4335,6 @@ def _diagnostic_completeness_note(output: str) -> str:
             "unknown. Re-examine the sources named in the design.\n"
         )
     return note + "\n"
-
-
-# ── Built, then died: not the same as never built (DEV-548) ─────────────────
-#
-# `_BUILD_FAILURE_RES["swift_test"]` accepts a bare `^error: ` line, which is
-# what catches the unattributed compile-stage failures DEV-435 documented
-# (`error: emit-module command failed`, `error: fatalError`). It also matches
-# anything the *test harness* prints, including long after the build finished.
-#
-# Run 9 of DEV-102 ended with `Build complete! (3.00s)`, 19 tests launched, and
-# then `error: Process '…swiftpm-testing-helper…' exited with unexpected signal
-# code 5`. That was classified as "the code does not compile" — told to the
-# model in those words, while the only located evidence in the output was the
-# warning DEV-547 parses. Ordering is the cheap discriminator: an unattributed
-# error *after* a completed build is not the compiler rejecting the code.
-_BUILD_COMPLETE_RES = {
-    "swift_test": re.compile(r"^Build complete!", re.MULTILINE),
-    "xcodebuild_test": re.compile(
-        r"^\*\* BUILD SUCCEEDED \*\*|^Build complete!", re.MULTILINE),
-}
-
-# A diagnostic that names a file:line:col is always the compiler talking.
-_LINE_ATTRIBUTED_RE = re.compile(r":\d+:\d+: (?:error|warning): ")
-
-# Driver lines that name a *compile* stage stay build failures wherever they
-# appear, so DEV-435's case is untouched. `fatalError` is the swift driver
-# reporting a crashed sub-job during the build and is kept here deliberately:
-# demoting it would change today's behaviour on every failed Swift build.
-_COMPILE_STAGE_ERROR_RE = re.compile(
-    r"error: .*\b(?:emit-module|compile|link|build)\b.*command failed"
-    r"|error: fatalError"
-    r"|The following build commands failed")
-
-_TEST_PROCESS_CRASH_RE = re.compile(
-    r"^error: Process '(?P<proc>[^']*)' exited with unexpected signal code "
-    r"(?P<signal>\d+)", re.MULTILINE)
-
-
-def _detect_test_process_crash(output: str) -> str | None:
-    """Short reason when the test binary died on a signal (DEV-548).
-
-    This is a third outcome beside "failed to build" and "tests failed": the
-    code compiled, the harness started, and the process was killed before it
-    could report. Under `--parallel` a single trap takes every test down with
-    it, which is why run 9 produced 19 started and 0 completed.
-
-    A behavioural defect, not a build one — an out-of-range subscript, a
-    force-unwrapped nil, a failed precondition.
-    """
-    if not output:
-        return None
-    match = _TEST_PROCESS_CRASH_RE.search(output)
-    if match is None:
-        return None
-    return (f"the test process exited on signal {match.group('signal')} "
-            f"before any test reported")
-
-
-def _detect_build_failure(output: str, framework: str, passed: bool) -> str | None:
-    """Return a short reason when *output* shows the code never built.
-
-    Only ever consulted on a failing run: a green suite proves the build was
-    fine, and some tests legitimately print the word "error" in their own
-    output. Returning None means "this is a real test failure, or we cannot
-    tell" — both of which keep the normal gate path.
-
-    DEV-548: an unattributed `error:` printed after the build completed is not
-    a build failure. It is some later process exiting non-zero, and calling it
-    a compile failure makes the pipeline state something false to the model.
-    """
-    if passed or not output:
-        return None
-    pattern = _BUILD_FAILURE_RES.get(framework.lower())
-    if pattern is None:
-        return None
-    complete = _BUILD_COMPLETE_RES.get(framework.lower())
-    complete_match = complete.search(output) if complete else None
-    completed_at = complete_match.start() if complete_match else None
-
-    for match in pattern.finditer(output):
-        line = output[match.start():].splitlines()[0].strip()
-        if not line:
-            continue
-        # The compiler naming a file, or a driver naming a compile stage:
-        # a build failure wherever it appears.
-        if (_LINE_ATTRIBUTED_RE.search(line)
-                or _COMPILE_STAGE_ERROR_RE.search(line)):
-            return line[:200]
-        # Bare `error:` after the build finished — a later process failing,
-        # not the compiler. Keep looking; something earlier may be real.
-        if completed_at is not None and match.start() > completed_at:
-            continue
-        return line[:200]
-    return None
 
 
 # DEV-468: how many consecutive implementer attempts may produce the same
@@ -5110,44 +4869,6 @@ def _route_build_failure_to_architect(db: Database, spec: Spec, task, spec_dir,
     return True
 
 
-# Swift emits no summary that _validate_test_output_structure knows — it
-# deliberately passes unrecognised frameworks through, which is right for the
-# anti-hallucination guard (a false negative there would force a genuinely
-# passing suite to FAIL) but useless for deciding what to tell a reviewer.
-# swift-testing prints "✔/✘ Test run with N tests passed/failed after ..."
-# and XCTest prints "Executed N tests, with M failures" plus "Test Suite '...'
-# passed/failed". `xcodebuild test` under parallel testing prints none of
-# those: only one "Test case 'Suite.name()' passed on 'My Mac ...'" line per
-# case and the "** TEST SUCCEEDED **" / "** TEST FAILED **" verdict (DEV-787,
-# run 51 was told "inconclusive" over a 65-case run). Matching any of them is
-# evidence tests actually executed.
-_SWIFT_SUMMARY_RE = re.compile(
-    r"Test run with \d+ test"
-    r"|Executed \d+ test"
-    r"|Test Suite '[^']*' (?:passed|failed)"
-    r"|Test case '[^']+' (?:passed|failed)"
-    r"|\*\*\s*TEST (?:SUCCEEDED|FAILED)\s*\*\*",
-    re.MULTILINE)
-
-
-def _observed_a_test_run(output: str, framework: str) -> bool:
-    """Is there positive evidence the runner executed tests? (DEV-477)
-
-    Wording only — this never changes control flow, so a miss costs a vaguer
-    gate prompt rather than a wrongly-failed suite. That asymmetry is
-    deliberate: a pattern that is wrong here can only make the prompt vaguer,
-    so it is the one safe place for one.
-    """
-    if not output or not output.strip():
-        return False
-    ok, _ = _validate_test_output_structure(output, framework)
-    if not ok:
-        return False
-    if framework.lower() in ("swift_test", "xcodebuild_test"):
-        return bool(_SWIFT_SUMMARY_RE.search(output))
-    return True
-
-
 def _test_split_suffix(build_output: str) -> str:
     """" — N new + M existing tests (…)" for a self-target run (DEV-675), so
     the gate says how many of each set the check actually ran; "" otherwise."""
@@ -5355,7 +5076,7 @@ def _extract_actionable_test_output(output: str, framework: str, max_chars: int 
         # DEV-792: the failing expectations and the verdict lines, in order,
         # ahead of anything else — a near-miss repair needs the named test and
         # its line, not 8,000 chars of passed-case noise.
-        clean = _outcome.ANSI_SGR_RE.sub("", output)
+        clean = _diagnostics.ANSI_SGR_RE.sub("", output)
         lines = clean.splitlines()
         failures = [ln for ln in lines
                     if ("recorded an issue" in ln or "Expectation failed" in ln
@@ -5386,31 +5107,6 @@ def _extract_actionable_test_output(output: str, framework: str, max_chars: int 
     if len(output) <= max_chars:
         return output
     return "[... output truncated ...]\n\n" + output[-max_chars:]
-
-
-def _validate_test_output_structure(test_output: str, framework: str) -> tuple[bool, str]:
-    """Confirm the test output has the structural shape of a real test run.
-
-    Catches the failure mode where a sandbox error or collection failure exits
-    cleanly without any tests actually running, leaving the orchestrator with
-    no evidence either way. Returns (ok, reason). On (False, reason) the
-    caller should force tests_passed=False — the runner can't be trusted.
-
-    Frameworks we don't recognize (Swift via mac-runner, custom) pass through.
-    """
-    fw = framework.lower()
-    if fw in ("pytest", "python"):
-        if not _PYTEST_SUMMARY_RE.search(test_output):
-            return False, "no pytest summary line ('N passed/failed/error') detected"
-    elif fw == "jest":
-        return True, ""
-    elif fw == "vitest":
-        if not _VITEST_SUMMARY_RE.search(test_output):
-            return False, "no vitest summary line ('Tests  N passed') detected"
-    elif fw == "node_test":
-        if not _NODE_TEST_SUMMARY_RE.search(test_output):
-            return False, "no node:test summary line ('# tests/# pass/# fail N') detected"
-    return True, ""
 
 
 # Paths that carry tests, across the frameworks this pipeline dispatches:
@@ -6250,63 +5946,6 @@ _SYNTHESIS_REPAIR_MIN_RATE = float(
     os.getenv("AUTONOMOUS_SYNTHESIS_REPAIR_MIN_RATE", "0.8"))
 
 
-# DEV-792: the three Swift summary shapes. `xcodebuild test` prints one
-# "Test case '…' passed|failed" line per case; `swift test` with Swift Testing
-# prints "Test run with N tests … passed|failed" per target plus one
-# "✘ Test name() failed after …" per failing test; XCTest under `swift test`
-# prints "Executed N tests, with M failures". Run 52's synthesis was 30 of 31
-# green and got no repair round because none of these was a "pass rate".
-_XCODEBUILD_CASE_RE = re.compile(
-    r"^Test case '[^']+' (passed|failed) on ", re.MULTILINE)
-_SWIFT_TESTING_RUN_RE = re.compile(r"Test run with (\d+) tests? in ")
-_SWIFT_TESTING_FAILED_RE = re.compile(
-    r"^\s*\S*\s*Test (?!run\b)\S+ failed after ", re.MULTILINE)
-_XCTEST_EXECUTED_RE = re.compile(r"Executed (\d+) tests?, with (\d+) failures?")
-
-
-def _swift_pass_rate(test_output: str) -> "float | None":
-    """Pass fraction from a Swift runner's output, or None (DEV-792)."""
-    text = _outcome.ANSI_SGR_RE.sub("", test_output or "")
-    cases = _XCODEBUILD_CASE_RE.findall(text)
-    if cases:
-        return cases.count("passed") / len(cases)
-    runs = [int(n) for n in _SWIFT_TESTING_RUN_RE.findall(text)]
-    if runs and sum(runs) > 0:
-        total = sum(runs)
-        failed = len(_SWIFT_TESTING_FAILED_RE.findall(text))
-        return max(0.0, total - failed) / total
-    executed = _XCTEST_EXECUTED_RE.findall(text)
-    if executed:
-        total = sum(int(n) for n, _ in executed)
-        failed = sum(int(m) for _, m in executed)
-        if total > 0:
-            return max(0.0, total - failed) / total
-    return None
-
-
-def _test_pass_rate(test_output: str) -> "float | None":
-    """Best-effort pass fraction from a runner summary; None if unparseable.
-
-    None (not 0.0) on no-parse: an unreadable summary must not qualify for
-    a repair round it can't be measured against.
-    """
-    tap_total = re.search(r"^# tests (\d+)$", test_output, re.MULTILINE)
-    tap_pass = re.search(r"^# pass (\d+)$", test_output, re.MULTILINE)
-    if tap_total and tap_pass and int(tap_total.group(1)) > 0:
-        return int(tap_pass.group(1)) / int(tap_total.group(1))
-    swift_rate = _swift_pass_rate(test_output)
-    if swift_rate is not None:
-        return swift_rate
-    passed = re.search(r"(\d+) passed", test_output)
-    failed = re.search(r"(\d+) failed", test_output)
-    if passed:
-        n_pass = int(passed.group(1))
-        n_fail = int(failed.group(1)) if failed else 0
-        if n_pass + n_fail > 0:
-            return n_pass / (n_pass + n_fail)
-    return None
-
-
 def _collect_rejection_notes(db: Database, spec_id: str) -> list[str]:
     """Human reviewer notes from rejected CODE_REVIEW gates, oldest first.
 
@@ -6592,8 +6231,11 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
     # since every failure arriving that way is a build failure by construction.
     # Observed on spec_cc7dd609: synthesis died on two one-line type errors
     # with no repair attempted.
-    rate = _test_pass_rate(test_output)
-    build_failed = _detect_build_failure(test_output, framework, tests_passed)
+    report = _diagnostics.read(
+        test_output, framework, passed=tests_passed,
+        protected_paths=(framework_opts or {}).get("protected_paths"))
+    rate = report.pass_rate
+    build_failed = report.build_failure
     # DEV-547: the unmeasurable case is not always unexplained. Run 9 of
     # spec_9ff962b9 compiled, started all 19 tests and trapped — no summary, so
     # no pass rate, and no compiler error either — while the compiler had named
@@ -6601,8 +6243,7 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
     # failed to compile, since a real diagnostic is better feedback.
     warning_blocking: list = []
     if not build_failed and BLOCK_ON_BUILD_WARNINGS:
-        warning_blocking = _blocking_build_warnings(
-            test_output, (framework_opts or {}).get("protected_paths"))
+        warning_blocking = [w for w in report.warnings if w.blocking]
     if rate is None and build_failed:
         logger.info("spec %s: synthesis failed to build (%s) — one targeted "
                     "repair round", spec.id, build_failed)

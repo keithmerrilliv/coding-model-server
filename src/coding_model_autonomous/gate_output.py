@@ -20,98 +20,20 @@ who cannot see the tests is not reviewing.
 """
 from __future__ import annotations
 
-import re
-from dataclasses import dataclass, field
+from . import diagnostics as _diagnostics
 
-# XCTest, as xcodebuild prints it. Note the lowercase "case" — the capitalised
-# form does not appear, and grepping for "Test Case" finds nothing, which is a
-# good way to conclude no tests ran when four of them did.
-_XCTEST_CASE = re.compile(
-    r"^Test case '([^']+)'\s+(passed|failed)\b", re.MULTILINE)
-# swift-testing (@Test / @Suite), Xcode 16+.
-_SWIFT_TESTING = re.compile(
-    r'^[✔✘◇\s]*Test\s+(?:"([^"]+)"|(\S+?))\s+(passed|failed)\b', re.MULTILINE)
-# pytest per-failure lines and its summary line.
-_PYTEST_FAILED = re.compile(r"^FAILED\s+(\S+)", re.MULTILINE)
-_PYTEST_SUMMARY = re.compile(
-    r"^=+\s*(?:.*?\b(\d+) failed)?.*?\b(\d+) passed\b.*$", re.MULTILINE)
-# The framework-level verdicts.
-_VERDICTS = (
-    (re.compile(r"\*\*\s*TEST SUCCEEDED\s*\*\*"), "TEST SUCCEEDED"),
-    (re.compile(r"\*\*\s*TEST FAILED\s*\*\*"), "TEST FAILED"),
-    (re.compile(r"\*\*\s*BUILD SUCCEEDED\s*\*\*"), "BUILD SUCCEEDED"),
-    (re.compile(r"\*\*\s*BUILD FAILED\s*\*\*"), "BUILD FAILED"),
-)
-# DEV-774: `swift test` has no `** TEST SUCCEEDED **`. Swift Testing prints one
-# run-level line per runner ("✔ Test run with 5 tests in 1 suite passed after
-# 0.064 seconds."; a mixed target prints a second for the XCTest half), and
-# XCTest under `swift test` prints "Test Suite 'All tests' passed/failed". Run
-# 49's release gate read "No framework verdict found" beside correct counts.
-_SWIFT_TESTING_RUN = re.compile(
-    r"^[✔✘◇\s]*Test run with \d+ tests? in \d+ suites? (passed|failed)\b",
-    re.MULTILINE)
-_XCTEST_ALL_SUITE = re.compile(
-    r"^Test Suite 'All tests' (passed|failed) at", re.MULTILINE)
-# Compiler/link errors, so a build failure names its cause rather than making
-# the reviewer scroll for it.
-_COMPILE_ERROR = re.compile(
-    r"^(/[^\s:]+:\d+:\d+:\s+error:\s+.*|.*\berror:\s+no such module.*)$",
-    re.MULTILINE)
-
-
-@dataclass
-class TestSummary:
-    verdict: str | None = None
-    passed: list[str] = field(default_factory=list)
-    failed: list[str] = field(default_factory=list)
-    errors: list[str] = field(default_factory=list)
-    # Frameworks that report COUNTS rather than names (pytest's summary line).
-    # Kept apart from the name lists so `executed` stays a real number instead
-    # of counting a synthesised placeholder as one test.
-    unnamed_passed: int = 0
-
-    @property
-    def n_passed(self) -> int:
-        return len(self.passed) + self.unnamed_passed
-
-    @property
-    def executed(self) -> int:
-        return self.n_passed + len(self.failed)
-
-
-def summarize_test_output(output: str) -> TestSummary:
-    """Pull the verdict, the test roster and any compile errors out of a log."""
-    s = TestSummary()
-    text = output or ""
-    for pattern, label in _VERDICTS:
-        if pattern.search(text):
-            s.verdict = label
-            break
-    if s.verdict is None:
-        runs = _SWIFT_TESTING_RUN.findall(text) + _XCTEST_ALL_SUITE.findall(text)
-        if runs:
-            # One failed runner fails the run; only all-passed is a pass.
-            s.verdict = "TEST RUN FAILED" if "failed" in runs else "TEST RUN PASSED"
-
-    for name, status in _XCTEST_CASE.findall(text):
-        (s.passed if status == "passed" else s.failed).append(name)
-    if not s.executed:
-        for quoted, bare, status in _SWIFT_TESTING.findall(text):
-            name = quoted or bare
-            (s.passed if status == "passed" else s.failed).append(name)
-    if not s.executed:
-        s.failed.extend(_PYTEST_FAILED.findall(text))
-        if (m := _PYTEST_SUMMARY.search(text)):
-            # pytest names its failures but only counts its passes.
-            s.unnamed_passed = int(m.group(2))
-
-    seen: set[str] = set()
-    for line in _COMPILE_ERROR.findall(text):
-        line = line.strip()
-        if line not in seen:
-            seen.add(line)
-            s.errors.append(line)
-    return s
+# The verdict and roster parser lives in diagnostics.py (DEV-838), beside the
+# other readers of the same logs; these names stay importable from here.
+_XCTEST_CASE = _diagnostics.XCTEST_CASE_RE
+_SWIFT_TESTING = _diagnostics.SWIFT_TESTING_CASE_RE
+_PYTEST_FAILED = _diagnostics.PYTEST_FAILED_RE
+_PYTEST_SUMMARY = _diagnostics.PYTEST_PASSED_SUMMARY_RE
+_VERDICTS = _diagnostics.VERDICT_BANNERS
+_SWIFT_TESTING_RUN = _diagnostics.SWIFT_TESTING_RUN_VERDICT_RE
+_XCTEST_ALL_SUITE = _diagnostics.XCTEST_ALL_SUITE_RE
+_COMPILE_ERROR = _diagnostics.COMPILE_ERROR_LINE_RE
+TestSummary = _diagnostics.TestSummary
+summarize_test_output = _diagnostics.summarize_test_output
 
 
 def _headline(s: TestSummary) -> str:

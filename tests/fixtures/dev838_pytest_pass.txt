@@ -1,0 +1,13 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.0.3, pluggy-1.6.0 -- /home/keith-merrill/Dev/coding-model-server/venv/bin/python
+cachedir: .pytest_cache
+rootdir: /home/keith-merrill/Dev/coding-model-server/var/tasks_db/specs/spec_823fee30
+plugins: anyio-4.12.1
+collecting ... collected 4 items
+
+tests/test_existing_fetch_role_log.py::test_r1_architect_role_logs_correctly PASSED [ 25%]
+tests/test_existing_fetch_role_log.py::test_r2_default_implementer_role_logs_correctly PASSED [ 50%]
+tests/test_existing_fetch_role_log.py::test_r3_architect_read_failure_logs_correctly PASSED [ 75%]
+tests/test_existing_fetch_role_log.py::test_r4_role_parameter_signature PASSED [100%]
+
+============================== 4 passed in 0.13s ===============================

@@ -1,0 +1,41 @@
+Building for debugging...
+[0/7] /Users/km4/Library/Caches/coding-model-runner/worktrees/spec_1ba2db3d-50005da2/.build/arm64-apple-macosx/debug/CentipedePackageTests.derived/runner.swift
+[1/7] Write sources
+[4/7] Write swift-version--58304C5D6DBC2206.txt
+[6/17] Compiling CentipedeCore Mushroom.swift
+[7/17] Compiling CentipedeCore SeededRNG.swift
+[8/17] Compiling CentipedeCore Segment.swift
+[9/17] Compiling CentipedeCore Position.swift
+[10/17] Compiling CentipedeCore MushroomField.swift
+/Users/km4/Library/Caches/coding-model-runner/worktrees/spec_1ba2db3d-50005da2/Sources/CentipedeCore/MushroomField.swift:12:24: error: cannot use mutating member on immutable value: 'rng' is a 'let' constant
+ 7 |     
+ 8 |     public init(seed: Int) {
+ 9 |         let rng = SeededRNG(seed: seed)
+   |         `- note: change 'let' to 'var' to make it mutable
+10 |         for col in 0..<FIELD_COLS {
+11 |             for row in 0..<PLAYER_ZONE_START_ROW {
+12 |                 if rng.next() % 4 == 0 {
+   |                        `- error: cannot use mutating member on immutable value: 'rng' is a 'let' constant
+13 |                     cells[Position(col: col, row: row)] = Mushroom()
+14 |                 }
+[11/17] Compiling CentipedeCore GameState.swift
+[12/17] Compiling CentipedeCore Constants.swift
+[13/17] Emitting module CentipedeCore
+[14/17] Compiling CentipedeCore Chain.swift
+[15/17] Compiling CentipedeCore CentipedeWorld.swift
+/Users/km4/Library/Caches/coding-model-runner/worktrees/spec_1ba2db3d-50005da2/Sources/CentipedeCore/CentipedeWorld.swift:71:17: warning: variable 'prevPositions' was never mutated; consider changing to 'let' constant
+ 69 |             
+ 70 |             // Store previous positions for body segments
+ 71 |             var prevPositions: [Position] = chains[i].segments.map { $0.pos }
+    |                 `- warning: variable 'prevPositions' was never mutated; consider changing to 'let' constant
+ 72 |             
+ 73 |             // Move the head
+
+/Users/km4/Library/Caches/coding-model-runner/worktrees/spec_1ba2db3d-50005da2/Sources/CentipedeCore/CentipedeWorld.swift:93:31: error: left side of mutating operator isn't mutable: 'mushroom' is a 'let' constant
+ 91 |             let damageBefore = mushroom.hits
+ 92 |             if damageBefore < 3 {
+ 93 |                 mushroom.hits += 1
+    |                               `- error: left side of mutating operator isn't mutable: 'mushroom' is a 'let' constant
+ 94 |             } else {
+ 95 |                 field[position] = nil
+error: fatalError
