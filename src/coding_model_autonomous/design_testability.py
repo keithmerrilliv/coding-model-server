@@ -232,13 +232,20 @@ _SWIFTUI_CONFORMANCE_RE = re.compile(
 
 
 def served_value_types(served: dict) -> dict:
-    """{path: [type names]} for served files declaring a struct or enum.
+    """{path: [type names]} for served Swift files declaring a struct or enum.
 
     SwiftUI view types are excluded: their state lives in property wrappers,
     so they have no mutability contract to declare.
+
+    Swift files only (DEV-831). The contract this check asks for — `mutating`,
+    value or reference — is Swift's. Run 66 served LLab's C++ `LSystem.h`,
+    whose only column-0 `struct|enum` is `enum NodeType`; the design added a
+    member to `class LSystem`, and the single-type rule charged it to the enum.
     """
     out: dict = {}
     for path, source in (served or {}).items():
+        if not str(path).endswith(".swift"):
+            continue
         src = source or ""
         swiftui = {m.group(2) for m in _SWIFTUI_CONFORMANCE_RE.finditer(src)}
         names = [n for _kind, n in _VALUE_TYPE_DECL_RE.findall(src)
