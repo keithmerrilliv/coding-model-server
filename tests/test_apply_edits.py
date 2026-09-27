@@ -407,3 +407,64 @@ def test_ambiguous_search_without_conditional_branches_only_names_lines():
     assert not r.ok and r.reason == "ambiguous"
     assert "at lines 1, 2" in r.error
     assert "conditional-compilation" not in r.error
+
+
+# ── DEV-842: a right answer in the wrong wrapper is not a failed attempt ─────
+# Run 69's first two attempts carried every edit correctly and were charged
+# anyway: attempt 0 for a broken-off edit block it then re-emitted whole,
+# attempt 1 for echoing the spec's "Edit 1" labels into its headers.
+
+from coding_model_autonomous.apply_edits import TIER_SUPERSEDED  # noqa: E402
+
+_EXISTING = {"Gen/LSystem.cpp": "int a = 1;\nint b = 2;\n"}
+_NEW = "Tests/NewTests.swift"
+_BROKEN_START = (f"### {_NEW}\n<<<<<<< SEARCH\nimport Testing\n"
+                 ">>>>>>> END_FILE>>>\n")
+
+
+def test_a_broken_start_is_superseded_by_the_whole_file_that_follows():
+    edit_text = _BROKEN_START + f"<<<FILE: {_NEW}>>>\nimport Testing\n<<<END_FILE>>>\n"
+    res = resolve_edits(whole_files=[(_NEW, "import Testing\n")],
+                        edit_text=edit_text, existing=_EXISTING)
+    assert res.errors == []
+    assert res.files == [(_NEW, "import Testing\n")]
+    assert [(a.path, a.tier) for a in res.applied] == [(_NEW, TIER_SUPERSEDED)]
+
+
+def test_a_broken_start_with_no_whole_file_still_refuses():
+    res = resolve_edits(whole_files=[], edit_text=_BROKEN_START, existing=_EXISTING)
+    assert len(res.errors) == 1 and "no `=======` divider" in res.errors[0]
+    assert res.failures[0].path == _NEW
+
+
+def test_a_broken_edit_to_an_existing_file_still_refuses():
+    """A whole file does not stand in for an EXISTING path: the model was
+    editing it, and which half it meant cannot be told."""
+    broken = "### Gen/LSystem.cpp\n<<<<<<< SEARCH\nint a = 1;\n>>>>>>> END\n"
+    res = resolve_edits(whole_files=[("Gen/LSystem.cpp", "int a = 9;\n")],
+                        edit_text=broken, existing=_EXISTING)
+    assert any("no `=======` divider" in e for e in res.errors)
+
+
+def test_labelled_headers_edit_the_file_they_name():
+    edit_text = (
+        "### Gen/LSystem.cpp (Edit 1 - first line)\n"
+        "<<<<<<< SEARCH\nint a = 1;\n=======\nint a = 10;\n>>>>>>> REPLACE\n\n"
+        "### Gen/LSystem.cpp (Edit 2 - second line)\n"
+        "<<<<<<< SEARCH\nint b = 2;\n=======\nint b = 20;\n>>>>>>> REPLACE\n")
+    res = resolve_edits(whole_files=[], edit_text=edit_text, existing=_EXISTING)
+    assert res.errors == []
+    assert res.files == [("Gen/LSystem.cpp", "int a = 10;\nint b = 20;\n")]
+
+
+def test_a_label_on_an_unknown_path_is_still_a_new_file():
+    edit_text = ("### Gen/Other.cpp (Edit 1)\n"
+                 "<<<<<<< SEARCH\nx\n=======\ny\n>>>>>>> REPLACE\n")
+    res = resolve_edits(whole_files=[], edit_text=edit_text, existing=_EXISTING)
+    assert len(res.errors) == 1 and "NEW file" in res.errors[0]
+
+
+def test_without_known_paths_the_header_is_read_as_written():
+    parsed = parse_edit_blocks(
+        "### a.cpp (Edit 1)\n<<<<<<< SEARCH\nx\n=======\ny\n>>>>>>> REPLACE\n")
+    assert [fe.path for fe in parsed.files] == ["a.cpp (Edit 1)"]
