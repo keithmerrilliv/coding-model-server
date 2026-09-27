@@ -101,16 +101,14 @@ from coding_model_autonomous.retry_policy import (
     _latest_supervisor_feedback,
     _load_prior_decisions,
     _read_retry_attempts,
-    _rotation_pick,
-    _select_implementer_agent,
+    choose_agent,
     _snapshot_retry,
     snapshot_phase,
     _IMPLEMENTER_ROTATION,
     inject_difference,
     plan_attempt,
     previous_plans,
-    random_rotation_pick,
-    record_attempt_plan, eligible_agents, previous_prompt_tokens, record_reroute,)
+    record_attempt_plan, record_reroute,)
 from coding_model_autonomous.executor import (
     ImplementerResult,
     MAX_RETRIES,
@@ -142,7 +140,7 @@ from coding_model_autonomous.test_strategy import (  # DEV-837: moved out
 from coding_model_autonomous.context import RunnerOutage, SpecContext
 from coding_model_autonomous.outcome import (
     Failure, FailureClass, Hooks, classify_exception, classify_model_output,
-    classify_test_run, repo_packages, rotation_offset,
+    classify_test_run, repo_packages,
 )
 
 # ── Configuration ────────────────────────────────────────────────────────────
@@ -3798,51 +3796,14 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
                 rejection_notes = g.reviewer_notes
                 break
 
-    # Pick the implementer. Retry 0 honors the architect's complexity-based
-    # recommendation; later retries walk the rotation chain so each attempt
-    # uses a different model family — see project_implementer_rotation.md.
-    # DEV-640: the anchor must be something this loop does not mutate.
-    # `task.agent` is overwritten by every pick below, so anchoring on it
-    # re-based the chain each retry and retries 3 and 4 both landed on the
-    # last rotation slot. The role's configured default is what the task was
-    # created with (_bootstrap_tasks) and never changes; task.agent is only
-    # the last resort when no default is configured.
-    initial_agent = (_select_implementer_agent(spec_dir)
-                     or executor.role_to_agent("implementer") or task.agent)
-    # DEV-629: a no-verdict that asked for a different agent (a 413, a
-    # truncation, an empty completion) advances the pick without spending
-    # the budget.
-    # DEV-676: rotate only among the agents whose window can hold this
-    # prompt. The previous attempt's prompt_tokens is the estimate; on the
-    # first attempt there is none and the fit check alone decides.
-    eligible = None
-    if task.retry_count > 0:
-        needed = previous_prompt_tokens(db, spec.id, "implementer")
-        if needed:
-            needed += executor.implementer_max_tokens_for(design_md)
-            eligible = eligible_agents(needed, _agent_ctx_limit)
-            if eligible is None:
-                logger.warning("spec %s: no agent's known window holds ~%d "
-                               "tokens — rotating over the full chain and "
-                               "leaving the fit check to escalate (DEV-676)",
-                               spec.id, needed)
-    chosen_agent = _rotation_pick(
-        initial_agent, task.retry_count + rotation_offset(db, spec.id, task),
-        eligible=eligible)
-    assignment = ("recommended" if task.retry_count == 0
-                  and _select_implementer_agent(spec_dir) else "rotation")
-    if eligible is not None and len(eligible) == 1:
-        assignment = "sole_fit"
-        logger.warning("spec %s: attempt %d — %r is the only agent whose window "
-                       "holds ~%d tokens; the rotation is one agent and a "
-                       "second identical failure on it is invariant (DEV-676)",
-                       spec.id, task.retry_count, chosen_agent, needed)
-    random_agent = random_rotation_pick()  # DEV-530 option 1; off by default
-    if random_agent:
-        logger.info("spec %s: attempt %d assigned at random: %r (was %r; "
-                    "AUTONOMOUS_ROTATION_RANDOM_FRACTION, DEV-530)", spec.id,
-                    task.retry_count, random_agent, chosen_agent)
-        chosen_agent, assignment = random_agent, "random"
+    # Pick the implementer (retry_policy.choose_agent has the order and the
+    # two later steps that may still move the dispatch).
+    choice = choose_agent(
+        db, spec.id, task, spec_dir,
+        default_agent=executor.role_to_agent("implementer"),
+        completion_tokens=executor.implementer_max_tokens_for(design_md),
+        window_of=_agent_ctx_limit)
+    chosen_agent, assignment = choice.agent, choice.assignment
 
     # DEV-631: what will differ from the failed attempt? Recorded before the
     # call, with the rationale; a plan identical to an earlier attempt's on
