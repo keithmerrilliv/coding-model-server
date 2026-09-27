@@ -600,9 +600,8 @@ still move a dispatch, and each records that it did:
 - `context.plan_dispatch` (DEV-633) escalates to a larger window when the
   prompt outgrows the chosen one. It is called through the daemon's
   `_prompt_budget` in `_generate_implementation` (single call) and
-  `_generate_one_file` (per file), which record a reroute, and through
-  `_ctx_capable_agent` in `_generate_via_manifest`, which moves the manifest
-  call without recording one.
+  `_generate_one_file` (per file), and through `_ctx_capable_agent` in
+  `_generate_via_manifest`. All three record a move as a reroute.
 
 The architect and reviewer have fixed picks with no rotation
 (`executor.role_to_agent`), and so does synthesis (`_SYNTHESIS_AGENT`,
