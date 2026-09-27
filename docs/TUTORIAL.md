@@ -321,6 +321,9 @@ to 76 (implementer).
 | `moe_architect` | 2,540 | 304 | **11.2** | MiniMax M2.5 (same model, other role) |
 | `dense_architect` | 2,520 | 829 | **10.8** | Qwen3.6-27B dense, ngl 36 MTP |
 
+`native_implementer`, `brainstorm`, `debugger`, `reviewer` and `moe_architect`
+were retired by DEV-839 on usage telemetry; their rows stay as measured.
+
 `supervisor` and `dense_architect` share one model (Qwen3.6-27B); their 11.4 vs
 10.8 is run-to-run noise, not a real difference. Same for the two MiniMax roles.
 `architect` has no row of its own because it is now an alias for
@@ -574,7 +577,7 @@ experts on GPU = faster decode, bounded by VRAM (the KV cache competes for the
 same space). It overrides `cpu_moe` when set.
 
 This is the knob the tuned agents actually use — `implementer` (N=20),
-`fast_implementer` (N=26), `native_implementer` (N=20) — and each one bought its
+`fast_implementer` (N=26) — and each one bought its
 decode speedup by trading away context (typically 256K → 64K).
 
 Sweep it with `scripts/sweep_cpu_moe.py`. Use the script rather than hand-timing:

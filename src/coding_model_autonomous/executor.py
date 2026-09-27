@@ -46,7 +46,7 @@ logger = logging.getLogger("orchestrator.executor")
 
 ARCHITECT_AGENT = os.getenv("AUTONOMOUS_ARCHITECT_AGENT", "dense_architect")
 IMPLEMENTER_AGENT = os.getenv("AUTONOMOUS_IMPLEMENTER_AGENT", "implementer")
-REVIEWER_AGENT = os.getenv("AUTONOMOUS_REVIEWER_AGENT", "reviewer")
+REVIEWER_AGENT = os.getenv("AUTONOMOUS_REVIEWER_AGENT", "deep_reviewer")
 
 # Design review (#3): a pre-implementation LLM critique of the architect's design.
 # Uses the light/fast `reviewer` (Coder-30B) by default — design input is small,
@@ -73,7 +73,7 @@ REVIEWER_AGENT = os.getenv("AUTONOMOUS_REVIEWER_AGENT", "reviewer")
 # PASS rate is not zero. `testability_check` and the human design_approval gate
 # cover this ground in the meantime.
 DESIGN_REVIEW_ENABLED = os.getenv("AUTONOMOUS_DESIGN_REVIEW", "0").lower() not in ("0", "false", "no")
-DESIGN_REVIEW_AGENT = os.getenv("AUTONOMOUS_DESIGN_REVIEW_AGENT", "reviewer")
+DESIGN_REVIEW_AGENT = os.getenv("AUTONOMOUS_DESIGN_REVIEW_AGENT", "deep_reviewer")
 DESIGN_REVIEW_MAX_TOKENS = int(os.getenv("AUTONOMOUS_DESIGN_REVIEW_MAX_TOKENS", "8000"))
 DESIGN_REVIEW_MAX_REVISIONS = int(os.getenv("AUTONOMOUS_DESIGN_REVIEW_MAX_REVISIONS", "1"))
 
@@ -353,7 +353,7 @@ ROLE_TO_MAX_TOKENS = {
 def _strip_thinking(text: str) -> str:
     """Defensive strip before parsing structured output (DEV-153).
 
-    Delegates to streaming.strip_thinking — the one implementation that
+    Delegates to thinking.strip_thinking — the one implementation that
     handles all three observed real patterns (full block, orphan close,
     unclosed open) plus <REACT>. The local regex copy only handled full
     blocks, so as a defensive layer it didn't defend against the patterns

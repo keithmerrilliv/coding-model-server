@@ -210,10 +210,10 @@ class LlamaServerManager:
         # True until proven otherwise — see _probe_expects_thinking.
         self.current_expects_thinking: bool = True
         # Tuple of fields that must match for the running child to be reused.
-        # Path equality alone isn't enough — fast_implementer (n_ctx=196608,
-        # n_ubatch=3584) and debugger (n_ctx=131072, n_ubatch=4096) point at
-        # the same Qwen3-Coder-30B GGUF file, so a path-only check let the
-        # second caller silently keep the first caller's runtime config.
+        # Path equality alone isn't enough — two agents can serve one GGUF
+        # with different n_ctx or n_ubatch (dense_architect and supervisor
+        # share _DENSE_27B's file), so a path-only check would let the second
+        # caller silently keep the first caller's runtime config.
         self.current_runtime_signature: Optional[tuple] = None
         self.started_at: Optional[float] = None
         # Per-agent VRAM consumption in MiB, learned on the first successful

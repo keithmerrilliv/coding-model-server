@@ -28,7 +28,7 @@ Design decisions that matter, and why:
 Usage:
     ADMIN_API_KEY=... python3 eval_agents.py -a implementer -a ornith
     python3 eval_agents.py -a implementer -a ornith --judge deep_reviewer
-    python3 eval_agents.py -a dense_architect -a qwen38_architect --tool-loop 3   # DEV-618
+    python3 eval_agents.py -a dense_architect -a <candidate> --tool-loop 3   # DEV-618
 """
 import argparse
 import collections

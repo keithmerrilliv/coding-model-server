@@ -57,6 +57,6 @@ def test_the_agent_and_budgets_were_not_changed():
     """Only the default moved. A later re-enable should get the same stage
     back, not a differently-configured one."""
     from coding_model_autonomous import executor
-    assert executor.DESIGN_REVIEW_AGENT == "reviewer"
+    assert executor.DESIGN_REVIEW_AGENT == "deep_reviewer"   # DEV-839 retired `reviewer`
     assert executor.DESIGN_REVIEW_MAX_REVISIONS == 1
     assert executor.DESIGN_REVIEW_MAX_TOKENS == 8000

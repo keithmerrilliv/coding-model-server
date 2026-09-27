@@ -347,19 +347,6 @@ Update these after each retrieval step. They help you stay organized and efficie
 """ + MACOS_TOOLKIT
 
     # ── Shared model configs ──
-    # Turbo: Speed-optimized implementer on RTX 5080.
-    # Migrated 2026-04-30 from llama_cpp (ngl=30, 131K Q4_0 KV) to llama_server
-    # + cpu_moe. Headroom from cpu_moe redirected to KV-quant upgrade per
-    # feedback_kv_quant_preference: 131K Q4_0 → 131K Q8_0, ub bumped to 4096.
-    _MOE_30B_TURBO = _create_model_config(
-        'MODEL_PATH_30B_TURBO',
-        f'{_MODELS_ROOT}/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf',
-        49, 131072, 4096,
-        server_extra_args=['--chat-template', 'chatml', '--swa-full'],
-        logit_bias=[[151657, -100.0], [151658, -100.0]],
-        cpu_moe=True, n_ubatch=4096,
-    )
-
     # FAST: Lightweight Q4_K_M for quick implementation tasks.
     # Migrated 2026-04-30 from llama_cpp (ngl=26, 262K Q4_0 KV) to llama_server
     # + cpu_moe. Headroom from cpu_moe redirected to KV-quant upgrade per
@@ -398,27 +385,6 @@ Update these after each retrieval step. They help you stay organized and efficie
         server_extra_args=['--chat-template', 'chatml', '--swa-full'],
         logit_bias=[[151657, -100.0], [151658, -100.0]],
         cpu_moe=True, n_ubatch=4096,
-    )
-
-    # HD: High-precision Q8_0 weights for reviewer-tier judgment.
-    # Migrated 2026-04-28 from llama_cpp (ngl=21, 65K Q4_0 KV) to llama_server
-    # + cpu_moe. Old layout offloaded 21 of 48 layers — each carrying all 128
-    # experts, of which only 8 are active per token — so most GPU bandwidth
-    # was wasted reading dead expert weights. cpu_moe keeps attention on GPU
-    # and only the 8 active experts per token are read from CPU memory.
-    # Q8_0 KV (per feedback_kv_quant_preference) at 196K — native 256K would
-    # need ~12.9 GB KV alone. 196K + ub=3072 lands ~1.16 GB free (very tight,
-    # at user-sanctioned tolerance); ub=8192 OOMs because compute-buffer
-    # scaling is ~1.28 MiB/ub above ub=2048, not the ~0.4 MiB/ub the small-ub
-    # observation suggests. Logit-ban for <tool_call>/</tool_call> tokens
-    # shared across the Qwen3-Coder family (151657/151658).
-    _MOE_30B_HD = _create_model_config(
-        'MODEL_PATH_30B_HD',
-        f'{_MODELS_ROOT}/lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q8_0.gguf',
-        49, 196608, 4096,
-        server_extra_args=['--chat-template', 'chatml', '--swa-full'],
-        logit_bias=[[151657, -100.0], [151658, -100.0]],
-        cpu_moe=True, n_ubatch=3072,
     )
 
     # Retired 2026-07-14: _MOE_480B_LITE (the 480B at IQ1_M, ~1.7 bpw) backed a
@@ -707,67 +673,6 @@ Update these after each retrieval step. They help you stay organized and efficie
         n_ubatch=2048,
     )
 
-    # QWEN3.8-27B (DEV-614): successor lineage to _DENSE_27B. GGUF arch is
-    # qwen35, which build a94d563 already speaks — no llama-server upgrade
-    # needed. 65 layers, native 256K ctx, and the MTP head is EMBEDDED in the
-    # unsloth UD-Q4_K_M (nextn_predict_layers=1), so the same --spec-type
-    # draft-mtp wiring as _DENSE_27B applies. Sweep 2026-08-27 at 128K Q4_0 KV
-    # (decode / prefill tok/s @ MiB free):
-    #   ngl=36          7.8 / 1,116  @ 4,006     ngl=40   8.7 / 1,172 @ 2,964
-    #   ngl=44         10.1 / 1,255  @ 1,864
-    #   ngl=40 + MTP   14.5 / 1,168  @   692  <- rejected: below the ~1.4 GB
-    #     reload floor; the 3.6 crashed production at 714 free (spec_b956e1c9).
-    #   ngl=36 + MTP   13.3 / 1,092  @ 1,810  <- chosen. MTP ~1.7x, same ratio
-    #     as the 3.6; the embedded head costs ~2.2 GB VRAM at load.
-    # Eval-only — DEV-615 (pairwise vs dense_architect) decides any repoint.
-    #
-    # --reasoning-budget 4096 (DEV-616): without it the 3.8 can ruminate
-    # UNBOUNDEDLY — on design_offline_sync it never closed its think block
-    # (10K tokens, finish_reason=length, zero visible content; the DEV-615
-    # eval hit the same class at 4,677 via EOS-inside-think). The budget
-    # guarantees the close and VISIBLE output — but on tasks whose thinking
-    # would exceed the cap, the model then pivots to tool-call stubs
-    # (~50-140 chars) instead of writing the document. Both steering-message
-    # variants failed to stop the pivot, including an injected explicit
-    # "I will not use tools" self-commitment the model contradicted two
-    # tokens later. enable_thinking=False also rejected (degenerate 313-tok
-    # answers, matching DEV-556's nothink findings). Net (full record on
-    # DEV-616): the 3.8 is UNFIT for the architect slot as served — the
-    # budget stays so failures are at least visible, and this agent stays
-    # eval-only. DEV-615 verdict (no repoint) stands.
-    # DEV-740: re-swept 2026-09-19 to the incumbent's rung. This served at
-    # 36/131072 — the configuration DEV-707 SUPERSEDED on _DENSE_27B — so
-    # every qwen38-vs-dense comparison measured a stale sweep alongside the
-    # model. Same architecture as the incumbent (qwen35, block_count 65,
-    # embedding 5120) and a smaller file (15.33 vs 15.93 GiB), so matching
-    # its 46/65536 was the obvious move; what the sweep added was the
-    # ceiling, which prediction got wrong.
-    #
-    # Measured at n_ctx=65536 (var/telemetry/sweep_qwen38_65k.sh):
-    #   ngl=46 -> 843 MiB free, 15.40 t/s shallow   <- chosen
-    #   ngl=48 -> 369 MiB free, 16.24 t/s           REJECTED: below DEV-616's
-    #             observed SIGABRT at 714 MiB free
-    #   ngl=50 -> LOAD FAILED, "failed to create MTP context"
-    #
-    # 843 MiB is 41 MiB under what the incumbent runs on in production, not
-    # a new risk. The 600 MiB the smaller file promised did NOT become
-    # headroom — predicted ~1,484, measured 843 — so do not re-derive this
-    # rung from file size when the next binary moves the footprint
-    # (DEV-598 moved it ~2.7 GB); re-run the sweep.
-    #
-    # --reasoning-budget 4096 STAYS (DEV-616): without it this model
-    # ruminates unboundedly and returns empty content.
-    _DENSE_27B_38 = _create_model_config(
-        'MODEL_PATH_27B_38',
-        f'{_MODELS_ROOT}/unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q4_K_M.gguf',
-        46, 65536, 2048,
-        server_extra_args=['--jinja', '--reasoning-format', 'none', '--swa-full',
-                           '--spec-type', 'draft-mtp', '--spec-draft-n-max', '2',
-                           '--reasoning-budget', '4096'],
-        type_k=2, type_v=2,
-        n_ubatch=2048,
-    )
-
     # MUSE-GLIMMER-30B UD-Q4_K_XL (DEV-692) — Meta's open-weight distill of the
     # HOSTED Muse Spark 1.1. Spark itself is not wirable here: every agent in this
     # server is a local llama-server GGUF and there is no remote-provider path.
@@ -875,49 +780,6 @@ Update these after each retrieval step. They help you stay organized and efficie
         n_ubatch=2048,
     )
 
-    # ── Non-Coding Model models ──
-
-    # Nemotron-3-Nano-30B-A3B Q4_K_M — NVIDIA hybrid Mamba-Transformer MoE
-    # 3.5B active, 24.6 GB. Needs llama_server (nemotron_h_moe arch not in llama-cpp-python).
-    # 32K native context. ~3.3x throughput vs Qwen3-30B on same hardware.
-    # ngl=28 (no --cpu-moe): 1,964 MiB free | ngl=28 (--cpu-moe): 12,840 MiB free
-    # 52 attention layers total. With --cpu-moe, targeting ngl=52 (all layers).
-    # Mamba-hybrid: only 6/52 layers use KV cache (rest are recurrent — no KV needed).
-    # KV at 1M Q8_0: ~3,264 MiB → ~8.6 GB free. Full 1M native context fits easily.
-    _HYBRID_30B = _create_model_config(
-        'MODEL_PATH_HYBRID_30B',
-        f'{_MODELS_ROOT}/unsloth/Nemotron-3-Nano-30B-A3B-GGUF/Nemotron-3-Nano-30B-A3B-Q4_K_M.gguf',
-        52, 1048576, 1024,
-        server_extra_args=['--jinja', '--reasoning-format', 'none'],
-        cpu_moe=True, n_ubatch=1024,
-    )
-
-    # GLM-4.7-Flash Q4_K_M — Zhipu AI 30B-A3B MoE, 18.3 GB
-    # Uses llama_server for proper glm4 template handling. 128K native context.
-    # Q4_0 cache at 82K ctx. Smallest model — can push most GPU layers.
-    # ngl=34 (no --cpu-moe): 884 MiB free | ngl=34 (--cpu-moe): 12,652 MiB free
-    # 47 attention layers total. With --cpu-moe, targeting ngl=47 (all layers).
-    # KV at 82K Q4_0: 1,164 MiB (47 GPU layers). 12,228 MiB free at ngl=47.
-    # Bumping to 262K Q4_0: ~3,713 MiB KV → ~8.5 GB free. Fits easily.
-    # KV cache upgraded Q4_0→Q8_0 (9 GB free at Q4_0 — plenty for 2x cache size)
-    # Expert-offload tuned 2026-06-03: 262K->64K ctx + n_cpu_moe=20 (27 of 47
-    # expert layers on the RTX 5080): measured +74% decode (37->64 tok/s) at 64K,
-    # ~1.7 GB VRAM free (GLM's smaller experts offload further than the others).
-    _MOE_30B_FLASH = _create_model_config(
-        'MODEL_PATH_30B_FLASH',
-        f'{_MODELS_ROOT}/unsloth/GLM-4.7-Flash-GGUF/GLM-4.7-Flash-Q4_K_M.gguf',
-        47, 65536, 2048,
-        # NB: --reasoning-budget 0 was tried here to stop GLM-4.7 burning the
-        # whole budget inside <think> as an implementer — it does NOT work: GLM
-        # still streams reasoning as plain text (template swallows the opening
-        # <think> but the prose leaks into content) and truncates. GLM was
-        # therefore dropped from the implementer rotation (see
-        # _IMPLEMENTER_ROTATION). This agent config is retained for ad-hoc use.
-        server_extra_args=['--jinja', '--reasoning-format', 'none'],
-        n_ubatch=2048,
-        cpu_moe=True, n_cpu_moe=20,
-    )
-
     # ── Few-shot example injected for executor agents ──
     # The model sees this as a real prior exchange, so it copies the format.
     FEW_SHOT = [
@@ -942,45 +804,6 @@ Update these after each retrieval step. They help you stay organized and efficie
     # ── Shared agent prompts ──
     _IMPLEMENTER_SYSTEM_PROMPT = (
         f'You are an implementer. {EXECUTOR_PROMPT}\n\nCOMPREHENSIVE IMPLEMENTATION: When implementing tasks, leverage multiple tools to understand the codebase thoroughly:\n\nEXECUTION ENVIRONMENT: You are running on a macOS environment with full access to development tools.\n- Use `<<<REMOTE_EXEC>>>` for ALL shell commands (including Xcode tools, Git, file operations).\n- Do NOT distinguish between "server" and "client". Everything runs locally.\n\nFILE OPERATIONS:\n- Use `<<<GLOB>>>` to find files: `<<<GLOB>>>**/*.swift`\n- Use `<<<GREP>>>` to search code: `<<<GREP>>>TODO|src/`\n- Use `<<<LIST_DIR>>>` to explore directories\n- Use `<<<READ_FILE>>>` to read file contents\n- Use `<<<WRITE_FILE>>>` for new files or complete rewrites\n- Use `<<<EDIT_FILE>>>` for targeted changes to existing files (PREFERRED)\n\nGIT AWARENESS: Use Git via `<<<REMOTE_EXEC>>>` to understand code context:\n- `git log`, `git diff`, `git blame`, `git show`, `git status`\n\nAPPLE DEVELOPMENT via `<<<REMOTE_EXEC>>>`:\n- Compile Swift: `swiftc file.swift -o output`\n- Compile Metal: `xcrun -sdk macosx metal -c shader.metal -o shader.air`\n- Build Xcode: `xcodebuild -project Foo.xcodeproj -scheme Foo build`\n\n{TOOL_REFERENCE}'
-    )
-
-    # Tools-aware variant — used when the request carries a `tools` array.
-    # Drops <<<REMOTE_EXEC>>> marker docs (the model should call the
-    # remote_exec function directly via the OpenAI tools interface) and keeps
-    # marker docs only for the tools that have NOT been migrated yet.
-    _IMPLEMENTER_NATIVE_TOOLS_SYSTEM_PROMPT = (
-        'You are an implementer working on a macOS development environment with '
-        'full access to development tools, source files, and Git. Take action '
-        '— never just describe what you would do.\n\n'
-        'TOOL CONVENTIONS — this session uses TWO interfaces:\n\n'
-        '1) FUNCTION CALL (use the OpenAI tools interface — do NOT emit these as text):\n'
-        '   - `remote_exec(command)` — execute any shell command (builds, tests, '
-        'git, ls, grep, sips, xcodebuild, swiftc, etc.). Call this through the '
-        'function-call interface. NEVER write `<<<REMOTE_EXEC>>>` as text — that '
-        'marker is deprecated for this session.\n\n'
-        '2) INLINE MARKERS (emit these tags directly in your response text):\n'
-        '   - `<<<READ_FILE>>>path` — read a file\n'
-        '   - `<<<LIST_DIR>>>path` — list a directory\n'
-        '   - `<<<GLOB>>>**/*.swift` — find files by pattern\n'
-        '   - `<<<GREP>>>pattern|path` — search code\n'
-        '   - `<<<WRITE_FILE>>>path\\ncontent` — create or rewrite a file\n'
-        '   - `<<<EDIT_FILE>>>path\\n<<<OLD>>>existing\\n<<<NEW>>>replacement` — '
-        'targeted edit (PREFERRED for changes to existing files)\n'
-        '   - `<<<SAVE_MEMORY>>>note` — record a finding\n\n'
-        'RULES:\n'
-        '- Shell commands → call `remote_exec` (function call). Never the marker.\n'
-        '- File modification → use `<<<EDIT_FILE>>>` (preferred) or `<<<WRITE_FILE>>>`. '
-        'NEVER modify files via `remote_exec` (no `python -c`, `sed -i`, heredocs, '
-        '`>` redirects). Shell-based file edits bypass diff preview, write-loop '
-        'detection, and checkpoints.\n'
-        '- File inspection → prefer `<<<GLOB>>>` / `<<<GREP>>>` over shell `find` / `grep` (faster, cleaner output).\n'
-        '- After writing files, call `remote_exec` to verify (build, run tests).\n'
-        '- Every response must produce at least one tool call (function or marker).\n'
-        '- Never ask for permission. You have full file access.\n\n'
-        'WORKING MEMORY (optional but encouraged for multi-step tasks):\n'
-        '<<<SCRATCHPAD>>>\nFACTS:\n- key findings\nOPEN_QUESTIONS:\n- what you still need\n\n'
-        '<<<PLAN>>>\nGOAL: ...\nSTEPS:\n1. [ ] first\n2. [ ] second\nCURRENT: 1\n\n'
-        '<<<CONFIDENCE>>>0-100\n'
     )
 
     _ARCHITECT_SYSTEM_PROMPT = (
@@ -1056,33 +879,15 @@ Update these after each retrieval step. They help you stay organized and efficie
         # and `--model architect` still resolve; it just isn't separately listed in
         # /v1/models. Restore a distinct entry here if the interactive architect ever
         # needs to diverge (different model, prompt, or context) from the planner.
-        'reviewer': _create_agent_config(
-            'Reviewer — Coder-30B Q8_0 (3B/30B MoE, 192K ctx Q8_0, ngl=49 cpu_moe ub=3072, high precision)',
-            _REVIEWER_SYSTEM_PROMPT,
-            _MOE_30B_HD,
-            executor=True
-        ),
         'deep_reviewer': _create_agent_config(
             'Reviewer — Qwen3.5-122B Q4_K_M (10B/122B MoE, 256K ctx Q8_0, ngl=49 cpu_moe ub=3072, deep judgment)',
             _REVIEWER_SYSTEM_PROMPT,
             _MOE_122B,
             executor=True
         ),
-        'debugger': _create_agent_config(
-            'Debugger — Coder-30B Q4_K_M (3B/30B MoE, 128K ctx Q8_0, ngl=49 cpu_moe, turbo)',
-            f'You are a debugger. {EXECUTOR_PROMPT}\n\nDEBUGGING WORKFLOW:\n- Use `<<<READ_FILE>>>` to examine source code\n- Use `<<<REMOTE_EXEC>>>` to run tests, check logs, execute debuggers\n- Use `<<<WRITE_FILE>>>` to apply fixes to source files\n- After fixing, use `<<<REMOTE_EXEC>>>` to verify the fix works (compile, run tests)\n\n{TOOL_REFERENCE}',
-            _MOE_30B_TURBO,
-            executor=True
-        ),
         'moe_implementer': _create_agent_config(
             'Implementer — MiniMax M2.5 Q4_K_M (10B/230B MoE, 116K ctx Q4_0, ngl=62 cpu_moe)',
             _IMPLEMENTER_SYSTEM_PROMPT + _UNICODE_GUARD,
-            _MOE_230B,
-            executor=True
-        ),
-        'moe_architect': _create_agent_config(
-            'Architect — MiniMax M2.5 Q4_K_M (10B/230B MoE, 116K ctx Q4_0, ngl=62 cpu_moe)',
-            _ARCHITECT_SYSTEM_PROMPT + _UNICODE_GUARD,
             _MOE_230B,
             executor=True
         ),
@@ -1093,64 +898,12 @@ Update these after each retrieval step. They help you stay organized and efficie
             _DENSE_27B,
             executor=True
         ),
-        # Same GGUF, same prompt, reasoning block suppressed — the second arm of
-        # the DEV-556 head-to-head. Qwen3.6's template gates <think> behind
-        # enable_thinking, and we never sent it, so max_tokens has always been a
-        # thinking-PLUS-design budget of which only the design half is visible:
-        # the reasoning is generated, counted by the server's usage, and then
-        # dropped by strip_thinking before call_agent sees a byte of it. Run 12
-        # spent 16000 completion tokens and 30.5 minutes to emit ~500 tokens of
-        # design, then wrote the whole design in 5369 on the identical prompt
-        # (DEV-543). 6 of 20 architect calls across runs 10-12 truncated, every
-        # one exactly at the ceiling.
-        #
-        # NOT yet the incumbent. Fourteen good designs came out of this model
-        # WITH thinking on and we have no sample of it designing without, so
-        # cheaper is not yet known to be as good — see DEV-93/DEV-99 for two
-        # times the measurement contradicted the intuition here. Repoint
-        # AUTONOMOUS_ARCHITECT_AGENT only once the judged eval says so.
-        'dense_architect_nothink': _create_agent_config(
-            'Architect (no reasoning) — Qwen3.6-27B MTP Q4_K_M, enable_thinking=False (DEV-556 eval arm; identical to dense_architect otherwise)',
-            _ARCHITECT_SYSTEM_PROMPT,
-            _DENSE_27B,
-            executor=True,
-            chat_template_kwargs={'enable_thinking': False},
-        ),
-        # Third eval arm (DEV-614): the Qwen3.8-27B candidate for the
-        # architect/supervisor slots. Same prompt as dense_architect so the
-        # DEV-615 pairwise eval isolates the model variable.
-        'qwen38_architect': _create_agent_config(
-            'Architect — Qwen3.8-27B UD-Q4_K_M (dense + MTP, 64K Q4_0 ctx, ngl=46, DEV-614 eval; DEV-615 candidate; rung re-swept DEV-740)',
-            _ARCHITECT_SYSTEM_PROMPT,
-            _DENSE_27B_38,
-            executor=True
-        ),
-        # ── Muse-Glimmer agents (DEV-692) ──
-        # Two entries over ONE model config, the same shape as dense_architect /
-        # supervisor over _DENSE_27B: the slots differ only by system prompt, so
-        # a single GGUF serves both and the eval isolates the model variable.
-        #
-        # REGISTRATION ONLY — deliberately NOT routed. These are absent from
-        # _IMPLEMENTER_ROTATION, ALLOWED_IMPLEMENTER_AGENTS and
-        # TIER_TO_IMPLEMENTER, and ARCHITECT_AGENT still points at
-        # dense_architect. An unevaluated model that is reachable by rotation or
-        # by an architect tier recommendation is an unevaluated model in
-        # production, which is the exact confound DEV-692 was parked to avoid.
-        # Reach them by env pin instead — AUTONOMOUS_ARCHITECT_AGENT or
-        # AUTONOMOUS_IMPLEMENTER_AGENT — or address them directly from the eval
-        # harness. Wire the routing once the pairwise eval has a verdict.
-        #
-        # Registration alone is what arms the DEV-676 window fit check:
-        # _agent_ctx_limit reads n_ctx off the agent's model config, so being in
-        # AGENTS is exactly what stops eligible_agents treating Glimmer's window
-        # as unknown and mis-routing it (that bug cost runs 32 and 34 six
-        # attempts each). No separate window table to update.
-        'glimmer_architect': _create_agent_config(
-            'Architect — Muse-Glimmer-30B UD-Q4_K_XL (Meta, 64K Q4_0 ctx, ngl=40 --swa-full, DEV-692 eval arm)',
-            _ARCHITECT_SYSTEM_PROMPT,
-            _MUSE_GLIMMER_30B,
-            executor=True
-        ),
+        # ── Muse-Glimmer (DEV-692) ──
+        # Retry-only: in _IMPLEMENTER_ROTATION, but not in
+        # ALLOWED_IMPLEMENTER_AGENTS or TIER_TO_IMPLEMENTER, so it never makes
+        # attempt 0 (retry_policy says why). Being in AGENTS is what arms the
+        # DEV-676 window fit check for it: _agent_ctx_limit reads n_ctx off the
+        # agent's model config.
         'glimmer_implementer': _create_agent_config(
             'Implementer — Muse-Glimmer-30B UD-Q4_K_XL (Meta, 64K Q4_0 ctx, ngl=40 --swa-full, DEV-692 eval arm)',
             _IMPLEMENTER_SYSTEM_PROMPT,
@@ -1164,52 +917,15 @@ Update these after each retrieval step. They help you stay organized and efficie
             _SUPERVISOR_SYSTEM_PROMPT,
             _DENSE_27B,
         ),
-        # ── Non-Coding Model agents ──
-        'brainstorm': _create_agent_config(
-            'Brainstorm — Nemotron-3-Nano Q4_K_M (3.5B/30B Mamba-MoE, 1M ctx Q8_0, ngl=52 cpu_moe, fastest, no tools)',
-            'You are a fast brainstorming assistant. Help the user think through ideas, '
-            'explore approaches, outline plans, and draft designs. You are great at rapid '
-            'iteration and generating options quickly.\n\n'
-            'IMPORTANT: You do NOT have access to tools, files, or shell commands. '
-            'Do NOT output <<<WRITE_FILE>>>, <<<REMOTE_EXEC>>>, or any tool markers. '
-            'Do NOT fabricate file contents or command outputs. If the user asks you to '
-            'read, write, or execute something, tell them to switch to the implementer agent.\n\n'
-            'Focus on: brainstorming, planning, outlining, comparing approaches, drafting '
-            'pseudocode, explaining concepts, and reviewing ideas.',
-            _HYBRID_30B,
-        ),
-        'native_implementer': _create_agent_config(
-            'Implementer — GLM-4.7-Flash Q4_K_M (3B/30B MoE, 64K ctx Q8_0, ngl=47 n_cpu_moe=20, Zhipu AI)',
-            _IMPLEMENTER_SYSTEM_PROMPT,
-            _MOE_30B_FLASH,
-            executor=True,
-            system_prompt_native_tools=_IMPLEMENTER_NATIVE_TOOLS_SYSTEM_PROMPT,
-        ),
     }
 
-    # Backward-compat: old model-versioned agent names → new role/tier keys.
-    # Keeps existing .env defaults (AUTONOMOUS_*_AGENT), saved sessions, and
-    # @-mentions working after the de-branding rename. Aliases are NOT listed
-    # in /v1/models — they only resolve on lookup.
+    # Names that resolve to an agent on lookup; not listed in /v1/models.
+    # scripts/agent_usage.py reports which are still requested (DEV-839).
     AGENT_ALIASES = {
         # `architect` = the interactive architect role. Folded into dense_architect
         # in DEV-101 once DEV-99 made them the same model+prompt. Not listed in
         # /v1/models, but still resolves for @-mentions and --model architect.
         'architect':       'dense_architect',
-        # Legacy handle for the thinking-off eval arm (DEV-562). Nothing in the
-        # pipeline uses it: the autonomous architect is dense_architect with
-        # thinking on (AUTONOMOUS_ARCHITECT_AGENT's default), per the
-        # 2026-09-15 thinking-on policy. Kept so old saved sessions resolve.
-        'q36_architect':   'dense_architect_nothink',
-        'm25_architect':   'moe_architect',
-        'm25_implementer': 'moe_implementer',
-        'glm':             'native_implementer',
-        'nemotron':        'brainstorm',
-        # Vendor-nickname handle, same pattern as `glm` and `nemotron` above.
-        # There is deliberately NO `spark` alias: Muse Spark is the hosted model
-        # this server cannot serve, and an alias by that name would resolve to a
-        # different model than the one it names (DEV-692).
-        'glimmer':         'glimmer_implementer',
     }
 
     @classmethod
