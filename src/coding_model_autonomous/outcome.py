@@ -43,6 +43,7 @@ from typing import Any, Callable, Iterable, Optional
 
 import requests
 
+from . import diagnostics as _diagnostics
 from .context import PromptTooLarge, RunnerOutage
 from .models import EventKind, GateType, SpecStatus, TaskStatus
 
@@ -159,207 +160,35 @@ def with_import_root_hint(failure: Failure) -> Failure:
     return failure
 
 # ── diagnostics: the stable text of a build or test failure ──────────────────
-# Moved here from the daemon (DEV-631): the failure_classified stream is the
-# one place a failure's identity lives, so the parsers that produce that
-# identity live beside it. Absolute worktree paths differ per dispatch
-# (…/worktrees/spec_x-7f8a8795/…) and line numbers move as the file is
-# rewritten; neither changes what the defect IS, so both are stripped.
-# DEV-755: swiftc colourises diagnostics, and the escape lands BETWEEN the
-# location and the keyword — `Game.swift:109:38: \x1b[1;31merror: \x1b[1;39mvalue
-# of...`. ATTRIBUTED_ERROR_RE needs a literal ": error: " and never matches, so a
-# genuinely failing build reports ZERO attributed diagnostics. Run 45's repair
-# gate then compared 0 -> 0 and read its own blindness as "did not improve".
-# Escapes also pollute the captured message, so the same defect seen twice can
-# compare unequal — which corrupts the failure IDENTITY this module exists to
-# produce (DEV-631). xcodebuild output is not coloured, which is why run 44 saw
-# a real 6 -> 36 and this stayed hidden until a swift_test run hit it.
-ANSI_SGR_RE = re.compile(r"\x1b\[[0-9;]*m")
+# The parsers that produce a failure's identity live in diagnostics.py
+# (DEV-838). These names stay importable from here because the failure stream
+# below and the tests reach them through this module.
+ANSI_SGR_RE = _diagnostics.ANSI_SGR_RE
+SIG_PATH_RE = _diagnostics.SIG_PATH_RE
+SIG_ERROR_RE = _diagnostics.SIG_ERROR_RE
+ATTRIBUTED_ERROR_RE = _diagnostics.ATTRIBUTED_ERROR_RE
+attributed_diagnostics = _diagnostics.attributed_diagnostics
+diagnostic_messages = _diagnostics.diagnostic_messages
+DIAG_MISSING_CONFORMANCE = _diagnostics.DIAG_MISSING_CONFORMANCE
+DIAG_MUTABILITY = _diagnostics.DIAG_MUTABILITY
+DIAG_UNDECLARED_TYPE = _diagnostics.DIAG_UNDECLARED_TYPE
+DIAG_FILE_PLACEMENT = _diagnostics.DIAG_FILE_PLACEMENT
+DIAG_CROSS_FILE_DRIFT = _diagnostics.DIAG_CROSS_FILE_DRIFT
+DIAG_OTHER = _diagnostics.DIAG_OTHER
+DIAGNOSTIC_CLASSES = _diagnostics.DIAGNOSTIC_CLASSES
+_DIAG_CLASS_RES = _diagnostics.DIAG_CLASS_RES
+_SYMBOL_RE = _diagnostics.SYMBOL_RE
+_SYMBOL_NOISE = _diagnostics.SYMBOL_NOISE
+classify_diagnostic = _diagnostics.classify_diagnostic
+diagnostic_classes = _diagnostics.diagnostic_classes
+diagnostic_symbols = _diagnostics.diagnostic_symbols
+_CITED_FILE_RE = _diagnostics.CITED_FILE_RE
+cited_files = _diagnostics.cited_files
+_REPO_ROOT_SEGMENTS = _diagnostics.REPO_ROOT_SEGMENTS
+repo_relative = _diagnostics.repo_relative
 
-SIG_PATH_RE = re.compile(r"(/\S+?/)?([\w.+-]+\.\w+):\d+:\d+:")
-SIG_ERROR_RE = re.compile(r"error: (.+)")
-ATTRIBUTED_ERROR_RE = re.compile(r"^\s*\S.*?:\d+:\d+: error: ", re.MULTILINE)
+# How many diagnostics one failure_classified event carries.
 DIAGNOSTICS_ON_EVENT = 40
-
-
-def attributed_diagnostics(notes: str) -> list:
-    """Location-stripped message of every attributed diagnostic, in order.
-
-    One entry per diagnostic *occurrence*. Callers asking "which defects are
-    here?" build a set from this; callers asking "did the build get worse?"
-    count it. Those are different questions, and the gap between them is
-    wide: run 8's repair output carries 27 diagnostics drawn from 6 distinct
-    messages, so deduplicating first discards most of the magnitude. A set
-    comparison can therefore score a regression as an improvement whenever
-    the new errors repeat one message — which is exactly what a dropped
-    import does (DEV-541).
-
-    Only diagnostics that name a file:line say anything about the code. Bare
-    driver lines — `error: fatalError`, `error: emit-module command failed…`
-    — appear in essentially every failed build regardless of cause;
-    counting them made every pair of consecutive failures look like the
-    same unfixable defect (spec_cc7dd609).
-    """
-    if not notes:
-        return []
-    notes = ANSI_SGR_RE.sub("", notes)
-    msgs = []
-    for line in notes.splitlines():
-        if not ATTRIBUTED_ERROR_RE.search(line):
-            continue
-        match = SIG_ERROR_RE.search(line)
-        if not match:
-            continue
-        msg = SIG_PATH_RE.sub(r"\2:", match.group(1).strip())
-        if msg:
-            msgs.append(msg)
-    return msgs
-
-
-def diagnostic_messages(notes: str) -> set:
-    """The distinct error messages in a failure report, location-stripped."""
-    return set(attributed_diagnostics(notes))
-
-
-# ── DEV-529: a closed set of diagnostic classes ──────────────────────────────
-#
-# Runs 1–7 produced a repeating failure taxonomy that lived only in prose:
-# missing conformance (run 6's Mushroom, never Equatable), mutability (`let`
-# where `var` is needed, `mutating` on a class method), undeclared type,
-# file placement (a test one character off its directory, a module the
-# sandbox cannot see), cross-file drift (signatures diverging between
-# manifest-generated files). Each is classified at capture time onto the
-# failure_classified row beside the raw text, so "failures by class, by
-# agent, by retry" is a query and not a re-read of the logs. The class is a
-# lossy index, never a replacement: unrecognised output is `other`, and
-# `other` staying large is itself the signal that the set needs a member.
-DIAG_MISSING_CONFORMANCE = "missing_conformance"
-DIAG_MUTABILITY = "mutability"
-DIAG_UNDECLARED_TYPE = "undeclared_type"
-DIAG_FILE_PLACEMENT = "file_placement"
-DIAG_CROSS_FILE_DRIFT = "cross_file_drift"
-DIAG_OTHER = "other"
-DIAGNOSTIC_CLASSES = (DIAG_MISSING_CONFORMANCE, DIAG_MUTABILITY,
-                      DIAG_UNDECLARED_TYPE, DIAG_FILE_PLACEMENT,
-                      DIAG_CROSS_FILE_DRIFT, DIAG_OTHER)
-# Order matters: the first match wins, and the specific classes come before
-# the broad ones (a conformance error also mentions a type name).
-_DIAG_CLASS_RES = (
-    (DIAG_MISSING_CONFORMANCE, re.compile(
-        r"does not conform to(?: protocol)?\b|requires that .+ conform to|"
-        r"must conform to|no protocol conformance|protocol requirements? .+ not|"
-        r"missing conformance|unsupported operand type|"
-        r"not supported between instances|object is not (?:iterable|subscriptable|hashable)",
-        re.I)),
-    (DIAG_MUTABILITY, re.compile(
-        r"'mutating'|cannot assign to (?:property|value|immutable)|"
-        r"is a 'let' constant|cannot use mutating (?:member|getter|setter)|"
-        r"immutable value|cannot pass immutable value|"
-        r"marked with 'let'|object does not support item assignment|"
-        r"can't set attribute|cannot assign to field",
-        re.I)),
-    (DIAG_FILE_PLACEMENT, re.compile(
-        r"no such module|No module named|ModuleNotFoundError|"
-        r"cannot find module|module '.+' has no attribute|"
-        r"file not found|no such file or directory|"
-        r"is not part of (?:the|any) (?:target|module)|"
-        r"could not find module|found no tests|collected 0 items",
-        re.I)),
-    (DIAG_CROSS_FILE_DRIFT, re.compile(
-        r"has no member|incorrect argument label|extra argument|"
-        r"missing argument(?:s)? for parameter|cannot convert value of type|"
-        r"argument type .+ does not|cannot import name|"
-        r"unexpected keyword argument|"
-        r"takes \d+ positional arguments? but|"
-        r"missing \d+ required positional argument|"
-        r"is not callable|no exact matches in call|"
-        r"has no attribute|ambiguous use of|"
-        r"argument passed to call that takes no arguments|"
-        r"initializer .+ requires|cannot call value of non-function type",
-        re.I)),
-    (DIAG_UNDECLARED_TYPE, re.compile(
-        r"cannot find (?:type )?'[^']+' in scope|use of undeclared|"
-        r"NameError|name '[^']+' is not defined|undefined (?:symbol|reference)|"
-        r"unresolved identifier|cannot find '[^']+'|is not a member type|"
-        r"no type named|unknown type name|undeclared identifier",
-        re.I)),
-)
-_SYMBOL_RE = re.compile(r"'([A-Za-z_][\w.]*)'")
-# Names that recur in unrelated diagnostics and would make any two attempts
-# look like the same defect.
-_SYMBOL_NOISE = frozenset({
-    "Int", "Int64", "UInt", "String", "Bool", "Double", "Float", "Any", "Void",
-    "Self", "self", "None", "str", "int", "float", "bool", "list", "dict",
-    "tuple", "set", "object", "Optional", "Array", "Dictionary", "Error",
-    "Equatable", "Hashable", "Codable", "Sendable", "Comparable", "let", "var",
-})
-
-
-def classify_diagnostic(message: str) -> str:
-    """The class of one location-stripped diagnostic message (DEV-529).
-    Never raises; unrecognised text is ``other``."""
-    text = message or ""
-    for cls, pattern in _DIAG_CLASS_RES:
-        try:
-            if pattern.search(text):
-                return cls
-        except Exception:  # a pathological message must not fail a run
-            return DIAG_OTHER
-    return DIAG_OTHER
-
-
-def diagnostic_classes(messages: Iterable[str]) -> list:
-    """Sorted distinct classes over *messages*."""
-    return sorted({classify_diagnostic(m) for m in messages})
-
-
-def diagnostic_symbols(messages: Iterable[str]) -> set:
-    """The quoted identifiers the diagnostics name, minus the noise — the
-    cheapest stable proxy for "the same defect wearing a different
-    symptom" (DEV-509: `cannot find 'SeededRNG'` one attempt, `'SeededRNG'
-    has no member 'next'` the next)."""
-    out: set = set()
-    for m in messages:
-        for sym in _SYMBOL_RE.findall(m or ""):
-            leaf = sym.split(".")[-1]
-            if leaf and leaf not in _SYMBOL_NOISE and len(leaf) > 1:
-                out.add(leaf)
-    return out
-
-
-_CITED_FILE_RE = re.compile(r"^\s*(\S+?):\d+:\d+: error: ", re.MULTILINE)
-
-
-def cited_files(notes: str) -> list:
-    """Distinct files the attributed diagnostics name, in order, as the
-    repository-relative path when one can be read off the absolute worktree
-    path and the basename otherwise."""
-    seen: list = []
-    for m in _CITED_FILE_RE.finditer(notes or ""):
-        rel = repo_relative(m.group(1))
-        if rel not in seen:
-            seen.append(rel)
-    return seen
-
-
-_REPO_ROOT_SEGMENTS = ("Sources", "Tests", "src", "tests", "lib", "app", "Packages")
-
-
-def repo_relative(path: str) -> str:
-    """The repository-relative form of a path a diagnostic named.
-
-    The Mac runner materialises a fresh worktree per dispatch
-    (`…/worktrees/<spec>-<hash>/Sources/…`, hash differs every time), so an
-    absolute path is different on every attempt while naming the same file.
-    Cut at the first recognised repository root segment; a path with none
-    (a bare basename, or a layout we do not know) keeps its basename only.
-    A path that is already relative and starts at such a segment is returned
-    unchanged (DEV-672).
-    """
-    parts = path.split("/")
-    for i, part in enumerate(parts):
-        if part in _REPO_ROOT_SEGMENTS:
-            return "/".join(parts[i:])
-    return parts[-1]
 
 
 @dataclass
@@ -831,28 +660,12 @@ def rotation_offset(db: Any, spec_id: str, task) -> int:
 # SEARCH text not found. Closest window: 0.81 similarity` are one defect (the
 # model cannot place an anchor in a 147K file) wearing two labels. The block
 # number and the score are exactly the volatile particulars that must NOT be
-# part of an identity. Class, phase and the file it is about are what is left.
-_KEY_PATH_RE = re.compile(r"((?:[\w.+-]+/)+[\w.+-]+\.[A-Za-z0-9]+)")
-
-
-# DEV-783: for a build failure the compiler's message IS the identity. Run 50
-# keyed retry 0 (an invented API member) and retry 1 (a placeholder line the
-# pipeline itself inserted) both as `build_failure||AudioManager.swift`, and
-# the guard ended the rotation at 2 of 5 on two unrelated defects. Every
-# attempt on a modify-spec touches the same files, so class+file collides by
-# construction; class+file+message is what run 29 (the same error reproduced
-# from the design) actually looked like. Other classes keep the class+file
-# key: an unappliable-edit detail carries block numbers and scores that are
-# exactly the volatile particulars an identity must ignore.
-_DIAG_MESSAGE_RE = re.compile(r":\d+:\d+:\s*(?:error|warning):\s*(.+)$")
-
-
-def _diagnostic_identity(detail: str) -> str:
-    """The first compiler message in *detail*, normalised, or ""."""
-    first = (detail or "").strip().splitlines()[0] if (detail or "").strip() else ""
-    m = _DIAG_MESSAGE_RE.search(first)
-    msg = m.group(1) if m else ""
-    return " ".join(msg.lower().split())[:160]
+# part of an identity. Class, phase and the file it is about are what is left,
+# plus the compiler's message for a build failure (DEV-783). The parsers are
+# diagnostics.KEY_PATH_RE and diagnostics.diagnostic_identity.
+_KEY_PATH_RE = _diagnostics.KEY_PATH_RE
+_DIAG_MESSAGE_RE = _diagnostics.DIAG_MESSAGE_RE
+_diagnostic_identity = _diagnostics.diagnostic_identity
 
 
 def coarse_key(failure: Failure) -> str:

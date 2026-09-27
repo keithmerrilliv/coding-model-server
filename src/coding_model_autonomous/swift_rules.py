@@ -33,10 +33,12 @@ import difflib
 import re
 from dataclasses import dataclass, field
 
-# Same pattern as outcome.ANSI_SGR_RE (DEV-755); duplicated rather than
-# imported because outcome -> context -> test_runner -> workspace -> executor
-# -> here would be a cycle, and executor is the first importer of this module.
-ANSI_SGR_RE = re.compile(r"\x1b\[[0-9;]*m")
+from . import diagnostics as _diagnostics
+
+# diagnostics is a leaf module, so this import cannot close the cycle that
+# importing outcome would (outcome -> context -> test_runner -> workspace ->
+# executor -> here).
+ANSI_SGR_RE = _diagnostics.ANSI_SGR_RE
 
 # ── 1. The standing paragraph ────────────────────────────────────────────────
 
@@ -85,74 +87,14 @@ def render_swift_rules(paths: "list[str]") -> str:
 
 # ── 2. Located diagnostics and fix hints ─────────────────────────────────────
 
-_LOCATED_RE = re.compile(
-    r"^\s*(?P<path>\S.*?\.\w+):(?P<line>\d+):(?P<col>\d+): error: (?P<msg>.+?)\s*$",
-    re.MULTILINE,
-)
-# DEV-791: Swift 6 reports an error inside a macro expansion (`#require`,
-# `#expect`) at `macro expansion #name:1:1:` with NO path, and puts the real
-# location on the next line as a note. Run 52's retry 3 (`#require` without
-# `try`) produced nothing the pattern above could locate, so the retry was
-# headlined with the bare "SwiftCompile ... failed" line.
-_MACRO_LOCATED_RE = re.compile(
-    r"^\s*macro expansion #\w+:\d+:\d+: error: (?P<msg>.+?)\s*\n"
-    r"\s*`- (?P<path>\S.*?\.\w+):(?P<line>\d+):(?P<col>\d+): note: expanded code originates here",
-    re.MULTILINE,
-)
-
-
-@dataclass(frozen=True)
-class LocatedDiagnostic:
-    path: str        # as the compiler printed it (often absolute)
-    line: int
-    message: str
-    artifact: str | None = None   # the artifact relpath it maps onto, if any
-
-    def located(self) -> str:
-        return f"{self.artifact or self.path}:{self.line}"
-
-
-def map_to_artifact(diag_path: str, artifact_paths: "list[str]") -> str | None:
-    """The artifact relpath *diag_path* names, by path-boundary suffix.
-
-    The compiler prints the worktree's absolute path
-    (``/Users/km4/.../worktrees/spec_x-abc/Sources/A/B.swift``); the artifact
-    is ``Sources/A/B.swift``. Longest suffix match wins so ``Tests/X.swift``
-    is not confused with ``Sources/Tests/X.swift``.
-    """
-    diag_path = diag_path.replace("\\", "/")
-    best: str | None = None
-    for rel in artifact_paths:
-        r = rel.replace("\\", "/").lstrip("./")
-        if diag_path == r or diag_path.endswith("/" + r):
-            if best is None or len(r) > len(best):
-                best = rel
-    return best
-
-
-def located_diagnostics(output: str,
-                        artifact_paths: "list[str] | None" = None
-                        ) -> list[LocatedDiagnostic]:
-    """Every ``path:line:col: error: msg`` in *output*, ANSI-stripped, in
-    order, deduplicated on (path, line, message)."""
-    if not output:
-        return []
-    text = ANSI_SGR_RE.sub("", output)
-    seen: set = set()
-    out: list[LocatedDiagnostic] = []
-    matches = sorted(
-        list(_LOCATED_RE.finditer(text)) + list(_MACRO_LOCATED_RE.finditer(text)),
-        key=lambda m: m.start())
-    for m in matches:
-        key = (m.group("path"), int(m.group("line")), m.group("msg"))
-        if key in seen:
-            continue
-        seen.add(key)
-        art = map_to_artifact(m.group("path"), artifact_paths or [])
-        out.append(LocatedDiagnostic(path=m.group("path"),
-                                     line=int(m.group("line")),
-                                     message=m.group("msg"), artifact=art))
-    return out
+# The located-diagnostic parser lives in diagnostics.py (DEV-838); swift_rules
+# keeps the Swift knowledge (the rules paragraph, the fix hints, the repair
+# filter) and re-exports the parser under its old names.
+_LOCATED_RE = _diagnostics.LOCATED_RE
+_MACRO_LOCATED_RE = _diagnostics.MACRO_LOCATED_RE
+LocatedDiagnostic = _diagnostics.LocatedDiagnostic
+map_to_artifact = _diagnostics.map_to_artifact
+located_diagnostics = _diagnostics.located_diagnostics
 
 
 # (regex on the message, the hint). First match wins.
