@@ -65,3 +65,25 @@ def _no_live_runner():
             f"this test opened a connection to the live Mac runner port "
             f"{_RUNNER_PORT} ({_runner_connects[0]}); stub "
             "test_runner.fetch_repo_files or patch MAC_RUNNER_URL", pytrace=False)
+
+
+# ── shared harnesses ─────────────────────────────────────────────────────────
+# Imports of the packages under test stay inside the fixtures: tests/seams
+# depends on Config being imported before the daemon, and a module-level
+# import here would run first for every test directory. Helpers a test module
+# imports by name live in fixture_files.py and chat_harness.py, not here:
+# ``from conftest import ...`` resolves to whichever conftest.py pytest loaded
+# last, which is tests/seams/conftest.py once that directory has collected.
+
+
+@pytest.fixture
+def db(tmp_path):
+    """A fresh task database under tmp_path, closed at teardown.
+
+    A module or class that needs a different database defines its own ``db``,
+    which overrides this one."""
+    from coding_model_autonomous.db import Database
+    database = Database(db_path=tmp_path / "t.sqlite",
+                        workspace_root=tmp_path / "ws")
+    yield database
+    database.close_all()

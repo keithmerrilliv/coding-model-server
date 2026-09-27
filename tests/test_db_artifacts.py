@@ -10,15 +10,7 @@ touched.
 """
 import pytest
 
-from coding_model_autonomous.db import Database
 from coding_model_autonomous.models import ArtifactKind
-
-
-@pytest.fixture
-def db(tmp_path):
-    d = Database(db_path=tmp_path / "t.sqlite", workspace_root=tmp_path / "ws")
-    yield d
-    d.close_all()
 
 
 @pytest.fixture

@@ -14,20 +14,12 @@ from unittest import mock
 import pytest
 
 import coding_model_server.orchestrator_daemon as d
-from coding_model_autonomous.db import Database
 from coding_model_autonomous.models import (
     GateStatus, SpecStatus, TaskStatus,
 )
 
 DIAG = ("World.swift:57:5: error: 'mutating' is not valid on instance methods "
         "in classes")
-
-
-@pytest.fixture
-def db(tmp_path):
-    database = Database(db_path=tmp_path / "t.sqlite", workspace_root=tmp_path / "ws")
-    yield database
-    database.close_all()
 
 
 @pytest.fixture

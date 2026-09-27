@@ -7,10 +7,7 @@ the scaffold protection (DEV-427) is disabled with no error at all.
 """
 from unittest import mock
 
-import pytest
-
 import coding_model_server.orchestrator_daemon as d
-from coding_model_autonomous.db import Database
 from coding_model_autonomous.models import GateType, SpecStatus
 
 SPEC_MD = """\
@@ -130,12 +127,6 @@ def test_malformed_plan_yaml_is_not_our_job():
 
 
 # ── the transition ───────────────────────────────────────────────────────────
-
-@pytest.fixture
-def db(tmp_path):
-    database = Database(db_path=tmp_path / "t.sqlite", workspace_root=tmp_path / "ws")
-    yield database
-    database.close_all()
 
 
 def _accept(db, yaml_text, spec_md=SPEC_MD):

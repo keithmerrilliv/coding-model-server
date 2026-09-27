@@ -9,19 +9,10 @@ the existing RUNNING crash-recovery path. A genuine error still FAILs.
 """
 from unittest import mock
 
-import pytest
 import requests
 
 import coding_model_server.orchestrator_daemon as d
-from coding_model_autonomous.db import Database
 from coding_model_autonomous.models import SpecStatus, TaskStatus
-
-
-@pytest.fixture
-def db(tmp_path):
-    database = Database(db_path=tmp_path / "t.sqlite", workspace_root=tmp_path / "ws")
-    yield database
-    database.close_all()
 
 
 # ── _start_task ──────────────────────────────────────────────────────────────

@@ -17,7 +17,6 @@ from unittest import mock
 import pytest
 
 import coding_model_server.orchestrator_daemon as d
-from coding_model_autonomous.db import Database
 from coding_model_autonomous.models import SpecStatus
 
 # Trimmed from spec_cc7dd609's actual synthesis output.
@@ -33,13 +32,6 @@ error: fatalError
 TEST_FAILURE_NEAR_MISS = "Executed 20 tests\n18 passed, 2 failed in 1.2s\n"
 TEST_FAILURE_FAR = "Executed 20 tests\n4 passed, 16 failed in 1.2s\n"
 NO_SIGNAL = "the runner produced nothing useful\n"
-
-
-@pytest.fixture
-def db(tmp_path):
-    database = Database(db_path=tmp_path / "t.sqlite", workspace_root=tmp_path / "ws")
-    yield database
-    database.close_all()
 
 
 @pytest.fixture

@@ -229,14 +229,6 @@ def test_the_language_comes_from_the_plan():
 # ── reading the language off a real spec ────────────────────────────────────
 
 class TestSpecLanguage:
-    @pytest.fixture
-    def db(self, tmp_path):
-        from coding_model_autonomous.db import Database
-        database = Database(db_path=tmp_path / "t.sqlite",
-                            workspace_root=tmp_path / "ws")
-        yield database
-        database.close_all()
-
     def _spec(self, db, plan):
         from coding_model_autonomous.models import SpecStatus
         spec = db.create_spec(title="demo", source_md_path="spec.md")

@@ -9,20 +9,12 @@ import pytest
 import requests
 
 from coding_model_autonomous import GateStatus, GateType, SpecStatus, TaskStatus
-from coding_model_autonomous.db import Database
 from coding_model_autonomous.models import EventKind
 from coding_model_autonomous.outcome import (
     Failure, FailureClass, Hooks, Outcome, classify_exception,
     classify_model_output, classify_test_run, consecutive_no_verdicts,
     dispose, repo_packages, rotation_offset,
 )
-
-
-@pytest.fixture
-def db(tmp_path):
-    database = Database(db_path=tmp_path / "t.sqlite", workspace_root=tmp_path / "ws")
-    yield database
-    database.close_all()
 
 
 @pytest.fixture

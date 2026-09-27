@@ -18,7 +18,7 @@ import pytest
 from fastapi import HTTPException
 
 import coding_model_server.routes.autonomous as routes
-from coding_model_autonomous.db import Database, GateAlreadyDecidedError
+from coding_model_autonomous.db import GateAlreadyDecidedError
 from coding_model_autonomous.jira_sync import JiraSync
 from coding_model_autonomous.models import (
     EventKind,
@@ -27,13 +27,6 @@ from coding_model_autonomous.models import (
     GateType,
     SpecStatus,
 )
-
-
-@pytest.fixture
-def db(tmp_path):
-    database = Database(db_path=tmp_path / "t.sqlite", workspace_root=tmp_path / "ws")
-    yield database
-    database.close_all()
 
 
 @pytest.fixture

@@ -15,8 +15,6 @@ no code — the misses were unrecoverable. Now:
 import json
 from unittest import mock
 
-import pytest
-
 import coding_model_server.orchestrator_daemon as d
 from coding_model_autonomous.context import SpecContext
 from coding_model_autonomous import executor
@@ -25,7 +23,6 @@ from coding_model_autonomous.apply_edits import (
     apply_search_replace,
     resolve_edits,
 )
-from coding_model_autonomous.db import Database
 from coding_model_autonomous.executor import ImplementerResult, ParseError
 from coding_model_autonomous.models import EventKind, TaskStatus
 from coding_model_autonomous.retry_policy import (
@@ -87,13 +84,6 @@ def test_resolve_records_no_base_and_malformed_failures():
 
 
 # ── daemon: event payload and the persisted response ─────────────────────────
-
-@pytest.fixture
-def db(tmp_path):
-    database = Database(db_path=tmp_path / "t.sqlite",
-                        workspace_root=tmp_path / "ws")
-    yield database
-    database.close_all()
 
 
 def _spec_with_task(db):
