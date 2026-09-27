@@ -1249,6 +1249,16 @@ def accumulate_agent_fields(tally: dict, meta: Optional[dict]) -> dict:
         outcomes[outcome] = outcomes.get(outcome, 0) + 1
         if isinstance(rag.get("hits"), int):
             acc["hits"] = acc.get("hits", 0) + rag["hits"]
+        # DEV-834: which documents, and the closest one, across the attempt.
+        if isinstance(rag.get("best_distance"), (int, float)):
+            prior = acc.get("best_distance")
+            acc["best_distance"] = (rag["best_distance"] if prior is None
+                                    else min(prior, rag["best_distance"]))
+        if isinstance(rag.get("sources"), list):
+            kept = acc.setdefault("sources", [])
+            for src in rag["sources"]:
+                if src not in kept and len(kept) < 20:
+                    kept.append(src)
         if rag.get("gate"):
             gates = acc.setdefault("gates", {})
             gates[rag["gate"]] = gates.get(rag["gate"], 0) + 1

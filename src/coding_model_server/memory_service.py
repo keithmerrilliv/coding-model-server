@@ -35,7 +35,14 @@ if _chunker is None:
 # be useful: against the rebuilt Apple-docs collection a near-verbatim sentence
 # scored 0.2757, but "MTLDevice" and "How do I create an MTLDevice and command
 # queue?" both returned nothing, i.e. anything phrased as a question missed.
-MEMORY_RELEVANCE_THRESHOLD = float(os.getenv('MEMORY_RELEVANCE_THRESHOLD', '0.6'))
+#
+# 0.6 was then too loose (DEV-834). Replaying spec-title queries on 2026-09-27,
+# every hit at 0.52 or above was off-topic ("cancelAction", a keyboard shortcut,
+# for "cancel MLX generation" at 0.587; SwiftData's modelContainer for MLX's
+# ModelContainer at 0.547), while the genuine matches (Metal renderer articles,
+# presentationFrameIndex for a frame lifecycle) sat at 0.459-0.506. Below 0.52
+# the bands still overlap; distance alone cannot split them.
+MEMORY_RELEVANCE_THRESHOLD = float(os.getenv('MEMORY_RELEVANCE_THRESHOLD', '0.52'))
 PDF_CHUNK_SIZE = int(os.getenv('PDF_CHUNK_SIZE', '1000'))
 PDF_CHUNK_OVERLAP = int(os.getenv('PDF_CHUNK_OVERLAP', '200'))
 
@@ -44,6 +51,16 @@ PDF_CHUNK_OVERLAP = int(os.getenv('PDF_CHUNK_OVERLAP', '200'))
 # an absolute path so the default works regardless of the caller's CWD.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_MEMORY_DB = os.getenv("CODING_MODEL_MEMORY_DB", str(_REPO_ROOT / "var" / "memory_db"))
+
+
+def memory_title(document: str, limit: int = 80) -> str:
+    """A short name for a retrieved chunk (DEV-834): its `# heading` when it has
+    one (Apple-docs chunks start "# init(content:)"), else its first line."""
+    for line in (document or "").splitlines():
+        line = line.strip()
+        if line:
+            return line.lstrip("#").strip()[:limit]
+    return ""
 
 
 class MemoryService:
@@ -469,11 +486,21 @@ class MemoryService:
         char_budget = max_tokens * 4
         header = "## RELEVANT MEMORIES (FACTS & DECISIONS):\n"
         context_str = header
+        injected = []
         for i, mem in enumerate(memories, 1):
             entry = f"{i}. {mem['document']}\n"
             if len(context_str) + len(entry) > char_budget:
                 break
             context_str += entry
+            injected.append(mem)
+        if stats is not None:
+            # DEV-834: WHICH documents went into the prompt, not only how many.
+            # Without this every relevance question needed a replay of the query.
+            stats["sources"] = [
+                {"title": memory_title(m["document"]),
+                 "distance": (round(m["distance"], 3)
+                              if m.get("distance") is not None else None)}
+                for m in injected]
 
         if context_str == header:
             return ""
