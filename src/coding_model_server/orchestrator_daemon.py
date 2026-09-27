@@ -3743,12 +3743,14 @@ def _pre_gate_build_check(db: Database, spec: Spec, task, spec_dir: Path,
                     fail_log=("spec %s: pre-gate build check failed structural "
                               "validation (%s)"),
                 )
-                build_reason = _detect_build_failure(build_output, fw, build_passed)
+                report = _diagnostics.read(
+                    build_output, fw, passed=build_passed,
+                    protected_paths=ts_for_build.get("protected_paths"))
+                build_reason = report.build_failure
                 # DEV-547: warnings are only consulted when nothing failed to
                 # compile. A real diagnostic is strictly better feedback, and
                 # stacking the two would bury it.
-                build_warnings = _parse_build_warnings(
-                    build_output, ts_for_build.get("protected_paths"))
+                build_warnings = list(report.warnings)
                 if build_reason is None and BLOCK_ON_BUILD_WARNINGS:
                     blocking_warnings = [w for w in build_warnings if w.blocking]
             except Exception as e:  # never let the check itself stall the spec
@@ -6224,8 +6226,11 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
     # since every failure arriving that way is a build failure by construction.
     # Observed on spec_cc7dd609: synthesis died on two one-line type errors
     # with no repair attempted.
-    rate = _test_pass_rate(test_output)
-    build_failed = _detect_build_failure(test_output, framework, tests_passed)
+    report = _diagnostics.read(
+        test_output, framework, passed=tests_passed,
+        protected_paths=(framework_opts or {}).get("protected_paths"))
+    rate = report.pass_rate
+    build_failed = report.build_failure
     # DEV-547: the unmeasurable case is not always unexplained. Run 9 of
     # spec_9ff962b9 compiled, started all 19 tests and trapped — no summary, so
     # no pass rate, and no compiler error either — while the compiler had named
@@ -6233,8 +6238,7 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
     # failed to compile, since a real diagnostic is better feedback.
     warning_blocking: list = []
     if not build_failed and BLOCK_ON_BUILD_WARNINGS:
-        warning_blocking = _blocking_build_warnings(
-            test_output, (framework_opts or {}).get("protected_paths"))
+        warning_blocking = [w for w in report.warnings if w.blocking]
     if rate is None and build_failed:
         logger.info("spec %s: synthesis failed to build (%s) — one targeted "
                     "repair round", spec.id, build_failed)
