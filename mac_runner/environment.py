@@ -203,42 +203,38 @@ def resolve_environment(opts: dict) -> dict:
     if resolved.get("signing_identity"):
         return resolved
 
-    # Manual style takes the SHA-1 (exact certificate, no name resolution);
-    # Automatic takes the generic name and lets Xcode choose.
-    identity, team = find_signing_identity(prefer_hash=not targeting_device)
+    if targeting_device:
+        # A physical device signs exactly as the project says: its own team,
+        # style and identity, with Xcode allowed to fetch profiles. Nothing
+        # discovered here can improve on that. The trailing "(XXXXXXXXXX)" in
+        # an "Apple Development: Name (...)" certificate is the developer's
+        # personal ID, not a team, so forcing it as DEVELOPMENT_TEAM fails
+        # every target with 'No Account for Team' (DEV-853).
+        resolved["signing_mode"] = "project"
+        return resolved
+
+    # Manual style takes the SHA-1: an exact certificate, no name resolution.
+    identity, team = find_signing_identity(prefer_hash=True)
     resolved["signing_identity"] = identity
-    # The team travels with the certificate in BOTH modes. Manual signing needs
-    # it just as much as Automatic — omitting it fails every target with
+    # Manual signing needs a team: omitting it fails every target with
     # "Signing for <target> requires a development team."
     if team and not resolved.get("development_team"):
         resolved["development_team"] = team
 
-    if not targeting_device:
-        # MANUAL style with the real certificate. Both other options put UI on
-        # the runner's screen, which defeats a headless runner:
-        #   unsigned  -> "is damaged ... move it to the Trash"  (DEV-395)
-        #   ad-hoc    -> "unidentified developer, open anyway?" (DEV-397)
-        # A build signed by a real Apple Development cert is trusted on the Mac
-        # that owns that cert, so nothing is prompted. Manual style is what
-        # keeps Xcode out of provisioning — Automatic is what produced
-        # "No Accounts: Add a new account in Accounts settings" on a Mac with
-        # no Apple ID in Xcode. A macOS test bundle needs no profile, so the
-        # certificate alone is sufficient.
-        resolved["signing_style"] = "Manual"
-        if identity == "-":
-            logger.warning(
-                "no code-signing identity in the keychain — falling back to "
-                "ad-hoc, which will raise an 'unidentified developer' prompt "
-                "on this Mac's screen")
-        return resolved
-
-    # A physical device additionally needs a provisioning profile, which does
-    # require an Apple ID signed into Xcode on this Mac.
-    resolved["signing_style"] = "Automatic"
-    if team and not resolved.get("development_team"):
-        resolved["development_team"] = team
+    # MANUAL style with the real certificate. Both other options put UI on
+    # the runner's screen, which defeats a headless runner:
+    #   unsigned  -> "is damaged ... move it to the Trash"  (DEV-395)
+    #   ad-hoc    -> "unidentified developer, open anyway?" (DEV-397)
+    # A build signed by a real Apple Development cert is trusted on the Mac
+    # that owns that cert, so nothing is prompted. Manual style is what
+    # keeps Xcode out of provisioning — Automatic is what produced
+    # "No Accounts: Add a new account in Accounts settings" on a Mac with
+    # no Apple ID in Xcode. A macOS test bundle needs no profile, so the
+    # certificate alone is sufficient.
+    resolved["signing_style"] = "Manual"
     if identity == "-":
         logger.warning(
-            "device run selected but no signing identity is available; "
-            "the install will be rejected")
+            "no code-signing identity in the keychain — falling back to "
+            "ad-hoc, which will raise an 'unidentified developer' prompt "
+            "on this Mac's screen")
     return resolved

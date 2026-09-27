@@ -138,6 +138,13 @@ def build_xcodebuild_test_cmd(worktree: Path, derived_data: Path, **opts: Any) -
     # environment.resolve_environment supplies a real identity when the Mac
     # holds one — required to install on a physical device — and otherwise
     # ad-hoc "-", which satisfies the kernel with no certificate or keychain.
+    if opts.get("signing_mode") == "project":
+        # A physical device (DEV-853): the project's own signing settings,
+        # untouched, and Xcode may fetch the profiles the device needs.
+        cmd.append("-allowProvisioningUpdates")
+        cmd.extend(_project_selector(opts))
+        cmd.extend(_only_testing_args(opts))
+        return cmd
     identity = opts.get("signing_identity") or "-"
     style = opts.get("signing_style") or "Manual"
     cmd += [

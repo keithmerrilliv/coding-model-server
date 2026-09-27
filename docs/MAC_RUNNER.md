@@ -192,10 +192,19 @@ access. The runner logs a warning naming the device on every such run.
 Metal validation is on through `TEST_RUNNER_MTL_DEBUG_LAYER=1`, which
 xcodebuild passes to the test process as `MTL_DEBUG_LAYER=1`.
 
+A device run signs exactly as the project's own settings say (its team, style
+and identity), with `-allowProvisioningUpdates`. The runner overrides nothing.
+It needs an Apple ID for the project's team signed into Xcode on the Mac, and
+the runner must run in the logged-in GUI session: codesign cannot reach the
+keychain from an SSH session (DEV-853).
+
 If the leg cannot run, its output starts with `[device-unavailable]` and the
-macOS result stands. That covers a runner that is not opted in, no device
-attached, a locked or unpaired device, and a runner too old to know the
-field. The daemon records a `device_leg_unavailable` anomaly and adds a line
+macOS result stands. That covers:
+- a runner that is not opted in;
+- no device attached;
+- a locked or unpaired device;
+- a signing or provisioning failure;
+- a runner too old to know the field. The daemon records a `device_leg_unavailable` anomaly and adds a line
 to the release gate saying the device leg did not run. If the leg ran and
 failed, a Metal assertion included, the reviewer's tests failed and the
 usual retry routing applies. Each leg that ran records a `test_ran` event with

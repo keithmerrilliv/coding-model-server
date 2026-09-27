@@ -135,12 +135,16 @@ MTL_VALIDATION_VAR = "TEST_RUNNER_MTL_DEBUG_LAYER"
 # the caller can tell "the device leg never happened" from "it failed".
 DEVICE_UNAVAILABLE = "[device-unavailable] "
 
-# What xcodebuild says when the device, not the code, stopped the run. Test
-# failures and crashes, Metal validation aborts included, must never match.
+# What xcodebuild says when the device or this Mac's signing setup, not the
+# code, stopped the run. Signing is environment too: protected paths keep the
+# project file out of a spec's reach, so no patch can cause these (DEV-853).
+# Test failures and crashes, Metal validation aborts included, must never match.
 _DEVICE_UNREACHABLE_RE = re.compile(
     r"device is locked|passcode protected|could not be,? unlocked"
     r"|unable to find a destination matching"
-    r"|is not available because it is unpaired|device is not connected",
+    r"|is not available because it is unpaired|device is not connected"
+    r"|No Account for Team|No profiles for '|No signing certificate"
+    r"|errSecInternalComponent|requires a provisioning profile",
     re.IGNORECASE)
 
 
@@ -158,7 +162,8 @@ def _mark_device_unreachable(output: str, device: str) -> str:
         return output
     line = next((ln.strip() for ln in output.splitlines()
                  if m.group(0).lower() in ln.lower()), m.group(0))
-    return (f"{DEVICE_UNAVAILABLE}device {device} was locked or unreachable: "
+    return (f"{DEVICE_UNAVAILABLE}device {device} was unreachable or could not "
+            f"be signed for: "
             f"{line}\n\n{output}")
 
 
