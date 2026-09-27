@@ -278,12 +278,13 @@ def test_dev709_agreeing_framework_is_left_alone():
 # The spec-archive check that would have caught this on day one
 # --------------------------------------------------------------------------
 
-# One tracked spec declares its strategy as prose with backticked keys and a
-# value of "as listed in 'Protected paths' above". There is nothing
-# machine-readable there, and inventing a parse for it would let the overlay
-# force a prose string onto the plan as protected_paths. It is listed here so
-# the rule below stays exact, and the test asserts it is FLAGGED, never silent.
-KNOWN_PROSE_ONLY = {"dev602_reviewer_overwrite_containment.md"}
+# A tracked spec that declares its strategy as prose ("as listed in 'Protected
+# paths' above") has nothing machine-readable, and inventing a parse for it
+# would let the overlay force a prose string onto the plan as protected_paths.
+# Such a spec is listed here so the rule below stays exact, and the test asserts
+# it is FLAGGED, never silent. The one case, dev602_reviewer_overwrite_
+# containment.md, moved to docs/specs/archive/ with DEV-829; the set is empty.
+KNOWN_PROSE_ONLY: set[str] = set()
 
 
 def _tracked_specs():
