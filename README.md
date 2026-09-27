@@ -744,6 +744,8 @@ coding-model-server/
 ├── docs/
 │   ├── TUTORIAL.md             #   End-to-end pipeline tutorial
 │   ├── PIPELINE.md             #   Pipeline state machine + failure routing (the map)
+│   ├── EDITS.md                #   How the implementer's SEARCH/REPLACE edits apply
+│   ├── SERVING.md              #   How the server swaps models on one GPU
 │   ├── MAC_RUNNER.md           #   The Mac runner: install, update, the two-host deploy rule
 │   ├── CONFIGURATION.md        #   Env vars, agent-config knobs, systemd
 │   ├── RAG_UPDATES.md          #   RAG database + agentic query layer
