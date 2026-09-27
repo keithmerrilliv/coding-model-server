@@ -67,7 +67,8 @@ def _maybe_inject_few_shot(request: ChatCompletionRequest, agent_config: dict) -
 
 def _record_rag(outcome: Optional[dict], kind: str, *, agent: Optional[str] = None,
                 query: Optional[str] = None, hits: Optional[int] = None,
-                best_distance: Optional[float] = None) -> None:
+                best_distance: Optional[float] = None,
+                sources: Optional[list] = None) -> None:
     """Record a retrieval outcome to the in-process ring AND, when the caller
     supplied one, to ``outcome`` so it can ride the response (DEV-657 part 2).
 
@@ -87,6 +88,9 @@ def _record_rag(outcome: Optional[dict], kind: str, *, agent: Optional[str] = No
         outcome["hits"] = hits
     if best_distance is not None:
         outcome["best_distance"] = best_distance
+    if sources:
+        # DEV-834: the injected documents' titles and distances.
+        outcome["sources"] = sources
 
 
 async def _maybe_inject_rag_context(
@@ -178,7 +182,8 @@ async def _maybe_inject_rag_context(
         return system_prompt, ""
     _record_rag(outcome, "injected", query=query, agent=request.model,
                 hits=rag_stats.get("hits"),
-                best_distance=rag_stats.get("best_distance"))
+                best_distance=rag_stats.get("best_distance"),
+                sources=rag_stats.get("sources"))
     logger.info("Injecting memory context for query: %s...", query[:50])
     rag_suffix = (
         "\n\n"
