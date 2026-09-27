@@ -6,6 +6,10 @@ human intervention — the supervisor's transition decisions are still
 exercised via test failures, not gate rejections.
 
 Exits when the spec reaches a terminal status (done / failed / cancelled).
+
+This bypasses the human gates the whole design rests on, so it refuses to run
+unless CODING_MODEL_ALLOW_AUTO_APPROVE=1 is set for the invocation (DEV-836).
+Use it for test drives only, never against a spec whose output will ship.
 """
 from __future__ import annotations
 
@@ -72,6 +76,12 @@ def main() -> int:
     parser.add_argument("--max-minutes", type=float, default=90.0,
                         help="hard timeout in minutes (default 90)")
     args = parser.parse_args()
+
+    if os.getenv("CODING_MODEL_ALLOW_AUTO_APPROVE") != "1":
+        print("[auto-approve] REFUSED: this approves every gate without a human. "
+              "Set CODING_MODEL_ALLOW_AUTO_APPROVE=1 for this invocation if that "
+              "is really what you want.", file=sys.stderr)
+        return 2
 
     deadline = time.time() + args.max_minutes * 60
     seen_gates: set[str] = set()

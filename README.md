@@ -23,20 +23,21 @@ together.
 
 [Results so far](#results-so-far), including the failures, are below.
 
-## What changed since v0.1.0
+## Releases
 
-**v0.1.0 (2026-08-19) was a proof of concept.** It worked: two specs had gone
-from markdown to an approved, test-passing patch against a real macOS app with
-no human writing code. But it worked on two specs, and what it proved was that
-the shape was right — not that the thing was reliable. Everything since has
-been finding out why two was not enough.
+| Release | Date | Theme |
+|---|---|---|
+| **v0.5.0** | 2026-09-27 | **Honest guards.** A guard reports what it observed and names a cause only when it has isolated one. Runs 56–68 all reached release approval, and LLab (Objective-C and C++) joined Electric Sheep and Centipede as a third target. |
+| **v0.4.0** | 2026-09-22 | **The Swift loop.** The implementer loop learns the compiler's shape: host-side Swift prechecks, a diagnostic-to-fix table in retry prompts, retrieval measured on the role that writes the code. |
+| **v0.3.0** | 2026-09-20 | **Serving.** `llama-server` moves to upstream v0.4.1, and the architect stops paying for prompt depth. |
+| **v0.2.0** | 2026-09-16 | **A kernel under the pipeline.** The decisions that kept killing runs moved out of the daemon into four typed modules, behind a fault-injecting test tier. |
+| **v0.1.0** | 2026-08-19 | **Proof of concept.** Two specs went from markdown to an approved, test-passing patch against a real macOS app with no human writing code. |
 
-**v0.2.0 is the same idea with a kernel under it.** More than 220 commits since the v0.1.0 tag, 118 tickets in the changelog.
-The decisions that kept killing runs moved out of the daemon's catch sites into
-four typed modules (~3,300 lines) with their own tests, behind a fault-injecting
-test tier. To be accurate about it: the daemon did not shrink — it is larger
-than it was. What moved was the *deciding*, not the line count. It is still the
-dispatch loop, and it is still the biggest file here:
+v0.1.0 proved the shape was right, not that the thing was reliable, and
+everything since has been finding out why two specs was not enough. The core of
+that is the kernel v0.2.0 introduced. To be accurate about it: the daemon did
+not shrink, it is larger than it was. What moved was the *deciding*, not the
+line count, and the daemon is still the dispatch loop and the biggest file here:
 
 | | What it owns | Why it exists |
 |---|---|---|
@@ -65,14 +66,18 @@ way, by the thing being fixed.
 - **Delivery lands a branch, not a merge.** A human reviews and merges, always.
 - **The Mac runner is a single point of truth that can lag.** A run once built a
   whole feature slice on a clone two slices behind origin, and every stage
-  reported success ([DEV-701](https://keith-merrill4.atlassian.net/browse/DEV-701));
-  a read now reports which commit served it, but nothing yet refuses to dispatch.
+  reported success ([DEV-701](https://keith-merrill4.atlassian.net/browse/DEV-701)).
+  A read now reports which commit served it, `/v1/version` reports the code the
+  runner is serving ([DEV-805](https://keith-merrill4.atlassian.net/browse/DEV-805)),
+  and delivery refuses a branch whose stale base would delete tests
+  ([DEV-756](https://keith-merrill4.atlassian.net/browse/DEV-756)). Dispatch
+  itself still only warns on a stale clone; see [docs/MAC_RUNNER.md](docs/MAC_RUNNER.md).
 - **It still needs a human at the gates.** That is the design, not a gap.
 
 Full ticket-by-ticket detail: [CHANGELOG.md](CHANGELOG.md).
 
 
-**Contents:** [What changed since v0.1.0](#what-changed-since-v010) · [Architecture](#architecture) · [Quick Start](#quick-start) ·
+**Contents:** [Releases](#releases) · [Architecture](#architecture) · [Quick Start](#quick-start) ·
 [Agents](#agents) · [Client Commands](#client-commands) ·
 [Tool System](#tool-system) · [Context Management](#context-management) ·
 [Autonomous Mode](#autonomous-mode) · [API](#api) ·
@@ -128,7 +133,7 @@ will not start without them.
 |---|---|
 | **OS / hardware** | Linux with an NVIDIA GPU for the server. The client runs on macOS or Linux. |
 | **Python** | 3.10 or newer; 3.12 is what CI and mypy run against |
-| **CUDA** | **12.8 — not 13.x.** CUDA 13.x has a compiler bug that silently disables MMQ kernels and costs roughly 7× on prefill (llama.cpp #18331, #18398). |
+| **CUDA** | **13.2**, what the reference build runs. 13.4 matched it on prefill and VRAM but changed the inference numerics and cost ~9% on decode ([DEV-745](https://keith-merrill4.atlassian.net/browse/DEV-745)); measurements do not transfer across a toolkit change. |
 | **`tools/llama-server`** | **You must supply this.** A llama.cpp build plus its shared libraries. It is the only inference backend, it is not in this repo, and `setup.sh` does not fetch it. `docs/TUTORIAL.md` §5.3 says where to download one or how to build it. |
 | **Model weights** | **You must supply these.** No GGUF ships here. `.env.example` lists the model slots; every one is optional, so start with a single small model and add more later. |
 | **VRAM** | Whatever you have. Most agents run with expert offload (`--cpu-moe`), keeping attention on the GPU and MoE experts on CPU, so a 16 GB card runs models far larger than it could hold. |
@@ -187,6 +192,12 @@ sudo bash scripts/redeploy.sh
 ```
 No reinstall needed — the venv is an editable install, so a restart picks up
 code changes. The script backs up the installed units before overwriting.
+
+**This redeploys the Linux server only.** `mac_runner/` deploys on the Mac, by a
+pull there (`scripts/mac_update_runner.sh --execute`), and a server redeploy
+leaves it untouched. [docs/MAC_RUNNER.md](docs/MAC_RUNNER.md) has the two-host
+rule and how to check which commit the runner is serving. Every live script is
+listed in [scripts/README.md](scripts/README.md).
 
 ### Client (macOS or Linux)
 
@@ -468,7 +479,14 @@ budget table. Read it before changing anything in the orchestrator.
 
 Honest version, because the failures are the useful part.
 
-**What works unattended.** Two specs have gone from markdown spec to an
+**Where it stands (v0.5.0).** Thirteen consecutive runs, 56 to 68, reached
+release approval, across three target repos: Electric Sheep (a visionOS and
+macOS Swift app), Centipede (a SwiftPM game) and LLab (Objective-C and C++,
+tested through Swift's C++ interop). Nine were pushed by the pipeline and four
+were delivered by hand. The run table below records every documented run, the
+failures included, and says why each one went the way it did.
+
+**Where it started (v0.1.0).** Two specs went from markdown spec to an
 approved, test-passing patch against a real macOS Swift app — a Stop button
 that cancels in-flight generation, and a top-k sampling mask — every line
 written by the pipeline. The first was as clean as it sounds: design approved
@@ -649,7 +667,7 @@ coding-model-server/
 ├── pyproject.toml              # Package metadata, deps, console scripts
 ├── requirements.txt            # Thin `-e .` pointer (pyproject is the source of truth)
 ├── requirements-client.txt     # Thin `-e .[client]` pointer
-├── QWEN.md                     # Agent context / project notes (CLAUDE.md-style)
+├── AGENTS.md                   # Orientation for coding agents working on this repo
 ├── src/
 │   ├── coding_model_server/     # FastAPI server + orchestrator daemon + shared modules
 │   │   ├── server.py           #   FastAPI app assembly, CORS, router wiring
@@ -666,7 +684,7 @@ coding-model-server/
 │   │   ├── web_search_service.py
 │   │   ├── mcp_service.py      #   Apple Deep Docs MCP client (JSON-RPC handshake)
 │   │   ├── streaming.py        #   SSE chunking, ThinkingStripper
-│   │   ├── external_judges.py  #   Claude / Gemini call wrappers (/review + Phase b)
+│   │   ├── external_judges.py  #   Claude / Gemini call wrappers (client /review, scripts/eval_agents.py)
 │   │   ├── metrics.py          #   GPU sampler + request metrics
 │   │   └── code_chunker.py     #   tree-sitter-aware code chunking for RAG
 │   ├── coding_model_client/     # Modular chat client package
@@ -683,30 +701,50 @@ coding-model-server/
 │   │   ├── config.py           #   Client-side configuration, constants
 │   │   ├── models.py           #   Agent theme management
 │   │   └── agentic/            #   RAG: scratchpad, planner, budget, confidence
-│   └── coding_model_autonomous/ # Autonomous mode task store + agents
+│   └── coding_model_autonomous/ # The pipeline: task store, kernel, agents
+│       │                       #   ── store ──
 │       ├── db.py               #   SQLite-backed task store (WAL, thread-safe)
 │       ├── models.py           #   Pydantic models (Spec, Task, Gate, Event)
 │       ├── schema.sql          #   DDL for specs, tasks, artifacts, gates, events
-│       ├── planner.py          #   Planner agent (spec → YAML or clarifications)
-│       ├── executor.py         #   Execution agents (architect/implementer/reviewer)
-│       ├── supervisor.py       #   Meta-orchestrator (retry / fail / replan)
-│       ├── test_runner.py      #   Sandboxed test dispatch (bwrap+seccomp; swift/node/pytest)
+│       │                       #   ── kernel: the decisions (v0.2.0) ──
+│       ├── workspace.py        #   Artifact ledger: the one door for artifact writes
+│       ├── outcome.py          #   Failure classification and disposition
+│       ├── context.py          #   One repository read per spec, one prompt budget
+│       ├── retry_policy.py     #   What a retry preserves and wipes, and who retries
+│       │                       #   ── agents and their inputs ──
+│       ├── planner.py          #   Planner agent (spec → plan YAML or clarifications)
+│       ├── executor.py         #   Architect/implementer/reviewer prompts, parsers, call_agent
+│       ├── architect_tools.py  #   The architect's bounded, read-only tool loop
+│       ├── plan_paths.py       #   Resolves the plan's phase paths against the target repo
+│       ├── apply_edits.py      #   Applies anchored SEARCH/REPLACE edit blocks
+│       ├── supervisor.py       #   Meta-orchestrator (retry / fail / replan); off by default
+│       ├── _http.py            #   HTTP access to the inference API for the agents
+│       │                       #   ── guards ──
+│       ├── design_testability.py  # Can each criterion of a design be tested as written?
+│       ├── swift_prechecks.py  #   Static pre-dispatch checks on generated Swift
+│       ├── swift_rules.py      #   Swift guidance and repair targeting
+│       │                       #   ── testing and delivery ──
+│       ├── test_runner.py      #   Sandboxed test dispatch (bwrap+seccomp) and the Mac runner transport
 │       ├── seccomp_filter.py   #   seccomp-BPF filter for sandboxed test runs
+│       ├── gate_output.py      #   Renders a test run for a human gate
+│       ├── delivery.py         #   Pushes a released spec to a pipeline/* branch of its repo
+│       │                       #   ── Jira ──
 │       ├── jira_client.py      #   Jira interface (FakeJiraClient + real Atlassian)
 │       └── jira_sync.py        #   Bidirectional sync (SQLite ↔ Jira)
-├── tests/                      # pytest suite (169 modules plus the seam tier; `pytest` from the repo root)
+├── tests/                      # pytest suite (228 modules plus the seam tier; `pytest` from the repo root)
 ├── bin/                        # Entry-point scripts: setup.sh, start*.sh
-├── scripts/                    # Operational scripts (redeploy, benchmarks, sweeps, stats)
+├── scripts/                    # Operational scripts; every live one is listed in scripts/README.md
 ├── systemd/                    # Service units (use `python -m coding_model_server.X` ExecStart)
 ├── polkit/                     # polkit rule: sudo-free restart of the units (redeploy.sh)
 ├── git-server/                 # git-shell wrapper + pre-receive hook for pipeline attempt branches
 ├── tools/                      # llama-server binary + shared libs, appledeepdoc-mcp (gitignored — you supply them)
 ├── scraping/                   # Apple documentation scraper
 ├── dashboard/                  # TypeScript React dashboard
-├── mac_runner/                 # Separate Swift/Xcode test runner service
+├── mac_runner/                 # Swift/Xcode test runner service; deploys on the Mac, not here
 ├── docs/
 │   ├── TUTORIAL.md             #   End-to-end pipeline tutorial
 │   ├── PIPELINE.md             #   Pipeline state machine + failure routing (the map)
+│   ├── MAC_RUNNER.md           #   The Mac runner: install, update, the two-host deploy rule
 │   ├── CONFIGURATION.md        #   Env vars, agent-config knobs, systemd
 │   ├── RAG_UPDATES.md          #   RAG database + agentic query layer
 │   ├── SECURITY_MIGRATION.md   #   The loopback + admin-key hardening, and how to undo it

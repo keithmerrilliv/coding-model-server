@@ -260,7 +260,7 @@ MAX_RETRIES = int(os.getenv("AUTONOMOUS_MAX_RETRIES", "5"))
 # before adoption and merged/deployed safely. Mirrors the BLOCK_ON_BUILD_WARNINGS
 # env-flag convention (a single truthy env read at import).
 DIFF_BASED_EDITS = os.getenv(
-    "AUTONOMOUS_DIFF_BASED_EDITS", "0").lower() in ("1", "true", "yes")
+    "AUTONOMOUS_DIFF_BASED_EDITS", "1").lower() in ("1", "true", "yes")
 
 # Manifest mode (#4): for large multi-file specs, generate a file MANIFEST first,
 # then one bounded call per file — removing the single-call output ceiling that

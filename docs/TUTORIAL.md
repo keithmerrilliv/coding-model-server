@@ -712,9 +712,11 @@ spec.md → Planner (dense_architect)  → [plan_approval gate]
 ```
 
 A planner that needs more information opens a **clarification** gate instead of
-guessing. A rejected gate feeds your notes back to the agent for a retry. With
-`AUTONOMOUS_DESIGN_REVIEW=1` (the default) a reviewer critiques the design and
-the architect gets a revision pass before any code is written.
+guessing. A rejected gate feeds your notes back to the agent for a retry.
+Before the design gate, an automated testability check sends a design back
+to the architect when a criterion cannot be tested as written. An optional
+model review of the design is off by default (`AUTONOMOUS_DESIGN_REVIEW=1`
+turns it on).
 
 ### 6.2 Driving It
 

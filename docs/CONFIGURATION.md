@@ -56,7 +56,7 @@ because every one of them is a VRAM-budget decision that has been measured.
 ### Client
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CODING_MODEL_SERVER_IP` | `192.0.2.10` | Server IP address. Note the autonomous CLI defaults the same var to `127.0.0.1`. |
+| `CODING_MODEL_SERVER_IP` | `127.0.0.1` | Server IP address, for the interactive client and the autonomous CLI alike. Set it when the client runs on a different machine from the server. |
 | `CODING_MODEL_SERVER_PORT` | `5000` | Server port used by the autonomous CLI. |
 | `PERMISSION_MODE` | `default` | `default` / `acceptEdits` / `yolo` |
 | `ALLOW_ALL` | *(unset)* | Legacy alias — equivalent to `PERMISSION_MODE=yolo`. |
@@ -71,7 +71,7 @@ because every one of them is a VRAM-budget decision that has been measured.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CODING_MODEL_MEMORY_DB` | `<repo>/var/memory_db` | ChromaDB persistence directory. |
-| `MEMORY_RELEVANCE_THRESHOLD` | `0.6` | **Maximum cosine distance** for a memory to be injected into a chat request — a hit is kept when `distance <= threshold`, so RAISING this makes retrieval *looser*, not stricter. (This row previously said "minimum similarity", which inverts the meaning.) |
+| `MEMORY_RELEVANCE_THRESHOLD` | `0.52` | **Maximum cosine distance** for a memory to be injected into a chat request — a hit is kept when `distance <= threshold`, so RAISING this makes retrieval *looser*, not stricter. 0.52 since DEV-834: every replayed hit at or above it was off-topic. |
 | `PDF_CHUNK_SIZE` | `1000` | Characters per chunk when ingesting a PDF. |
 | `PDF_CHUNK_OVERLAP` | `200` | Overlap between PDF chunks. |
 | `INGEST_MAX_FILE_SIZE` | `104857600` (100MB) | Per-file byte cap enforced by `/v1/memory/ingest`. `0` disables. |
@@ -162,7 +162,7 @@ again can help (`docs/PIPELINE.md` sections 6 and 8):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `AUTONOMOUS_DIFF_BASED_EDITS` | `0` | `1` asks the implementer for anchored SEARCH/REPLACE edit blocks against existing files instead of whole-file re-emission (DEV-581). |
+| `AUTONOMOUS_DIFF_BASED_EDITS` | `1` | Asks the implementer for anchored SEARCH/REPLACE edit blocks against existing files instead of whole-file re-emission (DEV-581). `0` restores whole-file re-emission. |
 | `AUTONOMOUS_ALLOW_UNREAD_FILE_MODIFICATION` | `0` | `1` lets a plan proceed when a declared modification cannot be read at `base_ref`. The default fails the spec rather than let the implementer rewrite a file it has never seen (DEV-492). |
 | `AUTONOMOUS_COLLISION_POLICY` | `rename` | What the artifact ledger does with a cross-role write at a path another role produced: `rename` (to `reviewer_<name>`) or `refuse`. |
 | `AUTONOMOUS_SHRINK_REFUSE_RATIO` | `0.25` | A write under this fraction of the repository file's lines and declarations is refused as a suspected reconstruction. |
@@ -184,7 +184,7 @@ architect and the implementer):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `AUTONOMOUS_DESIGN_REVIEW` | `1` | Master switch. Set to `0` to disable. |
+| `AUTONOMOUS_DESIGN_REVIEW` | `0` | Master switch. Off by default; set to `1` to have a reviewer critique each design before the design gate. |
 | `AUTONOMOUS_DESIGN_REVIEW_AGENT` | `reviewer` | Agent that reviews the architect's design. |
 | `AUTONOMOUS_DESIGN_REVIEW_MAX_TOKENS` | `8000` | Token budget for the design review. |
 | `AUTONOMOUS_DESIGN_REVIEW_MAX_REVISIONS` | `1` | How many times the architect may revise before escalating. |

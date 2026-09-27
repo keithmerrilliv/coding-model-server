@@ -31,16 +31,22 @@ The outer state machine. One spec, one row in `specs`, these statuses.
 stateDiagram-v2
     [*] --> pending_plan: spec submitted
     pending_plan --> needs_clarification: planner has questions
+    pending_plan --> needs_clarification: planner gave no verdict N times (infrastructure park)
     needs_clarification --> pending_plan: human answers
     needs_clarification --> cancelled: human rejects the questions
+    needs_clarification --> failed: no clarification gate exists (defensive)
     pending_plan --> pending_plan: plan fails validation (automatic)
     pending_plan --> plan_review: plan.yaml produced and valid
-    pending_plan --> failed: validation rounds exhausted
+    pending_plan --> failed: validation rounds exhausted, or the planner pass raised
     plan_review --> pending_plan: rejected (replan)
     plan_review --> executing: approved
     plan_review --> failed: gate vanished (defensive)
     executing --> done: release gate approved
     executing --> failed: budget exhausted / unrecoverable
+    executing --> pending_plan: supervisor replans (AUTONOMOUS_SUPERVISOR=1 only)
+    pending_plan --> cancelled: operator cancel
+    plan_review --> cancelled: operator cancel
+    executing --> cancelled: operator cancel
     done --> [*]
     failed --> [*]
     cancelled --> [*]
@@ -240,6 +246,18 @@ synthesized file's line count against the repository version. Every landed
 write ends with a newline — the whole-file parser strips the final one and
 the ledger restores it (DEV-641). Diagnostics
 (test output, failure reports, build logs) bypass the guards through
+### Checks around a test dispatch
+
+Four guards sit around the Mac dispatch and delivery. None has a diagram,
+because each is a single yes/no with one consequence.
+
+| Guard | When | What it checks | On failure |
+| --- | --- | --- | --- |
+| **Swift prechecks** (`swift_prechecks.py`, DEV-512, DEV-777) | Before a Swift attempt is dispatched | Pure text checks for errors decidable without a compiler: a type declared twice in one module, `mutating` inside a class, an unqualified static member, a `@Test` missing `throws`, `#require` without `try`, a dictionary key missing `Hashable`, `nil` for a non-optional argument, MainActor types called from nonisolated tests or closures | Reported as a build failure in the `path:line:col: error:` shape, so the retry behaves exactly as for a real build, minus the round-trip |
+| **Runner version** (`test_runner._log_runner_version`, DEV-805) | Every Mac dispatch | Reads the runner's `/v1/version`: the commit it serves and its timeout table | Logs the commit; warns when the two hosts' timeouts disagree, since the effective budget is the smaller. It does not refuse. See [MAC_RUNNER.md](MAC_RUNNER.md) |
+| **Tested manifest** (`delivery.verify_tested_manifest`, DEV-602) | Before delivery | The build check records the sha256 of every file it verified in `tested_manifest.json`; delivery re-hashes what it is about to push | Refuses the push, naming the divergent files. Bytes no test saw never ship |
+| **Base assessment** (`delivery.assess_base`, DEV-756, DEV-810) | Before delivery, against a fresh clone of the default branch | Whether the delivered snapshot would delete tests the default branch has | A deletion is refused on any base. A rename on a current base is delivered with both names recorded. A rename on a stale or unrecorded base is refused, since decay and intent cannot be told apart there |
+
 ## Three things called "corpus"
 
 The word was used for all three of these and the ambiguity cost real time, so

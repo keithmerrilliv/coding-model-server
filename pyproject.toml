@@ -72,6 +72,10 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+markers = [
+    "network: needs the internet (a real npm install); the local merge gate excludes it, CI runs it",
+    "slow: takes more than about 2 s (real sandbox or subprocess); informational",
+]
 
 [tool.mypy]
 # Scoped deliberately (DEV-169): type-hint coverage is bimodal, and these
