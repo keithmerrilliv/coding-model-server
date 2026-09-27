@@ -70,11 +70,51 @@ def test_autonomous_help_lists_every_subcommand(tmp_path):
         assert sub in r.stdout
 
 
-@pytest.mark.parametrize("sub", SUBCOMMANDS)
-def test_autonomous_subcommand_help_exits_zero(tmp_path, sub):
-    r = _run("coding-model-autonomous", sub, "--help", home=tmp_path)
+_SEP = "\n=== exit "
+
+
+@pytest.fixture(scope="module")
+def subcommand_helps(tmp_path_factory) -> dict:
+    """Every subcommand's --help from ONE interpreter: {sub: (exit, stdout)}.
+
+    Eight launches cost the suite about a second; the parser is rebuilt per
+    call, so one process running them in turn sees what eight would."""
+    home = tmp_path_factory.mktemp("home")
+    module, func = SCRIPTS["coding-model-autonomous"].split(":")
+    launcher = (
+        "import contextlib, io, sys\n"
+        f"from {module} import {func}\n"
+        f"for sub in {SUBCOMMANDS!r}:\n"
+        "    out = io.StringIO()\n"
+        "    sys.argv = ['coding-model-autonomous', sub, '--help']\n"
+        "    try:\n"
+        "        with contextlib.redirect_stdout(out):\n"
+        f"            code = {func}()\n"
+        "    except SystemExit as e:\n"
+        "        code = e.code\n"
+        f"    print(out.getvalue() + {_SEP!r} + sub + ' ' + str(code or 0))\n")
+    env = {**os.environ, "HOME": str(home),
+           "PYTHONPATH": os.pathsep.join([str(ROOT / "src"), str(ROOT)]),
+           "CODING_MODEL_SERVER_IP": "127.0.0.1",
+           "CODING_MODEL_SERVER_PORT": CLOSED_PORT}
+    r = subprocess.run([sys.executable, "-c", launcher], cwd=home, env=env,
+                       capture_output=True, text=True, timeout=60)
     assert r.returncode == 0, r.stderr
-    assert r.stdout.startswith(f"usage: coding-model-autonomous {sub}")
+    helps, text = {}, r.stdout
+    for sub in SUBCOMMANDS:
+        body, _, rest = text.partition(_SEP)
+        name, code = rest.split("\n", 1)[0].split()
+        assert name == sub
+        helps[sub] = (int(code), body)
+        text = rest.split("\n", 1)[1] if "\n" in rest else ""
+    return helps
+
+
+@pytest.mark.parametrize("sub", SUBCOMMANDS)
+def test_autonomous_subcommand_help_exits_zero(subcommand_helps, sub):
+    code, out = subcommand_helps[sub]
+    assert code == 0
+    assert out.startswith(f"usage: coding-model-autonomous {sub}")
 
 
 def test_autonomous_requires_a_subcommand(tmp_path):
