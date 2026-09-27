@@ -1,10 +1,11 @@
 # LLab: the app loads its bundled scene, and says where every scene came from
 
-Jira: DEV-308, epic DEV-449. Repo `llab`, `main` = `97c8cf9`: `caafa41` bundles
-`scene.usda`, and `97c8cf9` adds the `LLabStore` test target. Every fact below was read
-from that commit. A reference implementation of exactly the edits below, with the tests
-described, ran on the Mac Studio before this spec was written. The `LLabStore` tests passed
-8 of 8 (the existing one and the 7 new ones), and the `LLabGenerator` tests passed 2 of 2.
+Jira: DEV-308, epic DEV-449. Repo `llab`, `main` = `c1a8354`: `caafa41` bundles
+`scene.usda`, `97c8cf9` adds the `LLabStore` test target, and `c1a8354` is run 66's
+DEV-307 delivery. Every fact below was read from that commit. A reference implementation
+of exactly the edits below, with the tests described, ran on the Mac Studio before this
+spec was written. The `LLabStore` tests passed 8 of 8 (the existing one and the 7 new
+ones), and the `LLabGenerator` tests passed 8 of 8.
 The new test file alone, against unmodified `main`, fails to compile:
 `cannot find 'LLabSceneSource' in scope` (8 times),
 `argument passed to call that takes no arguments` (8 times) and
