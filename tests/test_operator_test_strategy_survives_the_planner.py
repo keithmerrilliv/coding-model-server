@@ -7,9 +7,9 @@ test_strategy parser could not read the ```yaml fence every real spec uses
 the keys mechanically.
 """
 
-from coding_model_server.orchestrator_daemon import (
-    _overlay_operator_test_strategy,
-    _spec_declared_test_strategy,
+from coding_model_autonomous.test_strategy import (
+    overlay_operator_test_strategy as _overlay_operator_test_strategy,
+    spec_declared_test_strategy as _spec_declared_test_strategy,
 )
 
 import yaml

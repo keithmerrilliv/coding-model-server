@@ -22,11 +22,11 @@ from pathlib import Path
 import pytest
 import yaml
 
-from coding_model_server.orchestrator_daemon import (
-    _overlay_operator_test_strategy,
-    _parse_spec_test_strategy,
-    _spec_declared_test_strategy,
-    _validate_test_strategy,
+from coding_model_autonomous.test_strategy import (
+    overlay_operator_test_strategy as _overlay_operator_test_strategy,
+    parse_spec_test_strategy as _parse_spec_test_strategy,
+    spec_declared_test_strategy as _spec_declared_test_strategy,
+    validate_test_strategy as _validate_test_strategy,
 )
 
 REPO = Path(__file__).resolve().parents[1]

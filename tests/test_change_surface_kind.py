@@ -10,6 +10,7 @@ fact they could not express.
 import logging
 
 import coding_model_server.orchestrator_daemon as d
+from coding_model_autonomous import test_strategy as ts
 from coding_model_autonomous.context import change_surface
 
 PROSE = "# Spec\n\nJust prose. No table.\n"
@@ -66,7 +67,7 @@ class TestGuardsArmByName:
 
     def test_the_repo_key_check_warns_on_an_unrecognised_table(self, caplog):
         with caplog.at_level(logging.WARNING, logger="orchestrator"):
-            problems = d._validate_test_strategy(self.NO_REPO, UNREAD)
+            problems = ts.validate_test_strategy(self.NO_REPO, UNREAD)
         assert any("DEV-492 repo-key check" in r.message and "NOT armed" in r.message
                    for r in caplog.records)
         # it could not tell, so it does not CLAIM a modification either
@@ -74,13 +75,13 @@ class TestGuardsArmByName:
 
     def test_a_recognised_table_still_raises_the_repo_problem(self, caplog):
         with caplog.at_level(logging.WARNING, logger="orchestrator"):
-            problems = d._validate_test_strategy(self.NO_REPO, RUN19)
+            problems = ts.validate_test_strategy(self.NO_REPO, RUN19)
         assert any("no `repo` key" in p for p in problems)   # unchanged behaviour
         assert not any("NOT armed" in r.message for r in caplog.records)
 
     def test_no_table_is_quiet(self, caplog):
         with caplog.at_level(logging.WARNING, logger="orchestrator"):
-            d._validate_test_strategy(self.NO_REPO, PROSE)
+            ts.validate_test_strategy(self.NO_REPO, PROSE)
         assert not any("DEV-630" in r.message for r in caplog.records)
 
 

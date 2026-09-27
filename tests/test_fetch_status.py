@@ -14,6 +14,7 @@ import logging
 import pytest
 
 import coding_model_server.orchestrator_daemon as d
+from coding_model_autonomous import test_strategy as ts
 from coding_model_autonomous import context as c
 
 REPO = "coding-model-server"
@@ -168,17 +169,17 @@ class TestNoStrategyMapping:
                                       "test_strategy: pytest\nphases: []\n",
                                       "phases: []\n"])
     def test_validation_bounces_a_plan_that_dropped_the_whole_block(self, plan):
-        problems = d._validate_test_strategy(plan, DECLARING_SPEC)
+        problems = ts.validate_test_strategy(plan, DECLARING_SPEC)
         assert len(problems) == 1
         assert "`protected_paths`" in problems[0] and "`repo`" in problems[0]
         assert "no `test_strategy` mapping" in problems[0]
 
     def test_a_spec_declaring_nothing_is_the_old_shape(self):
-        assert d._validate_test_strategy("phases: []\n", "# Spec\n") == []
+        assert ts.validate_test_strategy("phases: []\n", "# Spec\n") == []
 
     def test_the_overlay_says_it_cannot_restore(self, caplog):
         with caplog.at_level(logging.WARNING):
-            out = d._overlay_operator_test_strategy("test_strategy: null\n", DECLARING_SPEC, "spec_x")
+            out = ts.overlay_operator_test_strategy("test_strategy: null\n", DECLARING_SPEC, "spec_x")
         assert out == "test_strategy: null\n"
         msgs = [r.getMessage() for r in caplog.records if "DEV-573 overlay" in r.getMessage()]
         assert len(msgs) == 1 and "NOT armed" in msgs[0] and "protected_paths" in msgs[0]

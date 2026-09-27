@@ -245,12 +245,33 @@ def _marked_as_bookkeeping(payload: ast.Dict) -> bool:
     return False
 
 
+def _anomaly_calls() -> int:
+    """`_anomaly(...)` calls: AGENT_RAN with `model_call: False` by
+    construction (DEV-837), so they need no payload literal to be checked."""
+    tree = ast.parse(_DAEMON.read_text())
+    return sum(1 for node in ast.walk(tree)
+               if isinstance(node, ast.Call)
+               and isinstance(node.func, ast.Name) and node.func.id == "_anomaly")
+
+
 class TestEveryCallSiteIsAttributable:
     def test_the_guard_can_see_the_call_sites(self):
         """Guard against the guard: if a refactor moves these off dict
         literals this test starts passing vacuously, which is how DEV-502
-        survived."""
-        assert len(list(_agent_ran_payloads())) >= 18
+        survived. DEV-837 moved the bookkeeping ones into _anomaly(), which
+        is counted instead; the literal floor still covers the model calls."""
+        assert len(list(_agent_ran_payloads())) >= 8
+        assert len(list(_agent_ran_payloads())) + _anomaly_calls() >= 24
+
+    def test_anomaly_marks_itself_as_bookkeeping(self):
+        """The one literal every _anomaly() call shares must say no model ran."""
+        tree = ast.parse(_DAEMON.read_text())
+        fn = next(n for n in tree.body
+                  if isinstance(n, ast.FunctionDef) and n.name == "_anomaly")
+        payloads = [kw.value for n in ast.walk(fn) if isinstance(n, ast.Call)
+                    for kw in n.keywords
+                    if kw.arg == "payload" and isinstance(kw.value, ast.Dict)]
+        assert payloads and all(_marked_as_bookkeeping(p) for p in payloads)
 
     def test_every_agent_ran_payload_is_one_or_the_other(self):
         """Either it names the agent that ran, or it declares no model ran.
