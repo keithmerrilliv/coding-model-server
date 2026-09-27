@@ -238,3 +238,82 @@ def test_module_allowance_is_scoped_to_the_importing_file_dev775():
     got = unresolved_symbols({"App.swift": app}, {"App.swift": app})
     assert "MetricsParticleBridge" in got
     assert "Package" in got          # no PackageDescription import here
+
+
+# ── DEV-698 false positives, each shape taken from a recorded CONTEXT_ASSEMBLED ─
+
+def _only(source: str) -> list:
+    return unresolved_symbols({"F.swift": source}, {"F.swift": source})
+
+
+AUDIOSCAPE = """import AVFoundation
+
+final class Audioscape {
+    let engine = AVAudioEngine()
+    func build() {
+        let format = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 2)
+        let node = AVAudioSourceNode { _, _, _, list in
+            let buffers = UnsafeMutableAudioBufferListPointer(list)
+            let v = sinf(0.5) * expf(-1) + sqrtf(2)
+            return noErr
+        }
+        let reverb = AVAudioUnitReverb()
+    }
+}
+"""
+
+
+def test_avfoundation_libm_and_pointer_types_are_not_missing_files():
+    """Runs 43-46 and 50-51: eight names reported on every audio dispatch."""
+    assert _only(AUDIOSCAPE) == []
+
+
+def test_framework_names_without_the_import_are_still_reported():
+    """Control: the allowance is the import's, not the name's."""
+    got = _only("let e = AVAudioEngine()\nlet v = sinf(0.5)\n")
+    assert "AVAudioEngine" in got and "sinf" in got
+
+
+def test_metal_names_int32_and_memcpy_are_not_missing_files():
+    """Runs 46-47 (HalluRenderer)."""
+    src = ("import Metal\nimport simd\n"
+           "let d = MTLCreateSystemDefaultDevice()\n"
+           "let p = MTLRenderPipelineDescriptor()\n"
+           "let m = simd_float4x4(1)\nlet n = Int32(4)\nmemcpy(dst, src, 16)\n")
+    assert _only(src) == []
+
+
+def test_an_enum_case_with_an_associated_value_is_a_declaration():
+    """`case downloading(progress: Double)` read as a call to a missing
+    `downloading` on runs 55, 60, 61 and 62."""
+    src = ("enum ModelState {\n    case idle\n    case downloading(progress: Double)\n"
+           "    case error(String)\n}\n")
+    assert _only(src) == []
+
+
+def test_attributes_are_not_calls():
+    src = ('import Testing\n@Suite("s") struct S {\n'
+           '    @Test("t") func t() {}\n'
+           '    func go(completion: @escaping () -> Void) { completion() }\n}\n')
+    assert _only(src) == []
+
+
+def test_swiftui_environment_actions_and_closure_parameters_resolve():
+    """Run 61's ContentView: `dismiss()`, `openImmersiveSpace()` and a
+    closure parameter `pick` called in the body."""
+    src = ("import SwiftUI\nstruct V: View {\n"
+           "    @Environment(\\.dismiss) private var dismiss\n"
+           "    @Environment(\\.openImmersiveSpace) var openImmersiveSpace\n"
+           "    func choose(pick: @escaping () -> Int, onPick: (Int) -> Void) {\n"
+           "        onPick(pick()); dismiss()\n    }\n"
+           "    var body: some View { VStack { Button(\"x\") {} ; Toggle(\"t\", isOn: .constant(true)) } }\n}\n")
+    assert _only(src) == []
+
+
+def test_real_repository_symbols_survive_the_filters():
+    """Control: run 61's true positives, in a file that imports SwiftUI and
+    MLX, stay reported."""
+    src = ("import SwiftUI\nimport MLXLMCommon\n"
+           "let c = ModelConfiguration(id: \"x\")\n"
+           "let v = MetalViewRepresentable()\nlet g = GenerationTaskController()\n")
+    assert _only(src) == ["GenerationTaskController", "MetalViewRepresentable"]

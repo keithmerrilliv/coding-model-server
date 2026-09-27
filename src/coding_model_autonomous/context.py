@@ -267,7 +267,10 @@ def omission_status(reason: str) -> str:
 # is not a method on a receiver whose type we cannot resolve from here. That
 # narrowness is what keeps the noise down, and it is exactly the shape of
 # `spawnWaveChain()`.
-_BARE_CALL_RE = re.compile(r"(?<![\w.])([A-Za-z_]\w{2,})\s*\(")
+#
+# DEV-698: not preceded by `@` either. `@escaping (`, `@Test(` and `@Suite(`
+# are attributes, not calls, and all three were reported as missing symbols.
+_BARE_CALL_RE = re.compile(r"(?<![\w.@])([A-Za-z_]\w{2,})\s*\(")
 
 # Anything the served files declare, across the languages this pipeline sees.
 _DECL_RES = (
@@ -276,14 +279,27 @@ _DECL_RES = (
     re.compile(r"\bdef\s+(\w+)"),                                # Python
     re.compile(r"\bclass\s+(\w+)"),
     re.compile(r"\bfunction\s+(\w+)"),                           # JS/TS
-    re.compile(r"\b(?:let|var|const)\s+(\w+)\s*[:=]"),
+    # Any binding, not only one followed by `:` or `=`. DEV-698: SwiftUI's
+    # `@Environment(\.dismiss) var dismiss` has neither, and `dismiss()`,
+    # `openImmersiveSpace()` and `dismissImmersiveSpace()` read as missing.
+    re.compile(r"\b(?:let|var|const)\s+(\w+)"),
     re.compile(r"\btypealias\s+(\w+)"),
+    # DEV-698: a Swift enum case with an associated value, `case downloading(
+    # progress: Double)`, is a declaration that looks exactly like a bare call.
+    # `error`, `downloading`, `segment` and `mushroom` were reported on six
+    # specs for that reason alone. `case .x(` is a pattern, not a declaration,
+    # and the leading dot keeps it out.
+    re.compile(r"\bcase\s+(\w+)\s*\("),
+    # A closure-typed parameter or property, `pick: @escaping () -> PromptQuote`,
+    # is called by name in the body: `onPick(pick())` was reported on run 61.
+    re.compile(r"\b(\w+)\s*:\s*(?:@\w+\s+)*\("),
 )
 
 # Anything matching these is never a missing repository symbol. The prefix rule
 # covers XCTest's assertion family, which is large, stable and not worth
 # enumerating.
-_NOISE_PREFIXES = ("XCTAssert", "XCTUnwrap", "NS", "UI", "CG", "SIMD")
+_NOISE_PREFIXES = ("XCTAssert", "XCTUnwrap", "NS", "UI", "CG", "SIMD",
+                   "Unsafe")                       # the stdlib pointer family
 
 # Language keywords. `except (KeyError, ValueError):` and `private(set)` both
 # read as a bare call to the regex, and both were false positives on the real
@@ -324,6 +340,11 @@ _CALL_NOISE = frozenset("""
     describe it expect beforeEach afterEach test
     XCTAssert XCTAssertEqual XCTAssertTrue XCTAssertFalse XCTAssertNil
     XCTAssertNotNil XCTAssertThrowsError XCTFail Task MainActor
+
+    Int8 Int16 Int32 Int64 UInt UInt8 UInt16 UInt32 UInt64
+    Float16 Float32 Float64 Character Substring stride MemoryLayout
+    ObjectIdentifier repeatElement withUnsafeBytes withUnsafeMutableBytes
+    withUnsafePointer withUnsafeMutablePointer
 """.split())
 
 
@@ -338,7 +359,54 @@ _MODULE_PROVIDED: dict[str, frozenset] = {
         BuildSettingCondition LanguageTag SwiftLanguageMode SwiftLanguageVersion
         CLanguageStandard CXXLanguageStandard PluginCapability PluginPermission
         """.split()),
+    # DEV-698 false positives, every name below taken from a real
+    # CONTEXT_ASSEMBLED list where it was reported as "defined nowhere".
+    "SwiftUI": frozenset("""
+        Binding Button Circle Color Environment EnvironmentObject ForEach Form
+        GeometryReader Group GroupBox HStack VStack ZStack Image Label List Menu
+        NavigationStack Picker ProgressView Rectangle RoundedRectangle Capsule
+        ScrollView Section Slider Spacer Divider State StateObject Toggle
+        TextField TextEditor LinearGradient Font Animation ToolbarItem
+        """.split()),
+    "Testing": frozenset("Suite Test Tag Issue Bug".split()),
+    "ARKit": frozenset("""
+        ARKitSession WorldTrackingProvider HandTrackingProvider
+        PlaneDetectionProvider SceneReconstructionProvider ImageTrackingProvider
+        """.split()),
+    "MLXLMCommon": frozenset("""
+        ModelConfiguration TokenIterator TopPSampler ArgMaxSampler
+        CategoricalSampler GenerateParameters ModelContainer ModelContext
+        UserInput LMInput
+        """.split()),
+    "MLXLLM": frozenset("LLMModelFactory LLMRegistry".split()),
 }
+
+# DEV-698: modules whose API is too large to list but keeps one naming
+# prefix. With `import AVFoundation` every AV type read as a missing
+# repository file, on every Electric Sheep audio dispatch.
+_MODULE_PREFIXES: dict[str, tuple] = {
+    "AVFoundation": ("AV",), "AVFAudio": ("AV",),
+    "Metal": ("MTL",), "MetalKit": ("MTK", "MTL"),
+    "simd": ("simd_",), "Accelerate": ("vDSP_", "vv", "cblas_"),
+    "CoreAudio": ("Audio", "kAudio"), "AudioToolbox": ("Audio", "AU", "kAudio"),
+    "CoreMedia": ("CM",), "CoreVideo": ("CV",), "QuartzCore": ("CA",),
+}
+
+# The C maths and memory functions every Apple SDK module re-exports through
+# Darwin: `sinf`, `expf`, `sqrtf` and `memcpy` were reported on eight specs.
+_C_LIBRARY = frozenset("""
+    sin cos tan asin acos atan atan2 sinh cosh tanh exp exp2 log log2 log10
+    pow sqrt cbrt fabs floor ceil fmod fmin fmax hypot
+    sinf cosf tanf asinf acosf atanf atan2f sinhf coshf tanhf expf exp2f logf
+    log2f log10f powf sqrtf cbrtf fabsf floorf ceilf roundf truncf fmodf fminf
+    fmaxf hypotf memcpy memmove memset memcmp malloc calloc realloc free
+    """.split())
+_C_LIBRARY_IMPORTERS = frozenset("""
+    Foundation Darwin Glibc AVFoundation AVFAudio Metal MetalKit simd Accelerate
+    CoreAudio AudioToolbox SwiftUI UIKit AppKit CoreGraphics QuartzCore
+    CoreMedia CoreVideo
+    """.split())
+
 _IMPORT_RE = re.compile(r"^\s*import\s+([A-Za-z_]\w*)", re.MULTILINE)
 
 # Comments and string literals are prose, and prose is full of words followed
@@ -395,9 +463,18 @@ def unresolved_symbols(editable: dict, served: dict) -> list[str]:
             declared.update(decl.findall(source))
     called: set[str] = set()
     for source in editable.values():
-        called.update(_BARE_CALL_RE.findall(_strip_prose(source)))
-        for module in _IMPORT_RE.findall(source):
-            declared.update(_MODULE_PROVIDED.get(module, ()))
+        # What this file's own imports provide. Scoped per file (DEV-775): a
+        # module one file imports says nothing about another file's calls.
+        imports = set(_IMPORT_RE.findall(source))
+        provided: set[str] = set()
+        for module in imports:
+            provided.update(_MODULE_PROVIDED.get(module, ()))
+        if imports & _C_LIBRARY_IMPORTERS:
+            provided.update(_C_LIBRARY)
+        prefixes = tuple(p for m in imports for p in _MODULE_PREFIXES.get(m, ()))
+        called.update(
+            n for n in _BARE_CALL_RE.findall(_strip_prose(source))
+            if n not in provided and not (prefixes and n.startswith(prefixes)))
     names = sorted(
         n for n in called - declared - _CALL_NOISE - _KEYWORDS
         if not n.isupper()                        # SCREAMING_CASE is a constant
