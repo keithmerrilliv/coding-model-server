@@ -552,7 +552,7 @@ sequenceDiagram
     Note over RP: anchor: complexity.json's recommendation or tier,<br/>else the role default (AUTONOMOUS_IMPLEMENTER_AGENT)
     opt retry_count above 0
         RP->>EV: newest implementer agent_ran
-        Note over RP: eligible: agents whose n_ctx holds that prompt plus the completion
+        Note over RP: eligible: agents whose window holds its budget_needed_tokens,<br/>by the allocator's own rule, context.fits
     end
     RP->>OC: rotation_offset
     OC->>EV: no-verdicts on this attempt that asked to rotate
@@ -691,7 +691,10 @@ before any render:
    design, notes, instructions — is the fixed part, and it is charged first.
 2. The destination window, less the completion budget and any reasoning budget
    the agent's server spends ahead of it (DEV-616's `--reasoning-budget`), less
-   `AUTONOMOUS_PROMPT_HEADROOM`, is what the sections share.
+   `AUTONOMOUS_PROMPT_HEADROOM`, is what the sections share. The same share
+   decides whether a prompt fits at all (`context.fits`), and the rotation's
+   eligibility check uses it too, so an agent the retry plan names is one
+   this step accepts (DEV-843).
 3. Sections are filled in priority order — editable, then protected, then prior
    artifacts — each taking the smaller of its knob and what is left. A knob is
    still a ceiling; it is no longer independent.

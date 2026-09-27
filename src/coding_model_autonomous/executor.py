@@ -1090,7 +1090,7 @@ def agent_event_fields(meta: Optional[dict]) -> dict:
         key: meta[key]
         for key in ("agent", "duration_ms", "prompt_tokens",
                     "completion_tokens", "total_tokens", "calls",
-                    "max_call_prompt_tokens",
+                    "max_call_prompt_tokens", "budget_needed_tokens",
                     "reasoning_chars", "visible_chars")
         if meta.get(key) is not None
     }

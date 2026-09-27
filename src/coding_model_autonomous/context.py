@@ -981,6 +981,14 @@ CHARS_PER_TOKEN = max(1, int(os.getenv("AUTONOMOUS_PROMPT_CHARS_PER_TOKEN", "3")
 HEADROOM = float(os.getenv("AUTONOMOUS_PROMPT_HEADROOM", "0.95"))
 
 
+def fits(needed_tokens: int, window_tokens: int) -> bool:
+    """The allocator's fit rule for a caller that already has a total: the
+    prompt, the completion and any reasoning reserve against the part of the
+    window the input may claim. :func:`allocate` applies the same rule to
+    sections (DEV-843)."""
+    return needed_tokens <= int(window_tokens * HEADROOM)
+
+
 class PromptTooLarge(RuntimeError):
     """No available window holds this prompt even with every droppable
     section dropped — the fixed part (spec, design, instructions) plus the
@@ -1068,7 +1076,9 @@ class Allocation:
 
     @property
     def fits(self) -> bool:
-        return self.window_tokens is None or self.needed_tokens <= self.window_tokens
+        # The HEADROOM share, as the section budget uses: one rule for a
+        # prompt with droppable sections and one without (DEV-843).
+        return self.window_tokens is None or fits(self.needed_tokens, self.window_tokens)
 
     def describe(self) -> str:
         parts = [f"{s.name} {s.chars}/{s.budget}"

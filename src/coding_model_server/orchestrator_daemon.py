@@ -2395,8 +2395,22 @@ def _attempt_chars(attempt: dict) -> str:
     return " " * n
 
 
+def _note_budget(tally: "dict | None", alloc: "_context.Allocation",
+                 completion_tokens: int) -> None:
+    """Record what the largest call of this attempt needed from a window, in
+    the allocator's units: its prompt estimate plus the completion reserve.
+    The next attempt's choose_agent judges fit from this, so the agent it
+    plans is one the allocator will accept (DEV-843)."""
+    if tally is None:
+        return
+    needed = alloc.prompt_tokens + completion_tokens
+    tally["budget_needed_tokens"] = max(tally.get("budget_needed_tokens", 0),
+                                        needed)
+
+
 def _ctx_capable_agent(spec_id: str, agent: "str | None", messages: list,
-                       completion_tokens: int) -> "str | None":
+                       completion_tokens: int,
+                       tally: "dict | None" = None) -> "str | None":
     """DEV-624's fit check, now the allocator's (DEV-633).
 
     For the dispatch sites whose prompt has no droppable file section — the
@@ -2411,10 +2425,12 @@ def _ctx_capable_agent(spec_id: str, agent: "str | None", messages: list,
     largest and let the server answer with a 413" — five wasted round-trips
     to learn what the sum already said.
     """
-    return _prompt_budget(spec_id, "implementer",
-                          fixed_chars=_message_chars(messages),
-                          completion_tokens=completion_tokens, agent=agent,
-                          candidates=_IMPLEMENTER_ROTATION).agent
+    alloc = _prompt_budget(spec_id, "implementer",
+                           fixed_chars=_message_chars(messages),
+                           completion_tokens=completion_tokens, agent=agent,
+                           candidates=_IMPLEMENTER_ROTATION)
+    _note_budget(tally, alloc, completion_tokens)
+    return alloc.agent
 
 
 def _note_reroute(db: Database, spec: Spec, task, planned: "str | None",
@@ -2526,6 +2542,7 @@ def _generate_implementation(
                              executor.PROTECTED_FILES_MAX_CHARS),
         ],
         candidates=_IMPLEMENTER_ROTATION)
+    _note_budget(tally, alloc, impl_max_tokens)
     if alloc.agent != chosen_agent:
         _note_reroute(db, spec, task, chosen_agent, alloc.agent)
     chosen_agent = alloc.agent
@@ -3077,7 +3094,7 @@ def _generate_via_manifest(
     # operator's clarifications are the whole ask — so the budget here is only
     # a fit check (DEV-633).
     dispatched = _ctx_capable_agent(spec.id, chosen_agent, manifest_messages,
-                                    executor.MANIFEST_MAX_TOKENS)
+                                    executor.MANIFEST_MAX_TOKENS, tally=tally)
     # DEV-676: record the move, as the single-call and per-file paths do; it
     # used to change the agent silently, so ATTEMPT_PLANNED named one that
     # never ran.
@@ -3392,6 +3409,7 @@ def _generate_one_file(
                                    list(reference_files or []),
                                    executor.PROTECTED_FILES_MAX_CHARS)],
         candidates=_IMPLEMENTER_ROTATION)
+    _note_budget(tally, file_alloc, executor.PER_FILE_MAX_TOKENS)
     if file_alloc.agent != chosen_agent:
         _note_reroute(db, spec, task, chosen_agent, file_alloc.agent)
     chosen_agent = file_alloc.agent
@@ -3884,7 +3902,7 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
         db, spec.id, task, spec_dir,
         default_agent=executor.role_to_agent("implementer"),
         completion_tokens=executor.implementer_max_tokens_for(design_md),
-        window_of=_agent_ctx_limit)
+        window_of=_agent_ctx_limit, reserve_of=_agent_reasoning_reserve)
     chosen_agent, assignment = choice.agent, choice.assignment
 
     # DEV-631: what will differ from the failed attempt? Recorded before the
