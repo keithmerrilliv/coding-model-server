@@ -3160,8 +3160,13 @@ def _generate_via_manifest(
     # Nothing in a manifest prompt is droppable — spec, design and the
     # operator's clarifications are the whole ask — so the budget here is only
     # a fit check (DEV-633).
-    chosen_agent = _ctx_capable_agent(spec.id, chosen_agent, manifest_messages,
-                                      executor.MANIFEST_MAX_TOKENS)
+    dispatched = _ctx_capable_agent(spec.id, chosen_agent, manifest_messages,
+                                    executor.MANIFEST_MAX_TOKENS)
+    # DEV-676: record the move, as the single-call and per-file paths do; it
+    # used to change the agent silently, so ATTEMPT_PLANNED named one that
+    # never ran.
+    _note_reroute(db, spec, task, chosen_agent, dispatched)
+    chosen_agent = dispatched
     # DEV-507: a manifest parse failure buys a re-call of the manifest, not one
     # of the implementer's MAX_RETRIES attempts. An unreadable response says
     # nothing about whether this agent can do the work (DEV-431), so rotating
