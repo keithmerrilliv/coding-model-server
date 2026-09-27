@@ -53,6 +53,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Optional
 
 from .models import ArtifactKind
+from .plan_paths import is_placeholder
 
 logger = logging.getLogger("orchestrator.workspace")
 
@@ -188,7 +189,11 @@ def is_placeholder_path(rel_path: str) -> bool:
     # Rule 7: glob metacharacter — contains '*', '?', or '['
     if '*' in p or '?' in p or '[' in p:
         return True
-    return False
+    # Rule 8: the plan's own markers — `<source files>`, `TBD`, `n/a`, `none`
+    # (DEV-601). One vocabulary for "something goes here" (DEV-838); the
+    # ledger adds its write-only rules above, since a glob is a fine plan
+    # input but never a file.
+    return is_placeholder(p)
 
 
 def _with_trailing_newline(content: str) -> str:
