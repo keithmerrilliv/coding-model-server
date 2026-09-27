@@ -37,6 +37,7 @@ from .thinking import strip_thinking as _server_strip_thinking
 from .workspace import _count_declarations, artifact_path  # noqa: F401
 from .swift_rules import render_swift_rules, render_cited_diagnostics
 from . import swift_prechecks
+from .design_testability import FILE_STRUCTURE_HEADING, _section as _design_section
 
 logger = logging.getLogger("orchestrator.executor")
 
@@ -375,32 +376,13 @@ _DESIGN_FILE_PATH_RE = re.compile(
 
 
 def _file_structure_section(design_md: str) -> str | None:
-    """Extract the ## File Structure section from a design document.
+    """The body of the design's File Structure section, or None when absent.
 
-    Returns the text of the '## File Structure' section - from a line starting
-    with ## File Structure (case-insensitive, 2-4 # symbols) up to the next
-    line that starts with ## (level 2 or shallower heading) or end of doc.
-    Returns None when no such section exists.
+    One reader (DEV-838): design_testability's, which the guards already use.
+    This module had its own, with a looser heading match and a fixed level-2
+    boundary; on all 405 archived designs the two returned the same body.
     """
-    if not design_md:
-        return None
-
-    SECTION_START_RE = re.compile(r"^(#{2,4})\s+File\s+Structure", re.IGNORECASE | re.MULTILINE)
-    SECTION_BOUNDARY_RE = re.compile(r"^#{1,2}\s+", re.MULTILINE)
-
-    start_match = SECTION_START_RE.search(design_md)
-    if not start_match:
-        return None
-
-    start_pos = start_match.end()
-
-    boundary_match = SECTION_BOUNDARY_RE.search(design_md[start_pos:])
-    if boundary_match:
-        end_pos = start_pos + boundary_match.start()
-    else:
-        end_pos = len(design_md)
-
-    return design_md[start_match.start():end_pos]
+    return _design_section(design_md or "", FILE_STRUCTURE_HEADING) or None
 
 
 def estimate_design_file_count(design_md: str) -> int:
