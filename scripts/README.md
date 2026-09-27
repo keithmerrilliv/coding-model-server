@@ -12,6 +12,7 @@ Run Python scripts from the repo root with `venv/bin/python scripts/<name>`.
 | --- | --- |
 | `merge_gate.sh <branch>` | The local merge gate: merges a branch into `main` and runs ruff, mypy and pytest on the **merged** tree, then pushes. Refuses a dirty tree. Excludes `network`-marked tests; CI runs them. |
 | `release_tag.sh vX.Y.Z [--execute]` | Dates the CHANGELOG heading, tags, pushes and creates the GitHub release. Dry run by default. Needs green CI on `HEAD` and a `## vX.Y.Z — unreleased` heading. |
+| `check_mermaid.mjs [repo]` | Parses every mermaid diagram in `README.md` and `docs/*.md`; exits 1 on a parse error. Uses the dashboard's mermaid (`cd dashboard && npm ci`). Run it after editing a diagram. |
 
 ## Deploy and hosts
 
