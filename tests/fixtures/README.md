@@ -18,6 +18,11 @@ row says so. The run numbers match the runs table in the top-level README.
 | `dev831_run66_round2_design.md` | Run 66, LLab (spec_ae73361b) | The round 2 design, which lists header-resident C++ types in Data Models | `test_mutability_swift_only.py` (DEV-831) |
 | `dev831_LSystem.h` | Run 66, LLab (spec_ae73361b) | The C++ header `LLab Shared/Generator/LSystem.h` served to the architect | `test_mutability_swift_only.py` (DEV-831) |
 | `dev833_run68_round1_design.md` | Run 68, LLab (spec_9decc8db, DEV-832, USD parser validation) | The round 1 design, whose seam C7 compares an `NSError` domain with a string literal that is also a type's name | `test_equatable_string_literals.py` (DEV-833) |
+| `dev838_swift_compile_failure.txt` | Centipede (spec_1ba2db3d), `retry_history/retry_5/build_check_output.txt`, whole file | A `swift test` build that failed on two `'let' constant` mutability errors, with one style warning and the bare `error: fatalError` trailer | `test_diagnostics.py` (DEV-838) |
+| `dev838_xcodebuild_test_failure.txt` | Electric Sheep (spec_74c42cc8), `test_output.txt`, the last 29 lines of 6,120 | An `xcodebuild test` run: eight `Test case '…' passed/failed on` lines, two failed, and `** TEST FAILED **` | `test_diagnostics.py` (DEV-838) |
+| `dev838_pytest_pass.txt` | Self-target (spec_823fee30), `test_output.txt`, whole file | A pytest run of four tests, all passed | `test_diagnostics.py` (DEV-838) |
+| `dev838_node_test_harness_failure.txt` | Centipede JS (spec_54b2c1b3), `retry_history/retry_4/test_output.txt`, lines 1–38 and the last 9 lines | A node:test run whose test files failed to import (`does not provide an export named`), then the TAP footer: 71 tests, 31 pass | `test_diagnostics.py` (DEV-838) |
+| `dev838_swift_test_crash.txt` | Run 9 of DEV-102, Centipede (spec_9ff962b9), `test_output.txt`, whole file | `Build complete!`, then the swift-testing helper exited on signal 5 before any test reported; carries the blocking `[#no-usage]` warning | `test_diagnostics.py` (DEV-838) |
 
 `tests/seams/fixtures/` is a separate set, owned by the seam harness
 (`tests/seams/seam_harness.py`).

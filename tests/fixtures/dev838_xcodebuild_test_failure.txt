@@ -1,0 +1,29 @@
+Test session results, code coverage, and logs:
+	/Users/admin/dd/Logs/Test/Test-ElectricSheep-2026.08.14_02-37-31-+0000.xcresult
+
+Testing started
+Test suite 'ForcingStrategyTests' started on 'My Mac - ElectricSheep (1830)'
+Test suite 'DtypeContainmentTests' started on 'My Mac - ElectricSheep (1830)'
+Test suite 'GenerationCancellationTests' started on 'My Mac - ElectricSheep (1830)'
+Test case 'DtypeContainmentTests/a1_float64_input_rejected_with_readable_error()' failed on 'My Mac - ElectricSheep (1830)' (0.836 seconds)
+Test case 'ForcingStrategyTests/testNonTopKSuppressed()' passed on 'My Mac - ElectricSheep (1830)' (0.836 seconds)
+Test case 'ForcingStrategyTests/testTopKIndicesStable()' passed on 'My Mac - ElectricSheep (1830)' (0.836 seconds)
+Test case 'GenerationCancellationTests/startGenerationRoutesThroughController()' passed on 'My Mac - ElectricSheep (1830)' (0.835 seconds)
+Test case 'GenerationCancellationTests/stopGenerationCancelsInFlightTask()' passed on 'My Mac - ElectricSheep (1830)' (0.835 seconds)
+Test case 'GenerationCancellationTests/cancelStopsInFlightBody()' passed on 'My Mac - ElectricSheep (1830)' (0.835 seconds)
+Test case 'ForcingStrategyTests/testNoNaNOrInf()' passed on 'My Mac - ElectricSheep (1830)' (0.945 seconds)
+Test case 'DtypeContainmentTests/a2_all_strategies_process_valid_float32_correctly()' failed on 'My Mac - ElectricSheep (1830)' (1.273 seconds)
+
+2026-08-14 02:37:31.841 xcodebuild[954:6489] [MT] IDERunDestination: Supported platforms for the buildables in the current scheme is empty.
+--- xcodebuild: WARNING: Using the first of multiple matching destinations:
+{ platform:macOS, arch:arm64, id:c2a63311ceb6dc4a810a7d39fe18493201efe673, name:My Mac }
+{ platform:macOS, arch:x86_64, id:c2a63311ceb6dc4a810a7d39fe18493201efe673, name:My Mac }
+2026-08-14 02:38:46.017 xcodebuild[954:6489] [MT] IDETestOperationsObserverDebug: 6.769 elapsed -- Testing started completed.
+2026-08-14 02:38:46.017 xcodebuild[954:6489] [MT] IDETestOperationsObserverDebug: 0.000 sec, +0.000 sec -- start
+2026-08-14 02:38:46.017 xcodebuild[954:6489] [MT] IDETestOperationsObserverDebug: 6.769 sec, +6.769 sec -- end
+Failing tests:
+	DtypeContainmentTests.a1_float64_input_rejected_with_readable_error()
+	DtypeContainmentTests.a1_float64_input_rejected_with_readable_error()
+	DtypeContainmentTests.a2_all_strategies_process_valid_float32_correctly()
+
+** TEST FAILED **

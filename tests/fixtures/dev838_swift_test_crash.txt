@@ -1,0 +1,46 @@
+◇ Test run started.
+↳ Testing Library Version: 1902
+↳ Target Platform: arm64e-apple-macos14.0
+◇ Test fieldIsTheClassicThirtyByThirty() started.
+◇ Test "C9: Chain exits bottom and is removed" started.
+◇ Test newGameStartsAtClassicDefaults() started.
+◇ Test "C6: Mushroom block triggers turn on collision" started.
+◇ Test "C2: No mushrooms in bottom zone at creation" started.
+◇ Test "C12: Trailing chain blocked by mushroom next tick" started.
+◇ Test "C1: Different seeds produce different fields" started.
+◇ Test "C13: Hit behind head yields two chains" started.
+◇ Test "C14: Hit on head promotes next segment" started.
+◇ Test "C8: Hit on head leaves mushroom" started.
+◇ Test "C3: Mushroom lifecycle through 4 hits" started.
+◇ Test "C10: Body hit splits into two chains with mushroom left behind" started.
+◇ Test "C11: Trailing chain preserves parent direction and order" started.
+◇ Test "C15: Last segment hit removes chain" started.
+◇ Test "C4: Chain advances with segments following" started.
+◇ Test "C1: Same seed produces identical mushroom field" started.
+◇ Test "C7: Head stays in own column when blocked" started.
+◇ Test "C17: Deterministic replay produces identical results" started.
+◇ Test "C5: Edge block triggers descent and reversal" started.
+
+Building for debugging...
+[0/7] /Users/km4/Library/Caches/coding-model-runner/worktrees/spec_9ff962b9-09f0ad65/.build/arm64-apple-macosx/debug/CentipedePackageTests.derived/runner.swift
+[1/7] Write sources
+[4/7] Write swift-version--58304C5D6DBC2206.txt
+[6/10] Emitting module CentipedeCore
+[7/10] Compiling CentipedeCore World.swift
+/Users/km4/Library/Caches/coding-model-runner/worktrees/spec_9ff962b9-09f0ad65/Sources/CentipedeCore/World.swift:238:20: warning: value 'updateIdx' was defined but never used; consider replacing with boolean test [#no-usage]
+236 |         var newChains: [CentipedeChain] = []
+237 |         for idx in 0..<chains.count {
+238 |             if let updateIdx = removalIndices.firstIndex(of: idx) == nil ? idx : nil {
+    |                    `- warning: value 'updateIdx' was defined but never used; consider replacing with boolean test [#no-usage]
+239 |                 continue
+240 |             }
+[8/10] Compiling CentipedeCore GameState.swift
+[9/13] Compiling CentipedeCoreTests GameStateTests.swift
+[10/13] Compiling CentipedeCoreTests Slice1Tests.swift
+[11/13] Emitting module CentipedeCoreTests
+[12/15] Emitting module CentipedePackageTests
+[13/15] Compiling CentipedePackageTests runner.swift
+[13/15] Write Objects.LinkFileList
+[14/15] Linking CentipedePackageTests
+Build complete! (3.00s)
+error: Process '/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/libexec/swift/pm/swiftpm-testing-helper --test-bundle-path /Users/km4/Library/Caches/coding-model-runner/worktrees/spec_9ff962b9-09f0ad65/.build/arm64-apple-macosx/debug/CentipedePackageTests.xctest/Contents/MacOS/CentipedePackageTests --parallel --disable-sandbox /Users/km4/Library/Caches/coding-model-runner/worktrees/spec_9ff962b9-09f0ad65/.build/arm64-apple-macosx/debug/CentipedePackageTests.xctest/Contents/MacOS/CentipedePackageTests --testing-library swift-testing' exited with unexpected signal code 5
