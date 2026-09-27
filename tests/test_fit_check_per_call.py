@@ -7,11 +7,9 @@ added the 16,000 completion budget, ruled out every 64K agent and left
 deep_implementer. The retry's own budget line said ~18,357 prompt tokens —
 it fit everywhere.
 """
-import pytest
 
 from coding_model_autonomous import executor
 from coding_model_autonomous import retry_policy as rp
-from coding_model_autonomous.db import Database
 from coding_model_autonomous.models import EventKind
 
 WINDOWS = {"implementer": 65536, "glimmer_implementer": 65536,
@@ -19,13 +17,6 @@ WINDOWS = {"implementer": 65536, "glimmer_implementer": 65536,
            "deep_implementer": 262144}
 COMPLETION = 16000
 RUN61_CALLS = [9_100, 18_357, 14_600, 14_742, 14_600]      # sums to 71,399
-
-
-@pytest.fixture
-def db(tmp_path):
-    database = Database(db_path=tmp_path / "t.sqlite", workspace_root=tmp_path / "ws")
-    yield database
-    database.close_all()
 
 
 def _record(db, payload):

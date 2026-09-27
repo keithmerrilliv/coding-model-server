@@ -1,6 +1,6 @@
 """State-transition tests for the legacy (non-supervisor) retry path (DEV-129).
 
-_legacy_attempt_retry and _rotation_pick run exactly when a spec is already
+_attempt_retry and _rotation_pick run exactly when a spec is already
 going wrong, and had zero coverage. These pin the normal (non-exhausted)
 retry transitions and the rotation chain; the MAX_RETRIES synthesis escape
 hatch is pinned separately in test_synthesis_gate.py.
@@ -9,15 +9,7 @@ import pytest
 
 import coding_model_server.orchestrator_daemon as d
 from coding_model_autonomous import retry_policy
-from coding_model_autonomous.db import Database
 from coding_model_autonomous.models import GateStatus, GateType, SpecStatus, TaskStatus
-
-
-@pytest.fixture
-def db(tmp_path):
-    database = Database(db_path=tmp_path / "t.sqlite", workspace_root=tmp_path / "ws")
-    yield database
-    database.close_all()
 
 
 @pytest.fixture
@@ -35,7 +27,7 @@ def spec_with_tasks(db):
 
 def test_retry_creates_rejected_gate_and_resets_tasks(db, spec_with_tasks):
     spec, impl_task, reviewer_task = spec_with_tasks
-    d._legacy_attempt_retry(db, spec, reviewer_task, "AssertionError: boom")
+    d._attempt_retry(db, spec, reviewer_task, "AssertionError: boom")
 
     # The failure detail travels as a synthetic rejected code_review gate,
     # which _run_implementer reads back as rejection_notes on its next run.
@@ -57,7 +49,7 @@ def test_no_implementer_task_fails_spec(db):
     reviewer_task = db.create_task(
         spec_id=spec.id, agent="reviewer", role="reviewer", title="review",
     )
-    d._legacy_attempt_retry(db, db.get_spec(spec.id), reviewer_task, "boom")
+    d._attempt_retry(db, db.get_spec(spec.id), reviewer_task, "boom")
 
     assert db.get_task(reviewer_task.id).status is TaskStatus.FAILED
     assert db.get_spec(spec.id).status is SpecStatus.FAILED

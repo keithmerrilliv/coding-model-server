@@ -8,9 +8,6 @@ warning in the log. A workflow that HAS the status is untouched.
 """
 import logging
 
-import pytest
-
-from coding_model_autonomous.db import Database
 from coding_model_autonomous.jira_client import (
     LABEL_PIPELINE_FAILED, RESOLUTION_WONT_DO, STATUS_CANCELLED, STATUS_DONE,
     STATUS_IN_PROGRESS, STATUS_REJECTED, STATUS_TODO, FakeJiraClient,
@@ -20,13 +17,6 @@ from coding_model_autonomous.jira_sync import JiraSync
 from coding_model_autonomous.models import SpecStatus
 
 STOCK = [STATUS_TODO, STATUS_IN_PROGRESS, STATUS_DONE]
-
-
-@pytest.fixture
-def db(tmp_path):
-    database = Database(db_path=tmp_path / "t.sqlite", workspace_root=tmp_path / "ws")
-    yield database
-    database.close_all()
 
 
 class TestTheClientCollapse:

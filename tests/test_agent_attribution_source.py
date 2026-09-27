@@ -11,18 +11,8 @@ before the event stream showed 11 of 11 had.
 The first test demonstrates the loss rather than describing it, so anyone who
 changes the mutation semantics finds out here.
 """
-import pytest
 
-from coding_model_autonomous.db import Database
 from coding_model_autonomous.models import EventKind
-
-
-@pytest.fixture
-def db(tmp_path):
-    database = Database(db_path=tmp_path / "t.sqlite",
-                        workspace_root=tmp_path / "ws")
-    yield database
-    database.close_all()
 
 
 def _mk_spec_and_task(db, agent):

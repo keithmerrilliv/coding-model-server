@@ -1,14 +1,22 @@
-"""coding_model_autonomous — autonomous task orchestration shared between server and daemon.
+"""coding_model_autonomous — the autonomous pipeline.
 
-This package is the source of truth for the SQLite-backed task store used by
-the autonomous service mode. Both the FastAPI server (which exposes the
-public /v1/autonomous endpoints) and the orchestrator daemon (which runs
-agents and processes review gates) import from here.
+The FastAPI server (which exposes /v1/autonomous) and the orchestrator daemon
+(which drives specs through the pipeline) both import from here. This package
+imports nothing from coding_model_server: the server depends on the pipeline,
+never the reverse (DEV-837).
 
-Submodules: models (pydantic types) · db (SQLite store) · planner (spec → YAML)
-· executor (agent calls + parsing + sandboxed test execution) · supervisor
-(retry/replan decisions) · jira_client / jira_sync (bidirectional Atlassian
-mirror).
+Submodules, by role:
+  store      models (pydantic types) · db (SQLite store)
+  kernel     workspace (artifact ledger) · outcome (failure classification and
+             disposition) · context (one read, one prompt budget) ·
+             retry_policy (what a retry keeps, and who retries)
+  agents     planner · executor (prompts, parsers, call_agent) ·
+             architect_tools · plan_paths · apply_edits · supervisor · _http ·
+             thinking (strip reasoning from a response)
+  guards     design_testability · swift_prechecks · swift_rules
+  testing    test_runner (sandboxed dispatch, Mac runner transport) ·
+             seccomp_filter · gate_output · delivery
+  jira       jira_client · jira_sync
 """
 from coding_model_autonomous.models import (
     Spec,

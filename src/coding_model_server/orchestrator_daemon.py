@@ -40,7 +40,6 @@ import shutil
 import signal
 import threading
 import sys
-import textwrap
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -136,6 +135,10 @@ from coding_model_autonomous.workspace import (
 )
 from coding_model_autonomous import outcome as _outcome
 from coding_model_autonomous import context as _context
+from coding_model_autonomous.test_strategy import (  # DEV-837: moved out
+    overlay_operator_test_strategy as _overlay_operator_test_strategy,
+    validate_test_strategy as _validate_test_strategy,
+)
 from coding_model_autonomous.context import RunnerOutage, SpecContext
 from coding_model_autonomous.outcome import (
     Failure, FailureClass, Hooks, classify_exception, classify_model_output,
@@ -169,6 +172,29 @@ logging.basicConfig(
     format="%(asctime)s - orchestrator - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger("orchestrator")
+
+
+# ── Structural aborts and daemon-side events ─────────────────────────────────
+
+def _abort(db: Database, spec: Spec, task: "Task | None", detail: str, *,
+           phase: str, role: str = "daemon") -> None:
+    """A structural abort: the spec cannot go on for a reason no agent caused.
+
+    outcome.terminate logs it at ERROR, records ONE row saying why and closes
+    every in-flight task (DEV-652, DEV-532), so a caller needs no log line of
+    its own.
+    """
+    _outcome.terminate(db, spec, task, Failure(
+        FailureClass.ABORTED, role, "daemon", detail, phase=phase))
+
+
+def _anomaly(db: Database, spec: Spec, task: "Task | None", role: str,
+             **fields) -> None:
+    """Record something the daemon itself did or refused: an AGENT_RAN event
+    with ``model_call: False``, so telemetry never counts it as a model call."""
+    db.record_event(EventKind.AGENT_RAN, spec_id=spec.id,
+                    task_id=task.id if task is not None else None,
+                    payload={"role": role, "model_call": False, **fields})
 
 
 # ── Gate prompt formatting ───────────────────────────────────────────────────
@@ -273,14 +299,9 @@ def _process_pending_plan(db: Database, spec: Spec) -> None:
     spec_dir = db.spec_dir(spec.id)
     md_path = spec_dir / spec.source_md_path
     if not md_path.exists():
-        logger.error("spec %s: source markdown missing at %s",
-                     spec.id, md_path)
-        # DEV-652: still a structural abort, not an agent failure — but a spec
-        # that ends leaves ONE row saying why, and terminate() also closes
-        # every in-flight task (DEV-532) where this used to leave them.
-        _outcome.terminate(db, spec, None, Failure(
-            FailureClass.ABORTED, "planner", "daemon",
-            f"source markdown missing at {md_path}", phase="source_md"))
+        _abort(db, spec, None,
+               f"source markdown missing at {md_path}",
+               phase="source_md", role="planner")
         return
 
     markdown = md_path.read_text()
@@ -419,214 +440,11 @@ def _planner_no_verdict(db: Database, spec: Spec, failure: Failure) -> None:
                    consecutive, cap if cap is not None else "∞")
 
 
-# DEV-426: keys each Apple framework needs before a dispatch can even be built.
-# A plan missing these is invalid by construction — it cannot run, and the
-# failure surfaces at the test phase, long after design and implementation.
-_FRAMEWORK_REQUIRED_KEYS = {
-    "swift_test": ("repo",),
-    "xcodebuild_test": ("repo", "scheme", "filter"),
-}
 # How many times validation may bounce a plan back before the spec fails, so a
 # planner that cannot produce a valid block does not loop forever.
 PLAN_VALIDATION_MAX_ROUNDS = int(
     os.getenv("AUTONOMOUS_PLAN_VALIDATION_MAX_ROUNDS", "2"))
 _AUTO_PLAN_REJECT_MARKER = "## Plan validation failure (DEV-426)"
-# DEV-712: the heading is prose, not a key. Real specs write `## Test strategy`
-# as often as `## test_strategy`, sometimes with a trailing parenthetical
-# ("## Test strategy (for the planner — carry these keys through)"). Matching
-# only the underscore form disarmed every guard below for 8 specs.
-_SPEC_TEST_STRATEGY_RE = re.compile(
-    r"^##+[ \t]*test[ _]strategy\b[^\n]*$(.*?)(?=^##\s|\Z)",
-    re.MULTILINE | re.DOTALL | re.IGNORECASE)
-_SPEC_STRATEGY_YAML_FENCE_RE = re.compile(
-    r"```ya?ml[ \t]*\n(.*?)```", re.DOTALL)
-_SPEC_STRATEGY_ANY_FENCE_RE = re.compile(
-    r"```[ \t]*\n(.*?)```", re.DOTALL)
-
-
-class SpecStrategy(NamedTuple):
-    """What the spec's own test-strategy section yielded.
-
-    DEV-630 at the spec boundary. "The operator declared nothing" and "the
-    operator declared something this parser could not read" are different
-    facts, and returning {} for both is what let DEV-712 hide: every guard
-    keyed on the declaration stood down at once and said nothing.
-    """
-    keys: dict
-    heading: bool   # a test-strategy heading exists in the spec
-    reason: str     # why nothing parsed; "" when keys were read or no heading
-
-    @property
-    def unreadable(self) -> bool:
-        """A section is there and it yielded no keys. Never silent."""
-        return self.heading and not self.keys
-
-
-def _spec_strategy_block(section: str) -> str:
-    """The YAML-ish part of a test-strategy section, without trailing prose.
-
-    Three sources, in order of how sure we are about them:
-
-    1. A ```yaml fence, which says what it is.
-    2. The leading run of indented or markdown-list lines, stopping at the
-       first column-0 prose line. Every Apple spec follows its indented block
-       with an explanatory paragraph, and because that paragraph sits at
-       column 0 textwrap.dedent finds a common prefix of "" and dedents
-       nothing, so the old code fed YAML and prose to safe_load together and
-       it raised (DEV-712, 14 specs).
-    3. Only then an untagged fence.
-
-    Order matters: several specs put an indented block under the heading and
-    a ```-fenced *shell command* further down the same section, and taking
-    the first fence of any kind returned the xcodebuild invocation as the
-    test strategy.
-    """
-    fence = _SPEC_STRATEGY_YAML_FENCE_RE.search(section)
-    if fence:
-        return textwrap.dedent(fence.group(1)).strip()
-    kept: list[str] = []
-    for line in section.splitlines():
-        if not line.strip():
-            kept.append(line)
-            continue
-        if line[0] in " \t" or line.lstrip().startswith(("- ", "* ")):
-            kept.append(line)
-            continue
-        break
-    leading = textwrap.dedent("\n".join(kept)).strip()
-    if leading:
-        return leading
-    untagged = _SPEC_STRATEGY_ANY_FENCE_RE.search(section)
-    return textwrap.dedent(untagged.group(1)).strip() if untagged else ""
-
-
-def _spec_strategy_mapping(parsed) -> dict:
-    """Coerce a parsed strategy block to a mapping, or {} if it is not one.
-
-    Accepts the markdown-list dialect. `- framework: swift_test` on its own
-    line is how an operator writes a mapping in a bullet list, and YAML reads
-    it as a sequence of single-key mappings; merging them in order recovers
-    exactly what was written. Every Centipede spec uses this form.
-    """
-    if isinstance(parsed, dict):
-        return parsed
-    if isinstance(parsed, list):
-        merged: dict = {}
-        for item in parsed:
-            if not isinstance(item, dict):
-                return {}
-            merged.update(item)
-        return merged
-    return {}
-
-
-def _parse_spec_test_strategy(spec_md: str) -> SpecStrategy:
-    """Read the spec's own test-strategy section. Never raises.
-
-    Four dialects are in real use and all four must work: a ```yaml fence, an
-    indented block followed by prose, a markdown bullet list, and any of those
-    under a prose heading. Before DEV-712 only the first parsed, and the other
-    three returned {} — indistinguishable from a spec that declared nothing.
-    """
-    import yaml as _yaml
-    if not spec_md:
-        return SpecStrategy({}, False, "")
-    match = _SPEC_TEST_STRATEGY_RE.search(spec_md)
-    if not match:
-        return SpecStrategy({}, False, "")
-    block = _spec_strategy_block(match.group(1))
-    if not block:
-        return SpecStrategy({}, True, "the section is empty")
-    try:
-        parsed = _yaml.safe_load(block)
-    except _yaml.YAMLError as exc:
-        return SpecStrategy(
-            {}, True,
-            f"the section is not valid YAML ({type(exc).__name__})")
-    keys = _spec_strategy_mapping(parsed)
-    if not keys:
-        return SpecStrategy(
-            {}, True,
-            f"the section parsed as {type(parsed).__name__}, not a mapping")
-    return SpecStrategy(keys, True, "")
-
-
-def _spec_declared_test_strategy(spec_md: str) -> dict:
-    """The spec's own test-strategy block as a mapping, {} when unreadable.
-
-    Kept as the mapping-only view for callers that cannot act on the reason.
-    Anything that can report should use _parse_spec_test_strategy and check
-    `.unreadable` — an unreadable section is an operator error worth one
-    planner round, not a green light (DEV-712).
-    """
-    return _parse_spec_test_strategy(spec_md).keys
-
-
-# test_strategy keys the operator declares in the spec that must reach the
-# dispatch byte-identical. Everything protective hangs off these; run 14b
-# (DEV-573) lost protected_paths to the planner's rewrite and a fabricated
-# project.pbxproj reached the VM worktree.
-# DEV-709 adds `framework`: run 41's planner read `framework: swift_test` and
-# emitted `xcodebuild_test` for a SwiftPM package with no .xcodeproj, which
-# could not have dispatched at all. The value comes from a closed enumeration
-# the operator picks — there is nothing for a model to add to it, and a
-# SUBSTITUTED value is worse than a dropped one because it is well-formed and
-# plausible and survives every structural check.
-_OPERATOR_STRATEGY_KEYS = ("repo", "protected_paths", "base_ref", "filter",
-                           "execution_target", "framework", "skip_filter",
-                           "default_actor_isolation")   # DEV-784
-
-
-def _overlay_operator_test_strategy(yaml_text: str, spec_md: str,
-                                    spec_id: str) -> str:
-    """Force the spec's operator-authored test_strategy keys onto the plan.
-
-    The plan is an LLM rewrite of the spec, and protection metadata must not
-    depend on a model choosing to copy it (DEV-573). For each operator key the
-    spec declares, the spec's value wins — missing keys are restored and
-    divergent values overwritten, loudly. Returns the (possibly rewritten)
-    plan YAML; the original text is kept whenever no overlay is needed so the
-    gate shows the planner's own formatting.
-    """
-    import yaml as _yaml
-    spec_strategy = _parse_spec_test_strategy(spec_md)
-    if spec_strategy.unreadable:
-        # DEV-712: the overlay used to stand down here without a word, which
-        # is how DEV-573's fix sat disarmed for a month on 23% of specs.
-        logger.warning(
-            "spec %s: the spec has a test-strategy section but %s — the "
-            "DEV-573 overlay has nothing to restore and is NOT armed for "
-            "this plan (DEV-712)", spec_id, spec_strategy.reason)
-        return yaml_text
-    declared = spec_strategy.keys
-    wanted = {k: declared[k] for k in _OPERATOR_STRATEGY_KEYS if k in declared}
-    if not wanted:
-        return yaml_text
-    try:
-        plan = _yaml.safe_load(yaml_text)
-    except _yaml.YAMLError:
-        return yaml_text  # malformed YAML is rejected downstream, not here
-    if not isinstance(plan, dict):
-        return yaml_text
-    strategy = plan.get("test_strategy")
-    if not isinstance(strategy, dict):
-        # DEV-630: the one shape the overlay cannot repair. Validation bounces
-        # it (below); say here, by name, that nothing was restored.
-        logger.warning(
-            "spec %s: the plan has no test_strategy mapping (%s) while the "
-            "spec declares operator key(s) %s — the DEV-573 overlay cannot "
-            "restore them and is NOT armed for this plan (DEV-630)",
-            spec_id, type(strategy).__name__, ", ".join(sorted(wanted)))
-        return yaml_text
-    changed = [k for k, v in wanted.items() if strategy.get(k) != v]
-    if not changed:
-        return yaml_text
-    strategy.update({k: wanted[k] for k in changed})
-    logger.warning(
-        "spec %s: planner dropped or rewrote operator test_strategy key(s) "
-        "%s — restored verbatim from the spec (DEV-573)",
-        spec_id, ", ".join(sorted(changed)))
-    return _yaml.safe_dump(plan, sort_keys=False)
 
 
 def _test_log_path(db: "Database | None", spec: Spec) -> "str | None":
@@ -761,116 +579,14 @@ def _resolve_plan_phase_paths(
             ", ".join(f"{k} -> {v} [{by_source.get(k) or 'directory'}]"
                       for k, v in sorted(corrections.items())))
         if db is not None:
-            db.record_event(
-                EventKind.AGENT_RAN, spec_id=spec.id,
-                payload={"role": "plan_paths", "model_call": False,
-                         "corrected": corrections,
-                         "new_paths": report.new_paths,
-                         "placeholders": report.placeholders,
-                         "summary": report.summary()})
+            _anomaly(db, spec, None, "plan_paths", corrected=corrections,
+                     new_paths=report.new_paths, placeholders=report.placeholders,
+                     summary=report.summary())
     else:
         logger.info("spec %s: plan paths verified against the repo at %s — %s "
                     "(DEV-601)", spec.id, strategy.get("base_ref") or "HEAD",
                     report.summary())
     return yaml_text, problems
-
-
-def _validate_test_strategy(yaml_text: str, spec_md: str) -> list[str]:
-    """Problems that make a plan's test_strategy unrunnable. Empty means fine.
-
-    Two rules. The framework's own required keys must be present, because
-    without them no dispatch can be constructed. And every key the spec's own
-    test_strategy block declares must survive into the plan — the planner may
-    add keys, never silently drop them. The second rule is the stronger one:
-    `base_ref` and `protected_paths` are not framework-required, and losing
-    them fails silently rather than loudly (DEV-427 is disabled outright).
-    """
-    import yaml as _yaml
-    try:
-        plan = _yaml.safe_load(yaml_text)
-    except _yaml.YAMLError:
-        return []  # malformed YAML is _bootstrap_tasks' job to reject, not ours
-    if not isinstance(plan, dict):
-        return []
-    # DEV-712: before anything else, say whether the spec's own declaration
-    # was readable. If it was not, every rule below is running on {} and the
-    # plan cannot be judged against the operator's intent at all. That is a
-    # spec defect, and one round naming it costs far less than a run that
-    # silently loses its protected paths.
-    spec_strategy = _parse_spec_test_strategy(spec_md)
-    spec_problems: list[str] = []
-    if spec_strategy.unreadable:
-        spec_problems.append(
-            "the spec has a `test_strategy` section but no keys could be read "
-            f"from it — {spec_strategy.reason}. Nothing the spec declared is "
-            "being enforced: the operator-key overlay, the dropped-key rule "
-            "and the repo check are all standing down. Write the block as "
-            "`key: value` lines under the heading (a ```yaml fence, an "
-            "indented block, or a `- key: value` list all parse) and "
-            "resubmit.")
-    strategy = plan.get("test_strategy")
-    if not isinstance(strategy, dict):
-        # DEV-630: with no mapping at all, every rule below stood down at
-        # once, including the DEV-573 overlay. When the spec declared
-        # operator keys the planner dropped a whole block, and a round to
-        # copy it through is exactly what plan validation is for.
-        declared = spec_strategy.keys
-        wanted = sorted(k for k in _OPERATOR_STRATEGY_KEYS if k in declared)
-        if wanted:
-            return spec_problems + [
-                "the plan has no `test_strategy` mapping, but the spec's own "
-                "test_strategy block declares "
-                + ", ".join(f"`{k}`" for k in wanted)
-                + ". Copy the block through as real YAML keys under "
-                "`test_strategy:` — the pipeline cannot enforce protection "
-                "metadata it cannot read."]
-        return spec_problems  # no strategy at all is a different (non-Apple) shape
-
-    problems: list[str] = list(spec_problems)
-    reported: set[str] = set()
-    framework = str(strategy.get("framework") or "").strip()
-    for key in _FRAMEWORK_REQUIRED_KEYS.get(framework, ()):
-        if not strategy.get(key):
-            reported.add(key)
-            problems.append(
-                f"`{key}` is required for `framework: {framework}` and is missing. "
-                f"Without it the runner dispatch cannot be built at all.")
-
-    # A key can fail both rules; say so once.
-    declared = spec_strategy.keys
-    dropped = [k for k in declared
-               if k not in ("framework", "required", "notes")
-               and k not in strategy and k not in reported]
-    for key in dropped:
-        problems.append(
-            f"`{key}` is declared in the spec's own test_strategy block and is "
-            f"absent from the plan. Copy it through as a real YAML key — "
-            f"prose inside `notes` is never parsed.")
-
-    # DEV-625: a spec that modifies existing files needs a repo to read them
-    # from. Without this rule the DEV-492 acceptance probe treats a missing
-    # repo key as "every declared file is unreadable" and terminally fails
-    # the spec before any gate opens — though a planner round fixes a dropped
-    # key (run 19's plan gate proved it in one note; run 20 died on it).
-    surface = _change_surface(spec_md)
-    if surface.kind == "unrecognised":
-        # DEV-630: the spec has a table and we could not read a path from it.
-        # "Nothing declared" and "could not tell" used to be the same [] here,
-        # and this guard stood down on both. Arm it by name instead.
-        logger.warning(
-            "plan validation: the change-surface table has %d row(s) but no "
-            "path could be read from any of them — the DEV-492 repo-key check "
-            "cannot tell whether existing files are modified and is NOT armed "
-            "for this plan (DEV-630)", surface.rows)
-    if (not strategy.get("repo")
-            and not any("`repo`" in p for p in problems)
-            and surface.any):
-        problems.append(
-            "the spec declares modifications to existing files but the plan's "
-            "`test_strategy` has no `repo` key naming the repository to read "
-            "them from. Copy the `repo` value from the spec's test_strategy "
-            "block through as a real YAML key.")
-    return problems
 
 
 def _reject_plan_for_validation(db: Database, spec: Spec, problems: list[str],
@@ -884,14 +600,9 @@ def _reject_plan_for_validation(db: Database, spec: Spec, problems: list[str],
     prior = sum(1 for g in db.list_gates_for_spec(spec.id, GateType.CLARIFICATION)
                 if (g.prompt_md or "").startswith(_AUTO_PLAN_REJECT_MARKER))
     if prior >= PLAN_VALIDATION_MAX_ROUNDS:
-        logger.error("spec %s: plan still invalid after %d validation round(s) "
-                     "— failing: %s", spec.id, prior, "; ".join(problems))
-        # DEV-652: still a structural abort, not an agent failure — but a spec
-        # that ends leaves ONE row saying why, and terminate() also closes
-        # every in-flight task (DEV-532) where this used to leave them.
-        _outcome.terminate(db, spec, None, Failure(
-            FailureClass.ABORTED, "planner", "daemon",
-            f"plan still invalid after {prior} validation round(s): {'; '.join(problems)}", phase="plan_validation"))
+        _abort(db, spec, None,
+               f"plan still invalid after {prior} validation round(s): {'; '.join(problems)}",
+               phase="plan_validation", role="planner")
         return False
 
     bullets = "\n".join(f"- {p}" for p in problems)
@@ -944,7 +655,6 @@ ALLOW_UNREAD_FILE_MODIFICATION = (
 _declared_file_modifications = _context.declared_modifications
 _change_surface_path_rows = _context.change_surface_path_rows
 _change_surface = _context.change_surface  # DEV-630: the typed reading
-
 
 
 def _unreadable_declared_modifications(
@@ -1019,7 +729,6 @@ def _probe_context_with_retry(db, spec: Spec, spec_md: str, plan: dict):
         except RunnerOutage as e:
             last = e
     raise PlanProbeOutage(str(last))
-
 
 
 def _drop_undeliverable_manifest_entries(spec: Spec, entries: list) -> list:
@@ -1146,7 +855,6 @@ def _protected_files_soft(db: Database, spec: Spec, spec_md: str, *,
         return []
 
 
-
 def _block_plan_for_unreadable_modification(
     db: Database, spec: Spec, paths: list[str]
 ) -> None:
@@ -1182,12 +890,9 @@ def _block_plan_for_unreadable_modification(
         ),
     )
     db.respond_to_gate(gate.id, "rejected", notes="blocked by DEV-492 guard")
-    # DEV-652: still a structural abort, not an agent failure — but a spec
-    # that ends leaves ONE row saying why, and terminate() also closes
-    # every in-flight task (DEV-532) where this used to leave them.
-    _outcome.terminate(db, spec, None, Failure(
-        FailureClass.ABORTED, "planner", "daemon",
-        "spec modifies files the implementer cannot read (DEV-492 guard)", phase="unread_file_guard"))
+    _abort(db, spec, None,
+           "spec modifies files the implementer cannot read (DEV-492 guard)",
+           phase="unread_file_guard", role="planner")
 
 
 def _accept_plan(db: Database, spec: Spec, spec_dir, result: PlannerYaml) -> None:
@@ -1296,14 +1001,9 @@ def _process_needs_clarification(db: Database, spec: Spec) -> None:
     """
     gate = _latest_gate_of_type(db, spec.id, GateType.CLARIFICATION)
     if gate is None:
-        logger.warning("spec %s: NEEDS_CLARIFICATION but no clarification "
-                       "gate exists; marking failed", spec.id)
-        # DEV-652: still a structural abort, not an agent failure — but a spec
-        # that ends leaves ONE row saying why, and terminate() also closes
-        # every in-flight task (DEV-532) where this used to leave them.
-        _outcome.terminate(db, spec, None, Failure(
-            FailureClass.ABORTED, "daemon", "daemon",
-            "NEEDS_CLARIFICATION but no clarification gate exists", phase="clarification"))
+        _abort(db, spec, None,
+               "NEEDS_CLARIFICATION but no clarification gate exists",
+               phase="clarification")
         return
 
     if gate.status == GateStatus.PENDING:
@@ -1326,14 +1026,7 @@ def _process_plan_review(db: Database, spec: Spec) -> None:
     """Look for a resolved plan_approval gate and act on it."""
     gate = _latest_gate_of_type(db, spec.id, GateType.PLAN_APPROVAL)
     if gate is None:
-        logger.warning("spec %s: PLAN_REVIEW without a plan_approval gate; "
-                       "marking failed", spec.id)
-        # DEV-652: still a structural abort, not an agent failure — but a spec
-        # that ends leaves ONE row saying why, and terminate() also closes
-        # every in-flight task (DEV-532) where this used to leave them.
-        _outcome.terminate(db, spec, None, Failure(
-            FailureClass.ABORTED, "daemon", "daemon",
-            "PLAN_REVIEW without a plan_approval gate", phase="plan_review"))
+        _abort(db, spec, None, "PLAN_REVIEW without a plan_approval gate", phase="plan_review")
         return
 
     if gate.status == GateStatus.PENDING:
@@ -1396,7 +1089,6 @@ class ShutdownRequested(RuntimeError):
 # DEV-632: the outage is raised by the context stage for every role; the
 # daemon-side name stays for its catch sites and tests.
 RunnerOutageAtImplement = RunnerOutage
-
 
 
 class SpecScheduler:
@@ -1759,8 +1451,9 @@ def _process_executing(db: Database, spec: Spec) -> None:
     if current.status == TaskStatus.PENDING:
         _start_task(db, spec, current)
     elif current.status == TaskStatus.RUNNING:
-        # Shouldn't happen in normal operation since agent calls block the
-        # tick. If we see RUNNING, the daemon crashed mid-call. Each reset
+        # Shouldn't happen in normal operation: the scheduler never starts a
+        # second pass for a spec whose pass is still running. If we see
+        # RUNNING here, the daemon crashed mid-call. Each reset
         # burns a recovery (DEV-193): a task whose agent call deterministically
         # crashes the daemon otherwise loops RUNNING → crash → systemd
         # restart → PENDING forever — restarts more than 60s apart never
@@ -1785,12 +1478,8 @@ def _process_executing(db: Database, spec: Spec) -> None:
         # back" counter that rotation and the parse-failure path read. Only
         # the CAP above moved off it.
         db.increment_task_retry(current.id)
-        db.record_event(EventKind.AGENT_RAN, spec_id=spec.id,
-                        task_id=current.id,
-                        payload={"role": "crash_recovery", "model_call": False,
-                                 "recovery": recoveries + 1,
-                                 "max_recoveries": MAX_RETRIES,
-                                 "retry_count": current.retry_count + 1})
+        _anomaly(db, spec, current, "crash_recovery", recovery=recoveries + 1,
+                 max_recoveries=MAX_RETRIES, retry_count=current.retry_count + 1)
         logger.warning("spec %s: task %s stuck in RUNNING (crash recovery?), "
                        "resetting to PENDING (recovery %d/%d, retry_count now "
                        "%d)", spec.id, current.id, recoveries + 1, MAX_RETRIES,
@@ -1831,10 +1520,8 @@ def _deliver_completed_spec(db: Database, spec: Spec) -> None:
     except OSError as e:
         logger.warning("spec %s: could not write delivery_report.md: %s",
                        spec.id, e)
-    db.record_event(EventKind.AGENT_RAN, spec_id=spec.id,
-                    payload={"role": "delivery", "model_call": False,
-                             "status": result.status, "branch": result.branch,
-                             "detail": result.detail[:500]})
+    _anomaly(db, spec, None, "delivery", status=result.status, branch=result.branch,
+             detail=result.detail[:500])
 
 
 def _spec_language(spec: Spec) -> "str | None":
@@ -1887,7 +1574,6 @@ def _planned_implement_outputs(spec: Spec) -> list[str]:
     return _context.planned_outputs(_load_plan(spec))
 
 
-
 def _bootstrap_tasks(db: Database, spec: Spec) -> None:
     """Parse the planner's YAML into Task rows."""
     import yaml as _yaml
@@ -1896,36 +1582,17 @@ def _bootstrap_tasks(db: Database, spec: Spec) -> None:
         # path or hand-edited DB row). Without this guard, safe_load(None)
         # returns None and plan.get("phases") AttributeErrors with a stack
         # trace that's hard to read in the daemon log.
-        logger.error("spec %s: EXECUTING with no normalized_yaml — marking failed",
-                     spec.id)
-        # DEV-652: still a structural abort, not an agent failure — but a spec
-        # that ends leaves ONE row saying why, and terminate() also closes
-        # every in-flight task (DEV-532) where this used to leave them.
-        _outcome.terminate(db, spec, None, Failure(
-            FailureClass.ABORTED, "daemon", "daemon",
-            "EXECUTING with no normalized_yaml", phase="bootstrap"))
+        _abort(db, spec, None, "EXECUTING with no normalized_yaml", phase="bootstrap")
         return
     plan = _yaml.safe_load(spec.normalized_yaml)
     if not isinstance(plan, dict):
-        logger.error("spec %s: normalized_yaml is not a dict (got %s) — marking failed",
-                     spec.id, type(plan).__name__)
-        # DEV-652: still a structural abort, not an agent failure — but a spec
-        # that ends leaves ONE row saying why, and terminate() also closes
-        # every in-flight task (DEV-532) where this used to leave them.
-        _outcome.terminate(db, spec, None, Failure(
-            FailureClass.ABORTED, "daemon", "daemon",
-            f"normalized_yaml is not a dict (got {type(plan).__name__})", phase="bootstrap"))
+        _abort(db, spec, None,
+               f"normalized_yaml is not a dict (got {type(plan).__name__})",
+               phase="bootstrap")
         return
     phases = plan.get("phases", [])
     if not phases:
-        logger.error("spec %s: plan YAML has no phases — marking failed",
-                     spec.id)
-        # DEV-652: still a structural abort, not an agent failure — but a spec
-        # that ends leaves ONE row saying why, and terminate() also closes
-        # every in-flight task (DEV-532) where this used to leave them.
-        _outcome.terminate(db, spec, None, Failure(
-            FailureClass.ABORTED, "daemon", "daemon",
-            "plan YAML has no phases", phase="bootstrap"))
+        _abort(db, spec, None, "plan YAML has no phases", phase="bootstrap")
         return
     # Non-mapping phase entries — `phases: [design, implement, test]` is
     # plausible LLM output — used to AttributeError on phase.get() every
@@ -1933,16 +1600,9 @@ def _bootstrap_tasks(db: Database, spec: Spec) -> None:
     # failing and never progressing. Fail it once, loudly (DEV-140).
     bad = [p for p in phases if not isinstance(p, dict)]
     if bad:
-        logger.error(
-            "spec %s: plan phases must be mappings, got %s — marking failed",
-            spec.id, ", ".join(type(p).__name__ for p in bad),
-        )
-        # DEV-652: still a structural abort, not an agent failure — but a spec
-        # that ends leaves ONE row saying why, and terminate() also closes
-        # every in-flight task (DEV-532) where this used to leave them.
-        _outcome.terminate(db, spec, None, Failure(
-            FailureClass.ABORTED, "daemon", "daemon",
-            f"plan phases must be mappings, got {', '.join(type(p).__name__ for p in bad)}", phase="bootstrap"))
+        _abort(db, spec, None,
+               f"plan phases must be mappings, got {', '.join(type(p).__name__ for p in bad)}",
+               phase="bootstrap")
         return
     for phase in phases:
         role = phase.get("role", "implementer")
@@ -1968,8 +1628,8 @@ def _find_current_task(tasks: list) -> "Task | None":
 
 def _start_task(db: Database, spec: Spec, task) -> None:
     """Call the appropriate agent, parse the response, create artifacts
-    and a review gate. This is synchronous — it blocks the tick thread
-    for the entire duration of the inference call.
+    and a review gate. Synchronous: it blocks this spec's SpecScheduler
+    worker for the whole inference call, but not the tick or other specs.
     """
     # Compare-and-set claim (DEV-142): a second poller (manual debug run
     # beside the systemd unit) racing this tick must lose here, not both
@@ -2279,11 +1939,9 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
                 "revision — falling back to the last-good design.md and going "
                 "to the gate instead of failing the spec (DEV-543)",
                 spec.id, max_attempts)
-            db.record_event(
-                EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
-                payload={"role": "architect", "model_call": False,
-                         "anomaly": "parse_retry_exhausted_kept_prior_design",
-                         "retry": task.retry_count})
+            _anomaly(db, spec, task, "architect",
+                     anomaly="parse_retry_exhausted_kept_prior_design",
+                     retry=task.retry_count)
             db.update_task_status(task.id, TaskStatus.BLOCKED_ON_REVIEW)
             db.create_gate(
                 spec_id=spec.id,
@@ -2333,12 +1991,9 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
                      "workspace still holds the previous design, so there is "
                      "nothing to review (DEV-647)",
                      spec.id, design_write.describe())
-        db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
-                        payload={"role": "architect", "model_call": False,
-                                 "anomaly": "design_write_refused",
-                                 "action": design_write.action,
-                                 "detail": design_write.detail,
-                                 "retry": task.retry_count})
+        _anomaly(db, spec, task, "architect", anomaly="design_write_refused",
+                 action=design_write.action, detail=design_write.detail,
+                 retry=task.retry_count)
         _dispose(db, spec, task, Failure(
             FailureClass.UNKNOWN_EXCEPTION, "architect", "daemon",
             f"the ledger refused the design write: {design_write.describe()}",
@@ -2678,12 +2333,6 @@ def _verify_review_citations(review_md: str, spec_dir: Path) -> tuple[str, int, 
 
     annotated = _CITE_RE.sub(_annotate, review_md)
     return annotated, checked, unverified
-
-
-
-
-
-
 
 
 # ── Implementation generation: single-call vs manifest/per-file (#4) ──────────
@@ -3060,8 +2709,6 @@ TARGETED_RETRY_MAX_REPEATS = int(
     os.getenv("AUTONOMOUS_TARGETED_RETRY_MAX_REPEATS", "1"))
 
 # The diagnostics parsers live beside the failure stream now (DEV-631).
-_SIG_PATH_RE = _outcome.SIG_PATH_RE
-_SIG_ERROR_RE = _outcome.SIG_ERROR_RE
 _attributed_diagnostics = _outcome.attributed_diagnostics
 _diagnostic_messages = _outcome.diagnostic_messages
 
@@ -3728,9 +3375,7 @@ def _repair_manifest_dirs(db, spec, task, entries, design_md: str) -> int:
         e.path = corrected
         repaired += 1
     if repaired:
-        db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
-                        payload={"role": "manifest", "model_call": False,
-                                 "repaired_paths": repaired})
+        _anomaly(db, spec, task, "manifest", repaired_paths=repaired)
     return repaired
 
 
@@ -3798,13 +3443,8 @@ def _verify_manifest_workspace(db, spec, task, spec_dir) -> "tuple[list, list]":
         logger.error("spec %s: manifest-declared file(s) MISSING from the "
                      "workspace and unrecoverable from snapshots: %s",
                      spec.id, ", ".join(still_missing))
-    db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
-                    payload={"role": "implementer",
-                             "model_call": False,
-                             "anomaly": "manifest_files_missing",
-                             "restored": restored,
-                             "still_missing": still_missing,
-                             "retry": task.retry_count})
+    _anomaly(db, spec, task, "implementer", anomaly="manifest_files_missing",
+             restored=restored, still_missing=still_missing, retry=task.retry_count)
     return restored, still_missing
 
 
@@ -3843,11 +3483,8 @@ def _generate_one_file(
             "AUTONOMOUS_DIFF_BASED_EDITS or raise "
             "AUTONOMOUS_MANIFEST_WHOLE_FILE_MAX_CHARS",
             spec.id, entry.path, len(existing_content))
-        db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
-                        payload={"role": "implementer", "model_call": False,
-                                 "anomaly": "oversized_whole_file_refused",
-                                 "path": entry.path,
-                                 "existing_chars": len(existing_content)})
+        _anomaly(db, spec, task, "implementer", anomaly="oversized_whole_file_refused",
+                 path=entry.path, existing_chars=len(existing_content))
         return None
     target_base = os.path.basename(entry.path)
 
@@ -4080,9 +3717,7 @@ def _normalize_generated_files(db: Database, spec: Spec, task, files, role: str,
         return files
     for note in notes:
         logger.info("spec %s: boilerplate normalized — %s", spec.id, note)
-    db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
-                    payload={"role": role, "model_call": False,
-                             "normalized": notes})
+    _anomaly(db, spec, task, role, normalized=notes)
     return normalized
 
 
@@ -4370,12 +4005,8 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
     # content" investigation) can see that the model emitted the same
     # path twice. The parser already deduped via last-write-wins.
     if result.duplicate_paths:
-        db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
-                        payload={"role": "implementer",
-                                 "model_call": False,
-                                 "anomaly": "duplicate_file_paths",
-                                 "paths": result.duplicate_paths,
-                                 "retry": task.retry_count})
+        _anomaly(db, spec, task, "implementer", anomaly="duplicate_file_paths",
+                 paths=result.duplicate_paths, retry=task.retry_count)
 
     # DEV-581: a diff-based-edit response whose SEARCH anchor could not be
     # applied (not found / ambiguous / no base file). NOTHING was written yet —
@@ -4782,8 +4413,6 @@ _PYTEST_SUMMARY_RE = re.compile(
     r"\b\d+\s+(passed|failed|error|errors|skipped|xfailed|xpassed|deselected)\b",
     re.IGNORECASE,
 )
-# Jest summary: "Tests: N passed, M total"
-_JEST_SUMMARY_RE = re.compile(r"Tests?:\s+\d+\s+\w+", re.IGNORECASE)
 # Node's built-in test runner (node:test) TAP footer: lines like
 # "# tests 2", "# pass 1", "# fail 1". Any one of these confirms a real run.
 _NODE_TEST_SUMMARY_RE = re.compile(r"^# (?:tests|pass|fail)\s+\d+", re.MULTILINE)
@@ -5288,13 +4917,9 @@ def _carry_forward_uncited_outputs(db: Database, spec: Spec, task, spec_dir,
                     "not cite carried forward from the previous attempt: %s "
                     "(DEV-677)", spec.id, task.retry_count, len(carried),
                     ", ".join(p for p, _ in carried))
-        db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
-                        payload={"role": "implementer", "model_call": False,
-                                 "anomaly": "outputs_carried_forward",
-                                 "carried": [p for p, _ in carried],
-                                 "cited": sorted(cited),
-                                 "unrecoverable": unrecoverable,
-                                 "retry": task.retry_count})
+        _anomaly(db, spec, task, "implementer", anomaly="outputs_carried_forward",
+                 carried=[p for p, _ in carried], cited=sorted(cited),
+                 unrecoverable=unrecoverable, retry=task.retry_count)
     return carried
 
 
@@ -5402,11 +5027,8 @@ def _route_missing_planned_outputs(db: Database, spec: Spec, task,
                  "output(s) — missing %s; charging the implementer without a "
                  "build check (DEV-645)", spec.id, len(planned) - len(missing),
                  len(planned), ", ".join(missing))
-    db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
-                    payload={"role": "implementer", "model_call": False,
-                             "anomaly": "missing_planned_outputs",
-                             "missing": missing, "planned": planned,
-                             "retry": task.retry_count})
+    _anomaly(db, spec, task, "implementer", anomaly="missing_planned_outputs",
+             missing=missing, planned=planned, retry=task.retry_count)
     _dispose(db, spec, task, Failure(
         FailureClass.PARSE_FAILURE, "implementer", "parse",
         f"{len(missing)} planned implement output(s) not produced: "
@@ -5509,13 +5131,9 @@ def _route_build_failure_to_architect(db: Database, spec: Spec, task, spec_dir,
                        "the architect: %s", spec.id, e)
         return False
 
-    db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
-                    payload={"role": "implementer",
-                             "model_call": False,
-                             "routed_to": "architect",
-                             "reason": "persistent_build_diagnostics",
-                             "persistent": sorted(persistent)[:8],
-                             "diagnostic": build_reason[:200]})
+    _anomaly(db, spec, task, "implementer", routed_to="architect",
+             reason="persistent_build_diagnostics", persistent=sorted(persistent)[:8],
+             diagnostic=build_reason[:200])
     db.increment_task_retry(architect.id)
     db.update_task_status(architect.id, TaskStatus.PENDING)
     # DEV-652: the AGENT_RAN row above says where the work was routed; this
@@ -5884,7 +5502,6 @@ def _collect_reviewer_code_files(db: Database, spec_id: str,
     return _context.prior_artifacts(db, spec_id, spec_dir)
 
 
-
 _HARNESS_ERROR_RE = re.compile(
     r"is not a function|is not defined|Cannot find module"
     r"|ERR_MODULE_NOT_FOUND|ModuleNotFoundError|ImportError while importing"
@@ -6196,12 +5813,8 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
         return
 
     if result.duplicate_paths:
-        db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
-                        payload={"role": "reviewer",
-                                 "model_call": False,
-                                 "anomaly": "duplicate_test_paths",
-                                 "paths": result.duplicate_paths,
-                                 "retry": task.retry_count})
+        _anomaly(db, spec, task, "reviewer", anomaly="duplicate_test_paths",
+                 paths=result.duplicate_paths, retry=task.retry_count)
 
     # Write test files. Defensive normalization: a bare `test_*.py` at
     # spec_dir root gets rewritten to `tests/test_*.py` so reviewer
@@ -6418,14 +6031,10 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
 #   - request_clarification halts the spec on a CLARIFICATION gate; the human
 #     must respond manually. There is no auto-resume that re-invokes the
 #     supervisor with the response — that's a follow-up.
-#   - retry target_role=architect creates an approved CLARIFICATION gate with
-#     the feedback as notes, but the existing build_architect_message() does
-#     NOT consume clarification rounds. The audit trail is captured but the
-#     architect re-runs without seeing the feedback. The supervisor's system
-#     prompt steers it toward `replan` for design-level defects, which is
-#     the path that actually plumbs the feedback (via _process_pending_plan).
-#   - retry target_role=reviewer just resets reviewer to PENDING; no feedback
-#     channel exists for the reviewer.
+#   - retry target_role=architect or reviewer records the supervisor's
+#     feedback as an event; the next architect run reads it through
+#     _latest_supervisor_feedback (in _latest_architect_feedback), and the
+#     next reviewer run reads it the same way in _run_reviewer.
 
 def _list_artifact_summaries(db: Database, spec_id: str) -> list[dict]:
     """Compact summary of all artifacts on disk — for the supervisor context."""
@@ -6467,16 +6076,6 @@ def _build_supervisor_context(db: Database, spec: Spec, task, outcome: str,
     }
 
 
-
-
-
-
-
-
-
-
-
-
 def _retry_role_with_feedback(db: Database, spec: Spec, target_role: str,
                               feedback: str, *, current_task) -> None:
     """Apply a supervisor-issued retry to *target_role*.
@@ -6488,25 +6087,15 @@ def _retry_role_with_feedback(db: Database, spec: Spec, target_role: str,
     role_tasks = db.list_tasks_for_spec_by_role(spec.id, target_role)
     target = role_tasks[0] if role_tasks else None
     if target is None:
-        logger.error("spec %s: supervisor said retry %s but no such task; aborting",
-                     spec.id, target_role)
-        # DEV-652: still a structural abort, not an agent failure — but a spec
-        # that ends leaves ONE row saying why, and terminate() also closes
-        # every in-flight task (DEV-532) where this used to leave them.
-        _outcome.terminate(db, spec, current_task, Failure(
-            FailureClass.ABORTED, "supervisor", "daemon",
-            f"supervisor said retry {target_role} but no such task", phase="supervisor"))
+        _abort(db, spec, current_task,
+               f"supervisor said retry {target_role} but no such task",
+               phase="supervisor", role="supervisor")
         return
 
     if target.retry_count >= MAX_RETRIES:
-        logger.error("spec %s: supervisor said retry %s but retry budget exhausted (%d/%d); aborting",
-                     spec.id, target_role, target.retry_count, MAX_RETRIES)
-        # DEV-652: still a structural abort, not an agent failure — but a spec
-        # that ends leaves ONE row saying why, and terminate() also closes
-        # every in-flight task (DEV-532) where this used to leave them.
-        _outcome.terminate(db, spec, current_task, Failure(
-            FailureClass.ABORTED, "supervisor", "daemon",
-            f"supervisor said retry {target_role} but retry budget exhausted ({target.retry_count}/{MAX_RETRIES})", phase="supervisor"))
+        _abort(db, spec, current_task,
+               f"supervisor said retry {target_role} but retry budget exhausted ({target.retry_count}/{MAX_RETRIES})",
+               phase="supervisor", role="supervisor")
         return
 
     if target_role == "implementer":
@@ -6619,14 +6208,9 @@ def _apply_supervisor_decision(db: Database, spec: Spec, task,
         return
 
     # Defensive: schema validation in supervisor.py should make this unreachable
-    logger.error("spec %s: unknown supervisor action %r; aborting",
-                 spec.id, decision.action)
-    # DEV-652: still a structural abort, not an agent failure — but a spec
-    # that ends leaves ONE row saying why, and terminate() also closes
-    # every in-flight task (DEV-532) where this used to leave them.
-    _outcome.terminate(db, spec, task, Failure(
-        FailureClass.ABORTED, "supervisor", "daemon",
-        f"unknown supervisor action {decision.action!r}", phase="supervisor"))
+    _abort(db, spec, task,
+           f"unknown supervisor action {decision.action!r}",
+           phase="supervisor", role="supervisor")
 
 
 # Free (non-budget) harness-fix retries per spec. Capped so a model that
@@ -6692,11 +6276,7 @@ def _harness_retry(db: Database, spec: Spec, task, spec_dir: Path,
                 and _ROLE_ORDER.get(t.role, 99) > impl_rank
                 and t.status not in (TaskStatus.PENDING, TaskStatus.SKIPPED)):
             db.update_task_status(t.id, TaskStatus.PENDING)
-    db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
-                    payload={"role": "harness_guard",
-                             "model_call": False,
-                             "free_retry": used + 1,
-                             "reason": reason[:300]})
+    _anomaly(db, spec, task, "harness_guard", free_retry=used + 1, reason=reason[:300])
     logger.info("spec %s: harness defect — free retry %d/%d issued (%s)",
                 spec.id, used + 1, _HARNESS_FREE_RETRIES, reason[:120])
     return True
@@ -6780,8 +6360,6 @@ def _test_pass_rate(test_output: str) -> "float | None":
         if n_pass + n_fail > 0:
             return n_pass / (n_pass + n_fail)
     return None
-
-
 
 
 def _collect_rejection_notes(db: Database, spec_id: str) -> list[str]:
@@ -7412,15 +6990,6 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
     return repair_passed, repair_output
 
 
-def _legacy_attempt_retry(db: Database, spec: Spec, task, failure_detail: str) -> None:
-    """The default (supervisor-less) disposition of a reviewer-stage test
-    failure: charge the implementer with a synthetic rejected gate carrying
-    the failure, re-run the reviewer after it; at MAX_RETRIES hand the
-    attempts to synthesis (DEV-433), whose failure is the one terminal
-    branch (DEV-532: every task closes with it)."""
-    _dispose(db, spec, task, _test_failure(failure_detail), supervisor=False)
-
-
 def _synthesis_cannot_emit(db: Database, spec: Spec,
                            spec_dir: Path) -> "Failure | None":
     """Terminal Failure when synthesis provably cannot produce its answer.
@@ -7468,12 +7037,9 @@ def _synthesis_cannot_emit(db: Database, spec: Spec,
         f"Synthesis has no edit mode, so every response it could give would "
         f"be a fragment the shrink guard refuses (DEV-649)")
     logger.error("spec %s: %s", spec.id, detail)
-    db.record_event(EventKind.AGENT_RAN, spec_id=spec.id,
-                    payload={"role": "synthesizer", "model_call": False,
-                             "anomaly": "synthesis_emission_over_budget",
-                             "needed_tokens": needed, "allowed_tokens": allowed,
-                             "max_tokens": budget,
-                             "paths": [p for p, _ in must_emit]})
+    _anomaly(db, spec, None, "synthesizer", anomaly="synthesis_emission_over_budget",
+             needed_tokens=needed, allowed_tokens=allowed, max_tokens=budget,
+             paths=[p for p, _ in must_emit])
     return Failure(FailureClass.SYNTHESIS_FAILED, "synthesizer", "daemon",
                    detail, extra={"needed_tokens": needed,
                                   "allowed_tokens": allowed})
@@ -7703,17 +7269,6 @@ def _gate_rejection(task, gate) -> Failure:
     return Failure(FailureClass.REVIEW_REJECTED, "reviewer", "gate", detail,
                    feedback=notes or "Rejected at the release gate.",
                    charge_role="implementer")
-
-
-def _legacy_handle_gate_rejection(db: Database, spec: Spec, task, gate) -> None:
-    """The default (supervisor-less) disposition of a rejected gate."""
-    _persist_human_design_feedback(db, spec, task, gate)
-    _dispose(db, spec, task, _gate_rejection(task, gate), supervisor=False)
-
-
-def _list_code_artifacts(db: Database, spec_id: str):
-    """Return all CODE artifacts for a spec (for feeding to the reviewer)."""
-    return db.list_artifacts(spec_id, kind=ArtifactKind.CODE)
 
 
 def _build_jira_client() -> JiraClient:

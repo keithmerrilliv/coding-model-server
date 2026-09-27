@@ -22,7 +22,6 @@ import pytest
 
 import coding_model_server.orchestrator_daemon as d
 from coding_model_autonomous import executor
-from coding_model_autonomous.db import Database
 from coding_model_autonomous.models import SpecStatus
 
 # Verbatim from the protected scaffold this spec cannot edit.
@@ -137,12 +136,6 @@ def test_prompts_are_byte_identical_without_protected_files(empty):
 
 
 # ── the drop, through the real write path ────────────────────────────────────
-
-@pytest.fixture
-def db(tmp_path):
-    database = Database(db_path=tmp_path / "t.sqlite", workspace_root=tmp_path / "ws")
-    yield database
-    database.close_all()
 
 
 @pytest.fixture

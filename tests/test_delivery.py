@@ -108,6 +108,29 @@ def test_unreachable_remote_fails_open(spec_dir, monkeypatch):
     assert "clone" in r.detail
 
 
+def test_a_rejected_push_fails_and_says_why(remote, spec_dir, tmp_path,
+                                            monkeypatch):
+    """Clone, branch and commit all succeed; the remote refuses the push (a
+    protected-branch rule, a full disk, a revoked key). That is a failed
+    delivery naming the push and git's own reason, not a quiet success."""
+    hook = remote / "hooks" / "pre-receive"
+    hook.write_text("#!/bin/sh\necho 'branch creation frozen by policy' >&2\n"
+                    "exit 1\n")
+    hook.chmod(0o755)
+    monkeypatch.setenv("AUTONOMOUS_DELIVERY_REMOTES", f"demo={remote}")
+
+    r = delivery.deliver_spec("spec_t6", "Demo", spec_dir,
+                              ["Sources/Thing.swift"], "demo", [])
+
+    assert r.status == "failed", r.detail
+    assert r.detail.startswith(f"push to {remote} failed:"), r.detail
+    assert "branch creation frozen by policy" in r.detail
+    assert "pre-receive hook declined" in r.detail
+    assert r.branch is None
+    heads = _git(tmp_path, "ls-remote", "--heads", str(remote))
+    assert "pipeline/spec_t6" not in heads
+
+
 def test_remotes_parser_handles_multiple_pairs(monkeypatch):
     monkeypatch.setenv(
         "AUTONOMOUS_DELIVERY_REMOTES",
@@ -174,17 +197,16 @@ def test_delivery_that_only_adds_tests_pushes_and_records_the_base(remote, spec_
 
 
 def test_main_moving_under_a_delivered_file_is_refused_when_the_base_is_known(tmp_path):
-    from coding_model_autonomous.delivery import stale_base_refusal
     repo = tmp_path / "repo"; (repo / "Sources").mkdir(parents=True)
     (repo / "Sources" / "A.swift").write_text("let a = 2  // main moved\n")
     ws = tmp_path / "ws"; (ws / "Sources").mkdir(parents=True)
     (ws / "Sources" / "A.swift").write_text("let a = 1\nlet b = 9\n")
     base = {"Sources/A.swift": "let a = 1\n"}
-    why = stale_base_refusal(repo, ["Sources/A.swift"], ws, base)
+    why = delivery.assess_base(repo, ["Sources/A.swift"], ws, base).refusal
     assert why and "main changed since the base" in why
     # main == base: the artifact is a clean edit of what it read — no refusal
     (repo / "Sources" / "A.swift").write_text("let a = 1\n")
-    assert stale_base_refusal(repo, ["Sources/A.swift"], ws, base) is None
+    assert delivery.assess_base(repo, ["Sources/A.swift"], ws, base).refusal is None
 
 
 # ── DEV-810: a rename is not a deletion, and a current base is not stale ─────
@@ -217,8 +239,8 @@ def test_run57_rename_on_a_current_base_is_delivered_and_named(tmp_path):
 
 def test_a_rename_on_a_stale_base_is_refused_and_called_a_probable_rename(tmp_path):
     repo, ws = _pair(tmp_path, _RUN57_MAIN, _RUN57_OURS)
-    why = delivery.stale_base_refusal(repo, [_RUN57_PATH], ws, {},
-                                      base_is_current=False)
+    why = delivery.assess_base(repo, [_RUN57_PATH], ws, {},
+                               base_is_current=False).refusal
     assert why and why.startswith("REFUSED — stale base")
     assert "probable rename" in why
     assert "Re-run the spec against current main" in why
@@ -226,7 +248,7 @@ def test_a_rename_on_a_stale_base_is_refused_and_called_a_probable_rename(tmp_pa
 
 def test_a_rename_on_an_unrecorded_base_is_refused_without_calling_it_stale(tmp_path):
     repo, ws = _pair(tmp_path, _RUN57_MAIN, _RUN57_OURS)
-    why = delivery.stale_base_refusal(repo, [_RUN57_PATH], ws, {})
+    why = delivery.assess_base(repo, [_RUN57_PATH], ws, {}).refusal
     assert why and "base not recorded" in why
     assert "stale base" not in why
     assert "deliver by hand" in why
@@ -239,8 +261,8 @@ def test_a_real_deletion_on_a_current_base_is_refused_as_the_artifacts_own_chang
     only reproduce it."""
     repo, ws = _pair(tmp_path, _RUN57_MAIN,
                      "@Test func adaptedBoardRendersWhereBoardSaid() {}\n")
-    why = delivery.stale_base_refusal(repo, [_RUN57_PATH], ws, {},
-                                      base_is_current=True)
+    why = delivery.assess_base(repo, [_RUN57_PATH], ws, {},
+                               base_is_current=True).refusal
     assert why and "stale base" not in why
     assert "removes 1 test(s) main has (test count 2 → 1)" in why
     assert "artifact's own change" in why
@@ -250,8 +272,8 @@ def test_a_real_deletion_on_a_current_base_is_refused_as_the_artifacts_own_chang
 def test_a_real_deletion_on_a_stale_base_is_still_called_stale(tmp_path):
     repo, ws = _pair(tmp_path, _RUN57_MAIN,
                      "@Test func adaptedBoardRendersWhereBoardSaid() {}\n")
-    why = delivery.stale_base_refusal(repo, [_RUN57_PATH], ws, {},
-                                      base_is_current=False)
+    why = delivery.assess_base(repo, [_RUN57_PATH], ws, {},
+                               base_is_current=False).refusal
     assert why and why.startswith("REFUSED — stale base")
     assert "removes 1 test(s)" in why
 

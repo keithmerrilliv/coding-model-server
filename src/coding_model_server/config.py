@@ -1196,13 +1196,10 @@ Update these after each retrieval step. They help you stay organized and efficie
         # in DEV-101 once DEV-99 made them the same model+prompt. Not listed in
         # /v1/models, but still resolves for @-mentions and --model architect.
         'architect':       'dense_architect',
-        # Autonomous architect handle. Repointed to the thinking-off arm by
-        # DEV-562's clean 6-task eval (nothink 3-2-1, −23% tokens/wall, zero
-        # truncations, no degenerate answers under a tools-free prompt) per
-        # DEV-556's pre-registered wins-or-ties criterion. The INTERACTIVE
-        # 'architect' alias above deliberately keeps thinking on: without the
-        # private channel the model reaches for tools first, which interactive
-        # use services and the autonomous single-call path cannot.
+        # Legacy handle for the thinking-off eval arm (DEV-562). Nothing in the
+        # pipeline uses it: the autonomous architect is dense_architect with
+        # thinking on (AUTONOMOUS_ARCHITECT_AGENT's default), per the
+        # 2026-09-15 thinking-on policy. Kept so old saved sessions resolve.
         'q36_architect':   'dense_architect_nothink',
         'm25_architect':   'moe_architect',
         'm25_implementer': 'moe_implementer',

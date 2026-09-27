@@ -17,7 +17,6 @@ import pytest
 import coding_model_server.orchestrator_daemon as d
 from coding_model_autonomous import context as ctx
 from coding_model_autonomous import executor as ex
-from coding_model_autonomous.db import Database
 from coding_model_autonomous.models import SpecStatus
 from coding_model_autonomous.outcome import FailureClass
 
@@ -32,14 +31,6 @@ PLAN = {
 # The run-28 shape: one existing planned output far past what the budget can
 # re-emit, and one new file.
 RUN28_CHARS = 145_825
-
-
-@pytest.fixture
-def db(tmp_path):
-    database = Database(db_path=tmp_path / "t.sqlite",
-                        workspace_root=tmp_path / "ws")
-    yield database
-    database.close_all()
 
 
 @pytest.fixture

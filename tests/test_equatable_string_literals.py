@@ -7,12 +7,10 @@ conventionally IS the type's name, and the check read it as comparing
 `USDSceneParserError` values.
 """
 
-from pathlib import Path
-
+from fixture_files import load_fixture
 from coding_model_autonomous import design_testability as dt
 
-DESIGN = (Path(__file__).parent / "fixtures" /
-          "dev833_run68_round1_design.md").read_text(encoding="utf-8")
+DESIGN = load_fixture("dev833_run68_round1_design.md")
 
 
 def _equatable_findings(design_md: str) -> list:

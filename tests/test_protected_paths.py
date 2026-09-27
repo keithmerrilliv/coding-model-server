@@ -14,11 +14,8 @@ writing.
 """
 from unittest import mock
 
-import pytest
-
 import coding_model_server.orchestrator_daemon as d
 from coding_model_autonomous import test_runner as tr
-from coding_model_autonomous.db import Database
 from coding_model_autonomous.executor import ImplementerResult
 from coding_model_autonomous.models import GateStatus, SpecStatus
 
@@ -94,12 +91,6 @@ def test_dispatch_omits_protected_paths_and_says_so():
 
 
 # ── the gate tells the reviewer ──────────────────────────────────────────────
-
-@pytest.fixture
-def db(tmp_path):
-    database = Database(db_path=tmp_path / "t.sqlite", workspace_root=tmp_path / "ws")
-    yield database
-    database.close_all()
 
 
 def _run_implementer(db, *, emitted, protected):

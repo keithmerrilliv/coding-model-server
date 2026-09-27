@@ -20,7 +20,6 @@ import pytest
 
 import coding_model_server.orchestrator_daemon as d
 from coding_model_autonomous import executor
-from coding_model_autonomous.db import Database
 from coding_model_autonomous.models import SpecStatus
 
 # The whole error set from spec_1ba2db3d's synthesis, trimmed.
@@ -114,14 +113,6 @@ class TestNearMissUnchanged:
         assert "does NOT compile" not in _user_text(
             executor.build_synthesis_repair_message(
                 "# spec", "# design", FILES, NEAR_MISS))
-
-
-@pytest.fixture
-def db(tmp_path):
-    database = Database(db_path=tmp_path / "t.sqlite",
-                        workspace_root=tmp_path / "ws")
-    yield database
-    database.close_all()
 
 
 @pytest.fixture

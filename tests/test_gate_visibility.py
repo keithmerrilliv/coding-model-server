@@ -9,18 +9,8 @@ because the reviewer had no signal that a gate had opened.
 import logging
 from datetime import datetime, timedelta, timezone
 
-import pytest
-
 import coding_model_server.orchestrator_daemon as d
-from coding_model_autonomous.db import Database
 from coding_model_autonomous.models import GateType
-
-
-@pytest.fixture
-def db(tmp_path):
-    database = Database(db_path=tmp_path / "t.sqlite", workspace_root=tmp_path / "ws")
-    yield database
-    database.close_all()
 
 
 def _spec_with_pending_gate(db, gate_type=GateType.CODE_REVIEW):

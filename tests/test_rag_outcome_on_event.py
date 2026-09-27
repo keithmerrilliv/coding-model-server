@@ -13,39 +13,19 @@ happens in the server, AGENT_RAN is written by the orchestrator — so the
 outcome has to ride the HTTP response. These tests pin both halves and the
 invariant that they agree.
 """
-import asyncio
 from unittest import mock
 
+from chat_harness import drive_chat
 from coding_model_server.metrics import RagRetrievalCollector
-from coding_model_server.routes import chat
-from coding_model_server.schemas import ChatCompletionRequest, ChatMessage
 from coding_model_autonomous.executor import agent_event_fields
-
-
-class _FakeState:
-    pass
-
-
-class _FakeRequest:
-    def __init__(self):
-        self.state = _FakeState()
 
 
 def _run_chat(monkeypatch, memory, collector, **kwargs):
     """Drive the real handler and RETURN the completion, so the wire shape is
     assertable. The sibling harness in test_rag_metrics discards it."""
-    fake_mgr = mock.Mock()
-    fake_mgr.ensure_running.return_value = None
-    fake_mgr.tokenize.side_effect = lambda text: len(text or "") // 4
-    fake_mgr.proxy_sync.return_value = {"id": "ok", "choices": []}
-    monkeypatch.setattr(chat, "llama_server_manager", fake_mgr)
-    monkeypatch.setattr(chat, "chat_admission", mock.Mock())
-    monkeypatch.setattr(chat, "rag_metrics", collector)
-    monkeypatch.setattr(chat.runtime.services, "memory", memory, raising=False)
-    request = ChatCompletionRequest(
-        model="implementer", stream=False,
-        messages=[ChatMessage(role="user", content="hello")], **kwargs)
-    return asyncio.run(chat.chat_completions(request, _FakeRequest()))
+    result, _ = drive_chat(monkeypatch, memory=memory, collector=collector,
+                           **kwargs)
+    return result
 
 
 def _memory_returning(text, hits=None, best_distance=None):

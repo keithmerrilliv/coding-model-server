@@ -15,7 +15,6 @@ import pytest
 import coding_model_server.orchestrator_daemon as d
 from coding_model_autonomous.context import SpecContext
 from coding_model_autonomous import executor
-from coding_model_autonomous.db import Database
 from coding_model_autonomous.apply_edits import parse_edit_blocks
 from coding_model_autonomous.executor import (
     ImplementerResult,
@@ -134,12 +133,6 @@ def test_parser_handles_mixed_output():
 
 
 # ── single-call generation: flag ON applies edits ───────────────────────────
-
-@pytest.fixture
-def db(tmp_path):
-    database = Database(db_path=tmp_path / "t.sqlite", workspace_root=tmp_path / "ws")
-    yield database
-    database.close_all()
 
 
 @pytest.fixture

@@ -13,7 +13,6 @@ from that run.
 """
 import pytest
 
-from coding_model_autonomous.db import Database
 from coding_model_autonomous.models import EventKind, SpecStatus
 from coding_model_autonomous.outcome import (
     Failure, FailureClass, Hooks, _record, attempt_agent, coarse_key, dispose,
@@ -31,13 +30,6 @@ RUN29_BLOCK5 = ("`src/coding_model_autonomous/executor.py`: edit block #5: "
 def _edits(detail):
     return Failure(FailureClass.UNAPPLIABLE_EDITS, "implementer", "apply",
                    detail, phase="apply")
-
-
-@pytest.fixture
-def db(tmp_path):
-    database = Database(db_path=tmp_path / "t.sqlite", workspace_root=tmp_path / "ws")
-    yield database
-    database.close_all()
 
 
 @pytest.fixture

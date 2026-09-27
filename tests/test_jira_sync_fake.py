@@ -7,7 +7,6 @@ watermark idempotency, and reverse application of human decisions.
 """
 import pytest
 
-from coding_model_autonomous.db import Database
 from coding_model_autonomous.jira_client import (
     FakeJiraClient,
     STATUS_DONE,
@@ -16,13 +15,6 @@ from coding_model_autonomous.jira_client import (
 )
 from coding_model_autonomous.jira_sync import JiraSync
 from coding_model_autonomous.models import GateStatus, GateType, SpecStatus
-
-
-@pytest.fixture
-def db(tmp_path):
-    database = Database(db_path=tmp_path / "t.sqlite", workspace_root=tmp_path / "ws")
-    yield database
-    database.close_all()
 
 
 @pytest.fixture

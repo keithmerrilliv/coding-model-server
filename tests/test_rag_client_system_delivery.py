@@ -17,37 +17,17 @@ single control over whether retrieval runs.
 These tests assert delivery ON THE WIRE, not that a flag propagated — mistaking
 the latter for the former is what let this go unnoticed.
 """
-import asyncio
 from unittest import mock
 
-from coding_model_server.routes import chat
-from coding_model_server.schemas import ChatCompletionRequest, ChatMessage
+from chat_harness import drive_chat
+from coding_model_server.schemas import ChatMessage
 
 MEMORY_TEXT = "MEMORY-BLOCK-SENTINEL"
 
 
-class _FakeState:
-    pass
-
-
-class _FakeRequest:
-    def __init__(self):
-        self.state = _FakeState()
-
-
 def _run_chat(monkeypatch, messages, memory, **kwargs):
-    fake_mgr = mock.Mock()
-    fake_mgr.ensure_running.return_value = None
-    fake_mgr.tokenize.side_effect = lambda text: len(text or "") // 4
-    fake_mgr.proxy_sync.return_value = {"id": "ok", "choices": []}
-
-    monkeypatch.setattr(chat, "llama_server_manager", fake_mgr)
-    monkeypatch.setattr(chat, "chat_admission", mock.Mock())
-    monkeypatch.setattr(chat.runtime.services, "memory", memory, raising=False)
-
-    request = ChatCompletionRequest(
-        model="implementer", messages=messages, stream=False, **kwargs)
-    result = asyncio.run(chat.chat_completions(request, _FakeRequest()))
+    result, fake_mgr = drive_chat(monkeypatch, messages=messages,
+                                  memory=memory, **kwargs)
     # proxy_sync(messages, augmented_system, ...) — positional.
     sent_messages, sent_system = fake_mgr.proxy_sync.call_args[0][:2]
     return result, sent_messages, sent_system

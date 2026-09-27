@@ -11,12 +11,10 @@ Both look identical to a single "injections" counter — the first reports zero,
 and the second reports a healthy-looking number. These tests pin the
 distinctions that make them tellable apart.
 """
-import asyncio
 from unittest import mock
 
+from chat_harness import drive_chat
 from coding_model_server.metrics import RagRetrievalCollector
-from coding_model_server.routes import chat
-from coding_model_server.schemas import ChatCompletionRequest, ChatMessage
 
 
 class TestCollector:
@@ -79,28 +77,8 @@ class TestCollector:
         assert snap["counts"]["injected"] == 500, "counters must survive ring eviction"
 
 
-class _FakeState:
-    pass
-
-
-class _FakeRequest:
-    def __init__(self):
-        self.state = _FakeState()
-
-
 def _run_chat(monkeypatch, memory, collector, **kwargs):
-    fake_mgr = mock.Mock()
-    fake_mgr.ensure_running.return_value = None
-    fake_mgr.tokenize.side_effect = lambda text: len(text or "") // 4
-    fake_mgr.proxy_sync.return_value = {"id": "ok", "choices": []}
-    monkeypatch.setattr(chat, "llama_server_manager", fake_mgr)
-    monkeypatch.setattr(chat, "chat_admission", mock.Mock())
-    monkeypatch.setattr(chat, "rag_metrics", collector)
-    monkeypatch.setattr(chat.runtime.services, "memory", memory, raising=False)
-    request = ChatCompletionRequest(
-        model="implementer", stream=False,
-        messages=[ChatMessage(role="user", content="hello")], **kwargs)
-    asyncio.run(chat.chat_completions(request, _FakeRequest()))
+    drive_chat(monkeypatch, memory=memory, collector=collector, **kwargs)
 
 
 class TestRecordedFromTheRealPath:

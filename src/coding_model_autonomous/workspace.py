@@ -52,10 +52,59 @@ from enum import Enum
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Optional
 
-from .executor import _count_declarations, artifact_path
 from .models import ArtifactKind
 
 logger = logging.getLogger("orchestrator.workspace")
+
+
+def artifact_path(spec_dir: Path, rel_path: str) -> Path:
+    """Resolve a spec-relative artifact path, rejecting traversal.
+
+    Strips leading ``/`` so models can't write absolute paths (Python's
+    ``Path / "/abs"`` would discard the left operand). Then resolves
+    symlinks and checks the result is still under ``spec_dir``.
+
+    Uses Path.is_relative_to (not str.startswith): the latter would treat
+    /work/abc-evil/x as nested under /work/abc, so a sibling-prefix dir
+    escape would not be caught. is_relative_to compares path components.
+
+    Every write goes through the ledger below; this is public so a caller
+    that needs to *read* what is currently at a path — the pre-repair
+    snapshot — resolves it the same way the write will.
+    """
+    # Strip leading slashes only — do NOT use lstrip("./") which eats
+    # individual chars and would normalize "../../../x" into "x".
+    while rel_path.startswith("/"):
+        rel_path = rel_path[1:]
+    spec_root = spec_dir.resolve()
+    abs_path = (spec_dir / rel_path).resolve()
+    if not abs_path.is_relative_to(spec_root):
+        raise ValueError(f"Path traversal rejected: {rel_path}")
+    return abs_path
+
+
+# Keywords for declaration detection (line-start scan)
+_DECLARATION_KEYWORDS = ("async def", "def", "class", "func", "struct", "@Test")
+
+
+def _count_declarations(content: str) -> int:
+    """Count code declarations in *content* using line-start keyword scan."""
+    count = 0
+    for line in content.splitlines():
+        stripped = line.lstrip()
+        if not stripped:
+            continue
+        for kw in sorted(_DECLARATION_KEYWORDS, key=len, reverse=True):
+            if stripped.startswith(kw):
+                # Ensure whole-word match (not followed by alphanumeric or underscore)
+                end_idx = len(kw)
+                if end_idx < len(stripped):
+                    nxt = stripped[end_idx]
+                    if nxt.isalnum() or nxt == "_":
+                        continue
+                count += 1
+                break
+    return count
 
 LEDGER_FILE = "ledger.json"
 

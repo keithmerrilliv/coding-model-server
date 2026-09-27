@@ -15,6 +15,7 @@ the two sets are really one. Each direction has cost a run:
 """
 import pytest
 
+from fixture_files import load_fixture
 from coding_model_autonomous import design_testability as dt
 
 # Run 6's shape: SeededRNG named in Data Models, absent from File Structure.
@@ -167,9 +168,7 @@ class TestAgainstTheRealRun7Design:
 
     @pytest.fixture
     def design(self):
-        from pathlib import Path
-        return (Path(__file__).parent / "fixtures"
-                / "run7_design_v3.md").read_text()
+        return load_fixture("run7_design_v3.md")
 
     def test_it_catches_the_defect_i_caught_by_hand(self, design):
         f = [x for x in dt.check_design_completeness(design)
