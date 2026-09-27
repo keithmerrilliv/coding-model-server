@@ -762,6 +762,43 @@ def persistent_diagnostics(db: Any, spec_id: str, current: set, *,
     return survived
 
 
+def count_own_records(db: Any, spec_id: str, kind: EventKind,
+                      match: Callable[[dict], bool], *, what: str,
+                      task_id: Optional[str] = None) -> int:
+    """How many of its own rows a self-bounded loop has already recorded.
+
+    The one counter behind every cap that lives outside :func:`dispose`
+    (DEV-838): the planner's no-verdicts, crash recovery, testability
+    revisions and free harness retries. Each counts the rows it wrote, never
+    ``task.retry_count``, which human rejections, upstream routing and
+    crash recovery all share (DEV-558, DEV-545). Every row is read: a
+    newest-N window let a late pass lose its early records, and a counter
+    kept in the workspace was deleted by the retry wipe.
+
+    A count that cannot be read is 0 and says so (DEV-630). Failing closed
+    would park every spec on a transient read error; failing silently is how
+    a cap stops binding without anyone noticing.
+    """
+    try:
+        events = db.list_events_by_kind(spec_id=spec_id, kind=kind, limit=-1)
+    except Exception as exc:
+        logger.warning("spec %s: could not count toward the %s (%s) — the "
+                       "%s is NOT enforced this tick (DEV-630)", spec_id, what,
+                       exc, what)
+        return 0
+    n = 0
+    for ev in events:
+        if task_id is not None and ev.task_id != task_id:
+            continue
+        try:
+            payload = json.loads(ev.payload_json or "{}")
+        except (TypeError, ValueError):
+            continue
+        if match(payload):
+            n += 1
+    return n
+
+
 def consecutive_no_verdicts(db: Any, spec_id: str, task) -> int:
     """No-verdict dispositions already recorded for this attempt."""
     n = 0

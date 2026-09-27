@@ -348,6 +348,71 @@ def random_rotation_pick() -> Optional[str]:
     return _rng.choice(list(_IMPLEMENTER_ROTATION))
 
 
+@dataclass(frozen=True)
+class AgentChoice:
+    agent: "str | None"
+    assignment: str                 # recommended | rotation | sole_fit | random
+    eligible: "list[str] | None"    # agents whose window holds the estimate
+    needed_tokens: "int | None"     # that estimate; None on attempt 0
+
+
+def choose_agent(db: Database, spec_id: str, task: Any, spec_dir: Path, *,
+                 default_agent: "str | None", completion_tokens: int,
+                 window_of: Any) -> AgentChoice:
+    """Which implementer makes this attempt: the one place the pick is made
+    (DEV-838).
+
+    1. Anchor: the architect's recommendation or complexity tier, else the
+       role's configured default, else the task's agent. Never the agent a
+       previous pick wrote onto the task, which re-based the chain (DEV-640).
+    2. From retry 1, keep only the agents whose window holds the previous
+       attempt's largest prompt plus this completion (DEV-676, DEV-823).
+    3. Walk the rotation by retry count, plus the no-verdicts that asked
+       for a different agent without spending the budget (DEV-629).
+    4. On ROTATION_RANDOM_FRACTION of attempts, draw at random instead
+       (DEV-530; 0 in production).
+
+    Two later steps may still move the dispatch, and each records that it
+    did. DEV-631's ``inject_difference`` swaps in the next agent when the
+    plan would repeat an earlier attempt on every lever. The prompt
+    allocator (``context.plan_dispatch``, DEV-633) escalates to a larger
+    window when the prompt outgrows this one, which is recorded as a
+    reroute (DEV-676).
+    """
+    recommended = _select_implementer_agent(spec_dir)
+    initial = recommended or default_agent or task.agent
+    eligible: "list[str] | None" = None
+    needed: "int | None" = None
+    if task.retry_count > 0:
+        needed = previous_prompt_tokens(db, spec_id, "implementer")
+        if needed:
+            needed += completion_tokens
+            eligible = eligible_agents(needed, window_of)
+            if eligible is None:
+                logger.warning("spec %s: no agent's known window holds ~%d "
+                               "tokens — rotating over the full chain and "
+                               "leaving the fit check to escalate (DEV-676)",
+                               spec_id, needed)
+    agent = _rotation_pick(
+        initial, task.retry_count + _outcome.rotation_offset(db, spec_id, task),
+        eligible=eligible)
+    assignment = ("recommended" if task.retry_count == 0 and recommended
+                  else "rotation")
+    if eligible is not None and len(eligible) == 1:
+        assignment = "sole_fit"
+        logger.warning("spec %s: attempt %d — %r is the only agent whose window "
+                       "holds ~%d tokens; the rotation is one agent and a "
+                       "second identical failure on it is invariant (DEV-676)",
+                       spec_id, task.retry_count, agent, needed)
+    random_agent = random_rotation_pick()
+    if random_agent:
+        logger.info("spec %s: attempt %d assigned at random: %r (was %r; "
+                    "AUTONOMOUS_ROTATION_RANDOM_FRACTION, DEV-530)", spec_id,
+                    task.retry_count, random_agent, agent)
+        agent, assignment = random_agent, "random"
+    return AgentChoice(agent, assignment, eligible, needed)
+
+
 # ── DEV-631: what will differ from the failed attempt? ───────────────────────
 #
 # The retry loop incremented retry_count, rotated the agent and re-dispatched;

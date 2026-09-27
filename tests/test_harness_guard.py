@@ -12,7 +12,7 @@ import pytest
 
 import coding_model_server.orchestrator_daemon as d
 from coding_model_autonomous.db import Database
-from coding_model_autonomous.models import SpecStatus, TaskStatus
+from coding_model_autonomous.models import EventKind, SpecStatus, TaskStatus
 
 BROKEN_HARNESS_TAP = """\
 not ok 1 - deterministic_seeded_rng
@@ -166,5 +166,8 @@ def test_free_retries_are_capped(env):
     assert d._harness_retry(db, spec, rev, spec_dir, "r",
                             BROKEN_HARNESS_TAP, "node_test") is False, \
         "past the cap the normal budgeted path must take over"
-    used = json.loads((spec_dir / "harness_retries.json").read_text())["used"]
-    assert used == d._HARNESS_FREE_RETRIES
+    guard_events = [
+        p for p in (json.loads(e.payload_json) for e in db.list_events_by_kind(
+            spec_id=spec.id, kind=EventKind.AGENT_RAN, limit=-1))
+        if p.get("role") == "harness_guard"]
+    assert len(guard_events) == d._HARNESS_FREE_RETRIES
