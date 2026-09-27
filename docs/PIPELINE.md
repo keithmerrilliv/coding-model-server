@@ -401,30 +401,28 @@ The caps come from `Failure.cap`: `AUTONOMOUS_NO_VERDICT_CAP` (5) unless
 architect charge also writes the feedback to `design_review_feedback.md`; an
 implementer charge also sets the reviewer task back to PENDING.
 
-**Counters that still live outside `dispose`.** Four budgets are counted and
-enforced in `orchestrator_daemon.py` rather than in `outcome.py`:
+**Loops that bound themselves outside `dispose`.** Four budgets are enforced
+in `orchestrator_daemon.py`, each by counting its own records through
+`outcome.count_own_records` (DEV-838). That function reads every row of the
+loop's events, and when the count cannot be read it logs by the cap's name
+and returns 0 (DEV-630). None of the four uses `retry_count`, which human
+rejections and upstream routing share (DEV-558, DEV-545).
 
-- `_planner_no_verdict`. The planner has no task row, so the no-verdict cap
-  is written a second time for it: it counts planner-phase
-  `failure_classified` rows against the same `Failure.cap`, and parks the
-  *spec* in `needs_clarification`.
-- `_crash_recoveries_used`. Counts a task's `crash_recovery` records; at
-  `MAX_RETRIES` recoveries it calls `outcome.terminate` with `aborted`.
-  Each recovery still increments `retry_count`.
-- The testability-check rounds (`_testability_rounds_used` against
-  `executor.TESTABILITY_CHECK_MAX_ROUNDS`, 2). Each round charges the
-  architect through `outcome.record_local_charge`, which writes the row and
-  decides nothing.
-- `_harness_retry`'s free retries: `_HARNESS_FREE_RETRIES` (2, hard-coded),
-  counted in `harness_retries.json` in the workspace. A broken test harness
-  re-runs the implementer with no charge and no `failure_classified` row; the
-  record is a `harness_guard` anomaly. The retry wipe does not preserve that
-  file, so from `retry_count` 1 on the count starts again on every
-  implementer pass and the cap of two does not hold.
+| Loop | Counts | Cap | Past the cap |
+|---|---|---|---|
+| `_planner_no_verdict` | planner-phase no-verdict `failure_classified` rows | `Failure.cap` (the planner has no task row, so `dispose` cannot) | the spec parks in `needs_clarification` |
+| `_crash_recoveries_used` | the task's `crash_recovery` records | `MAX_RETRIES` | `outcome.terminate`, `aborted`. Each recovery still increments `retry_count` |
+| `_testability_rounds_used` | `testability_check` records with `revised` | `AUTONOMOUS_TESTABILITY_CHECK_MAX_ROUNDS` (2) | the findings go onto the design gate; each round charged the architect through `record_local_charge` |
+| `_harness_retry` | `harness_guard` records | `_HARNESS_FREE_RETRIES` (2) | the normal, charged retry path |
+
+Two of these used to leak. The testability count read only the 20 newest
+`agent_ran` rows, so a late architect pass could lose its early rounds. The
+harness count lived in a workspace file that the retry wipe deletes, so from
+`retry_count` 1 on it restarted on every pass. Both now count events.
 
 The upstream route to the architect (`_route_build_failure_to_architect`) and
 the design review also route themselves and record through
-`record_local_charge`. DEV-838 scope 2 moves these counters into `outcome`.
+`record_local_charge`.
 
 ### A build failure, end to end
 
@@ -550,21 +548,17 @@ sequenceDiagram
     participant CX as context.plan_dispatch
     participant S as model server
 
-    D->>RP: _select_implementer_agent, reads complexity.json
-    RP-->>D: recommended_agent if allowed, else the tier's agent, else none
-    Note over D: none: the role default, AUTONOMOUS_IMPLEMENTER_AGENT
+    D->>RP: choose_agent
+    Note over RP: anchor: complexity.json's recommendation or tier,<br/>else the role default (AUTONOMOUS_IMPLEMENTER_AGENT)
     opt retry_count above 0
-        D->>RP: previous_prompt_tokens, eligible_agents
         RP->>EV: newest implementer agent_ran
-        RP-->>D: agents whose n_ctx holds that prompt plus the completion, or none known
+        Note over RP: eligible: agents whose n_ctx holds that prompt plus the completion
     end
-    D->>OC: rotation_offset
+    RP->>OC: rotation_offset
     OC->>EV: no-verdicts on this attempt that asked to rotate
-    OC-->>D: k
-    D->>RP: _rotation_pick, index retry_count plus k
-    RP-->>D: the chain from the attempt-0 agent, filtered to the eligible agents
-    D->>RP: random_rotation_pick
-    RP-->>D: a uniform draw on ROTATION_RANDOM_FRACTION of calls, else nothing
+    OC-->>RP: k
+    Note over RP: _rotation_pick at retry_count plus k,<br/>then the random arm on ROTATION_RANDOM_FRACTION of calls
+    RP-->>D: AgentChoice: agent, assignment, eligible, needed tokens
     D->>RP: plan_attempt, inject_difference
     RP-->>D: the next untried agent, only if every lever repeats an earlier attempt
     D->>EV: attempt_planned, with the assignment
@@ -598,23 +592,21 @@ from the first eligible agent instead (DEV-823). With one eligible agent the
 assignment is `sole_fit`, and diagram 6's invariance edge treats a repeat on
 it as final.
 
-Selection happens in several places today, and DEV-838 scope 3 folds them into
-one `retry_policy.choose_agent()`:
+`retry_policy.choose_agent()` makes the pick (DEV-838). Two later steps can
+still move a dispatch, and each records that it did:
 
-- `retry_policy._select_implementer_agent`, for attempt 0. The daemon calls it
-  twice, once to pick and once to label the assignment `recommended`.
-- `_run_implementer` in `orchestrator_daemon.py`: the fallback to the role
-  default, the eligibility filter, `outcome.rotation_offset`,
-  `retry_policy._rotation_pick`, `random_rotation_pick` and
-  `inject_difference`.
-- `context.plan_dispatch`, called through the daemon's `_prompt_budget` in
-  `_generate_implementation` (single call) and `_generate_one_file` (per
-  file), which records a reroute; and through `_ctx_capable_agent` in
-  `_generate_via_manifest`, which moves the manifest call without recording
-  one.
-- Fixed picks with no rotation: the architect and reviewer through
-  `executor.role_to_agent`, and synthesis through `_SYNTHESIS_AGENT`
-  (`AUTONOMOUS_SYNTHESIS_AGENT`, default `deep_reviewer`).
+- `inject_difference` (DEV-631) swaps in the next untried agent when the plan
+  repeats an earlier attempt on every lever.
+- `context.plan_dispatch` (DEV-633) escalates to a larger window when the
+  prompt outgrows the chosen one. It is called through the daemon's
+  `_prompt_budget` in `_generate_implementation` (single call) and
+  `_generate_one_file` (per file), which record a reroute, and through
+  `_ctx_capable_agent` in `_generate_via_manifest`, which moves the manifest
+  call without recording one.
+
+The architect and reviewer have fixed picks with no rotation
+(`executor.role_to_agent`), and so does synthesis (`_SYNTHESIS_AGENT`,
+`AUTONOMOUS_SYNTHESIS_AGENT`, default `deep_reviewer`).
 
 What the model server does when the chosen agent is not the one loaded is in
 [SERVING.md](SERVING.md).
