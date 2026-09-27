@@ -273,6 +273,21 @@ def _states_contract_for(design_md: str, type_name: str) -> bool:
     return False
 
 
+def _types_gaining_state(names: list, line: str, declared: set) -> list:
+    """Which of a file's value types the design adds state to (DEV-828).
+
+    A type the File Structure line names (a file named after its type names it
+    through the filename), or one Data Models declares. A file with a single
+    value type needs neither: there is nowhere else for the state to go. A file
+    with several that the design names none of cannot be attributed, and a
+    finding would be a guess about the wrong type, so it yields nothing
+    (DEV-630: cannot tell, stay silent)."""
+    if len(names) == 1:
+        return list(names)
+    return [n for n in names
+            if n in declared or re.search(r"\b" + re.escape(n) + r"\b", line)]
+
+
 def check_declared_mutability(design_md: str, served: dict) -> list:
     """DEV-722: a design modifying a served value type must say what it is.
 
@@ -288,6 +303,8 @@ def check_declared_mutability(design_md: str, served: dict) -> list:
       * the File Structure names a file the context actually served;
       * that file declares a `struct` or `enum` at top level;
       * the entry describes ADDING state, not merely listing a reference;
+      * the type is the one gaining it — named for that file, declared in
+        Data Models, or the file's only value type (DEV-828);
       * and the design states no contract NEAR that type's name.
     """
     if not served:
@@ -296,6 +313,11 @@ def check_declared_mutability(design_md: str, served: dict) -> list:
     if not fs.strip():
         return []
     value_types = served_value_types(served)
+    # DEV-828: the state goes on a TYPE, not a file. Run 64 added `hud` to
+    # `FrameSnapshot`, stated its contract, and was still sent back twice for
+    # `GridPosition` and `CellKind`, which share the file and which the design
+    # never touched. Only a type the design names for that file counts.
+    declared = declared_types(design_md) | _heading_types(design_md)
     findings = []
     seen: set = set()
     for line in fs.splitlines():
@@ -307,7 +329,8 @@ def check_declared_mutability(design_md: str, served: dict) -> list:
             base = path.rsplit("/", 1)[-1]
             if path not in line and base not in line:
                 continue
-            undeclared = [n for n in names
+            touched = _types_gaining_state(names, line, declared)
+            undeclared = [n for n in touched
                           if not _states_contract_for(design_md, n)]
             if not undeclared or path in seen:
                 continue
