@@ -81,6 +81,9 @@ class ParsedEdits:
     """
     files: list[FileEdits] = field(default_factory=list)
     malformed: list[str] = field(default_factory=list)
+    # Parallel to ``malformed``: the file each broken block was headed for, or
+    # None when it had no `### path` header.
+    malformed_paths: list["str | None"] = field(default_factory=list)
 
     def is_empty(self) -> bool:
         return not self.files and not self.malformed
@@ -210,7 +213,24 @@ def _snippet(text: str, max_lines: int = 4) -> str:
     return preview or "    (empty)"
 
 
-def parse_edit_blocks(text: str) -> ParsedEdits:
+# DEV-842: a label the model appended to an edit header, e.g.
+# `### LSystem.cpp (Edit 1 - createRootModule)`, echoing the spec's own
+# "Edit 1." labels. Only a trailing parenthetical, and only when what is left
+# is a file the caller knows exists.
+_HEADER_LABEL_RE = re.compile(r"^(.*\S)[ \t]+\([^()]*\)$")
+
+
+def _known_path(path: str, known_paths: "set[str] | None") -> str:
+    if known_paths is None or path in known_paths:
+        return path
+    m = _HEADER_LABEL_RE.match(path)
+    if m and m.group(1) in known_paths:
+        return m.group(1)
+    return path
+
+
+def parse_edit_blocks(text: str,
+                      known_paths: "set[str] | None" = None) -> ParsedEdits:
     """Extract per-file SEARCH/REPLACE blocks from model output.
 
     Scans line by line. A `### path` line sets the current target file. A
@@ -221,6 +241,9 @@ def parse_edit_blocks(text: str) -> ParsedEdits:
 
     Anything outside a block that is not a header is ignored, so prose the model
     interleaves does not break parsing.
+
+    ``known_paths`` are the files that exist. A header naming one of them
+    plus a trailing parenthetical label is read as that file (DEV-842).
     """
     lines = text.splitlines()
     parsed = ParsedEdits()
@@ -252,6 +275,7 @@ def parse_edit_blocks(text: str) -> ParsedEdits:
                 parsed.malformed.append(
                     f"SEARCH block for {current_path or '(no file header)'} "
                     "has no `=======` divider")
+                parsed.malformed_paths.append(current_path)
                 continue
             # Collect the replace body until the closing marker.
             replace_lines: list[str] = []
@@ -265,12 +289,14 @@ def parse_edit_blocks(text: str) -> ParsedEdits:
                 parsed.malformed.append(
                     f"SEARCH block for {current_path or '(no file header)'} "
                     "has no `>>>>>>> REPLACE` terminator")
+                parsed.malformed_paths.append(current_path)
                 continue
             i += 1  # consume the REPLACE marker
             if current_path is None:
                 parsed.malformed.append(
                     "SEARCH/REPLACE block found with no `### path` header before "
                     "it — cannot tell which file to edit")
+                parsed.malformed_paths.append(None)
                 continue
             file_for(current_path).blocks.append(
                 EditBlock(search="\n".join(search_lines),
@@ -279,7 +305,8 @@ def parse_edit_blocks(text: str) -> ParsedEdits:
 
         m = _HEADER_RE.match(line)
         if m:
-            current_path = m.group(1).strip().strip("`").lstrip("/").strip()
+            current_path = _known_path(
+                m.group(1).strip().strip("`").lstrip("/").strip(), known_paths)
         else:
             fm = _FILE_OPEN_RE.match(line)
             if fm:
@@ -302,6 +329,9 @@ TIER_FUZZY = "fuzzy"
 # The synthetic "tier" recorded when a NEW path's single empty-SEARCH block is
 # taken as the whole file (resolve_edits, DEV-638 item 2).
 TIER_WHOLE_FROM_EMPTY_SEARCH = "whole_from_empty_search"
+# A malformed block for a NEW path that the same response also emits as a
+# well-formed whole file: the block is dropped, the whole file stands (DEV-842).
+TIER_SUPERSEDED = "superseded"
 
 # Fuzzy tier: a window must reach this similarity to count, and the best must
 # beat any NON-overlapping runner-up by the margin. Calibration: a one-token
@@ -620,18 +650,29 @@ def resolve_edits(
     # EXISTING path whose body is SEARCH/REPLACE markers is an edit set that
     # parse_edit_blocks picks up below, not content — writing it would put the
     # markers into the file verbatim.
+    whole_new: set[str] = set()
     for path, content in whole_files:
         if path in existing and _holds_edit_markers(content):
             continue
         put(path, content)
+        if path not in existing:
+            whole_new.add(path)
 
     errors: list[str] = []
     failures: list[EditFailure] = []
     applied: list[EditApplied] = []
-    parsed = parse_edit_blocks(edit_text)
-    for note in parsed.malformed:
+    parsed = parse_edit_blocks(edit_text, set(existing))
+    for note, mpath in zip(parsed.malformed, parsed.malformed_paths):
+        # DEV-842: a model that starts a NEW file as an edit block, breaks it
+        # off, and then emits the file whole has corrected itself. The whole
+        # file is the right form for a new path and it is complete, so the
+        # broken start is dropped and recorded. For an existing file, or with
+        # no whole file to stand in, the block still refuses the attempt.
+        if mpath is not None and mpath in whole_new:
+            applied.append(EditApplied(mpath, 0, TIER_SUPERSEDED, 0.0, None))
+            continue
         errors.append(note)
-        failures.append(EditFailure(path="", block=0, reason="malformed",
+        failures.append(EditFailure(path=mpath or "", block=0, reason="malformed",
                                     search="", detail=note))
 
     for fe in parsed.files:
