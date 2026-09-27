@@ -17,7 +17,7 @@ from unittest import mock
 
 import coding_model_server.orchestrator_daemon as d
 from coding_model_autonomous.context import SpecContext
-from coding_model_autonomous import executor
+from coding_model_autonomous import executor, retry_policy
 from coding_model_autonomous.apply_edits import (
     EditBlock,
     apply_search_replace,
@@ -224,7 +224,8 @@ def test_persisted_header_names_the_agent_the_call_went_to(db):
         return _failed_result()
 
     with mock.patch.object(d, "_generate_implementation", side_effect=generate), \
-            mock.patch.object(d, "_rotation_pick", return_value="fast_implementer"):
+            mock.patch.object(retry_policy, "_rotation_pick",
+                              return_value="fast_implementer"):
         d._run_implementer(db, spec, task, spec_dir)
 
     text = (spec_dir / "implementer_response.md").read_text()

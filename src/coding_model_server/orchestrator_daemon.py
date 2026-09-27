@@ -101,16 +101,14 @@ from coding_model_autonomous.retry_policy import (
     _latest_supervisor_feedback,
     _load_prior_decisions,
     _read_retry_attempts,
-    _rotation_pick,
-    _select_implementer_agent,
+    choose_agent,
     _snapshot_retry,
     snapshot_phase,
     _IMPLEMENTER_ROTATION,
     inject_difference,
     plan_attempt,
     previous_plans,
-    random_rotation_pick,
-    record_attempt_plan, eligible_agents, previous_prompt_tokens, record_reroute,)
+    record_attempt_plan, record_reroute,)
 from coding_model_autonomous.executor import (
     ImplementerResult,
     MAX_RETRIES,
@@ -142,7 +140,7 @@ from coding_model_autonomous.test_strategy import (  # DEV-837: moved out
 from coding_model_autonomous.context import RunnerOutage, SpecContext
 from coding_model_autonomous.outcome import (
     Failure, FailureClass, Hooks, classify_exception, classify_model_output,
-    classify_test_run, repo_packages, rotation_offset,
+    classify_test_run, repo_packages,
 )
 
 # ── Configuration ────────────────────────────────────────────────────────────
@@ -394,22 +392,11 @@ def _planner_no_verdict(db: Database, spec: Spec, failure: Failure) -> None:
     """A planner-stage no-verdict: stay in PENDING_PLAN (the next tick
     re-runs the planner) up to the cap, then ask a human via a
     clarification gate — the same channel a planner question uses."""
-    prior = 0
-    try:
-        for ev in db.list_events_by_kind(spec_id=spec.id,
-                                         kind=EventKind.FAILURE_CLASSIFIED,
-                                         limit=100):
-            payload = json.loads(ev.payload_json or "{}")
-            if payload.get("phase") == "planner" and \
-                    payload.get("outcome") == _outcome.Outcome.NO_VERDICT.value:
-                prior += 1
-    except Exception as exc:
-        # DEV-630: the planner's no-verdict cap reads as 'unused' when it
-        # cannot be read. Still 0, never silently.
-        logger.warning("spec %s: could not count planner no-verdicts (%s) — "
-                       "the planner cap is NOT enforced this tick (DEV-630)",
-                       spec.id, exc)
-        prior = 0
+    prior = _outcome.count_own_records(
+        db, spec.id, EventKind.FAILURE_CLASSIFIED,
+        lambda p: (p.get("phase") == "planner" and
+                   p.get("outcome") == _outcome.Outcome.NO_VERDICT.value),
+        what="planner cap")
     consecutive = prior + 1
     cap = failure.cap
     base = {"role": "planner", "outcome": failure.outcome.value,
@@ -1389,29 +1376,10 @@ def _crash_recoveries_used(db: Database, spec_id: str, task_id: str) -> int:
     recovered before this shipped carry no marker and so read as 0 — under-
     counting, which errs toward tolerance rather than toward discarding work.
     """
-    used = 0
-    try:
-        events = db.list_events_by_kind(spec_id=spec_id,
-                                        kind=EventKind.AGENT_RAN, limit=500)
-    except Exception as exc:
-        # DEV-630: a cap that cannot be read must not read as "unused". This
-        # is the crash-recovery bound; returning 0 here silently lifts it for
-        # this tick. Still 0 — failing closed would park every spec on a
-        # transient read error — but never silently.
-        logger.warning("spec %s: could not count crash recoveries (%s) — the "
-                       "recovery cap is NOT enforced this tick (DEV-630)",
-                       spec_id, exc)
-        return 0
-    for ev in events:
-        if ev.task_id != task_id:
-            continue
-        try:
-            payload = json.loads(ev.payload_json or "{}")
-        except (TypeError, ValueError):
-            continue
-        if payload.get("role") == "crash_recovery":
-            used += 1
-    return used
+    return _outcome.count_own_records(
+        db, spec_id, EventKind.AGENT_RAN,
+        lambda p: p.get("role") == "crash_recovery",
+        what="recovery cap", task_id=task_id)
 
 
 def _process_executing(db: Database, spec: Spec) -> None:
@@ -1676,25 +1644,10 @@ def _testability_rounds_used(db: Database, spec_id: str) -> int:
     reasons that had nothing to do with it — on run 9 both rounds were spent
     before a human saw any design at all.
     """
-    used = 0
-    try:
-        events = db.list_events_by_kind(spec_id=spec_id,
-                                        kind=EventKind.AGENT_RAN)
-    except Exception as exc:
-        # DEV-630: as for the crash-recovery cap — the testability check's
-        # revision budget reads as "unspent" whenever it cannot be read.
-        logger.warning("spec %s: could not count testability rounds (%s) — "
-                       "the revision cap is NOT enforced this tick (DEV-630)",
-                       spec_id, exc)
-        return 0
-    for ev in events:
-        try:
-            payload = json.loads(ev.payload_json or "{}")
-        except (TypeError, ValueError):
-            continue
-        if payload.get("role") == "testability_check" and payload.get("revised"):
-            used += 1
-    return used
+    return _outcome.count_own_records(
+        db, spec_id, EventKind.AGENT_RAN,
+        lambda p: p.get("role") == "testability_check" and bool(p.get("revised")),
+        what="revision cap")
 
 
 def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
@@ -3814,6 +3767,165 @@ def _record_tested_manifest(spec_dir: Path, files: "list[tuple[str, str]]",
                      spec_dir, exc_info=True)
 
 
+@dataclasses.dataclass
+class BuildCheck:
+    """What the pre-gate build check found (DEV-429). ``requeued`` means the
+    check already put the task down because the runner is unreachable
+    (DEV-538), and the caller has nothing left to do."""
+    reason: "str | None" = None       # a compiler diagnostic, or None
+    output: str = ""
+    passed: "bool | None" = None      # None: no check ran
+    framework: str = ""
+    blocking_warnings: list = dataclasses.field(default_factory=list)
+    split: Any = None                 # test_runner.parse_test_split's reading
+    strategy: Any = None              # the plan's test_strategy
+    requeued: bool = False
+
+
+def _pre_gate_build_check(db: Database, spec: Spec, task, spec_dir: Path,
+                          files: list, protected_files) -> BuildCheck:
+    # DEV-429: build the code before asking a human to review it. A gate that
+    # opens on code which cannot compile spends the expensive resource (the
+    # reviewer) on something the free one (the compiler) already decided. The
+    # reviewer/test task that would have caught it sits PENDING *behind* this
+    # gate, so without this the ordering is inverted.
+    #
+    # A dispatch that errors out (Mac asleep, key missing, network) must not
+    # burn a retry: _detect_build_failure only fires on a recognised compiler
+    # diagnostic, and everything else falls through to the normal gate.
+    build_reason = None
+    build_output = ""
+    build_passed = None
+    build_framework = ""
+    build_warnings: list = []
+    blocking_warnings: list = []
+    test_split = None
+    ts_for_build = _load_plan(spec).get("test_strategy")
+    if isinstance(ts_for_build, dict) and ts_for_build.get("framework"):
+        fw = build_framework = ts_for_build["framework"]
+        # DEV-512: statically-decidable Swift errors are caught here, before the
+        # ~300s Mac dispatch. A hit takes the SAME build_reason path a real
+        # compiler diagnostic would (its report is swiftc-shaped), so the whole
+        # routing/retry machinery below is unchanged — we just skip the runner.
+        # Gated to the Swift frameworks: the checks and the "does not compile"
+        # feedback only make sense for a Swift build.
+        precheck_failed = False
+        if fw.lower() in ("swift_test", "xcodebuild_test"):
+            build_reason, build_output = _local_swift_precheck(
+                db, spec, task, files, protected_files)
+            if build_reason is not None:
+                build_passed = False
+                precheck_failed = True  # its own event is recorded in the helper
+
+        # Only dispatch — and only record the dispatch's own TEST_RAN event —
+        # when the local pre-check let the code through.
+        if not precheck_failed:
+            try:
+                build_passed, build_output = _run_tests_with_guard(
+                    spec.id, spec_dir, fw, ts_for_build,
+                    output_label="Pre-gate build check output:",
+                    fail_log=("spec %s: pre-gate build check failed structural "
+                              "validation (%s)"),
+                )
+                build_reason = _detect_build_failure(build_output, fw, build_passed)
+                # DEV-547: warnings are only consulted when nothing failed to
+                # compile. A real diagnostic is strictly better feedback, and
+                # stacking the two would bury it.
+                build_warnings = _parse_build_warnings(
+                    build_output, ts_for_build.get("protected_paths"))
+                if build_reason is None and BLOCK_ON_BUILD_WARNINGS:
+                    blocking_warnings = [w for w in build_warnings if w.blocking]
+            except Exception as e:  # never let the check itself stall the spec
+                logger.warning("spec %s: pre-gate build check errored (%s) — "
+                               "falling through to the review gate", spec.id, e)
+                build_reason = None
+                blocking_warnings = []
+
+            build_payload = {"phase": "pre_gate_build_check",
+                             "passed": build_passed if not build_reason else False,
+                             # DEV-536 (via DEV-630): the runner's overwrite
+                             # detector was produced and never consumed. It now
+                             # heads the output (see test_runner) and is
+                             # queryable here, so a silent regression of the
+                             # read path is detectable after the fact.
+                             "suspected_reconstruction":
+                                 test_runner.RECONSTRUCTION_MARKER
+                                 in (build_output or "")[:2000],
+                             "build_failed": build_reason is not None,
+                             # DEV-547/DEV-529: warnings become queryable
+                             # rather than living only in the raw log.
+                             "warnings": len(build_warnings),
+                             "blocking_warnings": [
+                                 {"path": w.path, "line": w.line,
+                                  "diag_id": w.diag_id,
+                                  "message": w.message}
+                                 for w in blocking_warnings],
+                             # DEV-548: "compiled then crashed" is its own
+                             # outcome and DEV-529's taxonomy will want it
+                             # separated from a build failure.
+                             "test_process_crashed":
+                                 _detect_test_process_crash(build_output),
+                             "retry": task.retry_count}
+            # DEV-675: which results were the spec's own tests and which
+            # were the repository's, so "the suite passed" is a count the
+            # gate and the event both carry.
+            test_split = test_runner.parse_test_split(build_output)
+            if test_split is not None:
+                build_payload.update(test_split.payload())
+            # DEV-602 split B: a passing check records exactly what it
+            # verified, into the same payload this event carries. A failing
+            # check records nothing and leaves any prior manifest untouched.
+            if build_passed and not build_reason:
+                _record_tested_manifest(spec_dir, files, build_payload)
+            db.record_event(EventKind.TEST_RAN, spec_id=spec.id, task_id=task.id,
+                            payload=build_payload)
+
+        # DEV-478: keep the runner's own words whatever the outcome. Previously
+        # this was written only on the diagnostic path below, so the one case
+        # where the reviewer most needs it — the check ran, something failed,
+        # and it was not a recognised compiler diagnostic — kept nothing. The
+        # reviewer's own test_output.txt is written by _run_reviewer_tests,
+        # which sits *behind* this gate and has not run.
+        if build_output:
+            ArtifactLedger.open(db, spec, spec_dir).note(
+                "build_check_output.txt", build_output)
+            db.create_artifact(spec_id=spec.id, task_id=task.id,
+                               kind=ArtifactKind.TEST_REPORT,
+                               path="build_check_output.txt")
+
+        # DEV-477: neither a summary nor a diagnostic means the check told us
+        # nothing — an infrastructure fault, not a verdict on the code.
+        #
+        # DEV-548 carves out the case where it told us plenty: a build that
+        # completed and then took a signal. That is a runtime defect with a
+        # clean compile behind it, so it is neither inconclusive nor an
+        # infrastructure fault, and it must not be requeued as one.
+        if (build_passed is False and build_reason is None
+                and _detect_test_process_crash(build_output)):
+            logger.warning(
+                "spec %s: pre-gate build check compiled and then crashed — %s; "
+                "this is a runtime defect, not a build failure",
+                spec.id, _detect_test_process_crash(build_output))
+        elif (build_passed is False and build_reason is None
+                and not _observed_a_test_run(build_output, fw)):
+            logger.warning(
+                "spec %s: pre-gate build check is inconclusive — no test "
+                "summary and no compiler diagnostic in %d chars of output; "
+                "the build is unverified, not confirmed",
+                spec.id, len(build_output))
+            # DEV-538: and now act on it. Opening a code_review gate here asks
+            # the most expensive, slowest resource in the system to adjudicate
+            # a question no one has the evidence to answer, and then waits
+            # forever — run 8 sat on exactly this for 3930 minutes across three
+            # reboots. The runner comes back on its own, so the right move is
+            # to put the work down and pick it up again.
+            if test_runner.is_runner_unreachable(build_output):
+                if _requeue_for_unreachable_runner(db, spec, task):
+                    return BuildCheck(requeued=True)
+    return BuildCheck(build_reason, build_output, build_passed, build_framework,
+                      blocking_warnings, test_split, ts_for_build)
+
+
 def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
     # Wipe artifacts from earlier retries so the new implementer starts
     # from a clean slate. No-op on retry-0.
@@ -3843,51 +3955,14 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
                 rejection_notes = g.reviewer_notes
                 break
 
-    # Pick the implementer. Retry 0 honors the architect's complexity-based
-    # recommendation; later retries walk the rotation chain so each attempt
-    # uses a different model family — see project_implementer_rotation.md.
-    # DEV-640: the anchor must be something this loop does not mutate.
-    # `task.agent` is overwritten by every pick below, so anchoring on it
-    # re-based the chain each retry and retries 3 and 4 both landed on the
-    # last rotation slot. The role's configured default is what the task was
-    # created with (_bootstrap_tasks) and never changes; task.agent is only
-    # the last resort when no default is configured.
-    initial_agent = (_select_implementer_agent(spec_dir)
-                     or executor.role_to_agent("implementer") or task.agent)
-    # DEV-629: a no-verdict that asked for a different agent (a 413, a
-    # truncation, an empty completion) advances the pick without spending
-    # the budget.
-    # DEV-676: rotate only among the agents whose window can hold this
-    # prompt. The previous attempt's prompt_tokens is the estimate; on the
-    # first attempt there is none and the fit check alone decides.
-    eligible = None
-    if task.retry_count > 0:
-        needed = previous_prompt_tokens(db, spec.id, "implementer")
-        if needed:
-            needed += executor.implementer_max_tokens_for(design_md)
-            eligible = eligible_agents(needed, _agent_ctx_limit)
-            if eligible is None:
-                logger.warning("spec %s: no agent's known window holds ~%d "
-                               "tokens — rotating over the full chain and "
-                               "leaving the fit check to escalate (DEV-676)",
-                               spec.id, needed)
-    chosen_agent = _rotation_pick(
-        initial_agent, task.retry_count + rotation_offset(db, spec.id, task),
-        eligible=eligible)
-    assignment = ("recommended" if task.retry_count == 0
-                  and _select_implementer_agent(spec_dir) else "rotation")
-    if eligible is not None and len(eligible) == 1:
-        assignment = "sole_fit"
-        logger.warning("spec %s: attempt %d — %r is the only agent whose window "
-                       "holds ~%d tokens; the rotation is one agent and a "
-                       "second identical failure on it is invariant (DEV-676)",
-                       spec.id, task.retry_count, chosen_agent, needed)
-    random_agent = random_rotation_pick()  # DEV-530 option 1; off by default
-    if random_agent:
-        logger.info("spec %s: attempt %d assigned at random: %r (was %r; "
-                    "AUTONOMOUS_ROTATION_RANDOM_FRACTION, DEV-530)", spec.id,
-                    task.retry_count, random_agent, chosen_agent)
-        chosen_agent, assignment = random_agent, "random"
+    # Pick the implementer (retry_policy.choose_agent has the order and the
+    # two later steps that may still move the dispatch).
+    choice = choose_agent(
+        db, spec.id, task, spec_dir,
+        default_agent=executor.role_to_agent("implementer"),
+        completion_tokens=executor.implementer_max_tokens_for(design_md),
+        window_of=_agent_ctx_limit)
+    chosen_agent, assignment = choice.agent, choice.assignment
 
     # DEV-631: what will differ from the failed attempt? Recorded before the
     # call, with the rationale; a plan identical to an earlier attempt's on
@@ -4105,144 +4180,14 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
         _route_missing_planned_outputs(db, spec, task, spec_md, missing_planned)
         return
 
-    # DEV-429: build the code before asking a human to review it. A gate that
-    # opens on code which cannot compile spends the expensive resource (the
-    # reviewer) on something the free one (the compiler) already decided. The
-    # reviewer/test task that would have caught it sits PENDING *behind* this
-    # gate, so without this the ordering is inverted.
-    #
-    # A dispatch that errors out (Mac asleep, key missing, network) must not
-    # burn a retry: _detect_build_failure only fires on a recognised compiler
-    # diagnostic, and everything else falls through to the normal gate.
-    build_reason = None
-    build_output = ""
-    build_passed = None
-    build_framework = ""
-    build_warnings: list = []
-    blocking_warnings: list = []
-    test_split = None
-    ts_for_build = _load_plan(spec).get("test_strategy")
-    if isinstance(ts_for_build, dict) and ts_for_build.get("framework"):
-        fw = build_framework = ts_for_build["framework"]
-        # DEV-512: statically-decidable Swift errors are caught here, before the
-        # ~300s Mac dispatch. A hit takes the SAME build_reason path a real
-        # compiler diagnostic would (its report is swiftc-shaped), so the whole
-        # routing/retry machinery below is unchanged — we just skip the runner.
-        # Gated to the Swift frameworks: the checks and the "does not compile"
-        # feedback only make sense for a Swift build.
-        precheck_failed = False
-        if fw.lower() in ("swift_test", "xcodebuild_test"):
-            build_reason, build_output = _local_swift_precheck(
-                db, spec, task, result.files, protected_files)
-            if build_reason is not None:
-                build_passed = False
-                precheck_failed = True  # its own event is recorded in the helper
-
-        # Only dispatch — and only record the dispatch's own TEST_RAN event —
-        # when the local pre-check let the code through.
-        if not precheck_failed:
-            try:
-                build_passed, build_output = _run_tests_with_guard(
-                    spec.id, spec_dir, fw, ts_for_build,
-                    output_label="Pre-gate build check output:",
-                    fail_log=("spec %s: pre-gate build check failed structural "
-                              "validation (%s)"),
-                )
-                build_reason = _detect_build_failure(build_output, fw, build_passed)
-                # DEV-547: warnings are only consulted when nothing failed to
-                # compile. A real diagnostic is strictly better feedback, and
-                # stacking the two would bury it.
-                build_warnings = _parse_build_warnings(
-                    build_output, ts_for_build.get("protected_paths"))
-                if build_reason is None and BLOCK_ON_BUILD_WARNINGS:
-                    blocking_warnings = [w for w in build_warnings if w.blocking]
-            except Exception as e:  # never let the check itself stall the spec
-                logger.warning("spec %s: pre-gate build check errored (%s) — "
-                               "falling through to the review gate", spec.id, e)
-                build_reason = None
-                blocking_warnings = []
-
-            build_payload = {"phase": "pre_gate_build_check",
-                             "passed": build_passed if not build_reason else False,
-                             # DEV-536 (via DEV-630): the runner's overwrite
-                             # detector was produced and never consumed. It now
-                             # heads the output (see test_runner) and is
-                             # queryable here, so a silent regression of the
-                             # read path is detectable after the fact.
-                             "suspected_reconstruction":
-                                 test_runner.RECONSTRUCTION_MARKER
-                                 in (build_output or "")[:2000],
-                             "build_failed": build_reason is not None,
-                             # DEV-547/DEV-529: warnings become queryable
-                             # rather than living only in the raw log.
-                             "warnings": len(build_warnings),
-                             "blocking_warnings": [
-                                 {"path": w.path, "line": w.line,
-                                  "diag_id": w.diag_id,
-                                  "message": w.message}
-                                 for w in blocking_warnings],
-                             # DEV-548: "compiled then crashed" is its own
-                             # outcome and DEV-529's taxonomy will want it
-                             # separated from a build failure.
-                             "test_process_crashed":
-                                 _detect_test_process_crash(build_output),
-                             "retry": task.retry_count}
-            # DEV-675: which results were the spec's own tests and which
-            # were the repository's, so "the suite passed" is a count the
-            # gate and the event both carry.
-            test_split = test_runner.parse_test_split(build_output)
-            if test_split is not None:
-                build_payload.update(test_split.payload())
-            # DEV-602 split B: a passing check records exactly what it
-            # verified, into the same payload this event carries. A failing
-            # check records nothing and leaves any prior manifest untouched.
-            if build_passed and not build_reason:
-                _record_tested_manifest(spec_dir, result.files, build_payload)
-            db.record_event(EventKind.TEST_RAN, spec_id=spec.id, task_id=task.id,
-                            payload=build_payload)
-
-        # DEV-478: keep the runner's own words whatever the outcome. Previously
-        # this was written only on the diagnostic path below, so the one case
-        # where the reviewer most needs it — the check ran, something failed,
-        # and it was not a recognised compiler diagnostic — kept nothing. The
-        # reviewer's own test_output.txt is written by _run_reviewer_tests,
-        # which sits *behind* this gate and has not run.
-        if build_output:
-            ArtifactLedger.open(db, spec, spec_dir).note(
-                "build_check_output.txt", build_output)
-            db.create_artifact(spec_id=spec.id, task_id=task.id,
-                               kind=ArtifactKind.TEST_REPORT,
-                               path="build_check_output.txt")
-
-        # DEV-477: neither a summary nor a diagnostic means the check told us
-        # nothing — an infrastructure fault, not a verdict on the code.
-        #
-        # DEV-548 carves out the case where it told us plenty: a build that
-        # completed and then took a signal. That is a runtime defect with a
-        # clean compile behind it, so it is neither inconclusive nor an
-        # infrastructure fault, and it must not be requeued as one.
-        if (build_passed is False and build_reason is None
-                and _detect_test_process_crash(build_output)):
-            logger.warning(
-                "spec %s: pre-gate build check compiled and then crashed — %s; "
-                "this is a runtime defect, not a build failure",
-                spec.id, _detect_test_process_crash(build_output))
-        elif (build_passed is False and build_reason is None
-                and not _observed_a_test_run(build_output, fw)):
-            logger.warning(
-                "spec %s: pre-gate build check is inconclusive — no test "
-                "summary and no compiler diagnostic in %d chars of output; "
-                "the build is unverified, not confirmed",
-                spec.id, len(build_output))
-            # DEV-538: and now act on it. Opening a code_review gate here asks
-            # the most expensive, slowest resource in the system to adjudicate
-            # a question no one has the evidence to answer, and then waits
-            # forever — run 8 sat on exactly this for 3930 minutes across three
-            # reboots. The runner comes back on its own, so the right move is
-            # to put the work down and pick it up again.
-            if test_runner.is_runner_unreachable(build_output):
-                if _requeue_for_unreachable_runner(db, spec, task):
-                    return
+    check = _pre_gate_build_check(db, spec, task, spec_dir, result.files,
+                                  protected_files)
+    if check.requeued:
+        return
+    build_reason, build_output, build_passed = (check.reason, check.output,
+                                                check.passed)
+    build_framework, blocking_warnings = check.framework, check.blocking_warnings
+    test_split, ts_for_build = check.split, check.strategy
 
     # DEV-675: a repository test that passes at base_ref and fails on this
     # attempt is a verdict on the attempt — it broke behaviour that was
@@ -6226,11 +6171,11 @@ def _harness_retry(db: Database, spec: Spec, task, spec_dir: Path,
     budget for this spec is spent — the caller then falls through to the
     normal (budgeted) retry path.
     """
-    counter_path = spec_dir / "harness_retries.json"
-    try:
-        used = json.loads(counter_path.read_text()).get("used", 0)
-    except (OSError, ValueError):
-        used = 0
+    # Counted from the guard's own events: a file in spec_dir was deleted by
+    # every post-retry wipe, so the cap never bound after one charged retry.
+    used = _outcome.count_own_records(
+        db, spec.id, EventKind.AGENT_RAN,
+        lambda p: p.get("role") == "harness_guard", what="free harness-retry cap")
     if used >= _HARNESS_FREE_RETRIES:
         logger.warning("spec %s: harness defect again but free harness "
                        "retries exhausted (%d) — counting against the "
@@ -6255,11 +6200,6 @@ def _harness_retry(db: Database, spec: Spec, task, spec_dir: Path,
     )
     ArtifactLedger.open(db, spec, spec_dir).note(
         "failure_report.md", failure_detail)
-    try:
-        counter_path.write_text(json.dumps({"used": used + 1}))
-    except OSError as e:
-        logger.warning("spec %s: could not persist harness retry counter: %s",
-                       spec.id, e)
 
     # Same feedback channel _retry_role_with_feedback uses for implementer
     # retries — a rejected CODE_REVIEW gate — minus the budget increment.
