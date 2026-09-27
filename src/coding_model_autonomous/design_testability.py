@@ -652,6 +652,9 @@ def _check_symbols(seam: Seam, types: set[str], design_md: str) -> list[Finding]
     return findings
 
 
+_STRING_LITERAL_RE = re.compile(r'"(?:[^"\\\n]|\\.)*"')
+
+
 def _compared_types(assert_text: str, types: set[str],
                     members: dict[str, str]) -> set[str]:
     """Types an assert compares for equality.
@@ -672,6 +675,10 @@ def _compared_types(assert_text: str, types: set[str],
         spans = [assert_text] if re.search(r"[=!]=", assert_text) else []
     hits: set[str] = set()
     for span in spans:
+        # A string literal is a value, not a type reference (DEV-833): run 68's
+        # `nsErr.domain == "USDSceneParserError"` compares Strings, and an
+        # NS_ERROR_ENUM's domain string conventionally IS the type's name.
+        span = _STRING_LITERAL_RE.sub('""', span)
         for t in types:
             if re.search(r"\b" + re.escape(t) + r"\b", span):
                 hits.add(t)
