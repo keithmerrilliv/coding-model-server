@@ -17,6 +17,12 @@ The layering release ([DEV-835](https://keith-merrill4.atlassian.net/browse/DEV-
   - **Placeholders.** The ledger now refuses the plan's placeholder markers (`<source files>`, TBD, n/a, none) too. Plans still accept globs.
   - **Docs.** New `docs/EDITS.md` and `docs/SERVING.md`. PIPELINE.md adds a `dispose` decision tree and an agent-selection sequence, and fixes diagram 6's stale key. `scripts/check_mermaid.mjs` parses all 11 diagrams.
   - The daemon went from 7,482 lines to 7,068.
+- [DEV-842](https://keith-merrill4.atlassian.net/browse/DEV-842): a right answer in the wrong wrapper is no longer a failed attempt. Run 69's attempts 0–2 each carried correct code and were charged anyway. Two narrow rescues:
+  - A malformed edit block for a new file is dropped when the same response also emits that file whole. It is recorded as the `superseded` edit tier.
+  - An edit header that names a known file plus a trailing label, such as `### LSystem.cpp (Edit 1 - createRootModule)`, is read as that file.
+
+  Replayed, both of run 69's first two responses resolve to the spec's reference edits. On the archive's 146 responses, every behaviour change turns a refused attempt into an applied one.
+- [DEV-843](https://keith-merrill4.atlassian.net/browse/DEV-843): the rotation plans only agents the allocator will accept. Run 69 planned three retries onto 64K agents, and the allocator refused each, so all went back to `moe_implementer`. The two checks disagreed on three points: the server's token count against a chars/3 estimate, the whole window against its 95% share, and whether the reasoning reserve counts. There is now one rule, `context.fits`, used by the allocator and by `eligible_agents`. Each dispatch records `budget_needed_tokens` for the next attempt's plan. 0 of 237 archived implementer calls fall in the band where the rules differed.
 - [DEV-839](https://keith-merrill4.atlassian.net/browse/DEV-839) — the roster is what telemetry says is used (T3, in progress).
   - **Retired.** New `scripts/agent_usage.py` reads every request the server logged (smoke sweeps excluded), the pipeline's events, and what the daemon would dispatch to with `.env` applied. On its evidence, eight agents nothing wired or requested for a week were retired:
     - `reviewer` (last used 09-13; the reviewer role had already run on `deep_reviewer`)
