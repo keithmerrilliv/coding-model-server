@@ -30,6 +30,33 @@ def test_non_swift_sources_declare_no_value_types():
                                             "struct Point { float x; };\n"}) == {}
 
 
+ROUND2 = (FIXTURES / "dev831_run66_round2_design.md").read_text(encoding="utf-8")
+
+
+def test_run66_round2_c_family_design_raises_no_completeness_finding():
+    """Round 2 listed NodeType, ProductionMap and LSystem in Data Models (to
+    answer round 1's false finding); all live in existing headers, and
+    type_without_file asked for a file for each."""
+    assert dt.is_c_family_design(ROUND2)
+    assert dt.check_design_completeness(ROUND2) == []
+
+
+def test_completeness_still_fires_on_the_same_design_as_swift():
+    """Negative control: the same design with Swift files is still checked."""
+    swift = (ROUND2.replace("LSystem.h", "LSystem.swift")
+                   .replace("LSystem.cpp", "LSystemImpl.swift"))
+    assert not dt.is_c_family_design(swift)
+    kinds = {f.kind for f in dt.check_design_completeness(swift)}
+    assert dt.KIND_TYPE_WITHOUT_FILE in kinds
+
+
+def test_c_family_pattern_ignores_markdown_and_metal():
+    for fs in ("README.md - notes", "Shaders.metal - kernel", "design.md"):
+        assert not dt.is_c_family_design(f"## File Structure\n{fs}\n")
+    for fs in ("ShaderTypes.h", "Renderer.mm", "Loader.m", "Turtle.cpp"):
+        assert dt.is_c_family_design(f"## File Structure\n{fs} - modified\n")
+
+
 def test_same_shape_in_a_swift_file_still_fires():
     """Negative control: the check is narrowed, not disarmed."""
     design = DESIGN.replace("LSystem.h", "LSystem.swift")

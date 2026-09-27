@@ -367,6 +367,18 @@ def is_python_design(design_md: str) -> bool:
     return ".py" in _section(design_md, FILE_STRUCTURE_HEADING)
 
 
+_C_FAMILY_PATH_RE = re.compile(r"\.(?:hpp|hh|h|cc|cpp|cxx|c|mm|m)\b")
+
+
+def is_c_family_design(design_md: str) -> bool:
+    """True when the File Structure allocates a C, C++ or Objective-C path (DEV-831).
+
+    A header holds many types and is named for none of them in particular:
+    LLab's `LSystem.h` declares `NodeType`, `Texture`, `Node` and `LSystem`.
+    """
+    return bool(_C_FAMILY_PATH_RE.search(_section(design_md, FILE_STRUCTURE_HEADING)))
+
+
 # DEV-710: not every criterion HAS a call. "at least 6 new tests exist and the
 # pre-existing ones still pass" is a property of the file and the suite result,
 # not a test. With nowhere for those to go, the seam rules fail on them forever
@@ -1196,8 +1208,12 @@ def check_design_completeness(design_md: str) -> list[Finding]:
     `OverlayRef.py`. Runs 37 and 38 each spent a revision round on that
     finding, and the architect can only satisfy it by inventing a file the
     spec does not want.
+
+    Not C-family either (DEV-831), for the same reason: run 66's round-2 design
+    listed `NodeType`, `ProductionMap` and `LSystem` in Data Models, all housed
+    in existing headers, and was told to allocate a file for each.
     """
-    if is_python_design(design_md):
+    if is_python_design(design_md) or is_c_family_design(design_md):
         return []
     declared = declared_types(design_md) | _heading_types(design_md)
     files = allocated_files(design_md)
