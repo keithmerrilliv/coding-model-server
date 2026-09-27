@@ -151,6 +151,26 @@ def test_device_run_is_unsandboxed_off_the_vm_with_metal_validation(
     assert "Keith's Vision Pro" in caplog.text
 
 
+def test_device_run_signs_as_the_project_says(client, monkeypatch):
+    # DEV-853: the "(XXXXXXXXXX)" in a certificate's name is a personal ID, not
+    # a team; forcing it failed every target with 'No Account for Team'. A
+    # device run must not consult discovery or override the project's signing.
+    _attached(monkeypatch)
+    monkeypatch.setattr(environment, "find_signing_identity",
+                        lambda prefer_hash=True: pytest.fail(
+                            "a device run keeps the project's own signing"))
+    calls = _record(monkeypatch)
+    body = _post(client, on_device=True)
+    assert body["passed"] is True
+    build, _ = calls[-1]
+    assert "-allowProvisioningUpdates" in build
+    overrides = [a for a in build if a.split("=", 1)[0] in (
+        "CODE_SIGN_IDENTITY", "CODE_SIGN_STYLE", "DEVELOPMENT_TEAM",
+        "CODE_SIGNING_ALLOWED", "CODE_SIGNING_REQUIRED", "CODE_SIGN_ENTITLEMENTS",
+        "PROVISIONING_PROFILE_SPECIFIER")]
+    assert overrides == []
+
+
 def test_explicit_device_id_is_honoured_without_discovery(client, monkeypatch):
     monkeypatch.setattr(environment, "find_attached_device", lambda d: pytest.fail(
         "an id= destination is already hardware; nothing to discover"))
@@ -169,6 +189,14 @@ def test_explicit_device_id_is_honoured_without_discovery(client, monkeypatch):
     "Keith's Vision Pro could not be, unlocked",
     "Keith's Vision Pro is not available because it is unpaired",
     "Error: the device is not connected",
+    # DEV-853: the Mac's signing setup, not the code, stopped these runs.
+    "ElectricSheep.xcodeproj: error: No Account for Team \"YHU56PAQP4\". Add a "
+    "new account in Accounts settings",
+    "ElectricSheep.xcodeproj: error: No profiles for "
+    "'com.keithmerrill.ElectricSheep' were found",
+    "mlx-swift/Package.swift: error: No signing certificate \"iOS Development\" found",
+    "ElectricSheepTests.xctest: errSecInternalComponent",
+    "error: \"ElectricSheep\" requires a provisioning profile.",
 ])
 def test_a_locked_or_unreachable_device_is_marked(client, monkeypatch, line):
     _attached(monkeypatch)
