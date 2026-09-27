@@ -89,3 +89,83 @@ def test_the_daemon_does_not_compose_the_pick_itself():
                    "_select_implementer_agent", "previous_prompt_tokens"):
         assert not re.search(rf"\b{helper}\(", daemon), helper
     assert daemon.count("choose_agent(") == 1
+
+
+# ── DEV-843: the plan and the dispatch judge fit the same way ────────────────
+# Run 69 planned retries onto implementer and glimmer (64K); the allocator
+# refused each and every attempt went back to moe. choose_agent had added the
+# server's 30,684 prompt tokens to a 32,000 completion and compared against
+# the whole window; the allocator compares against its HEADROOM share.
+
+# The roster's windows as served (config n_ctx), not the fixture above.
+ROSTER_WINDOWS = {"implementer": 65_536, "glimmer_implementer": 65_536,
+                  "moe_implementer": 118_784, "fast_implementer": 65_536,
+                  "deep_implementer": 262_144}
+
+
+def _choose_real(db, spec, spec_dir, task, completion=32_000, reserve_of=None):
+    return choose_agent(db, spec.id, task, spec_dir, default_agent="implementer",
+                        completion_tokens=completion,
+                        window_of=ROSTER_WINDOWS.get, reserve_of=reserve_of)
+
+
+def _record_attempt(db, spec, **fields):
+    db.record_event(EventKind.AGENT_RAN, spec_id=spec.id,
+                    payload={"role": "implementer", "agent": "moe_implementer",
+                             "calls": 1, **fields})
+
+
+def test_run_69s_retry_is_planned_onto_an_agent_the_allocator_accepts(attempt):
+    db, spec, spec_dir, at_retry = attempt
+    _record_attempt(db, spec, prompt_tokens=30_684, max_call_prompt_tokens=30_684)
+    c = _choose_real(db, spec, spec_dir, at_retry(1))
+    assert c.eligible == ["moe_implementer", "deep_implementer"]
+    assert c.agent == "moe_implementer"
+
+
+def test_the_allocators_own_figure_wins_when_recorded(attempt):
+    """The allocator's estimate (chars / 3) runs above the server's count; the
+    recorded figure is the one the dispatch will judge by."""
+    db, spec, spec_dir, at_retry = attempt
+    _record_attempt(db, spec, prompt_tokens=20_000, budget_needed_tokens=70_000)
+    c = _choose_real(db, spec, spec_dir, at_retry(1))
+    assert c.needed_tokens == 70_000
+    assert c.eligible == ["moe_implementer", "deep_implementer"]
+
+
+def test_a_reasoning_reserve_counts_against_the_window(attempt):
+    db, spec, spec_dir, at_retry = attempt
+    _record_attempt(db, spec, prompt_tokens=10_000, budget_needed_tokens=40_000)
+    reserve = {"implementer": 30_000}.get
+    c = _choose_real(db, spec, spec_dir, at_retry(1), completion=8_000,
+                     reserve_of=lambda a: reserve(a) or 0)
+    assert "implementer" not in c.eligible
+    assert "glimmer_implementer" in c.eligible
+
+
+def test_eligible_agents_and_the_allocator_agree_at_the_margin():
+    """One unit either side of the HEADROOM boundary, for a 64K window."""
+    from coding_model_autonomous import context as ctx
+    from coding_model_autonomous.retry_policy import eligible_agents
+    edge = int(65_536 * ctx.HEADROOM)
+    assert eligible_agents(edge, ROSTER_WINDOWS.get, chain=["implementer"]) == ["implementer"]
+    assert eligible_agents(edge + 1, ROSTER_WINDOWS.get, chain=["implementer"]) is None
+    alloc = ctx.allocate([], fixed_chars=(edge - 1_000) * ctx.CHARS_PER_TOKEN,
+                         window_tokens=65_536, completion_tokens=1_000)
+    assert alloc.fits
+    over = ctx.allocate([], fixed_chars=(edge - 1_000 + 1) * ctx.CHARS_PER_TOKEN,
+                        window_tokens=65_536, completion_tokens=1_000)
+    assert not over.fits
+
+
+def test_every_dispatch_records_what_it_needed():
+    import coding_model_server.orchestrator_daemon as d
+    from coding_model_autonomous import context as ctx
+    tally: dict = {}
+    small = ctx.allocate([], fixed_chars=3_000, window_tokens=65_536,
+                         completion_tokens=500)
+    big = ctx.allocate([], fixed_chars=30_000, window_tokens=65_536,
+                       completion_tokens=500)
+    d._note_budget(tally, big, 500)
+    d._note_budget(tally, small, 500)
+    assert tally["budget_needed_tokens"] == big.prompt_tokens + 500

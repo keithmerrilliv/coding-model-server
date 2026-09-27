@@ -30,7 +30,7 @@ from . import outcome as _outcome
 from . import supervisor as _supervisor
 from .db import Database
 from .models import EventKind
-from .context import CONTEXT_FILE
+from .context import CONTEXT_FILE, fits
 from .workspace import LEDGER_FILE, attempt_files_from_ledger, read_entries
 
 logger = logging.getLogger("orchestrator.retry_policy")
@@ -243,7 +243,8 @@ _IMPLEMENTER_ROTATION = [
 
 
 def eligible_agents(needed_tokens: int, window_of: Any,
-                    chain: "list[str] | None" = None) -> "list[str] | None":
+                    chain: "list[str] | None" = None,
+                    reserve_of: Any = None) -> "list[str] | None":
     """The rotation agents whose KNOWN window holds *needed_tokens*, in
     rotation order — or None when no known window does (the caller keeps the
     full chain and says so; DEV-633's fit check still escalates at dispatch).
@@ -252,16 +253,41 @@ def eligible_agents(needed_tokens: int, window_of: Any,
     prompt that fit only one window was "rotated" five times onto that one
     agent while every plan recorded a different one. Runs 32 and 34 each
     spent six attempts that way.
+
+    DEV-843: judged by the allocator's own rule (``context.fits``: the
+    window's HEADROOM share, plus each agent's reasoning reserve), so an agent
+    listed here is one the dispatch-time fit check will accept. Run 69 planned
+    three retries onto 64K agents that the allocator then refused, and every
+    one went back to the same 116K agent.
     """
-    fits = []
+    ok = []
     for a in (chain or _IMPLEMENTER_ROTATION):
         try:
             w = window_of(a)
+            reserve = int(reserve_of(a)) if reserve_of else 0
         except Exception:
             w = None
-        if w is not None and int(w) >= int(needed_tokens):
-            fits.append(a)
-    return fits or None
+        if w is not None and fits(int(needed_tokens) + reserve, int(w)):
+            ok.append(a)
+    return ok or None
+
+
+def previous_needed_tokens(db: Database, spec_id: str, role: str) -> Optional[int]:
+    """What the largest call of the newest *role* attempt needed from a window,
+    in the allocator's units (prompt estimate plus completion reserve), or
+    None when that attempt predates the record (DEV-843)."""
+    try:
+        events = db.list_events_by_kind(spec_id=spec_id, kind=EventKind.AGENT_RAN, limit=200)
+    except Exception:
+        return None
+    for ev in events:  # newest first
+        p = _outcome._payload(ev)
+        if p.get("role") == role and p.get("prompt_tokens"):
+            try:
+                return int(p["budget_needed_tokens"]) if p.get("budget_needed_tokens") else None
+            except (TypeError, ValueError):
+                return None
+    return None
 
 
 def previous_prompt_tokens(db: Database, spec_id: str, role: str) -> Optional[int]:
@@ -358,7 +384,7 @@ class AgentChoice:
 
 def choose_agent(db: Database, spec_id: str, task: Any, spec_dir: Path, *,
                  default_agent: "str | None", completion_tokens: int,
-                 window_of: Any) -> AgentChoice:
+                 window_of: Any, reserve_of: Any = None) -> AgentChoice:
     """Which implementer makes this attempt: the one place the pick is made
     (DEV-838).
 
@@ -366,7 +392,8 @@ def choose_agent(db: Database, spec_id: str, task: Any, spec_dir: Path, *,
        role's configured default, else the task's agent. Never the agent a
        previous pick wrote onto the task, which re-based the chain (DEV-640).
     2. From retry 1, keep only the agents whose window holds the previous
-       attempt's largest prompt plus this completion (DEV-676, DEV-823).
+       attempt's largest call (DEV-676, DEV-823), judged by the allocator's
+       own figure and rule when the attempt recorded one (DEV-843).
     3. Walk the rotation by retry count, plus the no-verdicts that asked
        for a different agent without spending the budget (DEV-629).
     4. On ROTATION_RANDOM_FRACTION of attempts, draw at random instead
@@ -384,10 +411,14 @@ def choose_agent(db: Database, spec_id: str, task: Any, spec_dir: Path, *,
     eligible: "list[str] | None" = None
     needed: "int | None" = None
     if task.retry_count > 0:
-        needed = previous_prompt_tokens(db, spec_id, "implementer")
+        needed = previous_needed_tokens(db, spec_id, "implementer")
+        if needed is None:
+            # An attempt from before the record: the server's token count
+            # plus this completion, which underestimates the allocator's sum.
+            measured = previous_prompt_tokens(db, spec_id, "implementer")
+            needed = measured + completion_tokens if measured else None
         if needed:
-            needed += completion_tokens
-            eligible = eligible_agents(needed, window_of)
+            eligible = eligible_agents(needed, window_of, reserve_of=reserve_of)
             if eligible is None:
                 logger.warning("spec %s: no agent's known window holds ~%d "
                                "tokens — rotating over the full chain and "
