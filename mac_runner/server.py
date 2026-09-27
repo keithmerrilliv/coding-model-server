@@ -12,6 +12,7 @@ import hashlib
 import hmac
 import logging
 import os
+import re
 import subprocess
 import sys
 import time
@@ -104,6 +105,9 @@ class RunTestsRequest(BaseModel):
     configuration: Optional[str] = None
     workspace: Optional[str] = None
     project: Optional[str] = None
+    # DEV-850: run on the attached physical device, unsandboxed, with Metal
+    # API validation on. The pipeline sets it only after human code review.
+    on_device: bool = False
 
 
 class RunTestsResponse(BaseModel):
@@ -118,6 +122,44 @@ class RunTestsResponse(BaseModel):
     # was intended.
     overwrites: list[dict] = []
     integration_warnings: list[str] = []
+    # Echo of the request's on_device. Pydantic ignores fields it does not
+    # know, so a runner that predates DEV-850 would silently run a device
+    # request as an ordinary one; the caller tells the two apart by this.
+    on_device: bool = False
+
+
+# Metal API validation for a device run (DEV-850); see where it is added.
+MTL_VALIDATION_VAR = "TEST_RUNNER_MTL_DEBUG_LAYER"
+
+# Heads the output of every device request that did not run on the device, so
+# the caller can tell "the device leg never happened" from "it failed".
+DEVICE_UNAVAILABLE = "[device-unavailable] "
+
+# What xcodebuild says when the device, not the code, stopped the run. Test
+# failures and crashes, Metal validation aborts included, must never match.
+_DEVICE_UNREACHABLE_RE = re.compile(
+    r"device is locked|passcode protected|could not be,? unlocked"
+    r"|unable to find a destination matching"
+    r"|is not available because it is unpaired|device is not connected",
+    re.IGNORECASE)
+
+
+def _device_refusal(reason: str) -> RunTestsResponse:
+    logger.warning("device run refused: %s", reason)
+    return RunTestsResponse(
+        passed=False, output=DEVICE_UNAVAILABLE + reason,
+        duration_sec=0.0, exit_code=None)
+
+
+def _mark_device_unreachable(output: str, device: str) -> str:
+    """Prefix *output* with the marker when the device, not the code, failed."""
+    m = _DEVICE_UNREACHABLE_RE.search(output)
+    if m is None:
+        return output
+    line = next((ln.strip() for ln in output.splitlines()
+                 if m.group(0).lower() in ln.lower()), m.group(0))
+    return (f"{DEVICE_UNAVAILABLE}device {device} was locked or unreachable: "
+            f"{line}\n\n{output}")
 
 
 class ReadFilesRequest(BaseModel):
@@ -463,6 +505,12 @@ def read_files_endpoint(req: ReadFilesRequest) -> ReadFilesResponse:
     dependencies=[Depends(verify_runner_key)],
 )
 def run_tests_endpoint(req: RunTestsRequest) -> RunTestsResponse:
+    resp = _run_tests(req)
+    resp.on_device = req.on_device
+    return resp
+
+
+def _run_tests(req: RunTestsRequest) -> RunTestsResponse:
     repos = Config.repos()
     if req.repo not in repos:
         raise HTTPException(
@@ -477,24 +525,49 @@ def run_tests_endpoint(req: RunTestsRequest) -> RunTestsResponse:
     timeout = req.timeout or DEFAULT_TIMEOUTS[req.framework]
     patch_dicts = [pf.model_dump() for pf in req.patch_files]
     # framework is passed positionally to build_cmd; leaving it in opts too
-    # makes it a duplicate argument.
-    opts = req.model_dump(exclude_none=True, exclude={"framework"})
+    # makes it a duplicate argument. on_device decides where the run happens,
+    # not what the command says, so the builders never see it.
+    opts = req.model_dump(exclude_none=True, exclude={"framework", "on_device"})
+
+    # Device leg (DEV-850). Every refusal returns before anything runs, with
+    # the marker the caller reads as "the device leg did not happen".
+    if req.on_device:
+        if req.framework != "xcodebuild_test":
+            return _device_refusal(
+                f"on_device needs framework xcodebuild_test, not {req.framework}")
+        if not Config.DEVICE_TESTS:
+            return _device_refusal(
+                "device tests are disabled on this runner "
+                "(CODING_MODEL_RUNNER_DEVICE_TESTS is off)")
+
     # VM containment (DEV-422): frameworks sandbox-exec cannot hold
     # (app-hosted XCTest, DEV-403) dispatch into a throwaway tart VM instead
     # of running unsandboxed on the host. CODING_MODEL_RUNNER_VM=0 is the
-    # explicit fallback to the old warned host behavior.
-    use_vm = Config.SANDBOX and Config.VM and req.framework in VM_REQUIRED
+    # explicit fallback to the old warned host behavior. A device run cannot
+    # use the VM at all: the guest cannot see a USB device.
+    use_vm = (Config.SANDBOX and Config.VM and req.framework in VM_REQUIRED
+              and not req.on_device)
 
     # Discover what this Mac can offer: a real signing identity in preference
     # to ad-hoc, and an attached physical device in preference to a simulator
     # (DEV-395/DEV-396). Anything the plan set explicitly is left alone.
     # Host-only: an attached device is unreachable from inside a VM, and the
     # guest signs ad-hoc so there is no identity to discover (DEV-421).
+    device: Optional[str] = None
     if req.framework == "xcodebuild_test" and not use_vm:
         opts = resolve_environment(opts)
         if device := opts.pop("destination_device", None):
             logger.info("testing on attached device %s (%s)",
                         device, opts.get("destination"))
+        if req.on_device:
+            destination = str(opts.get("destination") or "")
+            # Only an id= destination names hardware. Without one, xcodebuild
+            # would quietly pick a simulator and report it as the device leg.
+            if "id=" not in destination:
+                return _device_refusal(
+                    f"no physical device attached for destination "
+                    f"{destination or '(none)'}")
+            device = device or destination
 
     start = time.monotonic()
     if use_vm and (unavailable := vm.vm_available()):
@@ -553,6 +626,13 @@ def run_tests_endpoint(req: RunTestsRequest) -> RunTestsResponse:
                     req.framework, wt, derived_data, **opts)
             except FrameworkError as e:
                 raise HTTPException(400, str(e))
+            if req.on_device:
+                # Metal API validation in the test process: xcodebuild hands
+                # TEST_RUNNER_-prefixed variables to the test runner with the
+                # prefix stripped, so the tests see MTL_DEBUG_LAYER=1. Also set
+                # in the environment by _run_on_host, which is the form
+                # xcodebuild's man page documents.
+                cmd.append(f"{MTL_VALIDATION_VAR}=1")
 
             if use_vm:
                 logger.info(
@@ -569,7 +649,8 @@ def run_tests_endpoint(req: RunTestsRequest) -> RunTestsResponse:
                 passed = exit_code == 0
             else:
                 passed, output, exit_code = _run_on_host(
-                    req, wt, cmd, resolve_cmd, timeout)
+                    req, wt, cmd, resolve_cmd, timeout,
+                    on_device=req.on_device, device=device)
     except WorkspaceError as e:
         return RunTestsResponse(
             passed=False,
@@ -591,6 +672,9 @@ def run_tests_endpoint(req: RunTestsRequest) -> RunTestsResponse:
         # First, not last: a 20k-char xcodebuild log buries a trailing note,
         # and this changes how the whole result should be read.
         output = "\n".join(integration_warnings) + "\n\n" + output
+    if req.on_device and not passed:
+        # Last, so the marker is the first thing in the output.
+        output = _mark_device_unreachable(output, device or "?")
     for ow in overwrites:
         if ow.get("suspected_reconstruction"):
             logger.warning(
@@ -606,8 +690,9 @@ def run_tests_endpoint(req: RunTestsRequest) -> RunTestsResponse:
 
 
 def _run_on_host(req: RunTestsRequest, wt: Path, cmd: list[str],
-                 resolve_cmd: "list[str] | None",
-                 timeout: int) -> "tuple[bool, str, Optional[int]]":
+                 resolve_cmd: "list[str] | None", timeout: int,
+                 on_device: bool = False, device: Optional[str] = None,
+                 ) -> "tuple[bool, str, Optional[int]]":
     """The pre-DEV-422 host execution path: resolve, maybe sandbox, run."""
     # Resolve SwiftPM dependencies BEFORE sandboxing (DEV-294).
     # SwiftPM sandboxes manifest evaluation itself and macOS cannot
@@ -656,7 +741,17 @@ def _run_on_host(req: RunTestsRequest, wt: Path, cmd: list[str],
     # is per-framework: app-hosted XCTest cannot survive sandbox-exec
     # at all (DEV-403) — its containment is the VM (DEV-422), so reaching
     # this path with such a framework means the operator disabled it.
-    if Config.SANDBOX and req.framework in VM_REQUIRED:
+    run_kwargs: dict = {}
+    if on_device:
+        # No wrapper: app-hosted XCTest cannot run under sandbox-exec
+        # (DEV-403), and the VM cannot reach the device. The human code review
+        # that precedes every device request is the only containment.
+        logger.warning(
+            "spec %s: UNSANDBOXED device run on %s — model-written test code "
+            "runs on this host with the runner user's access (DEV-850)",
+            req.spec_id, device)
+        run_kwargs["env"] = {**os.environ, MTL_VALIDATION_VAR: "1"}
+    elif Config.SANDBOX and req.framework in VM_REQUIRED:
         logger.warning(
             "%s runs UNSANDBOXED on the host: sandbox-exec cannot contain "
             "app-hosted XCTest (DEV-403) and VM containment (DEV-422) is "
@@ -680,6 +775,7 @@ def _run_on_host(req: RunTestsRequest, wt: Path, cmd: list[str],
     try:
         result = subprocess.run(
             cmd, cwd=wt, capture_output=True, text=True, timeout=timeout,
+            **run_kwargs,
         )
         passed = result.returncode == 0
         output = resolve_output + (result.stdout or "") + "\n" + (result.stderr or "")

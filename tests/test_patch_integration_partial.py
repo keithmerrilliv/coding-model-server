@@ -141,6 +141,7 @@ class TestWarningsReachTheOutput:
 
         from mac_runner import server
 
-        src = inspect.getsource(server.run_tests_endpoint)
+        # The endpoint is a thin wrapper (DEV-850); the body is _run_tests.
+        src = inspect.getsource(server._run_tests)
         assert "integration_warnings" in src
         assert 'join(integration_warnings)' in src
