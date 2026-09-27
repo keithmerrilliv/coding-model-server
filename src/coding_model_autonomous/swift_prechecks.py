@@ -42,7 +42,7 @@ from dataclasses import dataclass, field
 # ``/* … */`` block comments, ``//`` line comments, ``"…"`` strings with ``\"``
 # escapes, and ``"""…"""`` multiline strings.
 #
-# Known limitation (shared with executor._swift_code_only): a ``"`` nested
+# Known limitation (executor._swift_code_only uses this scanner too): a ``"`` nested
 # inside a string interpolation — ``"\(d["k"])"`` — ends the string early. It is
 # rare in the code these checks target and only ever costs a missed detection,
 # never a false positive, so it is accepted rather than parsed around.

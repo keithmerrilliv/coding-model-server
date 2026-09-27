@@ -31,6 +31,14 @@ class TestIsPlaceholderPath:
         for p in real_paths:
             assert is_placeholder_path(p) is False
 
+    @pytest.mark.parametrize("marker", ["<source files>", "<new test files>",
+                                        "TBD", "n/a", "none"])
+    def test_the_plans_markers_are_placeholders_at_the_ledger_too(self, marker):
+        """DEV-838: one vocabulary for "something goes here". Run 17 carried
+        `<source files>` as a phase input; as a write path the ledger used to
+        take it."""
+        assert is_placeholder_path(marker) is True
+
 
 class TestWriteRefusesPlaceholders:
     """T3, T4, T8: write refuses placeholders without side effects."""

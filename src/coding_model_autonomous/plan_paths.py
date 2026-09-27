@@ -49,6 +49,10 @@ from typing import Callable, Iterable
 
 # `<source files>`, `<new test files>`, `TBD`, `...` — a model's way of saying
 # "something goes here". Run 17 carried `<source files>` as phases[test].inputs.
+# The ledger refuses these too (workspace.is_placeholder_path), plus what only
+# a WRITE can get wrong: `path/to/`, `.ext`, braces and globs. Globs are not
+# placeholders here — 54 archived plan paths are patterns like
+# `Sources/CentipedeCore/*.swift` (DEV-838).
 _PLACEHOLDER_RE = re.compile(r"^\s*(<[^>]*>|\.{3}|tbd|n/?a|none)\s*$", re.IGNORECASE)
 
 PHASE_PATH_KEYS = ("inputs", "outputs")

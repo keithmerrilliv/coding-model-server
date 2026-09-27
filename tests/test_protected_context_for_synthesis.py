@@ -93,6 +93,23 @@ def test_partial_collision_is_reported_but_not_total():
     assert total is False
 
 
+def test_attributed_declarations_are_seen_on_both_sides():
+    """DEV-838: executor's own regex skipped `@MainActor final class C`, so on
+    a default-MainActor target a protected type was invisible to the check,
+    and a file mixing a colliding type with an attributed one read as a pure
+    duplicate and was dropped whole."""
+    protected = [("Sources/App/Engine.swift",
+                  "@MainActor\nfinal class Engine {}\n")]
+    redeclared = [("Sources/App/Engine2.swift",
+                   "@MainActor final class Engine {}\n")]
+    assert executor.protected_type_collisions(redeclared, protected) == [
+        ("Sources/App/Engine2.swift", ["Engine"], True)]
+    mixed = [("Sources/CentipedeCore/World.swift",
+              "public struct Field {}\n@MainActor final class Renderer {}\n")]
+    (_, names, total), = executor.protected_type_collisions(mixed, PROTECTED)
+    assert names == ["Field"] and total is False
+
+
 def test_the_protected_file_itself_is_never_an_offender():
     assert executor.protected_type_collisions(PROTECTED, PROTECTED) == []
 
