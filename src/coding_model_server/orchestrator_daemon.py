@@ -5673,10 +5673,14 @@ def _unresolved_for(view: "_context.RoleContext") -> list[str]:
     served = {**dict(view.reference_files), **editable}
     names = _context.unresolved_symbols(editable, served)
     if names:
+        # States what was observed, not a cause (DEV-698): a name can also come
+        # from a framework this scan does not know. If one of them is a
+        # repository symbol, THAT is when the modification set is short a file.
         logger.warning(
-            "context: %d symbol(s) the editable files call are defined nowhere "
-            "in the served set — %s. The spec's modification set is probably "
-            "short a file (DEV-698)", len(names), ", ".join(names[:10]))
+            "context: %d symbol(s) the editable files call are declared nowhere "
+            "in the served set — %s. Any that are repository symbols mean the "
+            "spec's modification set is short their file (DEV-698)",
+            len(names), ", ".join(names[:10]))
     return names
 
 
