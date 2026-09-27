@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## v0.5.0 — unreleased
+
+The honest-guards release ([DEV-818](https://keith-merrill4.atlassian.net/browse/DEV-818)): a guard reports what it observed and names a cause only when it has actually isolated one. Runs 56 to 68 all reached release approval. Nine were pushed by the pipeline and four were delivered by hand, one because of a false stale-base refusal fixed by DEV-810, and three because LLab had no delivery remote until 2026-09-27. LLab joined Electric Sheep and Centipede as a third target, and is tested through Swift's C++ interop.
 
 ### Shipped
 
