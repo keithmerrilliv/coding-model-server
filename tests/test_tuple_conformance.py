@@ -22,9 +22,8 @@ from pathlib import Path
 
 import pytest
 
+from fixture_files import load_fixture
 from coding_model_autonomous import design_testability as dt
-
-FIXTURE = Path(__file__).parent / "fixtures" / "run7_design_v3.md"
 
 
 def _design(body: str) -> str:
@@ -34,7 +33,7 @@ def _design(body: str) -> str:
 class TestTheShapeThatIsAlwaysWrong:
     def test_run7_v3_flags_mushrooms(self):
         """The ticket's acceptance, against the real artefact."""
-        findings = dt.check_design_testability(FIXTURE.read_text())
+        findings = dt.check_design_testability(load_fixture("run7_design_v3.md"))
         tuples = [f for f in findings if f.kind == dt.KIND_TUPLE_CONFORMANCE]
         assert [f.criterion for f in tuples] == ["WorldSnapshot.mushrooms"]
 

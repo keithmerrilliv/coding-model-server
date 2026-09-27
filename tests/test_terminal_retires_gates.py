@@ -12,13 +12,6 @@ from coding_model_autonomous.models import (
 )
 
 
-@pytest.fixture
-def db(tmp_path):
-    database = Database(db_path=tmp_path / "t.sqlite", workspace_root=tmp_path / "ws")
-    yield database
-    database.close_all()
-
-
 def _spec_with_gates(db: Database, n: int):
     """Create a spec with one implementer task and *n* open code-review gates.
 

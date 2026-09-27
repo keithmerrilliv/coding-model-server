@@ -12,7 +12,6 @@ import pytest
 
 import coding_model_server.orchestrator_daemon as d
 from coding_model_autonomous import test_runner
-from coding_model_autonomous.db import Database
 from coding_model_autonomous.models import TaskStatus
 
 TABLE = """
@@ -93,14 +92,6 @@ class TestFetchRaisesOnOutage:
             ([("src/big.py", "content")], []))
         assert _ctx_files(self._spec(), TABLE) == [
             ("src/big.py", "content")]
-
-
-@pytest.fixture
-def db(tmp_path):
-    database = Database(db_path=tmp_path / "t.sqlite",
-                        workspace_root=tmp_path / "ws")
-    yield database
-    database.close_all()
 
 
 class TestPark:

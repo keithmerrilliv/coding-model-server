@@ -13,8 +13,6 @@ import json
 import time
 from unittest import mock
 
-import pytest
-
 import coding_model_server.orchestrator_daemon as d
 from coding_model_autonomous.context import SpecContext
 from coding_model_autonomous import apply_edits, executor
@@ -23,7 +21,6 @@ from coding_model_autonomous.apply_edits import (
     apply_search_replace,
     resolve_edits,
 )
-from coding_model_autonomous.db import Database
 from coding_model_autonomous.executor import ImplementerResult, build_implementer_message
 from coding_model_autonomous.models import EventKind, GateType, TaskStatus
 
@@ -273,12 +270,6 @@ def test_file_modes_never_render_outside_edit_mode():
 
 
 # ── daemon wiring ─────────────────────────────────────────────────────────────
-
-@pytest.fixture
-def db(tmp_path):
-    database = Database(db_path=tmp_path / "t.sqlite", workspace_root=tmp_path / "ws")
-    yield database
-    database.close_all()
 
 
 def _spec_with_task(db):

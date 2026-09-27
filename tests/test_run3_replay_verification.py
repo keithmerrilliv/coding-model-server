@@ -16,7 +16,6 @@ import pytest
 
 import coding_model_server.orchestrator_daemon as d
 from coding_model_autonomous import outcome as _outcome
-from coding_model_autonomous.db import Database
 from coding_model_autonomous.models import SpecStatus, TaskStatus
 
 RUN3 = pathlib.Path("var/tasks_db/specs/spec_cc7dd609")
@@ -47,13 +46,6 @@ def _build_failures():
         if f.is_file():
             out.append((r.name, f.read_text()))
     return out
-
-
-@pytest.fixture
-def db(tmp_path):
-    database = Database(db_path=tmp_path / "t.sqlite", workspace_root=tmp_path / "ws")
-    yield database
-    database.close_all()
 
 
 # ── DEV-468: the design-caused diagnostics must be detectable ────────────────

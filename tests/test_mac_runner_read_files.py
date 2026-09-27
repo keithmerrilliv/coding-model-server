@@ -13,10 +13,8 @@ behaviour under test.
 import subprocess
 
 import pytest
-from fastapi.testclient import TestClient
 
 from mac_runner import server
-from mac_runner.config import Config
 
 
 def _commit(path, message):
@@ -46,13 +44,9 @@ def repo(tmp_path):
 
 
 @pytest.fixture
-def client(tmp_path, repo, monkeypatch):
+def client(repo, runner_client):
     path, _ = repo
-    repos_file = tmp_path / "repos.yml"
-    repos_file.write_text(f"repos:\n  proj:\n    path: {path}\n")
-    monkeypatch.setattr(Config, "REPOS_FILE", repos_file)
-    monkeypatch.setattr(Config, "API_KEY", "test-key")
-    return TestClient(server.app)
+    return runner_client(path)
 
 
 HEADERS = {"X-Runner-Key": "test-key"}

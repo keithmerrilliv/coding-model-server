@@ -10,19 +10,9 @@ different answers depending on which branch ended it, and DEV-532's invariant
 
 All twelve now go through ``outcome.terminate`` with ``FailureClass.ABORTED``.
 """
-import pytest
 
 import coding_model_server.orchestrator_daemon as d
-from coding_model_autonomous.db import Database
 from coding_model_autonomous.models import SpecStatus, TaskStatus
-
-
-@pytest.fixture
-def db(tmp_path):
-    database = Database(db_path=tmp_path / "t.sqlite",
-                        workspace_root=tmp_path / "ws")
-    yield database
-    database.close_all()
 
 
 def _terminal_rows(db, spec_id):

@@ -7,9 +7,10 @@ incentive would otherwise teach the architect to game.
 """
 from pathlib import Path
 
+from fixture_files import load_fixture
 from coding_model_autonomous import design_testability as T
 
-RUN60 = (Path(__file__).parent / "fixtures" / "dev809_run60_design.md").read_text()
+RUN60 = load_fixture("dev809_run60_design.md")
 
 
 def _kinds(md):

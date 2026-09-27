@@ -23,17 +23,9 @@ import pytest
 import coding_model_server.orchestrator_daemon as d
 from coding_model_autonomous.context import SpecContext
 from coding_model_autonomous import design_testability, executor
-from coding_model_autonomous.db import Database
 from coding_model_autonomous.models import (
     EventKind, GateStatus, GateType, SpecStatus, TaskStatus,
 )
-
-
-@pytest.fixture
-def db(tmp_path):
-    database = Database(db_path=tmp_path / "t.sqlite", workspace_root=tmp_path / "ws")
-    yield database
-    database.close_all()
 
 
 @pytest.fixture

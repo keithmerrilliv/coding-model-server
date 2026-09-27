@@ -10,13 +10,11 @@ the three 502s reached the event stream.
 import textwrap
 from unittest import mock
 
-import pytest
 import requests
 
 import coding_model_autonomous._http as h
 import coding_model_server.orchestrator_daemon as d
 from coding_model_autonomous import executor
-from coding_model_autonomous.db import Database
 from coding_model_autonomous.models import SpecStatus
 from coding_model_autonomous.outcome import FailureClass, classify_exception
 from coding_model_server.streaming import build_completion_response
@@ -43,13 +41,6 @@ def test_a_retry_gets_more_room_than_a_first_pass():
     assert executor.architect_max_tokens(False) == executor.ARCHITECT_MAX_TOKENS
     assert executor.architect_max_tokens(True) == executor.ARCHITECT_RETRY_MAX_TOKENS
     assert executor.ARCHITECT_RETRY_MAX_TOKENS > executor.ARCHITECT_MAX_TOKENS
-
-
-@pytest.fixture
-def db(tmp_path):
-    database = Database(db_path=tmp_path / "t.sqlite", workspace_root=tmp_path / "ws")
-    yield database
-    database.close_all()
 
 
 def _architect_budgets(db, *, retry):

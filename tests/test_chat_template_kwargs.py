@@ -21,14 +21,11 @@ What these tests pin is that the knob is INERT until something opts in. The
 whole roster runs through `_build_request_payload`, so a key appearing where it
 did not before would change every agent's request at once.
 """
-import asyncio
-from unittest import mock
-
 import pytest
 
+from chat_harness import drive_chat
 from coding_model_server.config import Config, _create_agent_config
 from coding_model_server.llama_server import LlamaServerManager
-from coding_model_server.routes import chat
 from coding_model_server.schemas import ChatCompletionRequest, ChatMessage
 
 MESSAGES = [{"role": "user", "content": "design it"}]
@@ -125,25 +122,10 @@ def test_an_agent_that_passes_nothing_carries_no_key(falsy):
 
 # ── the route resolves agent default vs request override ─────────────────────
 
-class _FakeRequest:
-    def __init__(self):
-        self.state = mock.Mock()
-
-
 def _resolve(monkeypatch, model, **kwargs):
     """Drive the real route and report what it handed the proxy."""
-    fake_mgr = mock.Mock()
-    fake_mgr.ensure_running.return_value = None
-    fake_mgr.tokenize.side_effect = lambda text: len(text or "") // 4
-    fake_mgr.proxy_sync.return_value = {"id": "ok", "choices": []}
-    monkeypatch.setattr(chat, "llama_server_manager", fake_mgr)
-    monkeypatch.setattr(chat, "chat_admission", mock.Mock())
-    monkeypatch.setattr(chat.runtime.services, "memory", None, raising=False)
-
-    request = ChatCompletionRequest(
-        model=model, stream=False,
-        messages=[ChatMessage(role="user", content="design it")], **kwargs)
-    asyncio.run(chat.chat_completions(request, _FakeRequest()))
+    _, fake_mgr = drive_chat(monkeypatch, model=model, messages=[
+        ChatMessage(role="user", content="design it")], **kwargs)
     return fake_mgr.proxy_sync.call_args.kwargs["chat_template_kwargs"]
 
 

@@ -11,18 +11,14 @@ import subprocess
 
 import pytest
 import requests
-from fastapi.testclient import TestClient
 
 from mac_runner import server
-from mac_runner.config import Config
 from coding_model_autonomous import test_runner
 
 
 @pytest.fixture
-def client(tmp_path, monkeypatch):
-    monkeypatch.setattr(Config, "API_KEY", "test-key")
-    monkeypatch.setattr(Config, "REPOS_FILE", tmp_path / "repos.yml")
-    return TestClient(server.app)
+def client(runner_client):
+    return runner_client()
 
 
 # ── the endpoint ─────────────────────────────────────────────────────────────

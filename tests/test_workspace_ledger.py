@@ -6,7 +6,6 @@ import json
 import pytest
 
 from coding_model_autonomous import ArtifactKind
-from coding_model_autonomous.db import Database
 from coding_model_autonomous.test_runner import _SPEC_SKIP_PATTERNS
 from coding_model_autonomous.workspace import (
     ACTION_RENAMED, ACTION_RESTORED, ACTION_WRITTEN, CONTAINED_DIR, LEDGER_FILE,
@@ -20,13 +19,6 @@ CODE = "def a():\n    return 1\n\n\ndef b():\n    return 2\n"
 TESTS = "def test_a():\n    assert True\n"
 BIG = "".join(f"def f{i}():\n    return {i}\n\n" for i in range(60))  # 180 lines, 60 decls
 STUB = "def f0():\n    return 0\n"
-
-
-@pytest.fixture
-def db(tmp_path):
-    database = Database(db_path=tmp_path / "t.sqlite", workspace_root=tmp_path / "ws")
-    yield database
-    database.close_all()
 
 
 @pytest.fixture

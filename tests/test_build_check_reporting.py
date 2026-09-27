@@ -19,7 +19,6 @@ from unittest import mock
 import pytest
 
 import coding_model_server.orchestrator_daemon as d
-from coding_model_autonomous.db import Database
 from coding_model_autonomous.models import GateStatus, SpecStatus
 
 # A real swift-testing summary and a real XCTest summary.
@@ -108,12 +107,6 @@ def test_the_guard_itself_is_untouched():
 
 
 # ── DEV-478: the output must survive ─────────────────────────────────────────
-
-@pytest.fixture
-def db(tmp_path):
-    database = Database(db_path=tmp_path / "t.sqlite", workspace_root=tmp_path / "ws")
-    yield database
-    database.close_all()
 
 
 @pytest.fixture

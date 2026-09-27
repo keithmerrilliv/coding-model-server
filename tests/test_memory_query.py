@@ -12,42 +12,21 @@ Measured: a 2,839-char spec.md is 693 tokens, of which 256 survive.
 The fix lets a caller pass `memory_query`. These tests pin both halves: the
 server prefers it, and the two callers that have a good query supply one.
 """
-import asyncio
 from unittest import mock
 
 import pytest
 
+from chat_harness import drive_chat
 from coding_model_autonomous import executor
-from coding_model_server.routes import chat
-from coding_model_server.schemas import ChatCompletionRequest, ChatMessage
+from coding_model_server.schemas import ChatMessage
 
 # The limit that makes this bug possible. ~4 chars/token.
 TRUNCATION_CHARS = 256 * 4
 
 
-class _FakeState:
-    pass
-
-
-class _FakeRequest:
-    def __init__(self):
-        self.state = _FakeState()
-
-
 def _run(monkeypatch, memory, **kwargs):
-    fake_mgr = mock.Mock()
-    fake_mgr.ensure_running.return_value = None
-    fake_mgr.tokenize.side_effect = lambda text: len(text or "") // 4
-    fake_mgr.proxy_sync.return_value = {"id": "ok", "choices": []}
-    monkeypatch.setattr(chat, "llama_server_manager", fake_mgr)
-    monkeypatch.setattr(chat, "chat_admission", mock.Mock())
-    monkeypatch.setattr(chat.runtime.services, "memory", memory, raising=False)
-
-    request = ChatCompletionRequest(
-        model="implementer", stream=False,
-        messages=[ChatMessage(role="user", content="the whole spec goes here")],
-        **kwargs)
-    asyncio.run(chat.chat_completions(request, _FakeRequest()))
+    drive_chat(monkeypatch, memory=memory, messages=[
+        ChatMessage(role="user", content="the whole spec goes here")], **kwargs)
     return memory.get_context_string.call_args[0][0]
 
 

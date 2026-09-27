@@ -108,6 +108,29 @@ def test_unreachable_remote_fails_open(spec_dir, monkeypatch):
     assert "clone" in r.detail
 
 
+def test_a_rejected_push_fails_and_says_why(remote, spec_dir, tmp_path,
+                                            monkeypatch):
+    """Clone, branch and commit all succeed; the remote refuses the push (a
+    protected-branch rule, a full disk, a revoked key). That is a failed
+    delivery naming the push and git's own reason, not a quiet success."""
+    hook = remote / "hooks" / "pre-receive"
+    hook.write_text("#!/bin/sh\necho 'branch creation frozen by policy' >&2\n"
+                    "exit 1\n")
+    hook.chmod(0o755)
+    monkeypatch.setenv("AUTONOMOUS_DELIVERY_REMOTES", f"demo={remote}")
+
+    r = delivery.deliver_spec("spec_t6", "Demo", spec_dir,
+                              ["Sources/Thing.swift"], "demo", [])
+
+    assert r.status == "failed", r.detail
+    assert r.detail.startswith(f"push to {remote} failed:"), r.detail
+    assert "branch creation frozen by policy" in r.detail
+    assert "pre-receive hook declined" in r.detail
+    assert r.branch is None
+    heads = _git(tmp_path, "ls-remote", "--heads", str(remote))
+    assert "pipeline/spec_t6" not in heads
+
+
 def test_remotes_parser_handles_multiple_pairs(monkeypatch):
     monkeypatch.setenv(
         "AUTONOMOUS_DELIVERY_REMOTES",

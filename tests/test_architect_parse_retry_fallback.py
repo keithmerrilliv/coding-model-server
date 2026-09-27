@@ -14,10 +14,7 @@ genuinely nothing to carry forward (first cycle, or design.md absent).
 import textwrap
 from unittest import mock
 
-import pytest
-
 import coding_model_server.orchestrator_daemon as d
-from coding_model_autonomous.db import Database
 from coding_model_autonomous.executor import ParseError
 from coding_model_autonomous.models import GateType, SpecStatus, TaskStatus
 
@@ -33,14 +30,6 @@ PLAN = textwrap.dedent("""\
 """)
 SPEC = "# Demo\n\nBuild it.\n"
 PRIOR_DESIGN = "# Architecture: Demo\n\n## Overview\nA valid design from a prior cycle.\n"
-
-
-@pytest.fixture
-def db(tmp_path):
-    database = Database(db_path=tmp_path / "t.sqlite",
-                        workspace_root=tmp_path / "ws")
-    yield database
-    database.close_all()
 
 
 def _spec(db, retry_count=0):

@@ -5,16 +5,8 @@ matches by class and symbol as well as by exact message (DEV-509 option 3).
 import pytest
 
 from coding_model_autonomous import outcome as o
-from coding_model_autonomous.db import Database
 
 W = "/tmp/wt-1/Sources/CentipedeCore/World.swift"
-
-
-@pytest.fixture
-def db(tmp_path):
-    database = Database(db_path=tmp_path / "t.sqlite", workspace_root=tmp_path / "ws")
-    yield database
-    database.close_all()
 
 
 class TestClasses:
