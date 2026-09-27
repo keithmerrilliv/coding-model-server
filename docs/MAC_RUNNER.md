@@ -166,6 +166,51 @@ test_strategy:
 `swift_test` takes no scheme and no destination. The full key list is in
 [CONFIGURATION.md](CONFIGURATION.md).
 
+## Device leg
+
+The device leg (DEV-850) runs a spec's `xcodebuild_test` suite a second time,
+on the physical device attached to the Mac (the Apple Vision Pro on the
+Studio), with Metal API validation on. The simulator and the Mac's GPU driver
+tolerate Metal misuse that real hardware does not, so a green macOS run can
+still hide a crash on the device.
+
+It needs two opt-ins, one per host:
+
+- **The spec** declares `device_destination` in its test strategy, e.g.
+  `device_destination: "platform=visionOS"`. The runner finds the attached
+  device for that platform and fills in its `id=`.
+- **The runner** has `CODING_MODEL_RUNNER_DEVICE_TESTS=1`. It is off by
+  default.
+
+The leg runs only in the reviewer phase, only after the macOS run passed, and
+the reviewer runs only after a human approved the code at the code-review
+gate. That ordering is why the run may be unsandboxed: app-hosted XCTest
+cannot run under `sandbox-exec` (DEV-403), and the VM cannot see a USB device.
+So model-written test code runs on the Mac host with the runner user's
+access. The runner logs a warning naming the device on every such run.
+
+Metal validation is on through `TEST_RUNNER_MTL_DEBUG_LAYER=1`, which
+xcodebuild passes to the test process as `MTL_DEBUG_LAYER=1`.
+
+If the leg cannot run, its output starts with `[device-unavailable]` and the
+macOS result stands. That covers a runner that is not opted in, no device
+attached, a locked or unpaired device, and a runner too old to know the
+field. The daemon records a `device_leg_unavailable` anomaly and adds a line
+to the release gate saying the device leg did not run. If the leg ran and
+failed, a Metal assertion included, the reviewer's tests failed and the
+usual retry routing applies. Each leg that ran records a `test_ran` event with
+`phase: "device"`.
+
+To enable it on the Mac, add the variable to the runner's env file and restart
+the runner:
+
+```sh
+echo 'CODING_MODEL_RUNNER_DEVICE_TESTS=1' >> ~/.config/coding-model-runner/.env
+launchctl kickstart -k gui/$(id -u)/com.codingmodel.runner
+```
+
+Keep the device unlocked and paired while a device run is due.
+
 ## Security posture
 
 Two containment mechanisms, one per framework. `swift_test` runs on the host
@@ -174,6 +219,9 @@ Keychain except a named signing keychain, and the runner's own `.env`.
 App-hosted XCTest cannot run under that wrapper at all, so `xcodebuild_test`
 runs in the throwaway VM, with no host keychain or files reachable and ad-hoc
 signing. Setting `CODING_MODEL_RUNNER_SANDBOX=0` turns both off and runs
-LLM-written code with the runner user's full access; do not.
+LLM-written code with the runner user's full access; do not. The one
+deliberate exception is the [device leg](#device-leg), which runs unsandboxed
+on the host only after human code review, and only on a runner opted in with
+`CODING_MODEL_RUNNER_DEVICE_TESTS=1`.
 [SECURITY_MIGRATION.md](SECURITY_MIGRATION.md) has the history of these
 decisions.

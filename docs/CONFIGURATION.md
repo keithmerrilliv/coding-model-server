@@ -293,6 +293,7 @@ Variables loaded from `~/.config/coding-model-runner/.env`.
 | `CODING_MODEL_RUNNER_REPOS_FILE` | `~/.config/coding-model-runner/repos.yml` | Symbolic-name → absolute-path map; the runner refuses any repo not listed here. |
 | `CODING_MODEL_RUNNER_ENV_FILE` | *(unset)* | Override the .env path the runner loads. |
 | `CODING_MODEL_RUNNER_ALLOW_UNAUTH` | *(unset)* | Set to `1` to let the runner start without an API key (dev only). |
+| `CODING_MODEL_RUNNER_DEVICE_TESTS` | `0` | Set to `1` to accept device-leg requests: `xcodebuild_test` on the attached physical device, **unsandboxed**, with Metal API validation on. While it is off, every device request is refused and nothing runs. See [MAC_RUNNER.md](MAC_RUNNER.md#device-leg) (DEV-850). |
 
 ### Planner `test_strategy` block
 
@@ -310,6 +311,7 @@ The planner emits a `test_strategy` map that the daemon forwards to
 | `configuration` | optional | Xcode build configuration. Defaults to `Debug`. |
 | `workspace` / `project` | optional | `.xcworkspace` / `.xcodeproj` path relative to worktree. Auto-detected if omitted. |
 | `filter` | optional | `swift test --filter` regex or xcodebuild `-only-testing:` fragment |
+| `device_destination` | xcodebuild only, optional | e.g. `platform=visionOS`. After the human approves the code and the reviewer's macOS run passes, the same tests run again on the attached device with Metal API validation on. The runner must also be opted in (`CODING_MODEL_RUNNER_DEVICE_TESTS=1`). An operator key: the spec's value survives the planner verbatim. See [MAC_RUNNER.md](MAC_RUNNER.md#device-leg) |
 
 The Xcode path expects a project that is **committed to the repo** — the runner
 only materializes a git worktree and applies patches; nothing regenerates an

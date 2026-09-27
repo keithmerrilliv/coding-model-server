@@ -1220,6 +1220,16 @@ RUNNER_UNREACHABLE = "mac-runner unreachable"
 # working (a Mac not redeployed, a fetch failing soft, a table naming nothing).
 RECONSTRUCTION_MARKER = "[suspected reconstruction]"
 
+# DEV-850: heads the output of a device-leg dispatch that never ran on the
+# device (refused by the runner, device locked or unplugged, runner too old).
+# Must match mac_runner.server.DEVICE_UNAVAILABLE; the two hosts share no code.
+DEVICE_UNAVAILABLE_MARKER = "[device-unavailable] "
+
+
+def is_device_unavailable(output: str) -> bool:
+    """True when a device-leg *output* says the leg did not run at all."""
+    return (output or "").startswith(DEVICE_UNAVAILABLE_MARKER)
+
 
 # Connection-level failures fail fast (the Mac is asleep, the tunnel is gone),
 # so retrying is nearly free and covers DEV-518's link re-enumeration, which
@@ -1333,6 +1343,7 @@ def _run_mac_runner_tests(
     filter: Optional[str] = None,
     skip_filter: Optional[str] = None,
     protected_paths: Optional[list] = None,
+    on_device: bool = False,
 ) -> tuple[bool, str]:
     """Dispatch swift_test / xcodebuild_test to the Mac runner over HTTP."""
     if not MAC_RUNNER_API_KEY:
@@ -1373,6 +1384,9 @@ def _run_mac_runner_tests(
                      ("skip_filter", skip_filter)):
         if val is not None:
             payload[key] = val
+    if on_device:
+        # Absent unless set, so every other payload is what it always was.
+        payload["on_device"] = True
 
     url = f"{MAC_RUNNER_URL.rstrip('/')}/v1/run_tests"
     headers = {"X-Runner-Key": MAC_RUNNER_API_KEY}
@@ -1397,6 +1411,18 @@ def _run_mac_runner_tests(
         return False, f"mac-runner returned non-JSON response: {resp.text[:2000]}"
 
     output = str(data.get("output", ""))
+    if on_device and data.get("on_device") is not True:
+        # The runner ignores fields it does not know, so one that predates
+        # DEV-850 has just run this as an ordinary (VM or simulator) test. That
+        # is no device verdict either way.
+        return False, (
+            f"{DEVICE_UNAVAILABLE_MARKER}the Mac runner did not honour "
+            "on_device — it predates DEV-850; pull mac_runner on the Mac and "
+            "restart the runner")
+    if on_device and output.startswith(DEVICE_UNAVAILABLE_MARKER):
+        # Returned before the notes below are prepended: callers read the
+        # marker at the head of the output, and nothing ran for them to annotate.
+        return False, output
     reconstructed = [ow for ow in (data.get("overwrites") or [])
                      if isinstance(ow, dict) and ow.get("suspected_reconstruction")]
     if reconstructed:
@@ -1644,6 +1670,10 @@ def run_tests(
     spec puts off-limits. They are dropped from the dispatch payload, so the
     worktree keeps the base_ref version of each (DEV-427).
 
+    on_device (xcodebuild_test only, DEV-850) asks the runner to test on the
+    attached physical device. An output headed by DEVICE_UNAVAILABLE_MARKER
+    means that leg did not run.
+
     Returns (passed, combined_output).
     """
     framework = _APPLE_FRAMEWORK_ALIASES.get(framework, framework)
@@ -1661,6 +1691,12 @@ def run_tests(
             f"to fall back to a local runner, which would test the wrong thing."
         )
 
+    if framework_opts.get("on_device") and framework != "xcodebuild_test":
+        # Any other framework would silently run its ordinary suite again and
+        # report it as the device leg.
+        return False, (f"{DEVICE_UNAVAILABLE_MARKER}on_device needs framework "
+                       f"xcodebuild_test, not {framework}")
+
     effective_timeout = timeout if timeout is not None else DEFAULT_TIMEOUTS.get(framework, 120)
 
     if framework in ("swift_test", "xcodebuild_test"):
@@ -1677,6 +1713,7 @@ def run_tests(
             # DEV-713: the operator's quarantine for a known flake (DEV-603).
             skip_filter=framework_opts.get("skip_filter"),
             protected_paths=framework_opts.get("protected_paths"),
+            on_device=bool(framework_opts.get("on_device")),
         )
     else:
         passed, output = _run_local_tests(spec_dir, framework, effective_timeout,
