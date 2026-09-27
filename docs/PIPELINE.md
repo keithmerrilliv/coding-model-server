@@ -255,13 +255,14 @@ the ledger restores it (DEV-641). Diagnostics
 (test output, failure reports, build logs) bypass the guards through
 ### Checks around a test dispatch
 
-Four guards sit around the Mac dispatch and delivery. None has a diagram,
+Five guards sit around the Mac dispatch and delivery. None has a diagram,
 because each is a single yes/no with one consequence.
 
 | Guard | When | What it checks | On failure |
 | --- | --- | --- | --- |
 | **Swift prechecks** (`swift_prechecks.py`, DEV-512, DEV-777) | Before a Swift attempt is dispatched | Pure text checks for errors decidable without a compiler: a type declared twice in one module, `mutating` inside a class, an unqualified static member, a `@Test` missing `throws`, `#require` without `try`, a dictionary key missing `Hashable`, `nil` for a non-optional argument, MainActor types called from nonisolated tests or closures | Reported as a build failure in the `path:line:col: error:` shape, so the retry behaves exactly as for a real build, minus the round-trip |
 | **Runner version** (`test_runner._log_runner_version`, DEV-805) | Every Mac dispatch | Reads the runner's `/v1/version`: the commit it serves and its timeout table | Logs the commit; warns when the two hosts' timeouts disagree, since the effective budget is the smaller. It does not refuse. See [MAC_RUNNER.md](MAC_RUNNER.md) |
+| **Device leg** (`orchestrator_daemon._run_device_leg`, DEV-850) | Reviewer phase, after the macOS run passed, when the test strategy declares `device_destination` | The same `xcodebuild_test` suite, run on the attached device with Metal API validation on. The runner must be opted in with `CODING_MODEL_RUNNER_DEVICE_TESTS=1` | A failure fails the reviewer's tests and takes the usual retry routing, without DEV-563 arbitration. A leg that did not run (`[device-unavailable]`) leaves the macOS pass standing, records a `device_leg_unavailable` anomaly, charges nobody, and says so on the release gate. See [MAC_RUNNER.md](MAC_RUNNER.md#device-leg) |
 | **Tested manifest** (`delivery.verify_tested_manifest`, DEV-602) | Before delivery | The build check records the sha256 of every file it verified in `tested_manifest.json`; delivery re-hashes what it is about to push | Refuses the push, naming the divergent files. Bytes no test saw never ship |
 | **Base assessment** (`delivery.assess_base`, DEV-756, DEV-810) | Before delivery, against a fresh clone of the default branch | Whether the delivered snapshot would delete tests the default branch has | A deletion is refused on any base. A rename on a current base is delivered with both names recorded. A rename on a stale or unrecorded base is refused, since decay and intent cannot be told apart there |
 

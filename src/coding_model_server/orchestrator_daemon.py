@@ -5355,11 +5355,75 @@ def _run_reviewer_tests(db: Database, spec: Spec, task, spec_dir,
         fail_log=("spec %s: test_output failed structural validation (%s); "
                   "forcing tests_passed=False to block hallucinated PASS"),
     )
-    ArtifactLedger.open(db, spec, spec_dir).note("test_output.txt", test_output)
+    ledger = ArtifactLedger.open(db, spec, spec_dir)
+    ledger.note("test_output.txt", test_output)
     db.record_event(EventKind.TEST_RAN, spec_id=spec.id, task_id=task.id,
                     payload={"passed": tests_passed,
                              "output_chars": len(test_output)})
+    device_destination = test_strategy.get("device_destination")
+    if tests_passed and device_destination:
+        tests_passed, test_output = _run_device_leg(
+            db, spec, task, spec_dir, framework, test_strategy,
+            str(device_destination), test_output)
+        ledger.note("test_output.txt", test_output)
     return tests_passed, test_output
+
+
+# Heads a reviewer test output whose red came from the device leg (DEV-850).
+_DEVICE_LEG_FAILED = "Device leg ({destination}) failed — Metal API validation on:"
+
+
+def _is_device_leg_failure(test_output: str) -> bool:
+    return test_output.startswith("Device leg (")
+
+
+def _run_device_leg(db: Database, spec: Spec, task, spec_dir, framework,
+                    test_strategy: dict, destination: str,
+                    macos_output: str) -> "tuple[bool, str]":
+    """Re-run the passing suite on the attached device (DEV-850).
+
+    Only the reviewer reaches this, and the reviewer runs only after a human
+    approved the code at the code-review gate. That ordering is what makes it
+    acceptable for the runner to execute the code on the device unsandboxed.
+    Metal API validation is on for the run, so misuse the macOS leg tolerates
+    (the simulator and the Mac's driver are lenient) fails here.
+
+    A leg that did not run (refused, device locked, runner too old) leaves the
+    macOS verdict standing and charges nobody; the human at the release gate
+    sees a note saying so. A leg that ran and failed is a test failure like
+    any other.
+    """
+    device_strategy = {k: v for k, v in test_strategy.items()
+                       if k != "device_destination"}
+    device_strategy.update(destination=destination, on_device=True)
+    passed, output = _run_tests_with_guard(
+        spec.id, spec_dir, framework, device_strategy,
+        output_label="Device leg test runner output:",
+        fail_log=("spec %s: device-leg output failed structural validation "
+                  "(%s); forcing it to FAIL"),
+    )
+    if test_runner.is_device_unavailable(output):
+        reason = output[len(test_runner.DEVICE_UNAVAILABLE_MARKER):]
+        reason = (reason.splitlines() or [""])[0].strip()
+        logger.warning("spec %s: device leg (%s) did not run: %s — the macOS "
+                       "verdict stands", spec.id, destination, reason)
+        _anomaly(db, spec, task, "reviewer", anomaly="device_leg_unavailable",
+                 reason=reason, destination=destination)
+        return True, (f"{macos_output}\n\n[device leg] {destination} did NOT "
+                      f"run: {reason}. Only the macOS result above was tested.")
+
+    ArtifactLedger.open(db, spec, spec_dir).note("device_test_output.txt", output)
+    db.record_event(EventKind.TEST_RAN, spec_id=spec.id, task_id=task.id,
+                    payload={"phase": "device", "passed": passed,
+                             "destination": destination,
+                             "output_chars": len(output)})
+    if not passed:
+        logger.warning("spec %s: device leg (%s) failed after a macOS pass",
+                       spec.id, destination)
+        return False, (_DEVICE_LEG_FAILED.format(destination=destination)
+                       + "\n\n" + output)
+    return True, (f"{macos_output}\n\n[device leg] {destination} PASSED with "
+                  f"Metal API validation on.")
 
 
 def _reviewer_run_had_no_verdict(db: Database, spec: Spec, task,
@@ -5570,7 +5634,11 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
         if not tests_passed and _reviewer_run_had_no_verdict(
                 db, spec, task, test_output):
             return
-        if not tests_passed and result.test_files:
+        # Not for a device-leg failure: arbitration re-runs the base suite on
+        # macOS, which already passed, and would call a device failure
+        # reviewer-only advice (DEV-850).
+        if (not tests_passed and result.test_files
+                and not _is_device_leg_failure(test_output)):
             tests_passed, test_output = _arbitrate_reviewer_only_failures(
                 spec, spec_dir, framework, test_strategy, result, test_output,
             )

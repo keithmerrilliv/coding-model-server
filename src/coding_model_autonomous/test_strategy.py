@@ -169,9 +169,12 @@ def spec_declared_test_strategy(spec_md: str) -> dict:
 # the operator picks — there is nothing for a model to add to it, and a
 # SUBSTITUTED value is worse than a dropped one because it is well-formed and
 # plausible and survives every structural check.
+# `device_destination` (DEV-850) opts a spec into running its tests on real
+# hardware, unsandboxed, after code review: a decision only the operator makes.
 OPERATOR_STRATEGY_KEYS = ("repo", "protected_paths", "base_ref", "filter",
                            "execution_target", "framework", "skip_filter",
-                           "default_actor_isolation")   # DEV-784
+                           "default_actor_isolation",   # DEV-784
+                           "device_destination")        # DEV-850
 
 
 def overlay_operator_test_strategy(yaml_text: str, spec_md: str,

@@ -97,6 +97,16 @@ class Config:
     # exactly as before. A path here is READ from, never written back: nothing
     # the guest produces reaches the host, so DEV-422 containment is unchanged.
     VM_PACKAGE_CACHE = os.getenv("CODING_MODEL_RUNNER_VM_PACKAGE_CACHE", "")
+    # Device leg (DEV-850): an `on_device` request runs xcodebuild_test on the
+    # physical device attached to this Mac, with Metal API validation on. That
+    # run executes model-written, app-hosted test code on the HOST with no
+    # containment at all: sandbox-exec cannot hold app-hosted XCTest (DEV-403)
+    # and a VM cannot see a USB device. It is acceptable only because the
+    # pipeline sends a device request after a human has approved the code at
+    # the code-review gate. Off by default, so a runner has to be opted in by
+    # hand; with it off, every device request is refused without running.
+    DEVICE_TESTS = os.getenv("CODING_MODEL_RUNNER_DEVICE_TESTS", "0").lower() in (
+        "1", "true", "yes")
     SANDBOX_PROFILE = Path(os.getenv(
         "CODING_MODEL_RUNNER_SANDBOX_PROFILE",
         str(Path(__file__).parent / "sandbox.sb"),
