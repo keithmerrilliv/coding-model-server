@@ -36,6 +36,7 @@ from .thinking import strip_thinking as _server_strip_thinking
 # Re-exported: the daemon and tests call executor.artifact_path (DEV-837 moved it).
 from .workspace import _count_declarations, artifact_path  # noqa: F401
 from .swift_rules import render_swift_rules, render_cited_diagnostics
+from . import swift_prechecks
 
 logger = logging.getLogger("orchestrator.executor")
 
@@ -3061,22 +3062,14 @@ _SWIFT_IMPORT_RE = re.compile(
     r"^[ \t]*(?:@testable[ \t]+)?import[ \t]+([A-Za-z_]\w*)", re.MULTILINE)
 _SWIFT_DECL_RE = re.compile(
     r"\b(?:struct|class|enum|protocol|actor|typealias)\s+([A-Za-z_]\w*)")
-# Strings first: a URL literal contains `//`, and stripping comments before
-# strings would eat the rest of that line.
-_SWIFT_STRING_RE = re.compile(r'"""(?:.|\n)*?"""|"(?:\\.|[^"\\\n])*"')
-_SWIFT_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
-_SWIFT_LINE_COMMENT_RE = re.compile(r"//[^\n]*")
-
-
 def _swift_code_only(src: str) -> str:
     """Blank out string literals and comments so symbol matching sees code.
 
     Without this, a doc comment reading "returns a UUID" would request an
-    import the file does not need.
+    import the file does not need. One scanner for every Swift check
+    (DEV-838): swift_prechecks', which also handles nested block comments.
     """
-    src = _SWIFT_STRING_RE.sub('""', src)
-    src = _SWIFT_BLOCK_COMMENT_RE.sub(" ", src)
-    return _SWIFT_LINE_COMMENT_RE.sub("", src)
+    return swift_prechecks.blank_comments_and_strings(src)
 
 
 def _first_swift_code_line(lines: list[str]) -> int:
@@ -3102,21 +3095,15 @@ def _first_swift_code_line(lines: list[str]) -> int:
 
 
 # DEV-552: a generated file may not redeclare a type a protected file already
-# declares. Anchored at column 0 on both sides deliberately — a NESTED type of
-# the same name is a different type in a different scope and is perfectly
-# legal, so matching indented declarations would delete working files over a
-# name collision that the compiler is perfectly happy with. `extension` is
-# absent from the alternation for the same reason: extending a protected type
-# is the correct way to add to it.
-_SWIFT_TOPLEVEL_DECL_RE = re.compile(
-    r"^(?:(?:public|internal|fileprivate|private|final|open|indirect)\s+)*"
-    r"(?:struct|class|enum|protocol|actor|typealias)\s+([A-Za-z_]\w*)",
-    re.MULTILINE)
-
-
+# declares. Column-0 declarations only, on both sides: a NESTED type of the
+# same name is a different type in a different scope, and extending a
+# protected type is the correct way to add to it. The reading is
+# swift_prechecks' (DEV-838), which also sees attributed declarations
+# (`@MainActor final class C`); this module's own regex did not, so a
+# default-MainActor target's protected types were invisible to the check.
 def declared_top_level_types(content: str) -> "set[str]":
     """Type names declared at file scope in Swift source."""
-    return set(_SWIFT_TOPLEVEL_DECL_RE.findall(_swift_code_only(content)))
+    return {d.name for d in swift_prechecks.top_level_declarations("", content)}
 
 
 def protected_type_collisions(
