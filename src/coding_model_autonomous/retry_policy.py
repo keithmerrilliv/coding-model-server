@@ -687,7 +687,8 @@ def _latest_supervisor_feedback(db: Database, spec_id: str,
     return None
 
 
-def _load_prior_decisions(db: Database, spec_id: str) -> list[dict]:
+def _load_prior_decisions(db: Database, spec_id: str,
+                          ) -> "list[_supervisor.PriorDecision]":
     """Most-recent N supervisor decisions for *spec_id*, oldest-first.
 
     Decoded from the events table's payload_json, capped to the supervisor
@@ -699,7 +700,7 @@ def _load_prior_decisions(db: Database, spec_id: str) -> list[dict]:
         kind=EventKind.SUPERVISOR_DECISION,
         limit=_supervisor.MAX_SUPERVISOR_TRANSITIONS,
     )
-    out = []
+    out: list[_supervisor.PriorDecision] = []
     for r in reversed(rows):  # oldest-first for natural reading order
         if not r.payload_json:
             continue
