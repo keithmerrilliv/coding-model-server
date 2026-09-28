@@ -19,7 +19,7 @@ from unittest import mock
 import pytest
 
 import coding_model_server.orchestrator_daemon as d
-from coding_model_autonomous import executor
+from coding_model_autonomous import settings
 from coding_model_autonomous.executor import ImplementerResult, ManifestEntry
 
 
@@ -75,7 +75,7 @@ def test_targeted_retry_end_to_end_keeps_the_file_set_complete(db, spec_task):
     db.increment_task_retry(task.id)
     task = db.get_task(task.id)
 
-    with mock.patch.object(executor, "PER_FILE_PARSE_RETRIES", 0), \
+    with mock.patch.object(settings, "PER_FILE_PARSE_RETRIES", 0), \
          mock.patch.object(d, "call_agent", return_value="no markers, sorry"):
         res = d._generate_via_manifest(
             db, spec, task, spec_dir, "SPEC", "DESIGN", "implementer", [],

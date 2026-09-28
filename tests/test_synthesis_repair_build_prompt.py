@@ -147,7 +147,7 @@ def _drive(db, spec, impl, spec_dir, first_output, repair_files):
          mock.patch.object(d, "run_tests",
                            side_effect=[(False, first_output),
                                         (False, first_output)]), \
-         mock.patch.object(d.executor, "build_synthesis_repair_message",
+         mock.patch.object(d, "build_synthesis_repair_message",
                            side_effect=_build):
         d._run_synthesis(db, spec, impl, spec_dir, "swift_test", {})
     return seen

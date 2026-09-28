@@ -1,6 +1,7 @@
 """Unit tests for manifest-mode infra (#4): parser, mode select, summary, builders."""
 import pytest
 
+from coding_model_autonomous import settings
 from coding_model_autonomous import executor
 from coding_model_autonomous.executor import ManifestEntry, ParseError
 
@@ -60,17 +61,17 @@ def _design_with_files(n):
 
 
 def test_use_manifest_mode_auto_threshold(monkeypatch):
-    monkeypatch.setattr(executor, "IMPLEMENTER_MODE", "auto")
-    monkeypatch.setattr(executor, "MANIFEST_FILE_THRESHOLD", 8)
+    monkeypatch.setattr(settings, "IMPLEMENTER_MODE", "auto")
+    monkeypatch.setattr(settings, "MANIFEST_FILE_THRESHOLD", 8)
     assert executor.use_manifest_mode(_design_with_files(3)) is False
     assert executor.use_manifest_mode(_design_with_files(20)) is True
 
 
 def test_use_manifest_mode_forced(monkeypatch):
-    monkeypatch.setattr(executor, "MANIFEST_FILE_THRESHOLD", 8)
-    monkeypatch.setattr(executor, "IMPLEMENTER_MODE", "manifest")
+    monkeypatch.setattr(settings, "MANIFEST_FILE_THRESHOLD", 8)
+    monkeypatch.setattr(settings, "IMPLEMENTER_MODE", "manifest")
     assert executor.use_manifest_mode(_design_with_files(1)) is True
-    monkeypatch.setattr(executor, "IMPLEMENTER_MODE", "single")
+    monkeypatch.setattr(settings, "IMPLEMENTER_MODE", "single")
     assert executor.use_manifest_mode(_design_with_files(50)) is False
 
 
@@ -115,8 +116,8 @@ a Redis cache client, a background worker, a metrics exporter, and a CLI entry.
 @pytest.mark.parametrize("design", [_RAILS_DESIGN, _TREE_DESIGN, _PROSE_DESIGN],
                          ids=["other-language", "extension-less-tree", "prose"])
 def test_large_design_triggers_manifest_even_when_file_regex_scores_zero(monkeypatch, design):
-    monkeypatch.setattr(executor, "IMPLEMENTER_MODE", "auto")
-    monkeypatch.setattr(executor, "MANIFEST_FILE_THRESHOLD", 8)
+    monkeypatch.setattr(settings, "IMPLEMENTER_MODE", "auto")
+    monkeypatch.setattr(settings, "MANIFEST_FILE_THRESHOLD", 8)
     # the budget file counter misses these shapes entirely...
     assert executor.estimate_design_file_count(design) < 8
     # ...but the unit estimate catches them, so mode selection is correct.
@@ -130,8 +131,8 @@ def test_large_design_triggers_manifest_even_when_file_regex_scores_zero(monkeyp
     "## Files\nsrc/a.rb\nsrc/b.rb\nGemfile",                   # 3 units, other lang
 ])
 def test_small_design_stays_single_call(monkeypatch, design):
-    monkeypatch.setattr(executor, "IMPLEMENTER_MODE", "auto")
-    monkeypatch.setattr(executor, "MANIFEST_FILE_THRESHOLD", 8)
+    monkeypatch.setattr(settings, "IMPLEMENTER_MODE", "auto")
+    monkeypatch.setattr(settings, "MANIFEST_FILE_THRESHOLD", 8)
     assert executor.use_manifest_mode(design) is False
 
 

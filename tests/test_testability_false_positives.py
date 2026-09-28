@@ -5,7 +5,6 @@ round 0; run 57's drew prose_seam on a static lookup. Each fix is paired with a
 negative control, because every one of them loosens a guard the DEV-710
 incentive would otherwise teach the architect to game.
 """
-from pathlib import Path
 
 from fixture_files import load_fixture
 from coding_model_autonomous import design_testability as T
@@ -122,9 +121,9 @@ def test_a_prose_heading_declares_nothing():
 
 def test_the_architect_prompt_names_the_empty_setup_spelling():
     """DEV-715: a hatch the architect cannot discover is not a hatch."""
-    from coding_model_autonomous import executor
-    src = Path(executor.__file__).read_text()
-    assert "setup: (none)" in src and "sub-seams" in src
+    from coding_model_autonomous.prompts import ARCHITECT_SYSTEM_PROMPT
+    assert "setup: (none)" in ARCHITECT_SYSTEM_PROMPT
+    assert "sub-seams" in ARCHITECT_SYSTEM_PROMPT
 
 
 # ── type_without_file: a type the design uses but does not create (DEV-855) ──

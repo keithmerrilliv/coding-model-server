@@ -598,7 +598,7 @@ still move a dispatch, and each records that it did:
   `_generate_via_manifest`. All three record a move as a reroute.
 
 The architect and reviewer have fixed picks with no rotation
-(`executor.role_to_agent`), and so does synthesis (`_SYNTHESIS_AGENT`,
+(`settings.role_to_agent`), and so does synthesis (`_SYNTHESIS_AGENT`,
 `AUTONOMOUS_SYNTHESIS_AGENT`, default `deep_reviewer`).
 
 What the model server does when the chosen agent is not the one loaded is in

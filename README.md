@@ -696,7 +696,13 @@ coding-model-server/
 │       ├── retry_policy.py     #   What a retry preserves and wipes, and who retries
 │       │                       #   ── agents and their inputs ──
 │       ├── planner.py          #   Planner agent (spec → plan YAML or clarifications)
-│       ├── executor.py         #   Architect/implementer/reviewer prompts, parsers, call_agent
+│       ├── settings.py         #   Every agent-layer knob: role agents, budgets, retries, modes
+│       ├── prompts.py          #   The roles' system prompts
+│       ├── _http.py            #   Transport to the inference server, and call_agent
+│       ├── parsers.py          #   Parsers for the agents' <<<MARKER>>> responses
+│       ├── messages.py         #   What each role is sent; design-sized budgets
+│       ├── normalize.py        #   Deterministic fixes and scans on generated files
+│       ├── executor.py         #   Re-exporting façade over the six modules above
 │       ├── architect_tools.py  #   The architect's bounded, read-only tool loop
 │       ├── plan_paths.py       #   Resolves the plan's phase paths against the target repo
 │       ├── apply_edits.py      #   Applies anchored SEARCH/REPLACE edit blocks

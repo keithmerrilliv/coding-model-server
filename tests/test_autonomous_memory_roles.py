@@ -18,6 +18,8 @@ from unittest import mock
 
 import pytest
 
+from coding_model_autonomous import _http
+from coding_model_autonomous import settings
 import coding_model_autonomous.executor as ex
 
 
@@ -33,7 +35,7 @@ def _capture_call(role, language="swift"):
     resp.raise_for_status.return_value = None
     resp.json.return_value = {"choices": [{"message": {"content": "ok"},
                                            "finish_reason": "stop"}]}
-    with mock.patch.object(ex, "post_chat_completion", return_value=resp) as p:
+    with mock.patch.object(_http, "post_chat_completion", return_value=resp) as p:
         ex.call_agent(role, [{"role": "user", "content": "make an MTLDevice"}],
                       language=language)
     return p.call_args.kwargs
@@ -82,30 +84,30 @@ class TestDefaultStaysOff:
             f"shipped default is {out.stdout.strip()}, not empty")
 
     def test_every_role_skips_memory_when_set_is_empty(self, monkeypatch):
-        monkeypatch.setattr(ex, "AUTONOMOUS_MEMORY_ROLES", set())
+        monkeypatch.setattr(settings, "AUTONOMOUS_MEMORY_ROLES", set())
         for role in ("implementer", "architect", "reviewer", "planner"):
             assert _capture_call(role)["skip_memory"] is True, role
 
 
 class TestOptIn:
     def test_named_role_gets_memory(self, monkeypatch):
-        monkeypatch.setattr(ex, "AUTONOMOUS_MEMORY_ROLES", {"implementer"})
+        monkeypatch.setattr(settings, "AUTONOMOUS_MEMORY_ROLES", {"implementer"})
         assert _capture_call("implementer")["skip_memory"] is False
 
     def test_other_roles_unaffected_by_one_opt_in(self, monkeypatch):
         """Opting the implementer in must not silently enable the planner,
         whose prompts are decomposition text and would retrieve noise."""
-        monkeypatch.setattr(ex, "AUTONOMOUS_MEMORY_ROLES", {"implementer"})
+        monkeypatch.setattr(settings, "AUTONOMOUS_MEMORY_ROLES", {"implementer"})
         for role in ("planner", "reviewer", "architect"):
             assert _capture_call(role)["skip_memory"] is True, role
 
     def test_role_match_is_case_insensitive(self, monkeypatch):
-        monkeypatch.setattr(ex, "AUTONOMOUS_MEMORY_ROLES", {"architect"})
+        monkeypatch.setattr(settings, "AUTONOMOUS_MEMORY_ROLES", {"architect"})
         assert _capture_call("Architect")["skip_memory"] is False
 
     def test_the_role_alone_is_no_longer_enough(self, monkeypatch):
         """DEV-657: opting a role in does not opt every language in. The
         corpus is Apple documentation and a Python spec must not pay for it."""
-        monkeypatch.setattr(ex, "AUTONOMOUS_MEMORY_ROLES", {"implementer"})
+        monkeypatch.setattr(settings, "AUTONOMOUS_MEMORY_ROLES", {"implementer"})
         assert _capture_call("implementer", language="python")["skip_memory"] is True
         assert _capture_call("implementer", language="swift")["skip_memory"] is False

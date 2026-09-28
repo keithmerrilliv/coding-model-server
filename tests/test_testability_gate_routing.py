@@ -117,13 +117,13 @@ class TestBounded:
         """Past the round cap a stranded design proceeds rather than looping —
         the human gate is still downstream."""
         spec, task, spec_dir = arch
-        monkeypatch.setattr(d.executor, "TESTABILITY_CHECK_MAX_ROUNDS", 0)
+        monkeypatch.setattr(d.settings, "TESTABILITY_CHECK_MAX_ROUNDS", 0)
         _run_architect(db, spec, task, spec_dir, STRANDED)
         assert len(_gates(db, spec)) == 1
 
     def test_it_can_be_disabled(self, db, arch, monkeypatch):
         spec, task, spec_dir = arch
-        monkeypatch.setattr(d.executor, "TESTABILITY_CHECK_ENABLED", False)
+        monkeypatch.setattr(d.settings, "TESTABILITY_CHECK_ENABLED", False)
         _run_architect(db, spec, task, spec_dir, STRANDED)
         assert len(_gates(db, spec)) == 1
 

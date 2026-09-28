@@ -70,9 +70,9 @@ def _run_synthesis(db, spec, impl_task, spec_dir, *, guard_results,
 
     with mock.patch.object(d, "call_agent", side_effect=fake_call_agent), \
             mock.patch.object(d, "build_synthesis_message", return_value=[]), \
-            mock.patch.object(d.executor, "build_synthesis_repair_message",
+            mock.patch.object(d, "build_synthesis_repair_message",
                               return_value=[]), \
-            mock.patch.object(d.executor, "implementer_max_tokens_for",
+            mock.patch.object(d, "implementer_max_tokens_for",
                               return_value=1000), \
             mock.patch.object(d, "parse_implementer_response",
                               side_effect=[synth, repair]), \

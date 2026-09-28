@@ -18,6 +18,7 @@ from unittest import mock
 import pytest
 
 import coding_model_server.orchestrator_daemon as d
+from coding_model_autonomous import settings
 from coding_model_autonomous import executor
 from coding_model_autonomous.executor import (
     ImplementerResult, ManifestResult, ParseError, parse_manifest_response,
@@ -110,7 +111,7 @@ def test_manifest_parse_retries_defaults_to_the_architect_budget():
 def test_a_parse_failure_is_retried_rather_than_rotated(db, spec_task):
     spec, task, spec_dir = spec_task
     bad = "I forgot the manifest markers"
-    with mock.patch.object(executor, "MANIFEST_PARSE_RETRIES", 2):
+    with mock.patch.object(settings, "MANIFEST_PARSE_RETRIES", 2):
         with mock.patch.object(d, "call_agent",
                                side_effect=[bad, GOOD, FILE_T]) as ca:
             res = d._generate_via_manifest(db, spec, task, spec_dir, "S", "D",
@@ -125,7 +126,7 @@ def test_a_parse_failure_does_not_consume_an_implementer_attempt(db, spec_task):
     # delimiter. The retry count must be untouched by a parse failure.
     spec, task, spec_dir = spec_task
     before = task.retry_count
-    with mock.patch.object(executor, "MANIFEST_PARSE_RETRIES", 2):
+    with mock.patch.object(settings, "MANIFEST_PARSE_RETRIES", 2):
         with mock.patch.object(d, "call_agent",
                                side_effect=["bad", GOOD, FILE_T]):
             d._generate_via_manifest(db, spec, task, spec_dir, "S", "D",
@@ -137,7 +138,7 @@ def test_the_agent_is_not_rotated_between_parse_retries(db, spec_task):
     # A response that could not be read says nothing about whether this agent
     # can do the work (DEV-431), so the retry goes back to the same agent.
     spec, task, spec_dir = spec_task
-    with mock.patch.object(executor, "MANIFEST_PARSE_RETRIES", 2):
+    with mock.patch.object(settings, "MANIFEST_PARSE_RETRIES", 2):
         with mock.patch.object(d, "call_agent",
                                side_effect=["bad", GOOD, FILE_T]) as ca:
             d._generate_via_manifest(db, spec, task, spec_dir, "S", "D",
@@ -148,7 +149,7 @@ def test_the_agent_is_not_rotated_between_parse_retries(db, spec_task):
 
 def test_an_exhausted_parse_budget_propagates(db, spec_task):
     spec, task, spec_dir = spec_task
-    with mock.patch.object(executor, "MANIFEST_PARSE_RETRIES", 2):
+    with mock.patch.object(settings, "MANIFEST_PARSE_RETRIES", 2):
         with mock.patch.object(d, "call_agent", side_effect=["bad"] * 3) as ca:
             res = d._generate_via_manifest(db, spec, task, spec_dir, "S", "D",
                                            "implementer", [], None)
@@ -158,7 +159,7 @@ def test_an_exhausted_parse_budget_propagates(db, spec_task):
 
 def test_a_zero_retry_budget_propagates_immediately(db, spec_task):
     spec, task, spec_dir = spec_task
-    with mock.patch.object(executor, "MANIFEST_PARSE_RETRIES", 0):
+    with mock.patch.object(settings, "MANIFEST_PARSE_RETRIES", 0):
         with mock.patch.object(d, "call_agent", side_effect=["bad"]) as ca:
             res = d._generate_via_manifest(db, spec, task, spec_dir, "S", "D",
                                            "implementer", [], None)
@@ -172,7 +173,7 @@ def test_every_failed_response_is_persisted_for_diagnosis(db, spec_task):
     # DEV-478's lesson: a failure recorded without its text is a failure nobody
     # can act on. I could not diagnose run 6 of DEV-102 at all.
     spec, task, spec_dir = spec_task
-    with mock.patch.object(executor, "MANIFEST_PARSE_RETRIES", 2):
+    with mock.patch.object(settings, "MANIFEST_PARSE_RETRIES", 2):
         with mock.patch.object(d, "call_agent",
                                side_effect=["first bad", "second bad", "third bad"]):
             d._generate_via_manifest(db, spec, task, spec_dir, "S", "D",
@@ -187,7 +188,7 @@ def test_every_failed_response_is_persisted_for_diagnosis(db, spec_task):
 
 def test_persisted_responses_do_not_collide_across_parse_attempts(db, spec_task):
     spec, task, spec_dir = spec_task
-    with mock.patch.object(executor, "MANIFEST_PARSE_RETRIES", 2):
+    with mock.patch.object(settings, "MANIFEST_PARSE_RETRIES", 2):
         with mock.patch.object(d, "call_agent", side_effect=["a", "b", "c"]):
             d._generate_via_manifest(db, spec, task, spec_dir, "S", "D",
                                      "implementer", [], None)
@@ -199,7 +200,7 @@ def test_an_unwritable_spec_dir_does_not_break_the_run(db, spec_task):
     # Losing the evidence is bad; losing the run over losing the evidence is
     # worse. The persist is best-effort.
     spec, task, spec_dir = spec_task
-    with mock.patch.object(executor, "MANIFEST_PARSE_RETRIES", 1):
+    with mock.patch.object(settings, "MANIFEST_PARSE_RETRIES", 1):
         with mock.patch("pathlib.Path.write_text", side_effect=OSError("read-only")):
             with mock.patch.object(d, "call_agent", side_effect=["bad", "bad"]):
                 res = d._generate_via_manifest(db, spec, task, spec_dir, "S", "D",

@@ -26,6 +26,7 @@ from unittest import mock
 
 import pytest
 
+from coding_model_autonomous import _http
 import coding_model_autonomous.executor as ex
 
 
@@ -45,13 +46,13 @@ def _call(meta, *, usage=None, finish_reason="stop", clock=None):
     if clock is not None:
         # Deterministic elapsed time — a real sleep would be flaky and slow.
         ticks = iter(clock)
-        with mock.patch.object(ex.time, "monotonic", lambda: next(ticks)), \
-                mock.patch.object(ex, "post_chat_completion",
+        with mock.patch.object(_http.time, "monotonic", lambda: next(ticks)), \
+                mock.patch.object(_http, "post_chat_completion",
                                   return_value=_resp(usage=usage,
                                                      finish_reason=finish_reason)):
             return ex.call_agent("implementer", [{"role": "user", "content": "hi"}],
                                  meta=meta)
-    with mock.patch.object(ex, "post_chat_completion",
+    with mock.patch.object(_http, "post_chat_completion",
                            return_value=_resp(usage=usage,
                                               finish_reason=finish_reason)):
         return ex.call_agent("implementer", [{"role": "user", "content": "hi"}],

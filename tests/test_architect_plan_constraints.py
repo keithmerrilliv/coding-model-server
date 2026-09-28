@@ -16,7 +16,6 @@ from unittest import mock
 import pytest
 
 import coding_model_server.orchestrator_daemon as d
-from coding_model_autonomous import executor
 from coding_model_autonomous.executor import ArchitectResult, build_architect_message
 from coding_model_autonomous.models import SpecStatus, TaskStatus
 
@@ -252,7 +251,7 @@ def test_run_architect_sends_the_plan_constraints_to_the_agent(db):
                                        "recommended_agent": "fast_implementer"})
     with mock.patch.object(d, "call_agent", return_value="raw") as call, \
             mock.patch.object(d, "parse_architect_response", return_value=ares), \
-            mock.patch.object(executor, "parse_design_review",
+            mock.patch.object(d, "parse_design_review",
                               return_value=("PASS", "")):
         d._run_architect(db, spec, task, spec_dir)
 

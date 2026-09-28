@@ -11,7 +11,9 @@ restart picks up a code change with no reinstall.
 
 - **`coding_model_autonomous`** — the pipeline, and the project's centre of
   gravity. The kernel (`workspace`, `outcome`, `context`, `retry_policy`) makes
-  the decisions; `executor` holds the agents' prompts and parsers; the guards
+  the decisions; the agent layer (`settings`, `prompts`, `_http`, `parsers`,
+  `messages`, `normalize`) configures, prompts, calls and parses the agents,
+  with `executor` kept as a re-exporting façade; the guards
   (`design_testability`, `swift_prechecks`, `swift_rules`) check designs and
   generated code; `test_runner` and `delivery` run tests and push results.
 - **`coding_model_server`** — the FastAPI inference server (`server.py`,
@@ -33,7 +35,8 @@ a Mac. It deploys there and nowhere else; see [docs/MAC_RUNNER.md](docs/MAC_RUNN
 | How a failure is classified and charged | `coding_model_autonomous/outcome.py` |
 | Which agent retries, and what a retry keeps | `coding_model_autonomous/retry_policy.py` |
 | What each role is shown, and the prompt budget | `coding_model_autonomous/context.py` |
-| Agent prompts and response parsing | `coding_model_autonomous/executor.py` |
+| Agent prompts and response parsing | `coding_model_autonomous/prompts.py`, `parsers.py`; what each role is sent, `messages.py` |
+| An agent-layer knob (`AUTONOMOUS_*` budgets, retries, modes) | `coding_model_autonomous/settings.py`: read and patch it there, never on `executor` |
 | The agent roster, model configs, VRAM numbers | `coding_model_server/config.py` (each model config's comments record the measurements behind it) |
 | Model loading, swapping, VRAM admission | `coding_model_server/llama_server.py` |
 | Env vars and their defaults | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) |

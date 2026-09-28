@@ -200,7 +200,7 @@ def test_a_broken_detector_never_breaks_a_generation(db, spec_task):
     """Fail open: a lint step must not be able to lose a whole generation."""
     spec, task = spec_task
     files = [("Sources/CentipedeCore/Field.swift", INVENTED_FIELD)]
-    with mock.patch.object(executor, "protected_type_collisions",
+    with mock.patch.object(d, "protected_type_collisions",
                            side_effect=RuntimeError("boom")):
         assert d._normalize_generated_files(
             db, spec, task, files, "synthesizer",

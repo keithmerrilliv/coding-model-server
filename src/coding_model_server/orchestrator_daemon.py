@@ -92,7 +92,7 @@ from coding_model_autonomous.jira_sync import JiraSync
 from coding_model_autonomous import (
     apply_edits, architect_tools, delivery, design_testability,
     gate_output, plan_paths,
-    executor, swift_prechecks, swift_rules, test_runner,
+    settings, swift_prechecks, swift_rules, test_runner,
 )
 from coding_model_autonomous.test_runner import run_tests
 from coding_model_autonomous.retry_policy import (
@@ -107,26 +107,49 @@ from coding_model_autonomous.retry_policy import (
     plan_attempt,
     previous_plans,
     record_attempt_plan, record_reroute,)
-from coding_model_autonomous.executor import (
+from coding_model_autonomous.parsers import (
+    _strip_thinking,
     ImplementerResult,
-    MAX_RETRIES,
+    ManifestEntry,
     ManifestResult,
+    parse_architect_response,
+    parse_design_review,
+    parse_implementer_response,
+    parse_manifest_response,
+    parse_reviewer_response,
     ParseError,
+)
+from coding_model_autonomous.messages import (
     build_architect_message,
+    build_design_review_message,
     build_implementer_message,
     build_manifest_message,
     build_per_file_message,
     build_reviewer_message,
     build_synthesis_message,
-    call_agent,
-    parse_architect_response,
-    parse_implementer_response,
-    parse_manifest_response,
-    parse_reviewer_response,
+    build_synthesis_repair_message,
+    estimate_design_file_count,
+    file_memory_query,
+    implementer_max_tokens_for,
+    spec_memory_query,
     summarize_written_files,
+    use_manifest_mode,
+    whole_file_emission_tokens,
 )
+from coding_model_autonomous.normalize import (
+    declared_top_level_types,
+    normalize_boilerplate,
+    protected_type_collisions,
+)
+from coding_model_autonomous._http import (
+    accumulate_agent_fields,
+    agent_event_fields,
+    call_agent,
+)
+from coding_model_autonomous.settings import MAX_RETRIES
 from coding_model_autonomous.workspace import (
     ACTION_RENAMED, ATTEMPT_ROLES, REFUSALS, ArtifactLedger,
+    artifact_path,
 )
 from coding_model_autonomous import outcome as _outcome
 from coding_model_autonomous import diagnostics as _diagnostics
@@ -321,7 +344,7 @@ def _process_pending_plan(db: Database, spec: Spec) -> None:
             EventKind.PLANNER_RAN,
             spec_id=spec.id,
             payload={"transient_error": f"{type(e).__name__}: {e}",
-                     **executor.agent_event_fields(tally)},
+                     **agent_event_fields(tally)},
         )
         return
     except Exception as e:
@@ -336,7 +359,7 @@ def _process_pending_plan(db: Database, spec: Spec) -> None:
             EventKind.PLANNER_RAN,
             spec_id=spec.id,
             payload={"error": f"{type(e).__name__}: {e}", "no_verdict": True,
-                     **executor.agent_event_fields(tally)},
+                     **agent_event_fields(tally)},
         )
         _planner_no_verdict(db, spec, failure)
         return
@@ -354,7 +377,7 @@ def _process_pending_plan(db: Database, spec: Spec) -> None:
             # readers drive rotation and crash recovery off AGENT_RAN
             # (retry_policy, outcome, _crash_recoveries_used), and a telemetry
             # ticket must not put rows into a stream that decides retries.
-            **executor.agent_event_fields(tally),
+            **agent_event_fields(tally),
         },
     )
 
@@ -374,7 +397,7 @@ def _process_pending_plan(db: Database, spec: Spec) -> None:
                 "raw_excerpt": result.raw_response[:500],
             },
         )
-        if not executor._strip_thinking(result.raw_response or "").strip():
+        if not _strip_thinking(result.raw_response or "").strip():
             # An empty completion is no plan at all — not a verdict on one.
             _planner_no_verdict(db, spec, Failure(
                 FailureClass.EMPTY_COMPLETION, "planner", "model_call",
@@ -1313,7 +1336,7 @@ def _hooks() -> Hooks:
     return Hooks(
         max_retries=lambda: MAX_RETRIES,
         synthesize=_synthesize_or_fail,
-        reviewer_parse_retries=lambda: executor.REVIEWER_PARSE_RETRIES,
+        reviewer_parse_retries=lambda: settings.REVIEWER_PARSE_RETRIES,
     )
 
 
@@ -1475,11 +1498,11 @@ def _spec_language(spec: Spec) -> "str | None":
     treats as "not known to be covered" rather than as a default.
     """
     plan = _load_plan(spec)
-    declared = executor.normalize_language(plan.get("language"))
+    declared = settings.normalize_language(plan.get("language"))
     # DEV-781: when the plan cannot say, the implement phase's own paths
     # can — a `.mm` is Objective-C++ whatever the prose called it. The plan
     # wins when both exist; a disagreement is logged, not resolved.
-    implied = executor.language_from_paths(_context.planned_outputs(plan))
+    implied = settings.language_from_paths(_context.planned_outputs(plan))
     if declared and implied and declared != implied:
         logger.info("spec %s: plan says language=%s but its implement "
                     "outputs imply %s — using the plan's (DEV-781)",
@@ -1550,7 +1573,7 @@ def _bootstrap_tasks(db: Database, spec: Spec) -> None:
         role = phase.get("role", "implementer")
         db.create_task(
             spec_id=spec.id,
-            agent=executor.role_to_agent(role),
+            agent=settings.role_to_agent(role),
             role=role,
             title=phase.get("name", role),
             description=str(phase.get("success", "")),
@@ -1633,14 +1656,14 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:  # noqa: C
                        if task.retry_count > 0 else None)
     # DEV-760: a revision reasons over the old design and the feedback before
     # re-deriving the whole document, so it gets more room than a first pass.
-    arch_max_tokens = executor.architect_max_tokens(bool(rejection_notes))
+    arch_max_tokens = settings.architect_max_tokens(bool(rejection_notes))
     # DEV-631/DEV-530: the architect has one agent, so its levers are the
     # feedback and the prompt; the record says whether a revision round
     # actually carries anything new.
     try:
         planned = record_attempt_plan(db, spec.id, task, plan_attempt(
             db, spec.id, task, role="architect",
-            agent=executor.role_to_agent("architect"), feedback=rejection_notes,
+            agent=settings.role_to_agent("architect"), feedback=rejection_notes,
             prompt_inputs=(spec_md,),
             strategy=_load_plan(spec).get("test_strategy"), assignment="fixed"))
         if task.retry_count > 0 and not planned["changed"]:
@@ -1730,12 +1753,12 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:  # noqa: C
         spec.id, "architect",
         fixed_chars=_message_chars(_architect_prompt([], [])),
         completion_tokens=arch_max_tokens,
-        agent=executor.role_to_agent("architect"),
+        agent=settings.role_to_agent("architect"),
         sections=[
             _context.Section(_context.SECTION_EDITABLE, view.existing_files,
-                             executor.EXISTING_FILES_MAX_CHARS),
+                             settings.EXISTING_FILES_MAX_CHARS),
             _context.Section(_context.SECTION_PROTECTED, view.reference_files,
-                             executor.PROTECTED_FILES_MAX_CHARS),
+                             settings.PROTECTED_FILES_MAX_CHARS),
         ])
     # DEV-714: tool results are prompt text like any other, and they arrive
     # AFTER the allocation above has already sized the window. Bound them by
@@ -1762,9 +1785,9 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:  # noqa: C
     # such miss used to fail the whole spec. We now retry the call up to
     # ARCHITECT_PARSE_RETRIES times before giving up. Each failed response is
     # persisted alongside spec.md so the post-mortem isn't blind.
-    max_attempts = executor.ARCHITECT_PARSE_RETRIES + 1
+    max_attempts = settings.ARCHITECT_PARSE_RETRIES + 1
     result = None
-    memory_query = executor.spec_memory_query(spec_md)
+    memory_query = spec_memory_query(spec_md)
     # DEV-657: the corpus is Apple documentation, so a Python spec must not
     # pay for it. Read once — the language cannot change mid-dispatch.
     language = _spec_language(spec)
@@ -1816,7 +1839,7 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:  # noqa: C
                         payload={"role": "architect",
                                  "result_kind": type(result).__name__,
                                  "attempt": attempt, **tool_fields,
-                                 **executor.agent_event_fields(meta)})
+                                 **agent_event_fields(meta)})
         if not isinstance(result, ParseError):
             if attempt > 1:
                 logger.info("spec %s: architect parsed cleanly on attempt %d/%d",
@@ -1841,7 +1864,7 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:  # noqa: C
         # architect — requeue without charging instead of failing the spec.
         no_verdict = classify_model_output(
             raw, meta, role="architect", parse_reason=result.reason,
-            strip_thinking=executor._strip_thinking)
+            strip_thinking=_strip_thinking)
         if no_verdict is not None and no_verdict.outcome is _outcome.Outcome.NO_VERDICT:
             _dispose(db, spec, task, no_verdict)
             return
@@ -1878,7 +1901,7 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:  # noqa: C
                     f"## Design ready for review: {spec.title}\n\n"
                     f"Spec ID: `{spec.id}`\n\n"
                     f"> ⚠ The latest revision attempt failed to parse "
-                    f"({executor.ARCHITECT_PARSE_RETRIES + 1} tries); this is "
+                    f"({settings.ARCHITECT_PARSE_RETRIES + 1} tries); this is "
                     f"the last design that parsed cleanly, carried forward "
                     f"rather than failing the spec (DEV-543). Review it on its "
                     f"merits.\n\n"
@@ -1961,7 +1984,7 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:  # noqa: C
     # DEV-468's upstream routing and crash recovery, so the check used to
     # retire itself for reasons that had nothing to do with it.
     findings = []
-    if executor.TESTABILITY_CHECK_ENABLED:
+    if settings.TESTABILITY_CHECK_ENABLED:
         try:
             # DEV-509 runs alongside DEV-481's check: same gate, same budget,
             # same feedback file. Completeness first — a design missing a type
@@ -1991,7 +2014,7 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:  # noqa: C
     if findings:
         kinds = sorted({f.kind for f in findings})
         rounds_used = _testability_rounds_used(db, spec.id)
-        may_revise = rounds_used < executor.TESTABILITY_CHECK_MAX_ROUNDS
+        may_revise = rounds_used < settings.TESTABILITY_CHECK_MAX_ROUNDS
         db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
                         payload={"role": "testability_check",
                                  "model_call": False,
@@ -2010,7 +2033,7 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:  # noqa: C
             logger.info("spec %s: testability check found %d finding(s) %s — "
                         "revising (round %d/%d)", spec.id, len(findings),
                         kinds, rounds_used + 1,
-                        executor.TESTABILITY_CHECK_MAX_ROUNDS)
+                        settings.TESTABILITY_CHECK_MAX_ROUNDS)
             try:
                 (spec_dir / "design_review_feedback.md").write_text(
                     design_testability.format_findings(findings))
@@ -2028,7 +2051,7 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:  # noqa: C
                     "review", f"testability check: {len(findings)} finding(s) "
                     f"{kinds}", phase="testability_check"),
                 f"round {rounds_used + 1}/"
-                f"{executor.TESTABILITY_CHECK_MAX_ROUNDS}")
+                f"{settings.TESTABILITY_CHECK_MAX_ROUNDS}")
             return
         # Revision budget spent. The findings are still true, and the human
         # about to read this design is the only one left who can act on them —
@@ -2038,13 +2061,13 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:  # noqa: C
             "revision budget is spent (%d/%d) — carrying them to the gate "
             "instead of silently approving an unchecked design",
             spec.id, len(findings), kinds, rounds_used,
-            executor.TESTABILITY_CHECK_MAX_ROUNDS)
+            settings.TESTABILITY_CHECK_MAX_ROUNDS)
         testability_note = (
             f"\n\n---\n\n"
             f"## ⚠ Automated testability check: {len(findings)} unresolved "
             f"finding(s)\n\n"
             f"The check's revision budget "
-            f"({executor.TESTABILITY_CHECK_MAX_ROUNDS} rounds) is spent, so "
+            f"({settings.TESTABILITY_CHECK_MAX_ROUNDS} rounds) is spent, so "
             f"the architect was NOT sent back to fix these. They are still "
             f"present in the design below.\n\n"
             f"{design_testability.format_findings(findings)}\n"
@@ -2054,8 +2077,8 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:  # noqa: C
     # implementer follows it exactly. Bounded by the architect retry budget and
     # fail-open (a flaky review never blocks). On a substantive FAIL, bounce back
     # to the architect with the notes instead of building a known-flawed design.
-    if (executor.DESIGN_REVIEW_ENABLED
-            and task.retry_count < executor.DESIGN_REVIEW_MAX_REVISIONS):
+    if (settings.DESIGN_REVIEW_ENABLED
+            and task.retry_count < settings.DESIGN_REVIEW_MAX_REVISIONS):
         verdict, notes = _run_design_review(db, spec, task, spec_dir,
                                             spec_md, result.design_md)
         if verdict == "FAIL" and notes:
@@ -2169,11 +2192,11 @@ def _run_design_review(db: Database, spec: Spec, task, spec_dir,
     try:
         raw = call_agent(
             "reviewer",
-            executor.build_design_review_message(spec_md, design_md),
-            agent=executor.DESIGN_REVIEW_AGENT,
-            memory_query=executor.spec_memory_query(spec_md),  # DEV-497
+            build_design_review_message(spec_md, design_md),
+            agent=settings.DESIGN_REVIEW_AGENT,
+            memory_query=spec_memory_query(spec_md),  # DEV-497
             language=_spec_language(spec),
-            max_tokens=executor.DESIGN_REVIEW_MAX_TOKENS,
+            max_tokens=settings.DESIGN_REVIEW_MAX_TOKENS,
             meta=meta,
         )
     except Exception as exc:  # transport/HTTP — never let it kill the spec
@@ -2184,10 +2207,10 @@ def _run_design_review(db: Database, spec: Spec, task, spec_dir,
         logger.warning("spec %s: design review truncated (agent=%s) — proceeding "
                        "without it", spec.id, meta.get("agent"))
         return "PASS", ""
-    verdict, notes = executor.parse_design_review(raw)
+    verdict, notes = parse_design_review(raw)
     db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
                     payload={"role": "design_review", "verdict": verdict,
-                             **executor.agent_event_fields(meta)})
+                             **agent_event_fields(meta)})
     try:
         (spec_dir / "design_review.md").write_text(f"VERDICT: {verdict}\n\n{raw}")
     except OSError:
@@ -2347,7 +2370,7 @@ def _prompt_budget(spec_id: str, role: str, *, fixed_chars: int,
     # No pick means call_agent will resolve the role's default, so budget
     # against THAT window — an unresolved agent has no window and would skip
     # the sum entirely.
-    agent = agent or executor.role_to_agent(role)
+    agent = agent or settings.role_to_agent(role)
     return _context.plan_dispatch(
         spec_id, role=role, sections=sections, fixed_chars=fixed_chars,
         completion_tokens=completion_tokens, agent=agent,
@@ -2440,7 +2463,7 @@ def _generate_implementation(
     ImplementerResult (list of (path, content)) or a ParseError, which the
     caller handles identically (rotation retry on ParseError).
     """
-    n_files = executor.estimate_design_file_count(design_md)
+    n_files = estimate_design_file_count(design_md)
     # DEV-546: conditions the reviewer attached when APPROVING this design.
     # Fetched here so both generation paths get them from one place.
     approval_conditions = _approved_gate_conditions(
@@ -2449,9 +2472,9 @@ def _generate_implementation(
         logger.info("spec %s: carrying %d chars of design-approval conditions "
                     "into the implementer prompt (DEV-546)",
                     spec.id, len(approval_conditions))
-    if executor.use_manifest_mode(design_md):
+    if use_manifest_mode(design_md):
         logger.info("spec %s: manifest mode (design enumerates ~%d files >= "
-                    "threshold %d)", spec.id, n_files, executor.MANIFEST_FILE_THRESHOLD)
+                    "threshold %d)", spec.id, n_files, settings.MANIFEST_FILE_THRESHOLD)
         return _generate_via_manifest(
             db, spec, task, spec_dir, spec_md, design_md,
             chosen_agent, clarifications, rejection_notes, tally=tally,
@@ -2480,7 +2503,7 @@ def _generate_implementation(
         logger.info("spec %s: retry %d — %d prior-attempt new file(s) served as "
                     "editable content: %s (DEV-790)", spec.id, task.retry_count,
                     len(prior_new), ", ".join(p for p, _ in prior_new))
-    impl_max_tokens = executor.implementer_max_tokens_for(design_md)
+    impl_max_tokens = implementer_max_tokens_for(design_md)
     # DEV-698: the implementer writes the stubs and meets the compiler, so it
     # needs this more than the architect did. Computed from the full context,
     # not the budget-trimmed render.
@@ -2496,7 +2519,7 @@ def _generate_implementation(
             reference_files=reference,
             approval_conditions=approval_conditions,
             unresolved=unresolved,
-            edit_mode=executor.DIFF_BASED_EDITS and bool(existing),
+            edit_mode=settings.DIFF_BASED_EDITS and bool(existing),
             new_files=new_files,
             omitted_existing=omitted_e, omitted_reference=omitted_r,
             standing_rules=standing_rules or None)
@@ -2512,9 +2535,9 @@ def _generate_implementation(
         completion_tokens=impl_max_tokens, agent=chosen_agent,
         sections=[
             _context.Section(_context.SECTION_EDITABLE, editable_seed,
-                             executor.EXISTING_FILES_MAX_CHARS),
+                             settings.EXISTING_FILES_MAX_CHARS),
             _context.Section(_context.SECTION_PROTECTED, view.reference_files,
-                             executor.PROTECTED_FILES_MAX_CHARS),
+                             settings.PROTECTED_FILES_MAX_CHARS),
         ],
         candidates=_IMPLEMENTER_ROTATION)
     _note_budget(tally, alloc, impl_max_tokens)
@@ -2528,9 +2551,9 @@ def _generate_implementation(
     # legacy whole-file path (build_implementer_message + parse_implementer_response).
     # The list is the ALLOCATED one: an edit block can only be anchored against
     # content the prompt actually carried.
-    edit_mode = executor.DIFF_BASED_EDITS and bool(existing_files)
+    edit_mode = settings.DIFF_BASED_EDITS and bool(existing_files)
     surface = _change_surface(spec_md)
-    if executor.DIFF_BASED_EDITS and not existing_files and surface.kind == "unrecognised":
+    if settings.DIFF_BASED_EDITS and not existing_files and surface.kind == "unrecognised":
         # DEV-630: same distinction as the plan-validation guard. The spec has
         # a table; edit mode could not read a path from it; the "edit mode
         # DISARMED" warning below only fires when a path WAS read, so this
@@ -2539,7 +2562,7 @@ def _generate_implementation(
             "spec %s: the change-surface table has %d row(s) but no path could "
             "be read from any of them — edit mode cannot tell whether existing "
             "files are involved and is NOT armed (DEV-630)", spec.id, surface.rows)
-    if executor.DIFF_BASED_EDITS and not existing_files and surface.any:
+    if settings.DIFF_BASED_EDITS and not existing_files and surface.any:
         # DEV-620: the silent version of this was run 19's only trace — a log
         # line missing its "[diff-based edits]" suffix.
         logger.warning(
@@ -2559,11 +2582,11 @@ def _generate_implementation(
     # back again. The title is the query, as the architect already does.
     raw = call_agent("implementer", messages, agent=chosen_agent,
                      max_tokens=impl_max_tokens, meta=meta,
-                     memory_query=executor.spec_memory_query(spec_md),
+                     memory_query=spec_memory_query(spec_md),
                      language=_spec_language(spec))
     _note_truncation(db, spec, task, "implementer", meta, impl_max_tokens)
     if tally is not None:
-        executor.accumulate_agent_fields(tally, meta)
+        accumulate_agent_fields(tally, meta)
         if meta.get("truncated"):
             tally["truncated"] = True
             tally["max_tokens"] = impl_max_tokens
@@ -2629,7 +2652,7 @@ def _load_prior_manifest_run(spec_dir, retry_count: int):
         return None
     try:
         data = json.loads(mpath.read_text())
-        entries = [executor.ManifestEntry(path=d["path"], purpose=d.get("purpose", ""),
+        entries = [ManifestEntry(path=d["path"], purpose=d.get("purpose", ""),
                                           exports=d.get("exports", ""))
                    for d in data]
     except (OSError, ValueError, KeyError, TypeError) as exc:
@@ -2716,7 +2739,7 @@ def _reemit_instruction(whole_file_text: str) -> str:
     With the flag OFF this returns ``whole_file_text`` verbatim, keeping the
     pre-DEV-581 feedback byte-identical.
     """
-    if executor.DIFF_BASED_EDITS:
+    if settings.DIFF_BASED_EDITS:
         return ("Fix the problem above, then re-emit anchored SEARCH/REPLACE "
                 "edit blocks for the existing files you change (whole-file "
                 "blocks for new files). Leave every other file untouched.")
@@ -2895,7 +2918,7 @@ def _build_from_manifest(
                 "spec %s: manifest: %d of %d entries already exist and will "
                 "be %s: %s", spec.id, len(editable), len(entries),
                 "edited via SEARCH/REPLACE blocks (DEV-581)"
-                if executor.DIFF_BASED_EDITS else "regenerated whole",
+                if settings.DIFF_BASED_EDITS else "regenerated whole",
                 ", ".join(editable))
     # Selected once for the whole manifest, same as the editable files: each
     # per-file call is isolated and would otherwise be blind to what the
@@ -2949,7 +2972,7 @@ def _build_from_manifest(
     if failures or stale_fallbacks:
         db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
                         payload={"role": "manifest",
-                                 "agent": chosen_agent or executor.role_to_agent("implementer"),
+                                 "agent": chosen_agent or settings.role_to_agent("implementer"),
                                  "model_call": False,
                                  "anomaly": "per_file_failures",
                                  "paths": failures,
@@ -3042,7 +3065,7 @@ def _generate_via_manifest(
                             ", ".join(sorted(cited)))
                 db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
                                 payload={"role": "manifest", "mode": "targeted_retry",
-                                         "agent": chosen_agent or executor.role_to_agent("implementer"),
+                                         "agent": chosen_agent or settings.role_to_agent("implementer"),
                                          "model_call": False,
                                          "regenerated": sorted(cited),
                                          "cited_by": provenance,  # DEV-539
@@ -3069,7 +3092,7 @@ def _generate_via_manifest(
     # operator's clarifications are the whole ask — so the budget here is only
     # a fit check (DEV-633).
     dispatched = _ctx_capable_agent(spec.id, chosen_agent, manifest_messages,
-                                    executor.MANIFEST_MAX_TOKENS, tally=tally)
+                                    settings.MANIFEST_MAX_TOKENS, tally=tally)
     # DEV-676: record the move, as the single-call and per-file paths do; it
     # used to change the agent silently, so ATTEMPT_PLANNED named one that
     # never ran.
@@ -3082,25 +3105,25 @@ def _generate_via_manifest(
     # did, moe_implementer -> fast_implementer — spends capability to fix a
     # typo. Only an exhausted parse budget propagates to the caller.
     manifest: ManifestResult | ParseError | None = None
-    for parse_attempt in range(executor.MANIFEST_PARSE_RETRIES + 1):
+    for parse_attempt in range(settings.MANIFEST_PARSE_RETRIES + 1):
         meta = {}
         manifest_raw = call_agent(
             "implementer", manifest_messages,
-            agent=chosen_agent, max_tokens=executor.MANIFEST_MAX_TOKENS,
+            agent=chosen_agent, max_tokens=settings.MANIFEST_MAX_TOKENS,
             meta=meta,
-            memory_query=executor.spec_memory_query(spec_md),   # DEV-497
+            memory_query=spec_memory_query(spec_md),   # DEV-497
             language=_spec_language(spec),
         )
         _note_truncation(db, spec, task, "manifest", meta,
-                         executor.MANIFEST_MAX_TOKENS)
+                         settings.MANIFEST_MAX_TOKENS)
         # Before any ParseError return: a manifest call that failed to parse
         # still cost the attempt a full generation, and that is exactly the
         # case a cost-per-attempt query wants to see.
         if tally is not None:
-            executor.accumulate_agent_fields(tally, meta)
+            accumulate_agent_fields(tally, meta)
             if meta.get("truncated"):
                 tally["truncated"] = True
-                tally["max_tokens"] = executor.MANIFEST_MAX_TOKENS
+                tally["max_tokens"] = settings.MANIFEST_MAX_TOKENS
         manifest = parse_manifest_response(manifest_raw)
         if not isinstance(manifest, ParseError):
             break
@@ -3112,7 +3135,7 @@ def _generate_via_manifest(
         except OSError as e:
             logger.warning("spec %s: could not persist failed manifest "
                            "response: %s", spec.id, e)
-        remaining = executor.MANIFEST_PARSE_RETRIES - parse_attempt
+        remaining = settings.MANIFEST_PARSE_RETRIES - parse_attempt
         logger.warning(
             "spec %s: manifest parse failed (%s) — %s", spec.id, manifest.reason,
             f"re-calling the manifest ({remaining} parse "
@@ -3124,7 +3147,7 @@ def _generate_via_manifest(
             payload={"role": "manifest", "parse_failed": True,
                      "parse_attempt": parse_attempt + 1,
                      "reason": manifest.reason,
-                     **executor.agent_event_fields(meta)})
+                     **agent_event_fields(meta)})
     if isinstance(manifest, ParseError):
         return manifest  # the caller classifies it
     # The parse loop runs at least once (MANIFEST_PARSE_RETRIES >= 0).
@@ -3134,7 +3157,7 @@ def _generate_via_manifest(
                     payload={"role": "manifest",
                              "files": len(manifest.entries),
                              "paths": [e.path for e in manifest.entries],
-                             **executor.agent_event_fields(meta)})
+                             **agent_event_fields(meta)})
     logger.info("spec %s: manifest = %d files: %s", spec.id,
                 len(manifest.entries), ", ".join(e.path for e in manifest.entries))
 
@@ -3336,10 +3359,10 @@ def _generate_one_file(
     written_summary = summarize_written_files(written)
     existing_content = (existing_by_path or {}).get(entry.path)
     existing_chars = len(existing_content) if existing_content is not None else 0
-    edit_mode = executor.DIFF_BASED_EDITS and existing_content is not None
+    edit_mode = settings.DIFF_BASED_EDITS and existing_content is not None
     oversized = (existing_content is not None
-                 and executor.MANIFEST_WHOLE_FILE_MAX_CHARS
-                 and existing_chars > executor.MANIFEST_WHOLE_FILE_MAX_CHARS)
+                 and settings.MANIFEST_WHOLE_FILE_MAX_CHARS
+                 and existing_chars > settings.MANIFEST_WHOLE_FILE_MAX_CHARS)
     if oversized and not edit_mode:
         # Whole-file re-emission at this size ships fragments — run 18 gutted a
         # 117-line class to 33 lines, run 19 emitted 43 lines of a 5,804-line
@@ -3382,12 +3405,12 @@ def _generate_one_file(
     file_alloc = _prompt_budget(
         spec.id, "implementer",
         fixed_chars=_message_chars(_per_file_prompt([])),
-        completion_tokens=executor.PER_FILE_MAX_TOKENS, agent=chosen_agent,
+        completion_tokens=settings.PER_FILE_MAX_TOKENS, agent=chosen_agent,
         sections=[_context.Section(_context.SECTION_PROTECTED,
                                    list(reference_files or []),
-                                   executor.PROTECTED_FILES_MAX_CHARS)],
+                                   settings.PROTECTED_FILES_MAX_CHARS)],
         candidates=_IMPLEMENTER_ROTATION)
-    _note_budget(tally, file_alloc, executor.PER_FILE_MAX_TOKENS)
+    _note_budget(tally, file_alloc, settings.PER_FILE_MAX_TOKENS)
     if file_alloc.agent != chosen_agent:
         _note_reroute(db, spec, task, chosen_agent, file_alloc.agent)
     chosen_agent = file_alloc.agent
@@ -3395,13 +3418,13 @@ def _generate_one_file(
     omitted_reference = file_alloc.dropped(_context.SECTION_PROTECTED)
 
     edit_errors = None
-    for attempt in range(executor.PER_FILE_PARSE_RETRIES + 1):
+    for attempt in range(settings.PER_FILE_PARSE_RETRIES + 1):
         meta: dict = {}
         raw = call_agent(
             "implementer",
             _per_file_prompt(reference_files, omitted_reference, edit_errors),
-            agent=chosen_agent, max_tokens=executor.PER_FILE_MAX_TOKENS, meta=meta,
-            memory_query=executor.file_memory_query(entry),
+            agent=chosen_agent, max_tokens=settings.PER_FILE_MAX_TOKENS, meta=meta,
+            memory_query=file_memory_query(entry),
             language=_spec_language(spec),
         )
         # Counted before any early return below: a truncated or unparseable
@@ -3409,9 +3432,9 @@ def _generate_one_file(
         # that omits its failed calls understates exactly the attempts worth
         # studying.
         if tally is not None:
-            executor.accumulate_agent_fields(tally, meta)
+            accumulate_agent_fields(tally, meta)
         _note_truncation(db, spec, task, f"per-file:{entry.path}", meta,
-                         executor.PER_FILE_MAX_TOKENS)
+                         settings.PER_FILE_MAX_TOKENS)
         if meta.get("truncated"):
             # Degenerate generation: the model burned the whole budget without
             # finishing the file. Retrying the SAME model just truncates again
@@ -3543,7 +3566,7 @@ def _drop_protected_type_collisions(db: Database, spec: Spec, task, files,
     if not protected_files:
         return files
     try:
-        collisions = executor.protected_type_collisions(files, protected_files)
+        collisions = protected_type_collisions(files, protected_files)
     except Exception as e:  # never let a lint step break a generation
         logger.warning("spec %s: protected-type check errored (%s) — skipping",
                        spec.id, e)
@@ -3583,7 +3606,7 @@ def _normalize_generated_files(db: Database, spec: Spec, task, files, role: str,
     """
     files = _drop_protected_type_collisions(
         db, spec, task, files, role, protected_files)
-    normalized, notes = executor.normalize_boilerplate(files)
+    normalized, notes = normalize_boilerplate(files)
     if not notes:
         return files
     for note in notes:
@@ -3879,8 +3902,8 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:  # noqa:
     # two later steps that may still move the dispatch).
     choice = choose_agent(
         db, spec.id, task, spec_dir,
-        default_agent=executor.role_to_agent("implementer"),
-        completion_tokens=executor.implementer_max_tokens_for(design_md),
+        default_agent=settings.role_to_agent("implementer"),
+        completion_tokens=implementer_max_tokens_for(design_md),
         window_of=_agent_ctx_limit, reserve_of=_agent_reasoning_reserve)
     chosen_agent, assignment = choice.agent, choice.assignment
 
@@ -3959,7 +3982,7 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:  # noqa:
                              # went to; fall back to the rotation pick when no
                              # call reported one (every call raised).
                              "agent": chosen_agent or task.agent,
-                             **executor.agent_event_fields(tally),
+                             **agent_event_fields(tally),
                              # DEV-638: per-tier counts + the non-exact applies.
                              **_edit_apply_event_fields(result)})
 
@@ -3969,7 +3992,7 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:  # noqa:
     # DEV-624 fit check had escalated the dispatch to deep_implementer).
     _persist_implementer_response(
         spec_dir, task,
-        executor.agent_event_fields(tally).get("agent") or chosen_agent or task.agent,
+        agent_event_fields(tally).get("agent") or chosen_agent or task.agent,
         result, tally)
 
     if isinstance(result, ParseError):
@@ -3981,7 +4004,7 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:  # noqa:
         # and at exhaustion it reaches synthesis like every other verdict.
         failure = classify_model_output(
             result.raw, tally, role="implementer", parse_reason=result.reason,
-            strip_thinking=executor._strip_thinking)
+            strip_thinking=_strip_thinking)
         assert failure is not None
         failure.feedback = (
             f"Previous implementer response was unparseable: {result.reason}. "
@@ -4027,7 +4050,7 @@ def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:  # noqa:
     # Deterministically fix boilerplate the reviewer checks — unpinned deps,
     # and a Swift file missing `import Foundation` — so the most mechanical
     # FAILs never depend on the model getting them right. See
-    # executor.normalize_boilerplate (#3, DEV-540).
+    # normalize_boilerplate (#3, DEV-540).
     # Fetched once and reused: the boilerplate/collision normalization below
     # and the DEV-512 Swift pre-check both need the protected scaffold, and it
     # costs a runner-side git read.
@@ -4683,7 +4706,7 @@ def _route_missing_planned_outputs(db: Database, spec: Spec, task,
                        "file is UNKNOWN; the DEV-638 file-mode guidance is "
                        "NOT armed for this retry (DEV-630)", spec.id, exc)
         existing, unknown = set(), set(planned)
-    edit_mode = executor.DIFF_BASED_EDITS
+    edit_mode = settings.DIFF_BASED_EDITS
 
     lines = [f"Your response is missing {len(missing)} of the {len(planned)} "
              f"file(s) the approved plan's implement phase declares. Nothing "
@@ -5458,22 +5481,22 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
     alloc = _prompt_budget(
         spec.id, "reviewer",
         fixed_chars=_message_chars(_reviewer_prompt([])),
-        completion_tokens=executor.REVIEWER_MAX_TOKENS,
-        agent=executor.role_to_agent("reviewer"),
+        completion_tokens=settings.REVIEWER_MAX_TOKENS,
+        agent=settings.role_to_agent("reviewer"),
         sections=[_context.Section("code", code_files,
-                                   executor.PRIOR_ARTIFACTS_MAX_CHARS)])
+                                   settings.PRIOR_ARTIFACTS_MAX_CHARS)])
     messages = _reviewer_prompt(alloc.files("code"), alloc.dropped("code"))
     meta: dict = {}
     raw = call_agent("reviewer", messages, meta=meta,
-                     memory_query=executor.spec_memory_query(spec_md),  # DEV-497
+                     memory_query=spec_memory_query(spec_md),  # DEV-497
                      language=_spec_language(spec))
-    _note_truncation(db, spec, task, "reviewer", meta, executor.REVIEWER_MAX_TOKENS)
+    _note_truncation(db, spec, task, "reviewer", meta, settings.REVIEWER_MAX_TOKENS)
     result = parse_reviewer_response(raw)
 
     db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
                     payload={"role": "reviewer",
                              "result_kind": type(result).__name__,
-                             **executor.agent_event_fields(meta)})
+                             **agent_event_fields(meta)})
 
     if isinstance(result, ParseError):
         logger.error("spec %s: reviewer response unparseable%s: %s", spec.id,
@@ -5494,7 +5517,7 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
         # a soft FAIL (the implementation was NOT actually reviewed).
         failure = classify_model_output(
             raw, meta, role="reviewer", parse_reason=result.reason,
-            strip_thinking=executor._strip_thinking)
+            strip_thinking=_strip_thinking)
         assert failure is not None
         # DEV-807: this used to assert "likely truncation" whatever the
         # reason, which is a guess presented as a finding and is simply false
@@ -5854,7 +5877,7 @@ def _repair_verdict(repair_passed: bool, pre_diags: list, post_diags: list,
     symbols: set = set()
     for path, content in (protected_files or []):
         if path.endswith(".swift"):
-            symbols |= executor.declared_top_level_types(content)
+            symbols |= declared_top_level_types(content)
     poisoned = sorted(
         {sym for sym in symbols for cls in new_classes
          if re.search(rf"\b{re.escape(sym)}\b", cls)})
@@ -5925,7 +5948,7 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,  # noqa:
     # single-call emit-everything constraint as the implementer, so it gets the
     # same design-scaled budget instead of the old hardcoded 16000 (which made
     # the merge step the most truncation-prone call in the pipeline).
-    synth_max_tokens = executor.implementer_max_tokens_for(design_md)
+    synth_max_tokens = implementer_max_tokens_for(design_md)
     # DEV-572: the merge prompt grows linearly with the attempt count and the
     # server (correctly) refuses an oversized body with a 413 — which used to
     # fail the spec on a transport error 31 seconds after the last attempt.
@@ -5966,9 +5989,9 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,  # noqa:
         completion_tokens=synth_max_tokens, agent=_SYNTHESIS_AGENT,
         sections=[
             _context.Section(_context.SECTION_PROTECTED, list(protected_files or []),
-                             executor.PROTECTED_FILES_MAX_CHARS),
+                             settings.PROTECTED_FILES_MAX_CHARS),
             _context.Section("attempts", corpus,
-                             executor.PRIOR_ARTIFACTS_MAX_CHARS),
+                             settings.PRIOR_ARTIFACTS_MAX_CHARS),
         ])
     keep_idx = {int(k) for k, _ in synth_alloc.files("attempts")}
     kept = [att for i, att in indexed if i in keep_idx]
@@ -5992,7 +6015,7 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,  # noqa:
         try:
             raw = call_agent("implementer", messages, agent=_SYNTHESIS_AGENT,
                              max_tokens=synth_max_tokens, meta=meta,
-                             memory_query=executor.spec_memory_query(spec_md),  # DEV-497
+                             memory_query=spec_memory_query(spec_md),  # DEV-497
                              language=_spec_language(spec))
             break
         except Exception as exc:
@@ -6021,7 +6044,7 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,  # noqa:
                      spec.id, result.reason)
         no_verdict = classify_model_output(
             raw, meta, role="synthesizer", parse_reason=result.reason,
-            strip_thinking=executor._strip_thinking, phase="synthesis")
+            strip_thinking=_strip_thinking, phase="synthesis")
         if no_verdict is not None and \
                 no_verdict.outcome is _outcome.Outcome.NO_VERDICT:
             raise SynthesisNoVerdict(no_verdict)
@@ -6032,7 +6055,7 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,  # noqa:
                              "attempts": len(kept),
                              "attempts_total": len(attempts),
                              "files": len(result.files),
-                             **executor.agent_event_fields(meta)})
+                             **agent_event_fields(meta)})
 
     # Wipe the live attempt so synthesis doesn't collide with it. Snapshot
     # first so we keep the corpus.
@@ -6147,7 +6170,7 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,  # noqa:
     cited = (swift_rules.located_diagnostics(
                  test_output, [p for p, _ in result.files])
              if rate is None and build_failed else [])
-    repair_messages = executor.build_synthesis_repair_message(
+    repair_messages = build_synthesis_repair_message(
         spec_md, design_md, result.files,
         _extract_actionable_test_output(test_output, framework),
         build_diagnostic=build_failed if rate is None else None,
@@ -6162,7 +6185,7 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,  # noqa:
         repair_raw = call_agent("implementer", repair_messages,
                                 agent=_SYNTHESIS_AGENT,
                                 max_tokens=synth_max_tokens, meta=repair_meta,
-                                memory_query=executor.spec_memory_query(spec_md),  # DEV-497
+                                memory_query=spec_memory_query(spec_md),  # DEV-497
                                 language=_spec_language(spec))
     except Exception as exc:
         # DEV-651: `return False, test_output` used to fall through here, and
@@ -6190,7 +6213,7 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,  # noqa:
     cited_before: dict = {}
     for rel_path, _ in repair.files:
         try:
-            target = executor.artifact_path(spec_dir, rel_path)
+            target = artifact_path(spec_dir, rel_path)
         except ValueError:
             continue
         cited_before[rel_path] = (
@@ -6209,7 +6232,7 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,  # noqa:
         db.record_event(EventKind.AGENT_RAN, spec_id=spec.id,
                         task_id=impl_task.id,
                         payload={"role": "synthesis_repair",
-                                 **executor.agent_event_fields(repair_meta),
+                                 **agent_event_fields(repair_meta),
                                  "trigger": "build_failure",
                                  "files_offered": len(result.files),
                                  "files_changed": 0,
@@ -6255,7 +6278,7 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,  # noqa:
     pre_repair_state: dict[str, str | None] = {}
     for rel_path, _ in repair.files:
         try:
-            target = executor.artifact_path(spec_dir, rel_path)
+            target = artifact_path(spec_dir, rel_path)
         except ValueError:
             continue  # traversal — the write below will reject it too
         pre_repair_state[rel_path] = (
@@ -6272,7 +6295,7 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,  # noqa:
     db.record_event(EventKind.AGENT_RAN, spec_id=spec.id,
                     task_id=impl_task.id,
                     payload={"role": "synthesis_repair",
-                             **executor.agent_event_fields(repair_meta),
+                             **agent_event_fields(repair_meta),
                              # None when the repair was triggered by a build
                              # failure, which has no pass rate to report
                              # (DEV-469) — the reason is recorded instead.
@@ -6373,7 +6396,7 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,  # noqa:
     if not improved:
         for rel_path, previous in pre_repair_state.items():
             try:
-                target = executor.artifact_path(spec_dir, rel_path)
+                target = artifact_path(spec_dir, rel_path)
             except ValueError:
                 continue
             if previous is None:
@@ -6456,14 +6479,14 @@ def _synthesis_cannot_emit(db: Database, spec: Spec,
     the escape hatch. Says the numbers so the operator sees the arithmetic
     rather than a stub refusal an hour later (DEV-649).
     """
-    if executor.SYNTHESIS_EMIT_HEADROOM <= 0:
+    if settings.SYNTHESIS_EMIT_HEADROOM <= 0:
         return None
     spec_md_path = spec_dir / spec.source_md_path
     spec_md = spec_md_path.read_text() if spec_md_path.exists() else ""
     design_path = spec_dir / "design.md"
     design_md = design_path.read_text() if design_path.exists() else ""
-    budget = executor.implementer_max_tokens_for(design_md)
-    allowed = int(budget * executor.SYNTHESIS_EMIT_HEADROOM)
+    budget = implementer_max_tokens_for(design_md)
+    allowed = int(budget * settings.SYNTHESIS_EMIT_HEADROOM)
     try:
         view = _spec_context(db, spec, spec_md, role="synthesizer").select(
             "synthesizer", planned=_planned_implement_outputs(spec))
@@ -6475,7 +6498,7 @@ def _synthesis_cannot_emit(db: Database, spec: Spec,
     must_emit = [(p, c) for p, c in view.existing_files if p in planned]
     if not must_emit:
         return None
-    needed = executor.whole_file_emission_tokens(must_emit)
+    needed = whole_file_emission_tokens(must_emit)
     if needed <= allowed:
         return None
     biggest = max(must_emit, key=lambda pc: len(pc[1]))
@@ -6483,7 +6506,7 @@ def _synthesis_cannot_emit(db: Database, spec: Spec,
         f"synthesis cannot emit its own answer: re-emitting "
         f"{len(must_emit)} existing planned output(s) whole needs ~{needed} "
         f"output tokens and the budget is {budget} "
-        f"({allowed} after the {executor.SYNTHESIS_EMIT_HEADROOM:g} emission "
+        f"({allowed} after the {settings.SYNTHESIS_EMIT_HEADROOM:g} emission "
         f"headroom). Largest is `{biggest[0]}` at {len(biggest[1])} chars. "
         f"Synthesis has no edit mode, so every response it could give would "
         f"be a fragment the shrink guard refuses (DEV-649)")

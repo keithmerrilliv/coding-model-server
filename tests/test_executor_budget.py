@@ -8,6 +8,8 @@ Covers the two halves of the #2 pipeline fix:
     daemon can emit OUTPUT_TRUNCATED instead of letting a cut-off file read as
     a phantom reviewer "missing file" FAIL.
 """
+from coding_model_autonomous import _http
+from coding_model_autonomous import settings
 from coding_model_autonomous import executor
 
 
@@ -34,10 +36,10 @@ def test_estimate_design_file_count_handles_empty():
 # ── budget clamp ─────────────────────────────────────────────────────────────
 
 def _pin_budget_knobs(monkeypatch):
-    monkeypatch.setattr(executor, "IMPLEMENTER_MAX_TOKENS", 16000)
-    monkeypatch.setattr(executor, "IMPLEMENTER_MAX_TOKENS_CEILING", 48000)
-    monkeypatch.setattr(executor, "IMPLEMENTER_TOKENS_PER_FILE", 1500)
-    monkeypatch.setattr(executor, "IMPLEMENTER_TOKENS_BASE", 4000)
+    monkeypatch.setattr(settings, "IMPLEMENTER_MAX_TOKENS", 16000)
+    monkeypatch.setattr(settings, "IMPLEMENTER_MAX_TOKENS_CEILING", 48000)
+    monkeypatch.setattr(settings, "IMPLEMENTER_TOKENS_PER_FILE", 1500)
+    monkeypatch.setattr(settings, "IMPLEMENTER_TOKENS_BASE", 4000)
 
 
 def test_small_design_clamps_to_floor(monkeypatch):
@@ -74,7 +76,7 @@ class _FakeResp:
 def _patch_completion(monkeypatch, finish_reason, content="x"):
     payload = {"choices": [{"finish_reason": finish_reason,
                             "message": {"content": content}}]}
-    monkeypatch.setattr(executor, "post_chat_completion",
+    monkeypatch.setattr(_http, "post_chat_completion",
                         lambda *a, **k: _FakeResp(payload))
 
 

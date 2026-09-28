@@ -16,8 +16,9 @@ import json
 from unittest import mock
 
 import coding_model_server.orchestrator_daemon as d
+from coding_model_autonomous import settings
 from coding_model_autonomous.context import SpecContext
-from coding_model_autonomous import executor, retry_policy
+from coding_model_autonomous import retry_policy
 from coding_model_autonomous.apply_edits import (
     EditBlock,
     apply_search_replace,
@@ -112,7 +113,7 @@ def _failed_result(raw=EDIT_WITH_LONG_ANCHOR):
 
 def test_generate_implementation_surfaces_structured_failures(db):
     spec, task, spec_dir = _spec_with_task(db)
-    with mock.patch.object(executor, "DIFF_BASED_EDITS", True), \
+    with mock.patch.object(settings, "DIFF_BASED_EDITS", True), \
             mock.patch.object(d, "_spec_context", return_value=SpecContext.from_files(
                 spec.id, [("src/app.py", CURRENT)])), \
             mock.patch.object(d, "call_agent", return_value=EDIT_WITH_LONG_ANCHOR):

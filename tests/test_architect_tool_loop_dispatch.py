@@ -183,7 +183,7 @@ def test_a_model_that_only_ever_asks_terminates(db, spec_task):
     _run(db, spec, task, spec_dir, agent)
     rounds = d.architect_tools.DEFAULT_MAX_ROUNDS
     assert len(agent.prompts) == (rounds + 1) * (
-        d.executor.ARCHITECT_PARSE_RETRIES + 1)
+        d.settings.ARCHITECT_PARSE_RETRIES + 1)
     assert "budget is now SPENT" in agent.prompts[rounds][-1]["content"]
 
 
@@ -243,7 +243,7 @@ def test_tools_off_leaves_a_request_unanswered_and_unparsed(db, spec_task):
     spec, task, spec_dir = spec_task()
     agent = _Agent("<<<READ_FILE>>>ElectricSheep/Bridge.swift")
     _run(db, spec, task, spec_dir, agent, tools=False)
-    assert len(agent.prompts) == d.executor.ARCHITECT_PARSE_RETRIES + 1
+    assert len(agent.prompts) == d.settings.ARCHITECT_PARSE_RETRIES + 1
 
 
 # ── the window ──────────────────────────────────────────────────────────────

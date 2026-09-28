@@ -12,6 +12,7 @@ from unittest import mock
 
 import pytest
 
+from coding_model_autonomous import settings
 import coding_model_autonomous.executor as ex
 import coding_model_server.orchestrator_daemon as d
 from coding_model_autonomous import context as ctx
@@ -320,7 +321,7 @@ class TestOmissionsReachThePrompt:
         """The renderers keep their own ceiling for any caller that renders
         without budgeting first — the allocator never hands them more than the
         knob, so this only ever bites outside the budgeted paths."""
-        with mock.patch.object(ex, "PROTECTED_FILES_MAX_CHARS", 100):
+        with mock.patch.object(settings, "PROTECTED_FILES_MAX_CHARS", 100):
             out = ex._render_reference_files([("src/big.py", "z" * 10_000)])
         assert "z" * 10_000 not in out
         assert "src/big.py" in out

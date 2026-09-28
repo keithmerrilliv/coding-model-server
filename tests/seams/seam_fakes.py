@@ -27,7 +27,7 @@ from typing import Any, Callable
 import requests
 
 import coding_model_server.orchestrator_daemon as d
-from coding_model_autonomous import executor, planner
+from coding_model_autonomous import _http, planner
 
 # ── role detection ───────────────────────────────────────────────────────────
 # Each role's system prompt opens with a fixed sentence; the fake keys its
@@ -155,7 +155,7 @@ class FakeModelServer:
         return self
 
     def install(self, monkeypatch) -> "FakeModelServer":
-        for mod in (executor, planner):
+        for mod in (_http, planner):
             monkeypatch.setattr(mod, "post_chat_completion", self.post)
         return self
 

@@ -12,7 +12,7 @@ which files are editable and routes failures (`_resolve_edit_mode_response`,
 `_generate_one_file` and `_route_unappliable_edits` in
 `orchestrator_daemon.py`). The prompt text the model sees is
 `IMPLEMENTER_EDIT_MODE_INSTRUCTIONS` and `PER_FILE_EDIT_MODE_INSTRUCTIONS` in
-`executor.py`.
+`prompts.py`.
 
 Where this sits in the pipeline: [PIPELINE.md](PIPELINE.md) section 4 (the
 single-call and manifest fork) and section 6 (what a verdict costs).
@@ -47,7 +47,7 @@ not a header or a block is ignored, so prose between blocks is harmless.
 
 | Form | Minimal example | Rules |
 |---|---|---|
-| **Whole file** (new files) | `<<<FILE: src/new.py>>>`<br/>`print("hi")`<br/>`<<<END_FILE>>>` | Parsed by `executor.parse_implementer_response`, not by `apply_edits`. One to three angle brackets, case-insensitive. A markdown fence around the body is stripped. The last block for a path wins. |
+| **Whole file** (new files) | `<<<FILE: src/new.py>>>`<br/>`print("hi")`<br/>`<<<END_FILE>>>` | Parsed by `parsers.parse_implementer_response`, not by `apply_edits`. One to three angle brackets, case-insensitive. A markdown fence around the body is stripped. The last block for a path wins. |
 | **File header** | `### src/app.py` | Two to four `#`, then the path. Backticks and a leading `/` are stripped. Sets the target for the blocks that follow. Recognised only outside a block body, so a `###` line inside a REPLACE is content. A header with no blocks after it is dropped. |
 | **SEARCH/REPLACE block** | `<<<<<<< SEARCH`<br/>`x = 1`<br/>`=======`<br/>`x = 2`<br/>`>>>>>>> REPLACE` | Each marker must own its line; leading whitespace is allowed. Five or more `<`, `=` or `>` are accepted, since models miscount the seven. The `SEARCH` and `REPLACE` labels are optional. Bodies are kept verbatim, minus the final newline. |
 | **Deletion** | `<<<<<<< SEARCH`<br/>`debug()`<br/>`=======`<br/>`>>>>>>> REPLACE` | An empty REPLACE deletes the searched lines. |
@@ -159,7 +159,7 @@ section 8 takes it from there.
 
 ### `AUTONOMOUS_DIFF_BASED_EDITS` (default `1`)
 
-Read once at import into `executor.DIFF_BASED_EDITS`. With it on, existing
+Read once at import into `settings.DIFF_BASED_EDITS`. With it on, existing
 files get edit blocks as above. With `0`, every file is re-emitted whole: the
 edit-mode instructions are not appended, the retry feedback says "re-emit"
 rather than "edit" (`_reemit_instruction`), and the implement path is the

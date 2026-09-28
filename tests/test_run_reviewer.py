@@ -300,7 +300,7 @@ def test_parse_error_soft_fails_to_retry_when_exhausted(db, spec_and_task):
         db.create_task(spec_id=spec.id, agent="implementer", role="implementer",
                        title="implement")
     perr = ParseError(reason="no REVIEW block", raw="prose")
-    with mock.patch.object(d.executor, "REVIEWER_PARSE_RETRIES", 0), \
+    with mock.patch.object(d.settings, "REVIEWER_PARSE_RETRIES", 0), \
             mock.patch.object(d, "call_agent", return_value="prose"), \
             mock.patch.object(d, "build_reviewer_message", return_value=[]), \
             mock.patch.object(d, "parse_reviewer_response", return_value=perr):
