@@ -8,9 +8,10 @@ from ..base import (
     RULE_COMPLETENESS,
     RULE_EQUATABLE,
     RULE_TUPLE_CONFORMANCE,
+    RULE_VALUE_MUTABILITY,
     LanguagePack,
 )
-from . import counting, prechecks, rules
+from . import counting, prechecks, rules, symbols
 from . import normalize as fixes
 
 
@@ -27,9 +28,10 @@ class SwiftPack(LanguagePack):
     name = "swift"
     frameworks = frozenset({"swift_test", "xcodebuild_test"})
     # Equatable and tuple conformance are Swift's protocol rules; completeness
-    # rests on Swift's one-type-per-eponymous-file convention.
+    # rests on Swift's one-type-per-eponymous-file convention; a value type's
+    # `mutating` contract is Swift's value semantics.
     design_rules = frozenset({RULE_EQUATABLE, RULE_TUPLE_CONFORMANCE,
-                              RULE_COMPLETENESS})
+                              RULE_COMPLETENESS, RULE_VALUE_MUTABILITY})
     # A Swift module is one namespace: two files each declaring `struct Foo`
     # fail to build together even in different directories.
     shares_target_namespace = True
@@ -51,6 +53,9 @@ class SwiftPack(LanguagePack):
 
     def declared_types(self, content: str) -> set[str]:
         return fixes.declared_top_level_types(content)
+
+    def provided_symbols(self, source: str) -> tuple[frozenset[str], tuple[str, ...]]:
+        return symbols.provided_symbols(source)
 
     def count_tests(self, source: str) -> int:
         return counting.count_swift_tests(source)

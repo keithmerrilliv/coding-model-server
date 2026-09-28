@@ -16,6 +16,7 @@ RULE_EQUATABLE = "equatable"                  # comparisons need Equatable types
 RULE_TUPLE_CONFORMANCE = "tuple_conformance"  # tuples conform to no protocol
 RULE_COMPLETENESS = "completeness"            # one type per eponymous file
 RULE_SEAM_IMPORTS = "seam_imports"            # seams import the code under test
+RULE_VALUE_MUTABILITY = "value_mutability"    # a value type's `mutating` contract
 
 
 class PrecheckResult(Protocol):
@@ -62,6 +63,12 @@ class LanguagePack:
     def declared_types(self, content: str) -> set[str]:
         """Type names a source file declares at file scope."""
         return set()
+
+    def provided_symbols(self, source: str) -> tuple[frozenset[str], tuple[str, ...]]:
+        """What a source file's own imports provide: exact names, and name
+        prefixes of APIs too large to list. A call to one is not a missing
+        repository symbol."""
+        return frozenset(), ()
 
     def count_tests(self, source: str) -> int:
         """Test declarations in *source*."""

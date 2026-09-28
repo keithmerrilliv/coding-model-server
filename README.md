@@ -712,7 +712,7 @@ coding-model-server/
 │       │                       #   ── languages ──
 │       ├── languages/          #   The one language detector, and a pack per language
 │       │   ├── base.py         #     The pack interface: rules, prechecks, fixes, counting
-│       │   ├── swift/          #     Swift: prechecks, prompt rules, fixes, test counting
+│       │   ├── swift/          #     Swift: prechecks, prompt rules, fixes, test counting, SDK symbols
 │       │   ├── python.py       #     Python: pytest counting, the seam-import rule
 │       │   ├── javascript.py   #     JavaScript/TypeScript: package.json pinning
 │       │   └── c_family.py     #     C, C++, Objective-C(++): detection
