@@ -190,6 +190,34 @@ def test_a_missing_attempt_is_unreproducible_not_failed(archive, tmp_path):
     assert "retry_0" in row["reason"]
 
 
+def test_a_self_target_overlay_is_the_pinned_commit_both_halves(archive, tmp_path):
+    """The overlay's src/ AND the tree the existing tests come from are read at
+    the commit synthesis ran against (main as of 2026-09-01 here), never at
+    HEAD. settings.py and this test file are both younger than that commit."""
+    root, spec_id = archive
+    # The daemon reads the plan from the spec row, not from plan.yaml.
+    conn = sqlite3.connect(root / "tasks.sqlite")
+    conn.execute("UPDATE specs SET normalized_yaml=? WHERE id=?",
+                 (PLAN + f"  repo: {rs.REPO.name}\n", spec_id))
+    conn.commit()
+    conn.close()
+    seen = {}
+
+    def fake_synthesis(db, spec, task, spec_dir, framework, opts):
+        from coding_model_autonomous import test_runner
+        test_runner._extract_committed_src(rs.REPO, tmp_path / "o")
+        test_runner._extract_committed_tree(rs.REPO, tmp_path / "o")
+        seen["settings"] = (tmp_path / "o/src/coding_model_autonomous/settings.py").exists()
+        seen["this_test"] = (tmp_path / "o/tests/test_replay_synthesis.py").exists()
+        seen["tests_dir"] = (tmp_path / "o/tests").is_dir()
+        return False, ""
+
+    with mock.patch.object(d, "_run_synthesis", fake_synthesis):
+        row = _replay(root, tmp_path)
+    assert row["pinned_ref"]
+    assert seen == {"settings": False, "this_test": False, "tests_dir": True}
+
+
 def test_the_scratch_database_holds_only_what_preceded_synthesis(archive, tmp_path):
     root, spec_id = archive
     other = Database(db_path=root / "tasks.sqlite", workspace_root=root / "specs")

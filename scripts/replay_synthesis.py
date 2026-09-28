@@ -262,6 +262,21 @@ def pinned_ref(framework: str, repo: str | None, context_json: Path,
     return out.stdout.strip() or None
 
 
+def archive_at(repo_root: Path, ref: str, into: Path, *, only: str | None = None,
+               skip: tuple[str, ...] = ()) -> None:
+    """``git archive <ref>`` of *repo_root* extracted under *into*: just *only*
+    when given, less anything under *skip*. The test runner's overlay reads
+    the repository at HEAD; a replay reads it at the commit the run used."""
+    cmd = ["git", "-C", str(repo_root), "archive", "--format=tar", ref]
+    out = subprocess.run(cmd + ([only] if only else []), capture_output=True,
+                         check=True, timeout=60)
+    into.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(fileobj=io.BytesIO(out.stdout)) as tar:
+        members = [m for m in tar.getmembers()
+                   if not any(m.name.startswith(s) for s in skip)]
+        tar.extractall(path=into, members=members, filter="data")
+
+
 # ── one replay ───────────────────────────────────────────────────────────────
 
 def prompt_hash(messages) -> str:
@@ -355,14 +370,6 @@ def replay(syn: Synthesis, agent: str, scratch: Path, *,
             row["tests"].append(_test_counts(output, fw, passed))
             return passed, output
 
-        def pinned_archive(repo_root, into):
-            out = subprocess.run(
-                ["git", "-C", str(repo_root), "archive", "--format=tar", ref, "src"],
-                capture_output=True, check=True, timeout=60)
-            into.mkdir(parents=True, exist_ok=True)
-            with tarfile.open(fileobj=io.BytesIO(out.stdout)) as tar:
-                tar.extractall(path=into, filter="data")
-
         real_call, real_guard = d.call_agent, d._run_tests_with_guard
         with ExitStack() as stack:
             stack.enter_context(mock.patch.object(d, "_SYNTHESIS_AGENT", BUDGET_AGENT))
@@ -373,8 +380,16 @@ def replay(syn: Synthesis, agent: str, scratch: Path, *,
                 test_runner, "fetch_repo_files",
                 archived_fetch(spec_dir / "context.json")))
             if ref is not None and overlays_repo:
+                # Both halves of the overlay: src/, and the rest of the tree
+                # the existing tests are selected from (DEV-675). Pinning only
+                # src/ ran today's tests against the old source.
                 stack.enter_context(mock.patch.object(
-                    test_runner, "_extract_committed_src", pinned_archive))
+                    test_runner, "_extract_committed_src",
+                    lambda root, into: archive_at(root, ref, into, only="src")))
+                stack.enter_context(mock.patch.object(
+                    test_runner, "_extract_committed_tree",
+                    lambda root, into, skip=("src/",): archive_at(root, ref, into,
+                                                                  skip=skip)))
             try:
                 passed, _output = d._run_synthesis(
                     db, spec, impl_task, spec_dir, framework, framework_opts)
