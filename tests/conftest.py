@@ -39,17 +39,42 @@ import pytest  # noqa: E402
 # 2026-09-26), and with the key sourced it would be served. The fetch fails
 # soft by design, so a raised connect error would vanish inside it; record the
 # attempt instead and fail the test at teardown.
+#
+# The inference server on :5000 is guarded the same way. It serves the live
+# pipeline, so a test whose stub misses call_agent sends a real completion to
+# whatever model a run has loaded; the server answers a busy model with 503 and
+# a retry schedule, so without the guard such a test hangs for minutes instead
+# of failing. The suite's own app runs through TestClient, which never opens a
+# socket, so no legitimate test connects to either port.
+class LiveServiceBlocked(RuntimeError):
+    """Not an OSError on purpose: post_chat_completion retries connection
+    errors on a 10/30/60 s backoff, so a refused connect would make a leaking
+    test crawl for minutes instead of failing at once."""
+
+
 _RUNNER_PORT = 5050
-_runner_connects: list = []
+_LIVE_PORTS = {
+    _RUNNER_PORT: ("the live Mac runner",
+                   "stub test_runner.fetch_repo_files or patch MAC_RUNNER_URL"),
+    int(os.getenv("CODING_MODEL_SERVER_PORT", "5000")): (
+        "the live inference server",
+        "stub the agent call where it is made: _http.post_chat_completion, "
+        "or the calling module's own name for it"),
+}
+_live_connects: list = []
 _real_connect = socket.socket.connect
 
 
 def _guarded_connect(self, address):
     if isinstance(address, tuple) and len(address) >= 2 \
-            and address[1] == _RUNNER_PORT:
-        _runner_connects.append(address)
-        raise ConnectionRefusedError(
-            f"tests must not reach the live Mac runner at {address}")
+            and address[1] in _LIVE_PORTS:
+        _live_connects.append(address)
+        what = _LIVE_PORTS[address[1]][0]
+        # The runner fetch fails soft by design, and tests exercise that
+        # path, so the runner port keeps a plain refused connect.
+        if address[1] == _RUNNER_PORT:
+            raise ConnectionRefusedError(f"tests must not reach {what} at {address}")
+        raise LiveServiceBlocked(f"tests must not reach {what} at {address}")
     return _real_connect(self, address)
 
 
@@ -57,14 +82,14 @@ socket.socket.connect = _guarded_connect
 
 
 @pytest.fixture(autouse=True)
-def _no_live_runner():
-    _runner_connects.clear()
+def _no_live_services():
+    _live_connects.clear()
     yield
-    if _runner_connects:
+    if _live_connects:
+        what, fix = _LIVE_PORTS[_live_connects[0][1]]
         pytest.fail(
-            f"this test opened a connection to the live Mac runner port "
-            f"{_RUNNER_PORT} ({_runner_connects[0]}); stub "
-            "test_runner.fetch_repo_files or patch MAC_RUNNER_URL", pytrace=False)
+            f"this test opened a connection to {what} ({_live_connects[0]}); "
+            f"{fix}", pytrace=False)
 
 
 # ── shared harnesses ─────────────────────────────────────────────────────────

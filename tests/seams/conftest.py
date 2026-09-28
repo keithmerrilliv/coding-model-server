@@ -24,7 +24,7 @@ for _k in set(os.environ) - set(_env_before):
     del os.environ[_k]
 os.environ.update(_env_before)
 
-from coding_model_autonomous import executor, outcome, planner, retry_policy  # noqa: E402
+from coding_model_autonomous import outcome, planner, retry_policy, settings  # noqa: E402
 from coding_model_autonomous.db import Database  # noqa: E402
 
 from seam_fakes import FakeModelServer, FakeRunner  # noqa: E402
@@ -39,30 +39,30 @@ def seam_env(monkeypatch):
     # Optional phases.
     # DEV-440 made this default-OFF. The seam matrix still exercises the
     # stage, so it opts in explicitly rather than inheriting a default.
-    monkeypatch.setattr(executor, "DESIGN_REVIEW_ENABLED", True)
-    monkeypatch.setattr(executor, "DESIGN_REVIEW_MAX_REVISIONS", 1)
-    monkeypatch.setattr(executor, "TESTABILITY_CHECK_ENABLED", True)
-    monkeypatch.setattr(executor, "AUTONOMOUS_MEMORY_ROLES", set())
+    monkeypatch.setattr(settings, "DESIGN_REVIEW_ENABLED", True)
+    monkeypatch.setattr(settings, "DESIGN_REVIEW_MAX_REVISIONS", 1)
+    monkeypatch.setattr(settings, "TESTABILITY_CHECK_ENABLED", True)
+    monkeypatch.setattr(settings, "AUTONOMOUS_MEMORY_ROLES", set())
     # Implementer shape: single-call, whole-file unless a test arms edit mode.
-    monkeypatch.setattr(executor, "DIFF_BASED_EDITS", False)
-    monkeypatch.setattr(executor, "IMPLEMENTER_MODE", "auto")
-    monkeypatch.setattr(executor, "MANIFEST_FILE_THRESHOLD", 8)
+    monkeypatch.setattr(settings, "DIFF_BASED_EDITS", False)
+    monkeypatch.setattr(settings, "IMPLEMENTER_MODE", "auto")
+    monkeypatch.setattr(settings, "MANIFEST_FILE_THRESHOLD", 8)
     # Token budgets: the shipped defaults, so max_tokens assertions hold on a
     # box whose .env raises them.
     for role, n in (("architect", 8000), ("implementer", 16000), ("reviewer", 16000)):
-        monkeypatch.setitem(executor.ROLE_TO_MAX_TOKENS, role, n)
-    monkeypatch.setattr(executor, "ARCHITECT_MAX_TOKENS", 8000)
-    monkeypatch.setattr(executor, "IMPLEMENTER_MAX_TOKENS", 16000)
-    monkeypatch.setattr(executor, "REVIEWER_MAX_TOKENS", 16000)
-    monkeypatch.setattr(executor, "IMPLEMENTER_MAX_TOKENS_CEILING", 48000)
-    monkeypatch.setattr(executor, "IMPLEMENTER_TOKENS_PER_FILE", 1500)
-    monkeypatch.setattr(executor, "IMPLEMENTER_TOKENS_BASE", 4000)
-    monkeypatch.setattr(executor, "DESIGN_REVIEW_MAX_TOKENS", 8000)
+        monkeypatch.setitem(settings.ROLE_TO_MAX_TOKENS, role, n)
+    monkeypatch.setattr(settings, "ARCHITECT_MAX_TOKENS", 8000)
+    monkeypatch.setattr(settings, "IMPLEMENTER_MAX_TOKENS", 16000)
+    monkeypatch.setattr(settings, "REVIEWER_MAX_TOKENS", 16000)
+    monkeypatch.setattr(settings, "IMPLEMENTER_MAX_TOKENS_CEILING", 48000)
+    monkeypatch.setattr(settings, "IMPLEMENTER_TOKENS_PER_FILE", 1500)
+    monkeypatch.setattr(settings, "IMPLEMENTER_TOKENS_BASE", 4000)
+    monkeypatch.setattr(settings, "DESIGN_REVIEW_MAX_TOKENS", 8000)
     # Budgets. MAX_RETRIES is imported by name into the daemon — pin both.
-    monkeypatch.setattr(executor, "MAX_RETRIES", 5)
+    monkeypatch.setattr(settings, "MAX_RETRIES", 5)
     monkeypatch.setattr(d, "MAX_RETRIES", 5)
-    monkeypatch.setattr(executor, "ARCHITECT_PARSE_RETRIES", 2)
-    monkeypatch.setattr(executor, "REVIEWER_PARSE_RETRIES", 1)
+    monkeypatch.setattr(settings, "ARCHITECT_PARSE_RETRIES", 2)
+    monkeypatch.setattr(settings, "REVIEWER_PARSE_RETRIES", 1)
     monkeypatch.setattr(planner, "PLANNER_PARSE_RETRIES", 1)
     monkeypatch.setattr(d, "PLAN_VALIDATION_MAX_ROUNDS", 2)
     monkeypatch.setattr(d, "BUILD_FAILURE_ARCHITECT_THRESHOLD", 1)
@@ -77,10 +77,10 @@ def seam_env(monkeypatch):
     monkeypatch.setattr(d, "BLOCK_ON_BUILD_WARNINGS", False)
     monkeypatch.setattr(d, "ALLOW_UNREAD_FILE_MODIFICATION", False)
     # Agents, so assertions can name models.
-    monkeypatch.setattr(executor, "ROLE_TO_AGENT", {
+    monkeypatch.setattr(settings, "ROLE_TO_AGENT", {
         "architect": "dense_architect", "implementer": "implementer",
         "reviewer": "reviewer"})
-    monkeypatch.setattr(executor, "DESIGN_REVIEW_AGENT", "reviewer")
+    monkeypatch.setattr(settings, "DESIGN_REVIEW_AGENT", "reviewer")
     monkeypatch.setattr(planner, "PLANNER_AGENT", "dense_architect")
     monkeypatch.setattr(d, "_SYNTHESIS_AGENT", "deep_reviewer")
     monkeypatch.setattr(retry_policy, "_IMPLEMENTER_ROTATION", list(ROTATION))
@@ -111,4 +111,4 @@ def runner(monkeypatch) -> FakeRunner:
 @pytest.fixture
 def edit_mode(monkeypatch):
     """Arm diff-based edits (the DEV-581 / DEV-638 path)."""
-    monkeypatch.setattr(executor, "DIFF_BASED_EDITS", True)
+    monkeypatch.setattr(settings, "DIFF_BASED_EDITS", True)

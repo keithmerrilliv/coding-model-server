@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from coding_model_autonomous import executor
+from coding_model_autonomous import settings
 from coding_model_autonomous.executor import (
     _file_structure_section, estimate_design_file_count,
     estimate_design_unit_count, use_manifest_mode,
@@ -45,8 +45,8 @@ class TestScopedCount:
         assert estimate_design_file_count(FLAT) == 4
 
     def test_c3_scoped_design_stays_single_call(self, monkeypatch):
-        monkeypatch.setattr(executor, "IMPLEMENTER_MODE", "auto")
-        monkeypatch.setattr(executor, "MANIFEST_FILE_THRESHOLD", 8)
+        monkeypatch.setattr(settings, "IMPLEMENTER_MODE", "auto")
+        monkeypatch.setattr(settings, "MANIFEST_FILE_THRESHOLD", 8)
         assert use_manifest_mode(SCOPED) is False
 
     def test_unit_count_is_scoped_the_same_way(self):

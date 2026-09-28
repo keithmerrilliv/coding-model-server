@@ -10,7 +10,7 @@ from unittest import mock
 import pytest
 
 import coding_model_server.orchestrator_daemon as d
-from coding_model_autonomous import executor
+from coding_model_autonomous import settings
 from coding_model_autonomous.executor import ArchitectResult, ImplementerResult, ParseError
 from coding_model_autonomous.models import GateType, TaskStatus
 
@@ -61,7 +61,7 @@ def test_manifest_parse_failure_propagates_as_parse_error(db, spec_task):
     # manifest before it propagates, so an unparseable response has to repeat
     # itself the whole way through the budget to reach the caller.
     spec, task, spec_dir = spec_task
-    with mock.patch.object(executor, "MANIFEST_PARSE_RETRIES", 2):
+    with mock.patch.object(settings, "MANIFEST_PARSE_RETRIES", 2):
         with mock.patch.object(d, "call_agent",
                                side_effect=["no markers at all"] * 3) as ca:
             res = d._generate_via_manifest(db, spec, task, spec_dir, "S", "D",
@@ -76,7 +76,7 @@ def test_per_file_retry_then_success(db, spec_task):
     one = "<<<MANIFEST>>>\nshared/t.ts | types | T\n<<<END_MANIFEST>>>"
     bad = "I forgot the file markers, sorry"
     good = FILE_T
-    with mock.patch.object(executor, "PER_FILE_PARSE_RETRIES", 2):
+    with mock.patch.object(settings, "PER_FILE_PARSE_RETRIES", 2):
         with mock.patch.object(d, "call_agent", side_effect=[one, bad, good]) as ca:
             res = d._generate_via_manifest(db, spec, task, spec_dir, "S", "D",
                                            "implementer", [], None)
@@ -105,7 +105,7 @@ def test_per_file_truncation_bails_and_records_agent(db, spec_task):
             meta["truncated"] = True
         return "<<<FILE: shared/t.ts>>>\nexport type T = "  # cut off mid-stream
 
-    with mock.patch.object(executor, "PER_FILE_PARSE_RETRIES", 2):
+    with mock.patch.object(settings, "PER_FILE_PARSE_RETRIES", 2):
         with mock.patch.object(d, "call_agent", side_effect=fake_call) as ca:
             res = d._generate_via_manifest(db, spec, task, spec_dir, "S", "D",
                                            "native_implementer", [], None)
@@ -127,7 +127,7 @@ def test_dispatch_single_vs_manifest(db, spec_task):
     big = "## Files\n" + "\n".join(f"d/f{i}.ts" for i in range(20))
 
     # single-call path: one implementer call returns a FILE block
-    with mock.patch.object(executor, "IMPLEMENTER_MODE", "auto"):
+    with mock.patch.object(settings, "IMPLEMENTER_MODE", "auto"):
         with mock.patch.object(d, "call_agent",
                                side_effect=["<<<FILE: only/one.ts>>>\nx\n<<<END_FILE>>>"]) as ca:
             res = d._generate_implementation(db, spec, task, spec_dir, "S", small,
@@ -138,7 +138,7 @@ def test_dispatch_single_vs_manifest(db, spec_task):
     # manifest path: manifest + per-file
     mani = "<<<MANIFEST>>>\n" + "\n".join(f"d/f{i}.ts | f{i} |" for i in range(20)) + "\n<<<END_MANIFEST>>>"
     files = [f"<<<FILE: d/f{i}.ts>>>\ncontent{i}\n<<<END_FILE>>>" for i in range(20)]
-    with mock.patch.object(executor, "IMPLEMENTER_MODE", "auto"):
+    with mock.patch.object(settings, "IMPLEMENTER_MODE", "auto"):
         with mock.patch.object(d, "call_agent", side_effect=[mani, *files]) as ca:
             res = d._generate_implementation(db, spec, task, spec_dir, "S", big,
                                              "implementer", [], None)
@@ -233,9 +233,9 @@ def test_run_architect_design_review_reject_revises(db):
     # DEV-440 made the stage default-OFF; this test is about the stage's
     # behaviour, so it turns it on explicitly rather than relying on a default.
     with mock.patch.object(d, "call_agent", return_value="raw"), \
-            mock.patch.object(executor, "DESIGN_REVIEW_ENABLED", True), \
+            mock.patch.object(settings, "DESIGN_REVIEW_ENABLED", True), \
             mock.patch.object(d, "parse_architect_response", return_value=ares), \
-            mock.patch.object(executor, "parse_design_review",
+            mock.patch.object(d, "parse_design_review",
                               return_value=("FAIL", "the formula collapses for count=20")):
         d._run_architect(db, spec, task, spec_dir)
     assert db.get_task(task.id).status is TaskStatus.PENDING
@@ -253,9 +253,9 @@ def test_run_architect_design_review_pass_creates_gate(db):
     # pass — the gate is created when the stage is SKIPPED too — so without
     # this line it would be asserting nothing about the PASS path.
     with mock.patch.object(d, "call_agent", return_value="raw"), \
-            mock.patch.object(executor, "DESIGN_REVIEW_ENABLED", True), \
+            mock.patch.object(settings, "DESIGN_REVIEW_ENABLED", True), \
             mock.patch.object(d, "parse_architect_response", return_value=ares), \
-            mock.patch.object(executor, "parse_design_review", return_value=("PASS", "")):
+            mock.patch.object(d, "parse_design_review", return_value=("PASS", "")):
         d._run_architect(db, spec, task, spec_dir)
     assert db.get_task(task.id).status is TaskStatus.BLOCKED_ON_REVIEW
     gates = db.list_open_gates(spec.id)

@@ -17,6 +17,8 @@ from unittest import mock
 import pytest
 
 from chat_harness import drive_chat
+from coding_model_autonomous import _http
+from coding_model_autonomous import settings
 from coding_model_autonomous import executor
 from coding_model_server.schemas import ChatMessage
 
@@ -138,8 +140,8 @@ class TestCallAgentForwarding:
                              "finish_reason": "stop"}]}
             return resp
 
-        monkeypatch.setattr(executor, "post_chat_completion", fake_post)
-        monkeypatch.setattr(executor, "AUTONOMOUS_MEMORY_ROLES", memory_roles)
+        monkeypatch.setattr(_http, "post_chat_completion", fake_post)
+        monkeypatch.setattr(settings, "AUTONOMOUS_MEMORY_ROLES", memory_roles)
         # These tests are about forwarding the QUERY. Retrieval also needs a
         # covered language since DEV-657, so a call passing none would be
         # blocked by the language gate and this file would pass for the wrong

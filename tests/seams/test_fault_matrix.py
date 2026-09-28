@@ -16,10 +16,10 @@ from __future__ import annotations
 import pytest
 
 import coding_model_server.orchestrator_daemon as d
+from coding_model_autonomous import settings
 from coding_model_autonomous import (
     EventKind, GateType, SpecStatus, TaskStatus,
 )
-from coding_model_autonomous import executor
 from coding_model_autonomous import outcome as _outcome
 
 from seam_fakes import (
@@ -946,7 +946,7 @@ class TestPromptBudget:
         """300K chars of editable file is ~100K tokens: over implementer's
         64K window, inside deep_implementer's 256K. A bigger window is always
         better than less context, so the dispatch moves and nothing is cut."""
-        monkeypatch.setattr(executor, "EXISTING_FILES_MAX_CHARS", 400_000)
+        monkeypatch.setattr(settings, "EXISTING_FILES_MAX_CHARS", 400_000)
         self._oversized_repo(runner, 300_000)
         spec = _impl_ready(db, model, runner)
         model.script("implementer", Reply(implementer_reply()))
@@ -964,7 +964,7 @@ class TestPromptBudget:
         """900K chars is ~300K tokens — past the largest window even alone.
         The section is droppable, so the prompt is trimmed rather than
         refused, and the implementer is TOLD it did not see the file."""
-        monkeypatch.setattr(executor, "EXISTING_FILES_MAX_CHARS", 1_000_000)
+        monkeypatch.setattr(settings, "EXISTING_FILES_MAX_CHARS", 1_000_000)
         self._oversized_repo(runner, 900_000)
         spec = _impl_ready(db, model, runner)
         model.script("implementer", Reply(implementer_reply()))
@@ -1072,8 +1072,8 @@ class TestPromptBudget:
         the editable knob for a big modification target, and the protected
         section does NOT inherit the room — the window is the ceiling both
         sections share."""
-        monkeypatch.setattr(executor, "EXISTING_FILES_MAX_CHARS", 1_000_000)
-        monkeypatch.setattr(executor, "PROTECTED_FILES_MAX_CHARS", 1_000_000)
+        monkeypatch.setattr(settings, "EXISTING_FILES_MAX_CHARS", 1_000_000)
+        monkeypatch.setattr(settings, "PROTECTED_FILES_MAX_CHARS", 1_000_000)
         runner.repo_files["Scaffold/Field.swift"] = "// " + "p" * 400_000
         self._oversized_repo(runner, 400_000)
         spec = _impl_ready(db, model, runner)
@@ -1282,7 +1282,7 @@ class TestUnknownIsNotAbsent:
     def test_a_manifest_build_reads_the_existing_file(self, db, model, runner, monkeypatch):
         """DEV-604 at the seam tier: the manifest's entries are dataclasses,
         and the per-file call for an existing path is shown that file."""
-        monkeypatch.setattr(executor, "MANIFEST_FILE_THRESHOLD", 1)
+        monkeypatch.setattr(settings, "MANIFEST_FILE_THRESHOLD", 1)
         spec = _impl_ready(db, model, runner)
         model.script("manifest", Reply(
             f"<<<MANIFEST>>>\n{DAEMON_PATH} | the daemon slice | _fetch_existing_files_for_spec\n"

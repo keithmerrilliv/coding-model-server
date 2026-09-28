@@ -23,6 +23,8 @@ import re
 import pytest
 
 import coding_model_server.orchestrator_daemon as d
+from coding_model_autonomous import _http
+from coding_model_autonomous import settings
 from coding_model_autonomous import executor as ex
 
 
@@ -31,9 +33,9 @@ from coding_model_autonomous import executor as ex
 class TestRetrievalDecision:
     @pytest.fixture(autouse=True)
     def _opted_in(self, monkeypatch):
-        monkeypatch.setattr(ex, "AUTONOMOUS_MEMORY_ROLES",
+        monkeypatch.setattr(settings, "AUTONOMOUS_MEMORY_ROLES",
                             {"architect", "implementer"})
-        monkeypatch.setattr(ex, "AUTONOMOUS_MEMORY_LANGUAGES", {"swift"})
+        monkeypatch.setattr(settings, "AUTONOMOUS_MEMORY_LANGUAGES", {"swift"})
 
     def test_covered_language_on_an_opted_in_role_retrieves(self):
         assert ex.retrieval_decision("architect", "swift") == (True, "retrieved")
@@ -63,7 +65,7 @@ class TestRetrievalDecision:
 
     def test_the_covered_set_is_configuration(self, monkeypatch):
         # The day a Python corpus is indexed, this is the only line that moves.
-        monkeypatch.setattr(ex, "AUTONOMOUS_MEMORY_LANGUAGES", {"swift", "python"})
+        monkeypatch.setattr(settings, "AUTONOMOUS_MEMORY_LANGUAGES", {"swift", "python"})
         assert ex.retrieval_decision("architect", "python")[0] is True
 
     def test_the_default_covers_swift_only(self):
@@ -97,15 +99,15 @@ def _capture(monkeypatch, rag=None):
         sent.update(kw)
         return _Resp(payload)
 
-    monkeypatch.setattr(ex, "post_chat_completion", fake)
+    monkeypatch.setattr(_http, "post_chat_completion", fake)
     return sent
 
 
 class TestCallAgent:
     @pytest.fixture(autouse=True)
     def _opted_in(self, monkeypatch):
-        monkeypatch.setattr(ex, "AUTONOMOUS_MEMORY_ROLES", {"architect"})
-        monkeypatch.setattr(ex, "AUTONOMOUS_MEMORY_LANGUAGES", {"swift"})
+        monkeypatch.setattr(settings, "AUTONOMOUS_MEMORY_ROLES", {"architect"})
+        monkeypatch.setattr(settings, "AUTONOMOUS_MEMORY_LANGUAGES", {"swift"})
 
     def test_a_swift_spec_asks_the_server_to_retrieve(self, monkeypatch):
         sent = _capture(monkeypatch)
@@ -136,8 +138,8 @@ class TestCallAgent:
 class TestTelemetry:
     @pytest.fixture(autouse=True)
     def _opted_in(self, monkeypatch):
-        monkeypatch.setattr(ex, "AUTONOMOUS_MEMORY_ROLES", {"architect"})
-        monkeypatch.setattr(ex, "AUTONOMOUS_MEMORY_LANGUAGES", {"swift"})
+        monkeypatch.setattr(settings, "AUTONOMOUS_MEMORY_ROLES", {"architect"})
+        monkeypatch.setattr(settings, "AUTONOMOUS_MEMORY_LANGUAGES", {"swift"})
 
     def test_the_gate_reason_rides_on_the_servers_record(self, monkeypatch):
         _capture(monkeypatch, rag={"outcome": "injected", "hits": 5})

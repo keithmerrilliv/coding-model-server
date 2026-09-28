@@ -43,6 +43,16 @@ The layering release ([DEV-835](https://keith-merrill4.atlassian.net/browse/DEV-
     - its feedback readers, its agent, its settings and its tests.
 
     The daemon went from 7,168 lines to 6,909, and the change deletes 1,262 lines overall. One path shared with the no-verdict park stays: approving a parked task's clarification gate re-runs the task. Its tests were rewritten around `park`. The idea is kept for a deliberate revival in [DEV-895](https://keith-merrill4.atlassian.net/browse/DEV-895).
+  - **`executor.py` is split.** Its 3,652 lines became six modules:
+    - `settings`: every env knob;
+    - `prompts`;
+    - `_http`: which gains `call_agent`;
+    - `parsers`;
+    - `messages`: builders and design-sized budgets;
+    - `normalize`: deterministic fixes and scans.
+
+    `executor` is a 190-line re-exporting façade. A script moved each statement verbatim. An AST comparison confirms all 152 names are unchanged except that knobs are now read as `settings.X` at call time. A one-token negative control proves the comparison can fail. Knobs have one home, because a from-import freezes a value and a patch on the façade reaches nothing. The daemon, planner and scripts import from the real modules. 91 test patches moved to `settings`, and 10 more to the module that actually reads the name. `test_agent_layer_boundaries.py` keeps it that way.
+  - **Tests cannot reach the live inference server.** `tests/conftest.py`'s guard, which covered only the Mac runner's port, now also blocks :5000. It raises an error the transport does not retry, so a test that misses its stub fails at once. While the split was in progress, tests whose stubs sat on the façade sent real completions to the live server.
 
 ## v0.5.0 — 2026-09-27
 

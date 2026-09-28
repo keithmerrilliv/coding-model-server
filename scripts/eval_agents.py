@@ -219,7 +219,7 @@ class EvalSandbox:
 # stopped under a 4000 cap, so models do not inflate to fill it. Imported so
 # that if production's budget moves and this does not, the test says so.
 try:
-    from coding_model_autonomous.executor import ARCHITECT_MAX_TOKENS as _PROD_BUDGET
+    from coding_model_autonomous.settings import ARCHITECT_MAX_TOKENS as _PROD_BUDGET
 except Exception:                                    # pragma: no cover
     _PROD_BUDGET = 8000
 DEFAULT_MAX_TOKENS = _PROD_BUDGET

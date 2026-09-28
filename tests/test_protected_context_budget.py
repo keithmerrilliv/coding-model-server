@@ -7,6 +7,7 @@ server refused the >1MB body with a 413 (terminal via DEV-624).
 """
 from unittest import mock
 
+from coding_model_autonomous import settings
 import coding_model_autonomous.executor as ex
 
 
@@ -14,8 +15,8 @@ def test_reference_budget_is_not_the_existing_files_knob():
     """The regression itself: inflating the existing-files budget must not
     inflate the reference render."""
     big = "x" * 10_000
-    with mock.patch.object(ex, "EXISTING_FILES_MAX_CHARS", 1_000_000), \
-         mock.patch.object(ex, "PROTECTED_FILES_MAX_CHARS", 100):
+    with mock.patch.object(settings, "EXISTING_FILES_MAX_CHARS", 1_000_000), \
+         mock.patch.object(settings, "PROTECTED_FILES_MAX_CHARS", 100):
         out = ex._render_reference_files([("src/big.py", big)])
     assert big not in out
     assert "src/big.py" in out  # named in the Not-shown listing
@@ -23,7 +24,7 @@ def test_reference_budget_is_not_the_existing_files_knob():
 
 
 def test_files_within_budget_render_in_full():
-    with mock.patch.object(ex, "PROTECTED_FILES_MAX_CHARS", 100):
+    with mock.patch.object(settings, "PROTECTED_FILES_MAX_CHARS", 100):
         out = ex._render_reference_files([("src/small.py", "TINY = 1")])
     assert "TINY = 1" in out
     assert "Not shown" not in out
@@ -32,7 +33,7 @@ def test_files_within_budget_render_in_full():
 def test_budget_spends_across_files_and_names_every_omission():
     """First file consumes the budget; both later files are omitted but both
     stay named as off-limits."""
-    with mock.patch.object(ex, "PROTECTED_FILES_MAX_CHARS", 50):
+    with mock.patch.object(settings, "PROTECTED_FILES_MAX_CHARS", 50):
         out = ex._render_reference_files([
             ("src/a.py", "a" * 40),
             ("src/b.py", "b" * 40),
@@ -46,7 +47,7 @@ def test_budget_spends_across_files_and_names_every_omission():
 def test_all_omitted_still_carries_the_protection_instruction():
     """A tiny budget drops all ballast but the render must still tell the
     model the paths exist and are off-limits — that is the DEV-492 point."""
-    with mock.patch.object(ex, "PROTECTED_FILES_MAX_CHARS", 10):
+    with mock.patch.object(settings, "PROTECTED_FILES_MAX_CHARS", 10):
         out = ex._render_reference_files([("src/huge.py", "z" * 1_000)])
     assert "may NOT change" in out
     assert "src/huge.py" in out

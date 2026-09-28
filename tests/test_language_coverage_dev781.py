@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from coding_model_autonomous import settings
 from coding_model_autonomous import executor as ex
 
 
@@ -28,8 +29,8 @@ def test_default_coverage_is_the_apple_family():
 
 
 def test_gate_retrieves_on_every_spelling_and_still_refuses_python(monkeypatch):
-    monkeypatch.setattr(ex, "AUTONOMOUS_MEMORY_ROLES", {"architect"})
-    monkeypatch.setattr(ex, "AUTONOMOUS_MEMORY_LANGUAGES", {"swift", "objective-c", "objective-c++"})
+    monkeypatch.setattr(settings, "AUTONOMOUS_MEMORY_ROLES", {"architect"})
+    monkeypatch.setattr(settings, "AUTONOMOUS_MEMORY_LANGUAGES", {"swift", "objective-c", "objective-c++"})
     for lang in ("Obj-C", "objc", "Objective-C++", "objcpp", "swift"):
         assert ex.retrieval_decision("architect", lang) == (True, "retrieved"), lang
     assert ex.retrieval_decision("architect", "python") == (False, "language_not_covered")

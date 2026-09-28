@@ -15,6 +15,7 @@ import yaml
 import pytest
 
 import coding_model_server.orchestrator_daemon as d
+from coding_model_autonomous import settings
 from coding_model_autonomous import context as ctx
 from coding_model_autonomous import executor as ex
 from coding_model_autonomous.models import SpecStatus
@@ -106,7 +107,7 @@ def test_a_greenfield_merge_is_never_refused(db, spec, monkeypatch):
 
 def test_the_check_can_be_disabled(db, spec, monkeypatch):
     _pin_context(monkeypatch, [("src/pkg/big.py", "x" * RUN28_CHARS)])
-    monkeypatch.setattr(ex, "SYNTHESIS_EMIT_HEADROOM", 0.0)
+    monkeypatch.setattr(settings, "SYNTHESIS_EMIT_HEADROOM", 0.0)
     assert d._synthesis_cannot_emit(db, spec, db.spec_dir(spec.id)) is None
 
 

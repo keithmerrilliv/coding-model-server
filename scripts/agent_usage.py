@@ -110,9 +110,9 @@ def wiring() -> "dict[str, list[str]]":
     """agent -> what dispatches to it today (code defaults, then .env)."""
     from dotenv import dotenv_values, load_dotenv
     load_dotenv(ROOT / ".env")          # as the daemon starts: .env over code defaults
-    from coding_model_autonomous import executor, planner, retry_policy
+    from coding_model_autonomous import planner, retry_policy, settings
     wired: dict = defaultdict(list)
-    for role, agent in executor.ROLE_TO_AGENT.items():
+    for role, agent in settings.ROLE_TO_AGENT.items():
         wired[Config.resolve_agent(agent)].append(f"role:{role}")
     for a in retry_policy._IMPLEMENTER_ROTATION:
         wired[a].append("rotation")
@@ -121,8 +121,8 @@ def wiring() -> "dict[str, list[str]]":
     for a in retry_policy.ALLOWED_IMPLEMENTER_AGENTS:
         wired[a].append("recommendable")
     wired[Config.resolve_agent(planner.PLANNER_AGENT)].append("planner")
-    if executor.DESIGN_REVIEW_ENABLED:
-        wired[Config.resolve_agent(executor.DESIGN_REVIEW_AGENT)].append("design_review")
+    if settings.DESIGN_REVIEW_ENABLED:
+        wired[Config.resolve_agent(settings.DESIGN_REVIEW_AGENT)].append("design_review")
     wired[Config.resolve_agent(
         os.getenv("AUTONOMOUS_SYNTHESIS_AGENT", "deep_reviewer"))].append("synthesis")
     names = set(Config.AGENTS) | set(Config.AGENT_ALIASES)

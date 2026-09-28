@@ -14,8 +14,9 @@ import time
 from unittest import mock
 
 import coding_model_server.orchestrator_daemon as d
+from coding_model_autonomous import settings
 from coding_model_autonomous.context import SpecContext
-from coding_model_autonomous import apply_edits, executor
+from coding_model_autonomous import apply_edits
 from coding_model_autonomous.apply_edits import (
     EditBlock,
     apply_search_replace,
@@ -287,7 +288,7 @@ def test_generate_implementation_records_the_tier_and_names_new_paths(db):
     spec, task, spec_dir = _spec_with_task(db)
     model_out = ("### src/App.swift\n<<<<<<< SEARCH\nlet x = 1\nlet y = 2\n=======\n"
                  "let x = 2\nlet y = 2\n>>>>>>> REPLACE\n")
-    with mock.patch.object(executor, "DIFF_BASED_EDITS", True), \
+    with mock.patch.object(settings, "DIFF_BASED_EDITS", True), \
             mock.patch.object(d, "_spec_context", return_value=SpecContext.from_files(
                 "spec", [("src/App.swift", "let x = 1   \nlet y = 2\n")])), \
             mock.patch.object(d, "_planned_implement_outputs",

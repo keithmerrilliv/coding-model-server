@@ -23,8 +23,7 @@ import time
 import yaml
 from dataclasses import dataclass
 
-from coding_model_autonomous._http import post_chat_completion
-from coding_model_autonomous.executor import accumulate_agent_fields
+from coding_model_autonomous._http import accumulate_agent_fields, post_chat_completion
 from coding_model_autonomous.thinking import strip_thinking as _server_strip_thinking
 
 logger = logging.getLogger(__name__)
@@ -38,7 +37,7 @@ PLANNER_MAX_TOKENS = int(os.getenv("AUTONOMOUS_PLANNER_MAX_TOKENS", "4000"))
 
 # How many times to RE-ISSUE the planner request when the model's output is
 # unparseable (bad YAML, missing/duplicate markers) before giving up. Mirrors
-# executor.REVIEWER_PARSE_RETRIES: structure errors are intermittent at temp 0.2,
+# settings.REVIEWER_PARSE_RETRIES: structure errors are intermittent at temp 0.2,
 # so a re-roll usually recovers — and the orchestrator turns a PlannerError into
 # spec FAILED, so a single bad token used to hard-kill the whole spec. Real
 # observed kill: dense_architect emitted `notes: Out-of-scope: CLI wrapper...`,

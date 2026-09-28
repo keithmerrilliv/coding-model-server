@@ -66,7 +66,7 @@ def _run(db, spec, impl, spec_dir, first_output, *, repair_passes=False,
          mock.patch.object(d, "build_synthesis_message", return_value=[]), \
          mock.patch.object(d, "parse_implementer_response", return_value=synth), \
          mock.patch.object(d, "run_tests", side_effect=outputs), \
-         mock.patch.object(d.executor, "build_synthesis_repair_message",
+         mock.patch.object(d, "build_synthesis_repair_message",
                            return_value=[]):
         d._run_synthesis(db, spec, impl, spec_dir, framework, {})
     # one call synthesises; a second means the repair round ran
@@ -105,7 +105,7 @@ def test_repair_converting_to_a_pass_is_reported(db, synth_spec):
          mock.patch.object(d, "run_tests",
                            side_effect=[(False, BUILD_FAILURE),
                                         (True, "Executed 20 tests\n20 passed in 1s\n")]), \
-         mock.patch.object(d.executor, "build_synthesis_repair_message",
+         mock.patch.object(d, "build_synthesis_repair_message",
                            return_value=[]):
         passed, _ = d._run_synthesis(db, spec, impl, spec_dir, "swift_test", {})
     assert passed is True

@@ -13,8 +13,8 @@ from unittest import mock
 import pytest
 
 import coding_model_server.orchestrator_daemon as d
+from coding_model_autonomous import settings
 from coding_model_autonomous.context import SpecContext
-from coding_model_autonomous import executor
 from coding_model_autonomous.apply_edits import parse_edit_blocks
 from coding_model_autonomous.executor import (
     ImplementerResult,
@@ -167,7 +167,7 @@ def test_single_call_applies_edits_when_flag_on(db, spec_task):
         ">>>>>>> REPLACE\n"
     )
     p_exist, p_prot = _patch_context(list(EXISTING))
-    with mock.patch.object(executor, "DIFF_BASED_EDITS", True), p_exist, p_prot, \
+    with mock.patch.object(settings, "DIFF_BASED_EDITS", True), p_exist, p_prot, \
             mock.patch.object(d, "call_agent", return_value=model_out):
         res = d._generate_implementation(db, spec, task, spec_dir, "S",
                                          SMALL_DESIGN, "implementer", [], None)
@@ -187,7 +187,7 @@ def test_single_call_surfaces_unappliable_anchor_as_apply_error(db, spec_task):
         ">>>>>>> REPLACE\n"
     )
     p_exist, p_prot = _patch_context(list(EXISTING))
-    with mock.patch.object(executor, "DIFF_BASED_EDITS", True), p_exist, p_prot, \
+    with mock.patch.object(settings, "DIFF_BASED_EDITS", True), p_exist, p_prot, \
             mock.patch.object(d, "call_agent", return_value=model_out):
         res = d._generate_implementation(db, spec, task, spec_dir, "S",
                                          SMALL_DESIGN, "implementer", [], None)
@@ -203,7 +203,7 @@ def test_single_call_flag_off_never_applies_edits(db, spec_task):
     spec, task, spec_dir = spec_task
     model_out = EDIT
     p_exist, p_prot = _patch_context(list(EXISTING))
-    with mock.patch.object(executor, "DIFF_BASED_EDITS", False), p_exist, p_prot, \
+    with mock.patch.object(settings, "DIFF_BASED_EDITS", False), p_exist, p_prot, \
             mock.patch.object(d, "call_agent", return_value=model_out) as ca:
         res = d._generate_implementation(db, spec, task, spec_dir, "S",
                                          SMALL_DESIGN, "implementer", [], None)
@@ -219,7 +219,7 @@ def test_single_call_flag_off_whole_file_passthrough(db, spec_task):
     apply_errors — identical to pre-DEV-581."""
     spec, task, spec_dir = spec_task
     p_exist, p_prot = _patch_context(list(EXISTING))
-    with mock.patch.object(executor, "DIFF_BASED_EDITS", False), p_exist, p_prot, \
+    with mock.patch.object(settings, "DIFF_BASED_EDITS", False), p_exist, p_prot, \
             mock.patch.object(d, "call_agent",
                               return_value="<<<FILE: src/App.swift>>>\nlet x = 5\n<<<END_FILE>>>"):
         res = d._generate_implementation(db, spec, task, spec_dir, "S",
@@ -252,8 +252,8 @@ def test_unappliable_edits_route_to_implementer(db):
 
 
 def test_reemit_instruction_respects_flag():
-    with mock.patch.object(executor, "DIFF_BASED_EDITS", False):
+    with mock.patch.object(settings, "DIFF_BASED_EDITS", False):
         assert d._reemit_instruction("re-emit ALL files.") == "re-emit ALL files."
-    with mock.patch.object(executor, "DIFF_BASED_EDITS", True):
+    with mock.patch.object(settings, "DIFF_BASED_EDITS", True):
         out = d._reemit_instruction("re-emit ALL files.")
         assert "SEARCH/REPLACE" in out and "ALL files" not in out

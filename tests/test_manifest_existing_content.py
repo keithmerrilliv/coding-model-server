@@ -22,8 +22,8 @@ from unittest import mock
 import pytest
 
 import coding_model_server.orchestrator_daemon as d
+from coding_model_autonomous import settings
 from coding_model_autonomous.context import SpecContext
-from coding_model_autonomous import executor
 from coding_model_autonomous.executor import (
     ManifestEntry,
     build_per_file_message,
@@ -140,8 +140,8 @@ def _gen(db, spec, task, response_or_responses, existing=GAME):
         calls.append(messages)
         return responses[min(len(calls) - 1, len(responses) - 1)]
 
-    with mock.patch.object(executor, "DIFF_BASED_EDITS", True), \
-         mock.patch.object(executor, "PER_FILE_PARSE_RETRIES", 1), \
+    with mock.patch.object(settings, "DIFF_BASED_EDITS", True), \
+         mock.patch.object(settings, "PER_FILE_PARSE_RETRIES", 1), \
          mock.patch.object(d, "call_agent", side_effect=fake_call_agent):
         content = d._generate_one_file(
             db, spec, task, "SPEC", "DESIGN", ENTRIES, ENTRIES[0], [],
@@ -180,7 +180,7 @@ def test_oversized_existing_file_is_refused_without_edit_mode(db, spec_task):
     refuse loudly instead of generating blind."""
     spec, task = spec_task
     big = "x = 1\n" * 20_000  # > MANIFEST_WHOLE_FILE_MAX_CHARS
-    with mock.patch.object(executor, "DIFF_BASED_EDITS", False), \
+    with mock.patch.object(settings, "DIFF_BASED_EDITS", False), \
          mock.patch.object(d, "call_agent") as agent:
         content = d._generate_one_file(
             db, spec, task, "SPEC", "DESIGN", ENTRIES, ENTRIES[0], [],
@@ -193,7 +193,7 @@ def test_oversized_existing_file_is_refused_without_edit_mode(db, spec_task):
 def test_small_existing_file_still_regenerates_whole_without_edit_mode(db, spec_task):
     spec, task = spec_task
     whole = f"<<<FILE: game.js>>>\n{GAME}<<<END_FILE>>>"
-    with mock.patch.object(executor, "DIFF_BASED_EDITS", False), \
+    with mock.patch.object(settings, "DIFF_BASED_EDITS", False), \
          mock.patch.object(d, "call_agent", return_value=whole):
         content = d._generate_one_file(
             db, spec, task, "SPEC", "DESIGN", ENTRIES, ENTRIES[0], [],

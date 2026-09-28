@@ -177,7 +177,7 @@ daemon that died hard, which would otherwise hold the port and answer
 ## 4. What the caller sees
 
 The pipeline's client is `post_chat_completion` with `retry_5xx=True`, which
-is how `executor.call_agent` and the planner call it.
+is how `_http.call_agent` and the planner call it.
 
 | Status | Cause | What the client does |
 |---|---|---|
