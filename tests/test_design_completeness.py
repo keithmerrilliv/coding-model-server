@@ -472,3 +472,43 @@ struct Mushroom { var hits: Int }
 """
         assert any(f.kind == dt.KIND_MISSING_EQUATABLE
                    for f in dt.check_design_testability(swift))
+
+
+# Run spec_47dec87b's design round 2 (DEV-312): a design that adds no types at
+# all, whose Data Models section describes the function's inputs and outputs as
+# labelled bullets.
+LABEL_BULLETS_ONLY = """\
+# Architecture: Demo
+
+## File Structure
+```
+Sources/ContentView.swift (modified)
+Sources/GameOfLifeRenderer.swift (modified)
+Tests/MetalGameOfLifeTests/GridMappingTests.swift (new)
+```
+
+## Data Models
+- Input: `CGPoint`, `CGSize`, `Int` (standard library/CoreGraphics)
+- Output: `SIMD2<UInt32>?` (Foundation/Swift stdlib, conforms to Equatable)
+- Internal: World, Position stay internal
+- Top-K Indices: collection of integer positions, stable ordering
+- No custom types or schemas introduced.
+"""
+
+
+class TestLabelBulletsAreNotTypes:
+    """DEV-872: only a code-quoted bullet name declares a type."""
+
+    def test_bare_labels_declare_no_types(self):
+        assert dt.declared_types(LABEL_BULLETS_ONLY) == set()
+        assert dt.top_level_types(LABEL_BULLETS_ONLY) == set()
+
+    def test_a_design_of_labels_needs_no_files(self):
+        kinds = [f.kind for f in dt.check_design_completeness(LABEL_BULLETS_ONLY)]
+        assert "type_without_file" not in kinds
+
+    def test_a_backticked_type_without_a_file_still_fires(self):
+        # The true-positive direction: run 6's SeededRNG shape.
+        findings = dt.check_design_completeness(RUN6_TYPE_WITHOUT_FILE)
+        assert any(f.kind == "type_without_file" and "SeededRNG" in f.detail
+                   for f in findings)

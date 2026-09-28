@@ -456,6 +456,14 @@ def _is_vacuous_span(span: str) -> bool:
 
 # ── the design's own vocabulary ──────────────────────────────────────────────
 
+# A Data Models bullet declares a type only when the name is code-quoted:
+# ``- `Position`: {col, row}``. The bare form is how architects write labels —
+# ``- Input: CGPoint``, ``- Internal: World stays internal``, ``- Top-K Indices``
+# — and reading those as types charges the design for files it never needs
+# (DEV-872). Every bullet-form type in the spec archive is backticked.
+_TYPE_BULLET_RE = re.compile(r"^[-*]\s*`([A-Z]\w*)`\s*[:—-]")
+
+
 def declared_types(design_md: str) -> set[str]:
     """Type names the design declares in Data Models.
 
@@ -469,7 +477,7 @@ def declared_types(design_md: str) -> set[str]:
     body = _section(design_md, DATA_MODELS_HEADING)
     types = set()
     for b in _bullets(body):
-        m = re.match(r"^[-*]\s*`?([A-Z]\w*)`?\s*[:—-]", b)
+        m = _TYPE_BULLET_RE.match(b)
         if m:
             types.add(m.group(1))
     for m in re.finditer(
@@ -501,7 +509,7 @@ def top_level_types(design_md: str) -> set[str]:
         if m and not m.group(1):
             top.add(m.group(2))
     for b in _bullets(body):
-        m = re.match(r"^[-*]\s*`?([A-Z]\w*)`?\s*[:—-]", b)
+        m = _TYPE_BULLET_RE.match(b)
         if m:
             top.add(m.group(1))
     return top
@@ -705,7 +713,7 @@ def _enum_literal_types(assert_text: str, types: set[str],
             continue
         for case in re.findall(r"[=!]=\s*\.(\w+)", span):
             for b in _bullets(_section(design_md, DATA_MODELS_HEADING)):
-                m = re.match(r"^[-*]\s*`?([A-Z]\w*)`?\s*[:—-]", b)
+                m = _TYPE_BULLET_RE.match(b)
                 if m and m.group(1) in types and \
                         re.search(r"\." + re.escape(case) + r"\b", b):
                     hits.add(m.group(1))
@@ -1215,7 +1223,7 @@ def _types_used_not_created(design_md: str,
     bulleted = set()
     marked_existing = set()
     for b in _bullets(body):
-        m = re.match(r"^[-*]\s*`?([A-Z]\w*)`?\s*[:—(-]", b)
+        m = re.match(r"^[-*]\s*`([A-Z]\w*)`\s*[:—(-]", b)
         if not m:
             continue
         bulleted.add(m.group(1))
