@@ -759,10 +759,9 @@ class Database:
         """Mark a gate CANCELLED: the daemon has fully acted on its decision.
 
         A decided gate that stays APPROVED/REJECTED can be re-read by a later
-        tick and re-processed — the DEV-122 failure mode was a REJECTED gate
-        re-invoking the supervisor every tick (duplicate CLARIFICATION gates,
-        each mirrored to Jira) until the transition budget aborted the spec.
-        Cancellation is the consumed marker; it is not a human decision, so
+        tick and re-processed — the DEV-122 failure mode was a decided gate
+        acted on every tick, minting a duplicate CLARIFICATION gate (each
+        mirrored to Jira) per tick. Cancellation is the consumed marker; it is not a human decision, so
         it bypasses respond_to_gate's PENDING-only CAS.
         """
         with self.transaction() as conn:
@@ -847,7 +846,7 @@ class Database:
         return [_row_to_event(r) for r in rows]
 
     def count_events(self, *, spec_id: str, kind: EventKind) -> int:
-        """Count events of *kind* for a spec. Used for supervisor budget."""
+        """Count events of *kind* for a spec."""
         row = self._conn().execute(
             "SELECT COUNT(*) AS n FROM events WHERE spec_id = ? AND kind = ?",
             (spec_id, kind.value),

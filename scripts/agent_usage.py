@@ -11,8 +11,8 @@ Three sources, because no one of them sees everything:
   back to the first run but see only autonomous dispatches.
 * wiring — what the daemon would dispatch to today, with the repo's .env
   applied: role agents, the implementer rotation, the tier map, the planner,
-  synthesis, and the design-review and supervisor agents only when their
-  stage is switched on. A wired agent is kept even when idle, because
+  synthesis, and the design-review agent only when its stage is switched
+  on. A wired agent is kept even when idle, because
   retiring it would break the next dispatch.
 
 A smoke sweep (one request to each of many agents within minutes, as after a
@@ -110,7 +110,7 @@ def wiring() -> "dict[str, list[str]]":
     """agent -> what dispatches to it today (code defaults, then .env)."""
     from dotenv import dotenv_values, load_dotenv
     load_dotenv(ROOT / ".env")          # as the daemon starts: .env over code defaults
-    from coding_model_autonomous import executor, planner, retry_policy, supervisor
+    from coding_model_autonomous import executor, planner, retry_policy
     wired: dict = defaultdict(list)
     for role, agent in executor.ROLE_TO_AGENT.items():
         wired[Config.resolve_agent(agent)].append(f"role:{role}")
@@ -123,8 +123,6 @@ def wiring() -> "dict[str, list[str]]":
     wired[Config.resolve_agent(planner.PLANNER_AGENT)].append("planner")
     if executor.DESIGN_REVIEW_ENABLED:
         wired[Config.resolve_agent(executor.DESIGN_REVIEW_AGENT)].append("design_review")
-    if os.getenv("AUTONOMOUS_SUPERVISOR", "0") == "1":   # the daemon's own test
-        wired[Config.resolve_agent(supervisor.SUPERVISOR_AGENT)].append("supervisor")
     wired[Config.resolve_agent(
         os.getenv("AUTONOMOUS_SYNTHESIS_AGENT", "deep_reviewer"))].append("synthesis")
     names = set(Config.AGENTS) | set(Config.AGENT_ALIASES)

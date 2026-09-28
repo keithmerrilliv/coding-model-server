@@ -36,8 +36,7 @@ ROTATION = ["implementer", "deep_implementer", "moe_implementer", "fast_implemen
 @pytest.fixture(autouse=True)
 def seam_env(monkeypatch):
     """Pin the daemon's env-derived globals to the shipped defaults."""
-    # Routing stacks and optional phases.
-    monkeypatch.setattr(d, "SUPERVISOR_ENABLED", False)
+    # Optional phases.
     # DEV-440 made this default-OFF. The seam matrix still exercises the
     # stage, so it opts in explicitly rather than inheriting a default.
     monkeypatch.setattr(executor, "DESIGN_REVIEW_ENABLED", True)

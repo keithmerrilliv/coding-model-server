@@ -83,7 +83,6 @@ class EventKind(str, Enum):
     OUTPUT_TRUNCATED = "output_truncated"  # an agent response hit max_tokens (finish_reason=length)
     TEST_RAN = "test_ran"                # subprocess test execution completed
     DAEMON_TICK = "daemon_tick"          # heartbeat for liveness checks
-    SUPERVISOR_DECISION = "supervisor_decision"  # meta-orchestrator transition
     # DEV-629: one record per failed attempt, written by outcome.dispose —
     # the class (transport, truncation, parse failure, ...), the outcome
     # (no_verdict / verdict / terminal) and what was done about it. This is
@@ -120,7 +119,7 @@ EVENT_PAYLOAD_SCHEMAS: dict = {
             "retry": "task.retry_count when recorded (the attempt this failure belongs to)",
             "consecutive": "no-verdicts in a row on this attempt, 0 for verdicts",
             "cap": "the consecutive no-verdict cap for this class, null for shutdown",
-            "disposition": "requeue | rotate | charge | synthesize | park | terminal | supervisor | handled",
+            "disposition": "requeue | rotate | charge | synthesize | park | terminal",
             "rotate": "no-verdict only: the next dispatch should reach a different agent",
             "exc_type": "the exception type for exception-class failures, else empty",
             "phase": "free text naming where it happened (build_check, existing_fetch, ...)",
@@ -140,7 +139,7 @@ EVENT_PAYLOAD_SCHEMAS: dict = {
             "missing": "planned outputs the attempt did not produce (DEV-645)",
             "blocks": "unappliable edit blocks (DEV-581)",
             "warnings": "blocking compiler warnings (DEV-547)",
-            "action": "the supervisor's action when it handled the failure",
+            "action": "the artifact ledger's action on a refused design write (DEV-647)",
             "gate_carries_notes": "the human gate already holds the notes the retry reads",
             "needed_tokens": "prompt_too_large: what the prompt needs (DEV-633)",
             "allowed_tokens": "prompt_too_large: what the largest window allows",

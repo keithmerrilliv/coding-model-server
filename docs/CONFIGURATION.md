@@ -189,18 +189,6 @@ architect and the implementer):
 | `AUTONOMOUS_DESIGN_REVIEW_MAX_TOKENS` | `8000` | Token budget for the design review. |
 | `AUTONOMOUS_DESIGN_REVIEW_MAX_REVISIONS` | `1` | How many times the architect may revise before escalating. |
 
-**Supervisor** (meta-orchestrator that decides retry / fail / replan). **Off by
-default** — without `AUTONOMOUS_SUPERVISOR=1` the daemon never calls it, so
-setting `AUTONOMOUS_SUPERVISOR_AGENT` alone does nothing:
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `AUTONOMOUS_SUPERVISOR` | `0` | Master switch. Set to `1` to enable the supervisor path. |
-| `AUTONOMOUS_SUPERVISOR_AGENT` | `supervisor` | Agent used for the decision call. |
-| `AUTONOMOUS_SUPERVISOR_TIMEOUT` | `600` | Seconds. |
-| `AUTONOMOUS_SUPERVISOR_MAX_TOKENS` | `1500` | Decision output is small; this is a `decide()` function-call, not prose. |
-| `AUTONOMOUS_MAX_SUPERVISOR_TRANSITIONS` | `8` | Cap on supervisor-driven state transitions per spec (loop guard). |
-
 **Parse retries** — an agent whose output doesn't parse (bad YAML, missing
 markers) gets re-asked rather than failing the spec:
 
@@ -455,7 +443,7 @@ Two mechanisms, both optional:
 
 - **MTP** (multi-token prediction): a model shipping a native MTP head plus
   `server_extra_args=['--spec-type', 'draft-mtp', '--spec-draft-n-max', '2']`.
-  Used by `dense_architect` / `supervisor` (Qwen3.6-27B-MTP), where it roughly
+  Used by `dense_architect` (Qwen3.6-27B-MTP), where it roughly
   doubles decode on a dense model that has ~24 of 64 layers on CPU. Lossless.
 - **`draft=`**: a separate same-tokenizer draft model (`path`, `n_gpu_layers`,
   `n_ctx`, `cpu_moe`, `draft_max`, `draft_min`, `draft_p_min`). Wired but not

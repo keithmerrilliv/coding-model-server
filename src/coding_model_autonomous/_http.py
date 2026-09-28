@@ -1,6 +1,6 @@
 """Shared HTTP access to the coding-model-server inference API for autonomous agents.
 
-planner, supervisor, and executor each POST to the same local
+planner and executor each POST to the same local
 ``/v1/chat/completions`` endpoint with the same host/port/admin-key handling.
 This centralises the session, the URL, the auth header, and an optional
 transient-5xx retry so those three stop duplicating it.
@@ -18,7 +18,7 @@ import time
 
 import requests
 
-# The orchestrator (planner/supervisor/executor) always runs on the SAME box as
+# The orchestrator (planner/executor) always runs on the SAME box as
 # the inference server, so it reaches it over loopback. This is deliberately
 # decoupled from CODING_MODEL_SERVER_IP: that var is the server's *externally
 # advertised* LAN address (remote clients, CORS, dashboard) and moves whenever the
@@ -36,7 +36,7 @@ ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
 API_URL = f"http://{CODING_MODEL_INTERNAL_HOST}:{CODING_MODEL_SERVER_PORT}/v1/chat/completions"
 
 # Module-level session: reuses TCP+TLS across the architect → implementer →
-# reviewer → supervisor sequence, saving 5-30 ms per call.
+# reviewer sequence, saving 5-30 ms per call.
 _SESSION = requests.Session()
 
 logger = logging.getLogger("orchestrator.http")

@@ -3,16 +3,15 @@
 Extracted from orchestrator_daemon.py (DEV-152). These are the decision and
 state-reading helpers of the retry path — snapshotting a failed attempt,
 deciding which artifacts survive a wipe, rotating the implementer agent, and
-reading back prior attempts and supervisor directives. None of them touch the
-daemon's globals, so they are now exercisable without importing the daemon and
-triggering its import-time load_dotenv()/basicConfig().
+reading back prior attempts. None of them touch the daemon's globals, so they
+are exercisable without importing the daemon and triggering its import-time
+load_dotenv()/basicConfig().
 
-Deliberately NOT moved: _attempt_retry and _retry_role_with_feedback. Those
-drive the state machine — they call _apply_supervisor_decision,
-_build_supervisor_context and _run_synthesis — so moving them would either drag
-half the daemon along or introduce an import cycle. This module has no edges
-back into the daemon, and none into executor either: the tier map lives here
-(DEV-837), so the kernel loads without the agent layer.
+Deliberately NOT moved: _attempt_retry and the synthesis pass. Those drive the
+state machine through outcome.dispose and the daemon's role runners, so moving
+them would either drag half the daemon along or introduce an import cycle.
+This module has no edges back into the daemon, and none into executor either:
+the tier map lives here (DEV-837), so the kernel loads without the agent layer.
 """
 from __future__ import annotations
 
@@ -27,7 +26,6 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from . import outcome as _outcome
-from . import supervisor as _supervisor
 from .db import Database
 from .models import EventKind
 from .context import CONTEXT_FILE, fits
@@ -659,61 +657,6 @@ def record_reroute(db: Database, spec_id: str, task, dispatched_agent: str) -> O
     # Compare against the attempt BEFORE this retry, as the original record did.
     return record_attempt_plan(db, spec_id, task, plan,
                                [p for p in prior_plans if p.get("retry") != task.retry_count])
-
-
-def _latest_supervisor_feedback(db: Database, spec_id: str,
-                                *, target_role: str) -> str | None:
-    """Most recent supervisor `feedback_to_inject` for *target_role* on this spec.
-
-    Used by `_run_reviewer` (and any role whose retry path can't carry feedback
-    through a synthetic gate) to read the supervisor's directive on retry.
-    Returns None if no matching decision is found.
-    """
-    import json
-    rows = db.list_events_by_kind(
-        spec_id=spec_id, kind=EventKind.SUPERVISOR_DECISION, limit=20,
-    )
-    for r in rows:  # most-recent first
-        if not r.payload_json:
-            continue
-        try:
-            payload = json.loads(r.payload_json)
-        except json.JSONDecodeError:
-            continue
-        if (payload.get("action") == "retry"
-                and payload.get("target_role") == target_role
-                and payload.get("feedback_to_inject")):
-            return payload["feedback_to_inject"]
-    return None
-
-
-def _load_prior_decisions(db: Database, spec_id: str,
-                          ) -> "list[_supervisor.PriorDecision]":
-    """Most-recent N supervisor decisions for *spec_id*, oldest-first.
-
-    Decoded from the events table's payload_json, capped to the supervisor
-    transition budget so we never render more than the model could have made.
-    """
-    import json
-    rows = db.list_events_by_kind(
-        spec_id=spec_id,
-        kind=EventKind.SUPERVISOR_DECISION,
-        limit=_supervisor.MAX_SUPERVISOR_TRANSITIONS,
-    )
-    out: list[_supervisor.PriorDecision] = []
-    for r in reversed(rows):  # oldest-first for natural reading order
-        if not r.payload_json:
-            continue
-        try:
-            payload = json.loads(r.payload_json)
-        except json.JSONDecodeError:
-            continue
-        out.append({
-            "action": payload.get("action", "?"),
-            "target_role": payload.get("target_role"),
-            "reason": payload.get("reason", ""),
-        })
-    return out
 
 
 def _read_retry_attempts(spec_dir: Path) -> list[dict]:

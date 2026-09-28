@@ -11,7 +11,7 @@ Submodules, by role:
              disposition) · context (one read, one prompt budget) ·
              retry_policy (what a retry keeps, and who retries)
   agents     planner · executor (prompts, parsers, call_agent) ·
-             architect_tools · plan_paths · apply_edits · supervisor · _http ·
+             architect_tools · plan_paths · apply_edits · _http ·
              thinking (strip reasoning from a response)
   guards     design_testability · swift_prechecks · swift_rules
   testing    test_runner (sandboxed dispatch, Mac runner transport) ·

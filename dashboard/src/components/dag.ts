@@ -7,7 +7,7 @@
 // mostly-linear chain, which is a wide strip rather than a tall column.
 //
 // Note on data shape: Tasks correspond to architect / implementer /
-// reviewer / supervisor steps. The planner is implicit (no Task row);
+// reviewer steps. The planner is implicit (no Task row);
 // we infer it from the spec's first plan_approval gate.
 
 import type { Event, Gate, SpecDetailResponse, Task } from "../types/api";

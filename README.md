@@ -227,7 +227,6 @@ for method, prefill figures, and the caveat about raw-vs-proxy numbers).
 | `fast_implementer` | Fast implementation | Qwen3-Coder-30B Q4_K_M | 3B/30B | 64K | Q8_0 | ngl 49, n_cpu_moe 26 | 58.2 |
 | `deep_reviewer` | Reviewer, synthesis | Qwen3.5-122B-A10B Q4_K_M | 10B/122B | 256K | Q8_0 | ngl 49, cpu_moe | 20.0 |
 | `dense_architect` | Planner + architect (interactive `architect` alias) | Qwen3.6-27B MTP Q4_K_M (dense) | 27B dense | 64K | Q4_0 | ngl 66, **n_cpu_ffn 33**, MTP speculative decode | 17.4 † |
-| `supervisor` | Retry/fail/replan decisions | Qwen3.6-27B MTP Q4_K_M (dense) | 27B dense | 64K | Q4_0 | ngl 66, **n_cpu_ffn 33**, MTP speculative decode | 11.4 ‡ |
 | `moe_implementer` | Implementation | MiniMax M2.5 Q4_K_M | 10B/230B | 116K | Q4_0 | ngl 62, cpu_moe | 11.2 |
 | `glimmer_implementer` | Retry-only implementation | Muse-Glimmer-30B UD-Q4_K_XL | 3B/30B | 64K | Q4_0 | ngl 40, `--swa-full` | 13.2 § |
 
@@ -238,15 +237,8 @@ state their prompt depth and predate that measurement, so they are not directly
 comparable to it — re-measuring the roster on one basis is
 [DEV-95](https://keith-merrill4.atlassian.net/browse/DEV-95).
 
-‡ `supervisor` shares `_DENSE_27B` with `dense_architect`, so its serving config
-changed identically, but only the architect was re-measured. This figure
-predates [DEV-744](https://keith-merrill4.atlassian.net/browse/DEV-744).
-
 § From the DEV-727 re-sweep, which drove llama-server directly rather than
 through the proxy, so it reads a little high against the other rows.
-
-`supervisor` is decision-only: it is always called with native tools (a
-`decide()` function call) and never gets marker-based shell tools.
 
 **The roster is what the telemetry says is used.** `scripts/agent_usage.py`
 reads every request the server logged, the pipeline's own events, and what the
@@ -708,7 +700,6 @@ coding-model-server/
 │       ├── architect_tools.py  #   The architect's bounded, read-only tool loop
 │       ├── plan_paths.py       #   Resolves the plan's phase paths against the target repo
 │       ├── apply_edits.py      #   Applies anchored SEARCH/REPLACE edit blocks
-│       ├── supervisor.py       #   Meta-orchestrator (retry / fail / replan); off by default
 │       ├── _http.py            #   HTTP access to the inference API for the agents
 │       │                       #   ── guards ──
 │       ├── design_testability.py  # Can each criterion of a design be tested as written?

@@ -7,8 +7,6 @@ import os
 from pathlib import Path
 from typing import List
 
-from coding_model_autonomous.supervisor import SYSTEM_PROMPT as _SUPERVISOR_SYSTEM_PROMPT
-
 # Root for model weights. Every model config also has its own MODEL_PATH_*
 # env override; this only de-personalizes the defaults (DEV-199) — derived
 # from the running user's home instead of a hardcoded username, so it
@@ -195,7 +193,7 @@ class Config:
     # Interactive clients drive a tool-using agent over many turns, so they can
     # act on "signal continuation" and "assemble the file with shell tools".
     # Programmatic callers (the autonomous pipeline: architect, implementer,
-    # reviewer, manifest, per-file, synthesis, supervisor, planner) get ONE
+    # reviewer, manifest, per-file, synthesis, planner) get ONE
     # shot at a response that a regex then parses. For them:
     #
     #   - There is no continuation turn on THIS path. The interactive client does
@@ -628,10 +626,7 @@ Update these after each retrieval step. They help you stay organized and efficie
     # Note `--swa-full` is a no-op here: llama-server logs "swa_full is not
     # supported by this model, it will be disabled" on every load. Left in place
     # so this change is only the two numbers.
-    # Quality lossless (verified tokens == base model). Used by dense_architect,
-    # its nothink eval arm and supervisor — all three move together ON PURPOSE, so
-    # the DEV-556 arms still differ in exactly one variable
-    # (test_both_arms_are_the_same_model_and_the_same_prompt).
+    # Quality lossless (verified tokens == base model). Used by dense_architect.
     # See [[project_mtp_test_scope]] / [[project_llama_server_upgrade]].
     # DEV-744, 2026-09-19 — ngl 46 -> 66 with n_cpu_ffn=33, on llama-server
     # v0.4.1. This SUPERSEDES the DEV-707 note above, whose premise ("the window
@@ -909,13 +904,6 @@ Update these after each retrieval step. They help you stay organized and efficie
             _IMPLEMENTER_SYSTEM_PROMPT,
             _MUSE_GLIMMER_30B,
             executor=True
-        ),
-        # Supervisor — meta-orchestrator. Always invoked with native tools
-        # (decide()), never with marker-based shell tools, so executor=False.
-        'supervisor': _create_agent_config(
-            'Supervisor — Qwen3.6-27B MTP Q4_K_M (27B dense, decision-only, no shell tools)',
-            _SUPERVISOR_SYSTEM_PROMPT,
-            _DENSE_27B,
         ),
     }
 

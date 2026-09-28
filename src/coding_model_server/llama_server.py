@@ -111,8 +111,8 @@ def _reject_reasoning_only_completion(text, tool_calls, usage, raw_text, rid):
     block (EOS or length mid-thought) — post-strip that is an empty 200, the
     same silent-success shape as the DEV-543 production incident, and the
     caller records an empty artifact as if it were an answer. Native
-    tool-call responses are legitimately content-empty (the supervisor's
-    decide()) and pass through untouched.
+    tool-call responses are legitimately content-empty (a caller that forces
+    a tool call) and pass through untouched.
     """
     if ALLOW_EMPTY_COMPLETIONS or (text or "").strip() or tool_calls:
         return
@@ -200,8 +200,7 @@ class LlamaServerManager:
         self.process: Optional[subprocess.Popen] = None
         self.current_model_path: Optional[str] = None
         # Most recent agent_id passed through ensure_running. Multiple agents
-        # can share a model path (supervisor + dense_architect both use Qwen3.6-27B),
-        # so this is tracked separately from current_model_path — set on every
+        # can share a model path, so this is tracked separately from current_model_path — set on every
         # ensure_running call, not just on the swap.
         self.current_agent_id: Optional[str] = None
         self.current_model_config: Optional[dict] = None
@@ -211,8 +210,7 @@ class LlamaServerManager:
         self.current_expects_thinking: bool = True
         # Tuple of fields that must match for the running child to be reused.
         # Path equality alone isn't enough — two agents can serve one GGUF
-        # with different n_ctx or n_ubatch (dense_architect and supervisor
-        # share _DENSE_27B's file), so a path-only check would let the second
+        # with different n_ctx or n_ubatch, so a path-only check would let the second
         # caller silently keep the first caller's runtime config.
         self.current_runtime_signature: Optional[tuple] = None
         self.started_at: Optional[float] = None

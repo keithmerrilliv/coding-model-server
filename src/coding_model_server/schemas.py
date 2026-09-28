@@ -60,7 +60,7 @@ class ChatCompletionRequest(BaseModel):
     tool_choice: Optional[Any] = None  # str ("auto"|"none"|"required") or {"type":"function","function":{"name":...}}
     parallel_tool_calls: Optional[bool] = None
     # Opt-out for the server-side ChromaDB memory injection. Autonomous
-    # callers (architect/implementer/reviewer/supervisor/planner) set this
+    # callers (architect/implementer/reviewer/planner) set this
     # to True so the user-populated chat memory doesn't pollute their
     # structured prompts (the memory was populated by chat-style use; a
     # semantic search of "## Specification\n\n# Roman numeral converter…"

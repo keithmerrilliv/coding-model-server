@@ -1,8 +1,8 @@
 """Tests for the autonomous package's shared chat-completion helper.
 
-planner / supervisor / executor were each hand-rolling the same POST to the
+planner and executor were each hand-rolling the same POST to the
 local coding-model-server. These pin the consolidated helper: payload shape, the
-skip_memory default, extra-param passthrough (tools/tool_choice for supervisor),
+skip_memory default, extra-param passthrough (tools/tool_choice),
 and — most importantly — the opt-in transient-5xx backoff that executor.call_agent
 relies on to survive model-swap CUDA OOMs.
 

@@ -83,7 +83,7 @@ class TestDefaultStaysOff:
 
     def test_every_role_skips_memory_when_set_is_empty(self, monkeypatch):
         monkeypatch.setattr(ex, "AUTONOMOUS_MEMORY_ROLES", set())
-        for role in ("implementer", "architect", "reviewer", "planner", "supervisor"):
+        for role in ("implementer", "architect", "reviewer", "planner"):
             assert _capture_call(role)["skip_memory"] is True, role
 
 
@@ -96,7 +96,7 @@ class TestOptIn:
         """Opting the implementer in must not silently enable the planner,
         whose prompts are decomposition text and would retrieve noise."""
         monkeypatch.setattr(ex, "AUTONOMOUS_MEMORY_ROLES", {"implementer"})
-        for role in ("planner", "supervisor", "reviewer", "architect"):
+        for role in ("planner", "reviewer", "architect"):
             assert _capture_call(role)["skip_memory"] is True, role
 
     def test_role_match_is_case_insensitive(self, monkeypatch):

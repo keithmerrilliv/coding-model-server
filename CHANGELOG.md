@@ -35,6 +35,14 @@ The layering release ([DEV-835](https://keith-merrill4.atlassian.net/browse/DEV-
   - **Defaults.** The code defaults for the reviewer and design-review agents are now `deep_reviewer`. `/review`'s first local judge is now `implementer`.
   - **Disk.** Every model file the roster no longer references was deleted from disk, 144 GiB.
   - **Gates.** mypy now covers `orchestrator_daemon.py`. Its 33 findings were type-only: parse loops that always run at least once now assert their result instead of leaving it `Optional`, one path reads a precomputed length, and the supervisor context uses the supervisor's own TypedDicts. Ruff adds C901 at a complexity threshold of 30. The seven functions already over it, from 32 (`_run_implementer`) to 63 (the client's `get_completion`), carry `# noqa: C901`. The threshold drops as they shrink.
+  - **The supervisor is gone.** The April prototype of an LLM that decides each retry had never run: its switch was never set, and it logged no decision in 70+ runs. What was deleted:
+    - `supervisor.py`;
+    - its daemon layer;
+    - the `Hooks.supervisor` branch, the only way around the `dispose` table;
+    - the `SUPERVISOR_DECISION` event kind;
+    - its feedback readers, its agent, its settings and its tests.
+
+    The daemon went from 7,168 lines to 6,909, and the change deletes 1,262 lines overall. One path shared with the no-verdict park stays: approving a parked task's clarification gate re-runs the task. Its tests were rewritten around `park`. The idea is kept for a deliberate revival in [DEV-895](https://keith-merrill4.atlassian.net/browse/DEV-895).
 
 ## v0.5.0 — 2026-09-27
 

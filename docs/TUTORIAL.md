@@ -322,7 +322,8 @@ to 76 (implementer).
 | `dense_architect` | 2,520 | 829 | **10.8** | Qwen3.6-27B dense, ngl 36 MTP |
 
 `native_implementer`, `brainstorm`, `debugger`, `reviewer` and `moe_architect`
-were retired by DEV-839 on usage telemetry; their rows stay as measured.
+were retired by DEV-839 on usage telemetry, and `supervisor` was deleted with
+the supervisor feature (DEV-839, DEV-895); their rows stay as measured.
 
 `supervisor` and `dense_architect` share one model (Qwen3.6-27B); their 11.4 vs
 10.8 is run-to-run noise, not a real difference. Same for the two MiniMax roles.
@@ -531,8 +532,7 @@ In `src/coding_model_client/config.py`, add to `THEME_STYLES`:
 ```
 
 And in `src/coding_model_client/models.py`, add to the fallback defaults. An
-agent with no theme still works — it just renders with the generic 🤖 default
-(as `deep_reviewer` and `supervisor` currently do).
+agent with no theme still works — it just renders with the generic 🤖 default.
 
 ### 4.5 Tuning VRAM
 
