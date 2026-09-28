@@ -47,6 +47,7 @@ Run Python scripts from the repo root with `venv/bin/python scripts/<name>`.
 | `_llama_bench.py` | Shared harness for the benchmarks above. |
 | `sweep_cpu_moe.py` | Sweeps `--n-cpu-moe` per agent to find each model's expert-offload point. |
 | `eval_agents.py` + `eval_tasks.json` | Blind, counterbalanced head-to-head between two agents, scored by an external judge. |
+| `replay_synthesis.py <agent> [--specs …] [--population done] [--prompt-only]` | Replays every archived synthesis through `<agent>`, using the daemon's own synthesis code on scratch copies of the workspace and the database as they stood when synthesis started. It scores the output with the pipeline's tests, pinned to the commit the run was planned against, and writes one JSONL row per spec to `var/replay_synthesis/`. Read-only against the archive. Model calls hit the live server, so run it with nothing in flight. `--prompt-only` hashes the prompts without calling a model. |
 
 ## RAG maintenance
 
