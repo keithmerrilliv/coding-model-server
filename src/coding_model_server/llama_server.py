@@ -252,6 +252,11 @@ class LlamaServerManager:
         # When the swap guard first saw "reserved but no proxy behind it".
         # None whenever that condition does not hold.
         self._orphan_slot_since: "float | None" = None
+        # DEV-857: the slot file the running child restored, until a request
+        # completes on it. A restore can "succeed" and still crash the next
+        # decode; if the child dies while this is set, the file is quarantined
+        # rather than restored into every replacement child.
+        self._unconfirmed_restore: Optional[Path] = None
         self._watchdog_thread: Optional[Thread] = None
         # Generation token, not a boolean. Each _start_watchdog bumps it and
         # binds the new thread to the new value; each shutdown bumps it to
@@ -680,7 +685,9 @@ class LlamaServerManager:
         """Reload parked KV for this exact runtime signature, if any.
 
         A rejected or corrupt file is deleted so one bad save can't fail
-        every future start of that model. Best-effort like the save side.
+        every future start of that model. A restore that is accepted is
+        held as unconfirmed until a request completes on it (DEV-857).
+        Best-effort like the save side.
         """
         if not self.SLOT_SAVE_ENABLED:
             return
@@ -696,6 +703,8 @@ class LlamaServerManager:
             )
             if resp.status_code == 200:
                 logger.info("slot restore: reloaded KV from %s", fname)
+                with self.lock:
+                    self._unconfirmed_restore = path
             else:
                 logger.warning(
                     "slot restore rejected (HTTP %d) — discarding %s",
@@ -703,6 +712,37 @@ class LlamaServerManager:
                 path.unlink(missing_ok=True)
         except Exception as e:
             logger.warning("slot restore skipped: %s", e)
+
+    def _confirm_restore(self) -> None:
+        """A request completed on the restored KV: the file is sound."""
+        with self.lock:
+            self._unconfirmed_restore = None
+
+    def _quarantine_unconfirmed_restore(self) -> None:
+        """The child died before any request completed on the KV it restored.
+
+        Run 73 lost 13 calls and an infrastructure gate this way: MiniMax's
+        parked slot restored with HTTP 200 and then aborted the next decode,
+        and every replacement child restored it again. A cache miss costs one
+        re-prefill, so the file is moved aside after one crash rather than
+        trusted a second time. It is kept, not deleted, for diagnosis.
+        """
+        with self.lock:
+            path, self._unconfirmed_restore = self._unconfirmed_restore, None
+        if path is None or not path.is_file():
+            return
+        dest_dir = self._slot_save_dir.parent / "kv_cache_quarantine"
+        try:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            path.replace(dest_dir / path.name)
+            logger.warning(
+                "slot restore: child died before a request completed on the "
+                "KV restored from %s — quarantined to %s (DEV-857)",
+                path.name, dest_dir)
+        except OSError as e:
+            logger.warning("slot quarantine of %s failed (%s) — deleting it",
+                           path.name, e)
+            path.unlink(missing_ok=True)
 
     def _trim_slot_cache_dir(self) -> None:
         """Drop oldest save files until the directory fits the size cap."""
@@ -745,6 +785,9 @@ class LlamaServerManager:
                 return
             self._watchdog_generation += 1  # invalidate the current watchdog
             self._state = _STATE_STOPPING
+            # The restore belongs to the child going away; the next child's
+            # own restore (if any) is the only one it can be blamed for.
+            self._unconfirmed_restore = None
             self.process = None
             self.current_model_path = None
             self.current_model_config = None
@@ -1126,6 +1169,7 @@ class LlamaServerManager:
                         "llama-server child is gone (state=%s) — clearing stale "
                         "state and starting a fresh one", prev_state,
                     )
+                    self._quarantine_unconfirmed_restore()
                 elif same_path:
                     logger.info(
                         "Runtime swap (same model file, different config) for %s",
@@ -1713,6 +1757,7 @@ class LlamaServerManager:
             logger.info("[%s] llama-server proxy response (%d chars): %s",
                          rid, len(full_text), repr(full_text[:2000]))
 
+            self._confirm_restore()
             final_chunk = build_stream_chunk(completion_id, model_id, finish=True,
                                              finish_reason=finish_reason or "stop")
             yield f"data: {json.dumps(final_chunk)}\n\n"
@@ -1772,6 +1817,7 @@ class LlamaServerManager:
                     detail=f"upstream inference error (request_id={rid})",
                 )
 
+            self._confirm_restore()
             result = resp.json()
             message = result["choices"][0].get("message", {})
             text = message.get("content") or ""

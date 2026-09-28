@@ -185,3 +185,43 @@ def test_trim_removes_oldest_over_budget(mgr, monkeypatch):
     mgr._trim_slot_cache_dir()
     assert not older.exists(), "oldest file must be evicted first"
     assert newer.exists()
+
+
+# ── DEV-857: a restore that "succeeds" and then crashes the child ────────
+
+def _restored(mgr, sig=("m.gguf", 131072)):
+    path = mgr._slot_save_dir / mgr._slot_cache_filename(sig)
+    path.write_bytes(b"kv")
+    mgr._session = _fake_session()
+    mgr._restore_slot_state(sig)
+    return path
+
+
+def test_an_accepted_restore_is_held_as_unconfirmed(mgr):
+    path = _restored(mgr)
+    assert mgr._unconfirmed_restore == path
+
+
+def test_a_child_death_before_any_completion_quarantines_the_file(mgr):
+    """Run 73: MiniMax restored its slot with HTTP 200 and aborted the next
+    decode, and every replacement child restored the same file again."""
+    path = _restored(mgr)
+    mgr._quarantine_unconfirmed_restore()
+    assert not path.exists()
+    assert (mgr._slot_save_dir.parent / "kv_cache_quarantine" / path.name).exists()
+    assert mgr._unconfirmed_restore is None
+
+
+def test_a_completed_request_confirms_the_restore(mgr):
+    path = _restored(mgr)
+    mgr._confirm_restore()
+    mgr._quarantine_unconfirmed_restore()
+    assert path.exists()
+
+
+def test_a_rejected_restore_leaves_nothing_unconfirmed(mgr):
+    sig = ("m.gguf", 131072)
+    (mgr._slot_save_dir / mgr._slot_cache_filename(sig)).write_bytes(b"stale")
+    mgr._session = _fake_session(post_status=400)
+    mgr._restore_slot_state(sig)
+    assert mgr._unconfirmed_restore is None
