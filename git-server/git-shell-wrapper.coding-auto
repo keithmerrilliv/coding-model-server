@@ -6,13 +6,13 @@
 #
 # Confines the principal to git-shell AND to the phase-0 pilot repo: git-shell
 # alone would stop interactive logins and non-git commands, but not a
-# `git-upload-pack /srv/private/git/SomethingElse.git` — repo scoping is this
+# `git-upload-pack /srv/git/SomethingElse.git` — repo scoping is this
 # wrapper's job. Add repos here (and their pre-receive hooks) as later DEV-400
 # phases widen the pilot.
 
 case "$SSH_ORIGINAL_COMMAND" in
-    "git-receive-pack '/srv/private/git/JSONParser.git'" | \
-    "git-upload-pack '/srv/private/git/JSONParser.git'")
+    "git-receive-pack '/srv/git/JSONParser.git'" | \
+    "git-upload-pack '/srv/git/JSONParser.git'")
         exec git-shell -c "$SSH_ORIGINAL_COMMAND"
         ;;
     *)

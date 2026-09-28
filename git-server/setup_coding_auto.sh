@@ -17,19 +17,25 @@
 #      confinement is the forced command, see git-shell-wrapper.coding-auto).
 #   2. Installs the forced-command wrapper and authorized_keys entry
 #      (restrict = no pty, no forwarding, no X11, no agent).
-#   3. Grants the principal write access to JSONParser.git only: chgrp to
-#      coding-auto, group-writable + setgid dirs, core.sharedRepository=group.
-#      Adds youruser to the coding-auto group so objects the pipeline
-#      writes stay readable/gc-able by the operator.
+#   3. Grants the principal write access to JSONParser.git only: the repo
+#      lives in the shared git area (/srv/git, mode 2770 git:git) and is
+#      chgrp'd to `git`, group-writable + setgid dirs,
+#      core.sharedRepository=group. Adds both the principal and youruser
+#      to the `git` group, which also gives the principal traversal into
+#      /srv/git (no ACL needed). Repo scoping is the wrapper's job.
 #   4. Installs the pre-receive hook from this directory (create-only
-#      refs/auto/spec/<id>/attempt-<n> namespace for this principal).
+#      refs/auto/spec/<id>/attempt-<n> namespace for this principal), and
+#      makes it and hooks/ non-group-writable: the principal is in the
+#      repo's group, so a group-writable hook would let it rewrite its own
+#      guard.
 #
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PRINCIPAL=coding-auto
 OPERATOR=youruser
-REPO=/srv/private/git/JSONParser.git
+REPO=/srv/git/JSONParser.git
+REPO_GROUP=git
 PUBKEY="/home/${OPERATOR}/.ssh/coding_auto_ed25519.pub"
 
 if [[ $EUID -ne 0 ]]; then
@@ -66,27 +72,23 @@ chmod 600 "/home/${PRINCIPAL}/.ssh/authorized_keys"
 echo "==> authorized_keys installed (restrict + forced command)"
 
 # 3. Repo write access, scoped to the pilot repo. setgid keeps new objects in
-# the coding-auto group so both sides can read what the other writes.
-chgrp -R "$PRINCIPAL" "$REPO"
+# the shared group so both sides can read what the other writes.
+chgrp -R "$REPO_GROUP" "$REPO"
 chmod -R g+rw "$REPO"
 find "$REPO" -type d -exec chmod g+s {} +
 git -C "$REPO" config core.sharedRepository group
-usermod -aG "$PRINCIPAL" "$OPERATOR"
-echo "==> ${REPO} group-writable by ${PRINCIPAL}; ${OPERATOR} added to group (re-login to pick it up)"
+usermod -aG "$REPO_GROUP" "$PRINCIPAL"
+usermod -aG "$REPO_GROUP" "$OPERATOR"
+echo "==> ${REPO} group-writable by ${REPO_GROUP}; ${PRINCIPAL} and ${OPERATOR} in ${REPO_GROUP} (re-login to pick it up)"
 
-# Group ownership on the repo is not enough on its own: the parents are
-# 0700 ${OPERATOR}, so the principal cannot traverse INTO them and every
-# push dies at repo-open with "does not appear to be a git repository" —
-# before the hook ever runs, which makes a broken setup look like a
-# working one (every acceptance push "correctly rejected", for the wrong
-# reason). Grant traverse to exactly this principal via ACL rather than
-# `chmod o+x`: x-without-r means it can walk the path but not list it, and
-# an ACL keeps the grant off every other user of a tree named "private".
-REPO_PARENT="$(dirname "$REPO")"
-for parent in "$(dirname "$REPO_PARENT")" "$REPO_PARENT"; do
-    setfacl -m "u:${PRINCIPAL}:x" "$parent"
-    echo "==> traverse ACL on ${parent} for ${PRINCIPAL}"
-done
+# Traversal: /srv/git is 2770 git:git, so membership in ${REPO_GROUP} (above)
+# is what lets the principal walk INTO the repo. If it cannot, every push dies
+# at repo-open with "does not appear to be a git repository" — before the hook
+# ever runs — which makes a broken setup look like a working one (every
+# acceptance push "correctly rejected", for the wrong reason). Check it here.
+PARENT_MODE="$(stat -c '%a %G' "$(dirname "$REPO")")"
+[[ "$PARENT_MODE" == "2770 ${REPO_GROUP}" ]] || \
+    echo "WARNING: $(dirname "$REPO") is '${PARENT_MODE}', expected '2770 ${REPO_GROUP}'" >&2
 
 # git refuses to operate on a repo owned by another user ("detected dubious
 # ownership") — here the owner is the operator and the writer is the
@@ -98,18 +100,19 @@ sudo -u "$PRINCIPAL" env HOME="/home/${PRINCIPAL}" \
 echo "==> safe.directory exception for ${PRINCIPAL} on ${REPO}"
 
 # 4. Hook (source of truth in this directory).
-install -o "$OPERATOR" -g "$PRINCIPAL" -m 755 \
+install -o "$OPERATOR" -g "$REPO_GROUP" -m 750 \
     "${SCRIPT_DIR}/pre-receive.coding-auto" "${REPO}/hooks/pre-receive"
-echo "==> pre-receive hook installed"
+chmod g-w "${REPO}/hooks"
+echo "==> pre-receive hook installed (not writable by ${PRINCIPAL})"
 
 cat <<'EOF'
 
 Done. Acceptance (run as the operator, from anywhere with the private key):
 
   alias gpush="GIT_SSH_COMMAND='ssh -i ~/.ssh/coding_auto_ed25519 -o IdentitiesOnly=yes' \
-      git -C /tmp/jsonparser-accept push ssh://coding-auto@localhost/srv/private/git/JSONParser.git"
+      git -C /tmp/jsonparser-accept push ssh://coding-auto@localhost/srv/git/JSONParser.git"
 
-  git clone /srv/private/git/JSONParser.git /tmp/jsonparser-accept
+  git clone /srv/git/JSONParser.git /tmp/jsonparser-accept
   gpush HEAD:refs/auto/spec/test/attempt-1     # must succeed -- CHECK THIS FIRST
 
 Read the first result before trusting any rejection below it. A setup broken
