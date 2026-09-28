@@ -1,7 +1,6 @@
 """DEV-124 — design-gate rejection notes must actually reach the architect.
 
-In default mode (AUTONOMOUS_SUPERVISOR=0) the legacy branch stored the
-human's rejection notes in a synthetic CLARIFICATION gate — a channel only
+The rejection branch used to store the human's rejection notes in a synthetic CLARIFICATION gate — a channel only
 the planner reads — and never incremented the architect task's retry count.
 _run_architect only looks for feedback when retry_count > 0 (via
 _latest_architect_feedback, which reads design_review_feedback.md), so the
@@ -33,10 +32,8 @@ def _reject_design(db, spec, task, notes):
     return gate
 
 
-def test_rejection_notes_land_in_the_architect_feedback_channel(
-        db, spec_arch, monkeypatch):
+def test_rejection_notes_land_in_the_architect_feedback_channel(db, spec_arch):
     spec, task = spec_arch
-    monkeypatch.setattr(d, "SUPERVISOR_ENABLED", False)
     _reject_design(db, spec, task, "add error handling to the API layer")
 
     d._check_execution_gate(db, spec, db.get_task(task.id))
@@ -51,12 +48,10 @@ def test_rejection_notes_land_in_the_architect_feedback_channel(
     assert "add error handling" in fb.read_text()
 
 
-def test_feedback_flows_through_latest_architect_feedback(
-        db, spec_arch, monkeypatch):
+def test_feedback_flows_through_latest_architect_feedback(db, spec_arch):
     # The exact reader _run_architect uses on its re-run must return the
     # notes (and consume the file so they don't bleed into later cycles).
     spec, task = spec_arch
-    monkeypatch.setattr(d, "SUPERVISOR_ENABLED", False)
     _reject_design(db, spec, task, "the cache invariant is wrong")
 
     d._check_execution_gate(db, spec, db.get_task(task.id))
@@ -69,12 +64,10 @@ def test_feedback_flows_through_latest_architect_feedback(
     )
 
 
-def test_each_rejection_cycle_increments_the_retry_count(
-        db, spec_arch, monkeypatch):
+def test_each_rejection_cycle_increments_the_retry_count(db, spec_arch):
     # The regenerate loop is no longer invisible: every human rejection now
     # advances retry_count instead of leaving it pinned at 0.
     spec, task = spec_arch
-    monkeypatch.setattr(d, "SUPERVISOR_ENABLED", False)
 
     for round_no, notes in enumerate(["first pass", "second pass"], start=1):
         db.update_task_status(task.id, TaskStatus.BLOCKED_ON_REVIEW)

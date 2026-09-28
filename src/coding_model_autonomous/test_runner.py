@@ -447,7 +447,7 @@ def _run_confined(
             except (ProcessLookupError, PermissionError, OSError):
                 proc.kill()
             # Group is dead; the drain returns. Surface partial output so
-            # the supervisor / reviewer can diagnose the hang.
+            # the reviewer can diagnose the hang.
             try:
                 out, err = proc.communicate(timeout=10)
             except Exception:

@@ -42,7 +42,7 @@ def test_missing_usage_passes_through():
 
 
 def test_tool_calls_with_empty_content_are_legitimate():
-    # The supervisor's native decide() returns tool_calls and no content.
+    # A forced native tool call returns tool_calls and no content.
     assert guard(tool_calls=[{"function": {"name": "decide"}}]) is None
 
 

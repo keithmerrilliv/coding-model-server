@@ -216,25 +216,6 @@ def test_parse_cited_paths_full_and_basename():
     assert "shared/t.ts" not in cited  # 'anything' must not match 't.ts'
 
 
-def test_retry_architect_resets_downstream_tasks(db):
-    # Supervisor design-revision (retry→architect) must reset the implementer AND
-    # reviewer to PENDING — else the revised design is never re-implemented and
-    # the reviewer judges stale code against a new design.
-    spec = db.create_spec(title="demo", source_md_path="spec.md")
-    a = db.create_task(spec_id=spec.id, agent="dense_architect", role="architect", title="a")
-    i = db.create_task(spec_id=spec.id, agent="implementer", role="implementer", title="i")
-    r = db.create_task(spec_id=spec.id, agent="reviewer", role="reviewer", title="r")
-    for t in (a, i, r):
-        db.update_task_status(t.id, TaskStatus.DONE)
-    reviewer = db.get_task(r.id)  # retry originates at the reviewer (test failure)
-    d._retry_role_with_feedback(db, db.get_spec(spec.id), "architect",
-                                "the design's formula is wrong", current_task=reviewer)
-    assert db.get_task(a.id).status is TaskStatus.PENDING
-    assert db.get_task(i.id).status is TaskStatus.PENDING   # <-- the fix
-    assert db.get_task(r.id).status is TaskStatus.PENDING
-    assert db.get_task(a.id).retry_count == 1
-
-
 def _architect_spec(db):
     spec = db.create_spec(title="demo", source_md_path="spec.md")
     spec_dir = db.spec_dir(spec.id)

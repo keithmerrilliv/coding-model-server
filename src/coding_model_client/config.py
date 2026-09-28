@@ -132,7 +132,6 @@ THEME_STYLES = {
     # DEV-154: these two existed in the server registry but not here, so
     # they rendered with the default robot theme.
     "deep_reviewer":     {"color": COLORS['CYAN'],    "icon": "\U0001f52c", "prompt": "Deep Review"},
-    "supervisor":        {"color": COLORS['HEADER'],  "icon": "\U0001f9ed", "prompt": "Supervisor"},
     # DEV-692: Muse-Glimmer, a retry-only slot in the implementer rotation.
     "glimmer_implementer": {"color": COLORS['GREEN'],   "icon": "\u2728",     "prompt": "Glimmer Impl"},
     "default":           {"color": COLORS['WARNING'], "icon": "\U0001f916", "prompt": "Agent"},

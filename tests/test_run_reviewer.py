@@ -293,7 +293,7 @@ def test_parse_error_persists_raw_and_retries(db, spec_and_task):
 
 def test_parse_error_soft_fails_to_retry_when_exhausted(db, spec_and_task):
     # When reviewer re-runs are exhausted, an unparseable review becomes a soft
-    # FAIL routed through _attempt_retry (supervisor → implementer/design) — NOT
+    # FAIL routed through _attempt_retry (outcome.dispose charges it) — NOT
     # a direct spec failure (the old behavior that killed specs on one truncation).
     spec, task, spec_dir = spec_and_task
     if not db.list_tasks_for_spec_by_role(spec.id, "implementer"):

@@ -125,7 +125,7 @@ class TestThinkingStripperTruncation:
     def test_clean_stop_still_emits_a_hybrid_answer(self):
         # Qwen3.6-style hybrid in non-thinking mode: template says thinking,
         # output has no tags, finish is a clean stop. Dropping this would eat
-        # every response of the supervisor/dense_architect agents.
+        # every response of the dense_architect agent.
         s = ThinkingStripper()
         s.feed("a real answer with no tags")
         assert s.flush(truncated=False) == "a real answer with no tags"

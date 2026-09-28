@@ -246,7 +246,7 @@ class TestSoleFit:
         calls = []
         hooks = Hooks(max_retries=lambda: 5,
                       synthesize=lambda *a: calls.append(a) or None,
-                      supervisor=None, reviewer_parse_retries=lambda: 1)
+                      reviewer_parse_retries=lambda: 1)
         # attempt 0 fails; attempt 1 is a sole fit on the same agent and fails identically
         d0 = dispose(db, spec, db.get_task(task.id), self._fail(), hooks, reviewer_task=rev)
         assert d0.action == "charge"

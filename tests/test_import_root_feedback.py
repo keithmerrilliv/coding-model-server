@@ -117,7 +117,7 @@ def test_T8_end_to_end_through_dispose(tmp_path):
         impl_task = db.get_task(
             db.create_task(spec_id=spec.id, agent="implementer", role="implementer", title="implement").id
         )
-        hooks = Hooks(max_retries=lambda: 5, synthesize=None, supervisor=None, reviewer_parse_retries=lambda: 1)
+        hooks = Hooks(max_retries=lambda: 5, synthesize=None, reviewer_parse_retries=lambda: 1)
         
         f = Failure(FailureClass.BUILD_FAILURE, "implementer", "build_check", SRC_OUT, feedback=SRC_OUT)
         d = dispose(db, spec, impl_task, f, hooks)

@@ -4,8 +4,8 @@ The daemon reaches the outside world through two seams and the tier fakes
 exactly those, one level BELOW the daemon's own code so its handling runs for
 real:
 
-* ``post_chat_completion`` — the HTTP call under ``executor.call_agent``,
-  ``planner.call_planner`` and ``supervisor.decide``. The fake returns a
+* ``post_chat_completion`` — the HTTP call under ``executor.call_agent`` and
+  ``planner.call_planner``. The fake returns a
   Response stand-in, so ``call_agent`` still does its own ``raise_for_status``,
   usage/finish_reason bookkeeping and truncation warning. Faults are the ones
   live runs produced: dead transport, timeout, HTTP 413/502, empty content, an
@@ -27,7 +27,7 @@ from typing import Any, Callable
 import requests
 
 import coding_model_server.orchestrator_daemon as d
-from coding_model_autonomous import executor, planner, supervisor
+from coding_model_autonomous import executor, planner
 
 # ── role detection ───────────────────────────────────────────────────────────
 # Each role's system prompt opens with a fixed sentence; the fake keys its
@@ -42,7 +42,6 @@ ROLE_NEEDLES: list[tuple[str, str]] = [
     ("implementer", "You are the IMPLEMENTER agent"),
     ("reviewer", "You are the REVIEWER"),
     ("synthesis", "You are a code-synthesis agent"),
-    ("supervisor", "SUPERVISOR"),
 ]
 
 
@@ -156,7 +155,7 @@ class FakeModelServer:
         return self
 
     def install(self, monkeypatch) -> "FakeModelServer":
-        for mod in (executor, planner, supervisor):
+        for mod in (executor, planner):
             monkeypatch.setattr(mod, "post_chat_completion", self.post)
         return self
 

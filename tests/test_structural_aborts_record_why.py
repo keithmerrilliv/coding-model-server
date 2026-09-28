@@ -2,7 +2,7 @@
 
 Twelve sites failed a spec with a bare ``update_spec_status(..., FAILED)`` —
 state-machine aborts (missing source markdown, an unparseable plan, no
-phases, a supervisor decision that cannot be applied). They are genuinely not
+phases). They are genuinely not
 agent failures and their routing is untouched. But a spec that died that way
 left no ``failure_classified`` row at all, so "why did this spec fail" had two
 different answers depending on which branch ended it, and DEV-532's invariant

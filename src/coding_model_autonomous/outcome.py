@@ -28,8 +28,8 @@ response were each filed as if the code had been judged — runs 19, 20 and
 ``dispose`` is the only place that requeues, rotates, charges a retry, opens
 a synthetic gate or fails a spec. Every disposition is one
 ``FAILURE_CLASSIFIED`` event, which is the taxonomy DEV-529 asked for.
-The daemon supplies the two things this module must not import — the
-synthesis escape hatch and the supervisor — as :class:`Hooks`.
+The daemon supplies what this module must not import — the synthesis escape
+hatch — as :class:`Hooks`.
 """
 from __future__ import annotations
 
@@ -239,15 +239,11 @@ class Hooks:
 
     ``synthesize(db, spec, impl_task, reviewer_task, feedback)`` is the
     exhaustion escape hatch: it runs synthesis and either opens the release
-    gate or returns a terminal Failure. ``supervisor(db, spec, task,
-    failure)`` returns True when the supervisor Strategy handled the
-    failure (only consulted for gate rejections and test failures, the two
-    places it was ever consulted). ``max_retries`` is read at call time so
-    tests can pin it.
+    gate or returns a terminal Failure. ``max_retries`` is read at call time
+    so tests can pin it.
     """
     max_retries: Callable[[], int]
     synthesize: Optional[Callable[..., "Failure | None"]] = None
-    supervisor: Optional[Callable[..., bool]] = None
     reviewer_parse_retries: Callable[[], int] = lambda: 1
 
 
@@ -936,15 +932,6 @@ def dispose(db: Any, spec: Any, task: Any, failure: Failure, hooks: Hooks,
         return Disposition(action, failure, consecutive=consecutive)
 
     # ── verdict ──────────────────────────────────────────────────────────
-    if hooks.supervisor is not None and failure.source in ("gate", "tests"):
-        try:
-            if hooks.supervisor(db, spec, task, failure):
-                _record(db, spec, task, failure, "supervisor", 0)
-                return Disposition("handled", failure, "supervisor")
-        except Exception:
-            logger.warning("spec %s: supervisor strategy raised; using the default "
-                           "disposition", spec.id, exc_info=True)
-
     charge_role = failure.charge_role or failure.role
     max_retries = hooks.max_retries()
 

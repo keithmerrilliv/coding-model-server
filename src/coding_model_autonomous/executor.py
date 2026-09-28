@@ -87,7 +87,7 @@ TESTABILITY_CHECK_MAX_ROUNDS = int(
     os.getenv("AUTONOMOUS_TESTABILITY_CHECK_MAX_ROUNDS", "2"))
 
 # Robustness: how many times to re-run the reviewer when its output is
-# truncated/unparseable before treating it as a soft FAIL (→ supervisor/retry)
+# truncated/unparseable before treating it as a soft FAIL (→ retry)
 # instead of failing the whole spec. The 122B reviewer's degenerate truncation
 # is intermittent, so one re-run often recovers it.
 REVIEWER_PARSE_RETRIES = int(os.getenv("AUTONOMOUS_REVIEWER_PARSE_RETRIES", "1"))
@@ -1969,7 +1969,7 @@ def build_architect_message(spec_md: str,
                             standing_rules: str | None = None,
                             ) -> list[dict[str, str]]:
     user_parts: list[str] = []
-    # On a re-run (design-review rejection or supervisor design-revision), the
+    # On a re-run (a human or design-review rejection), the
     # prior design led to the failure below. The implementer builds the design
     # faithfully, so a recurring failure means the DESIGN is wrong/under-specified
     # — fix it here rather than regenerating the same document.

@@ -2,8 +2,8 @@
 """coding-model-orchestrator daemon.
 
 Long-running process that drives autonomous-mode specs through their state
-machine. The full pipeline (plan → architect → implementer → reviewer →
-supervisor retry/replan) lives here.
+machine. The full pipeline (plan → architect → implementer → reviewer, with
+retries routed by outcome.dispose) lives here.
 
 State transitions:
 
@@ -21,8 +21,8 @@ State transitions:
                                                 clarification round)
 
     EXECUTING ──> [architect → review-gate → implementer → review-gate →
-                   reviewer → review-gate → COMPLETED, with supervisor-
-                   driven retries on review rejection or test failure]
+                   reviewer → review-gate → COMPLETED, with retries on
+                   review rejection or test failure routed by outcome.dispose]
 
 The daemon talks to the coding_model_autonomous SQLite store directly (it shares
 the file with coding-model-server) and to the coding-model-server inference HTTP API for
@@ -98,8 +98,6 @@ from coding_model_autonomous.test_runner import run_tests
 from coding_model_autonomous.retry_policy import (
     _PRESERVE_ON_RETRY,
     _clean_spec_dir_for_retry,
-    _latest_supervisor_feedback,
-    _load_prior_decisions,
     _read_retry_attempts,
     choose_agent,
     _snapshot_retry,
@@ -127,7 +125,6 @@ from coding_model_autonomous.executor import (
     parse_reviewer_response,
     summarize_written_files,
 )
-from coding_model_autonomous import supervisor as _supervisor
 from coding_model_autonomous.workspace import (
     ACTION_RENAMED, ATTEMPT_ROLES, REFUSALS, ArtifactLedger,
 )
@@ -157,7 +154,6 @@ GATE_REPORT_INTERVAL = float(os.getenv("ORCHESTRATOR_GATE_REPORT_INTERVAL", "300
 # bootstraps) no longer wait behind another spec's long agent call.
 SPEC_WORKERS = int(os.getenv("ORCHESTRATOR_SPEC_WORKERS", "4"))
 LOG_LEVEL = os.getenv("ORCHESTRATOR_LOG_LEVEL", "INFO").upper()
-SUPERVISOR_ENABLED = os.getenv("AUTONOMOUS_SUPERVISOR", "0") == "1"
 # DEV-714: let the architect read files it was not served. On by default —
 # DEV-702 measured the same marker protocol in eval and the tool-using arm won
 # 5-1, and the failure it addresses (designing against an API nobody showed
@@ -1243,8 +1239,8 @@ _ROLE_TO_GATE_TYPE = {
 }
 
 # Worker roles in pipeline order. Used to reset downstream tasks when an earlier
-# role is retried — e.g. a supervisor design-revision (retry→architect) must also
-# re-run the implementer + reviewer, else the revised design is never built.
+# role is retried — e.g. an implementer retry must also re-run the reviewer,
+# else the reviewer judges code that has since been replaced.
 _ROLE_ORDER = {"architect": 0, "implementer": 1, "reviewer": 2}
 
 
@@ -1312,43 +1308,19 @@ class SynthesisNoVerdict(Exception):
         self.failure = failure
 
 
-def _hooks(*, supervisor: bool = True) -> Hooks:
+def _hooks() -> Hooks:
     """What outcome.dispose needs from the daemon (DEV-629)."""
     return Hooks(
         max_retries=lambda: MAX_RETRIES,
         synthesize=_synthesize_or_fail,
-        supervisor=_supervisor_strategy if supervisor else None,
         reviewer_parse_retries=lambda: executor.REVIEWER_PARSE_RETRIES,
     )
 
 
 def _dispose(db: Database, spec: Spec, task, failure: Failure, *,
-             reviewer_task=None, supervisor: bool = True) -> "_outcome.Disposition":
-    return _outcome.dispose(db, spec, task, failure, _hooks(supervisor=supervisor),
+             reviewer_task=None) -> "_outcome.Disposition":
+    return _outcome.dispose(db, spec, task, failure, _hooks(),
                             reviewer_task=reviewer_task)
-
-
-def _supervisor_strategy(db: Database, spec: Spec, task, failure: Failure) -> bool:
-    """The supervisor as a Strategy inside dispose: consulted for the two
-    verdicts it always was (a rejected gate, a failed test run), only when
-    enabled. False means "use the default disposition"."""
-    if not SUPERVISOR_ENABLED:
-        return False
-    if failure.source == "gate":
-        ctx = _build_supervisor_context(db, spec, task, outcome="review_reject",
-                                        reviewer_notes=failure.feedback)
-    else:
-        ctx = _build_supervisor_context(db, spec, task, outcome="test_fail",
-                                        test_output_excerpt=failure.feedback)
-    try:
-        decision = _supervisor.decide(ctx)
-    except _supervisor.SupervisorError as e:
-        logger.warning("spec %s: supervisor failed (%s); falling back to the "
-                       "default disposition", spec.id, e)
-        return False
-    _apply_supervisor_decision(db, spec, task, decision,
-                               legacy_feedback=failure.feedback)
-    return True
 
 
 def _repo_packages_for_spec(spec: Spec) -> set[str]:
@@ -1394,11 +1366,10 @@ def _process_executing(db: Database, spec: Spec) -> None:
       3. Either start it, check its review gate, or handle crash recovery.
     """
     tasks = db.list_tasks_for_spec(spec.id)
-    # Bootstrap when there are no tasks (fresh spec) OR every task is SKIPPED
-    # (post-replan: supervisor invalidated the prior task DAG and we re-entered
-    # EXECUTING with a new plan). Without this, a replan that completes leaves
-    # only DONE+SKIPPED tasks, _find_current_task returns None, and the spec
-    # gets falsely marked DONE without ever re-running the new plan.
+    # Bootstrap when there are no tasks (fresh spec) OR every task is SKIPPED.
+    # Nothing invalidates a task DAG wholesale mid-execution today, but a DAG
+    # of only DONE+SKIPPED tasks would make _find_current_task return None and
+    # the spec would be falsely marked DONE without running its plan.
     if not tasks or all(t.status == TaskStatus.SKIPPED for t in tasks):
         _bootstrap_tasks(db, spec)
         return
@@ -1549,8 +1520,8 @@ def _bootstrap_tasks(db: Database, spec: Spec) -> None:
     """Parse the planner's YAML into Task rows."""
     import yaml as _yaml
     if not spec.normalized_yaml:
-        # State machine reached EXECUTING without a plan (supervisor replan
-        # path or hand-edited DB row). Without this guard, safe_load(None)
+        # State machine reached EXECUTING without a plan (a hand-edited DB
+        # row). Without this guard, safe_load(None)
         # returns None and plan.get("phases") AttributeErrors with a stack
         # trace that's hard to read in the daemon log.
         _abort(db, spec, None, "EXECUTING with no normalized_yaml", phase="bootstrap")
@@ -1655,7 +1626,7 @@ def _testability_rounds_used(db: Database, spec_id: str) -> int:
 
 def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:  # noqa: C901
     spec_md = (spec_dir / spec.source_md_path).read_text()
-    # On a re-run (design-review rejection #3, or supervisor design-revision #4),
+    # On a re-run (a human design rejection, or a design-review rejection #3),
     # feed the failure back so the architect fixes the design instead of
     # regenerating the same document.
     rejection_notes = (_latest_architect_feedback(db, spec, spec_dir)
@@ -2150,9 +2121,10 @@ def _approved_gate_conditions(db: Database, spec_id: str, gate_type) -> "str | N
 
 def _latest_architect_feedback(db: Database, spec: Spec, spec_dir: Path) -> "str | None":
     """Feedback for an architect re-run, combining the two sources:
+      * human_design_feedback.md — the human's design-rejection notes, read on
+        every pass of the round and cleared on design approval (DEV-569).
       * design_review_feedback.md — the design-review rejection (#3), consumed
         once (deleted after reading so it doesn't bleed into a later cycle).
-      * the supervisor's design-revision directive (#4), from the decision log.
     Returns the combined notes, or None when there's nothing to inject."""
     parts: list[str] = []
     # DEV-569: the human's design-rejection notes survive the whole round —
@@ -2181,9 +2153,6 @@ def _latest_architect_feedback(db: Database, spec: Spec, spec_dir: Path) -> "str
         # the transient slot; injecting them twice wastes prompt space.
         if transient.strip() and transient.strip() != human.strip():
             parts.append(transient)
-    sup = _latest_supervisor_feedback(db, spec.id, target_role="architect")
-    if sup:
-        parts.append(sup)
     combined = "\n\n".join(p.strip() for p in parts if p and p.strip())
     return combined or None
 
@@ -5476,16 +5445,9 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
     framework = test_strategy.get("framework", "pytest")
     tests_required = test_strategy.get("required", True)
 
-    # Pull supervisor feedback if this is a reviewer retry. Without this the
-    # reviewer reruns blind, regenerating the same broken tests — observed in
-    # spec_d8ac6b36 where a missing `import pytest` survived 3 retries.
-    rejection_notes = _latest_supervisor_feedback(db, spec.id, target_role="reviewer") \
-        if task.retry_count > 0 else None
-
     def _reviewer_prompt(files, omitted=None):
         return build_reviewer_message(spec_md, design_md, files,
                                       test_framework=framework,
-                                      rejection_notes=rejection_notes,
                                       omitted_code=omitted)
 
     # DEV-633: the reviewer's implementation section had no budget of any kind,
@@ -5763,202 +5725,6 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
         _attempt_retry(db, spec, task, failure_detail)
 
 
-# ── Supervisor-driven transition layer (Phase 2.5) ──────────────────────────
-#
-# When SUPERVISOR_ENABLED, _attempt_retry and _handle_gate_rejection consult
-# the supervisor agent (coding_model_autonomous.supervisor) to decide the next
-# transition instead of routing on hardcoded if/elif by role.
-#
-# Limitations of the prototype:
-#   - request_clarification halts the spec on a CLARIFICATION gate; the human
-#     must respond manually. There is no auto-resume that re-invokes the
-#     supervisor with the response — that's a follow-up.
-#   - retry target_role=architect or reviewer records the supervisor's
-#     feedback as an event; the next architect run reads it through
-#     _latest_supervisor_feedback (in _latest_architect_feedback), and the
-#     next reviewer run reads it the same way in _run_reviewer.
-
-def _list_artifact_summaries(db: Database, spec_id: str,
-                             ) -> "list[_supervisor.ArtifactSummary]":
-    """Compact summary of all artifacts on disk — for the supervisor context."""
-    spec_dir = db.spec_dir(spec_id)
-    out = []
-    for art in db.list_artifacts(spec_id):
-        full = spec_dir / art.path
-        size = full.stat().st_size if full.exists() else None
-        item: _supervisor.ArtifactSummary = {"kind": art.kind.value, "path": art.path}
-        if size is not None:
-            item["bytes"] = size
-        out.append(item)
-    return out
-
-
-def _build_supervisor_context(db: Database, spec: Spec, task,
-                              outcome: "_supervisor.Outcome",
-                              *, reviewer_notes: str | None = None,
-                              test_output_excerpt: str | None = None,
-                              agent_error_excerpt: str | None = None,
-                              ) -> "_supervisor.SupervisorContext":
-    """Assemble the structured snapshot the supervisor reasons over."""
-    transitions_used = db.count_events(
-        spec_id=spec.id, kind=EventKind.SUPERVISOR_DECISION,
-    )
-    return {
-        "spec_id": spec.id,
-        "spec_title": spec.title,
-        "phase": task.role,
-        "role": task.role,
-        "outcome": outcome,
-        "retry_count": task.retry_count,
-        "transitions_used": transitions_used,
-        "plan_yaml": spec.normalized_yaml,
-        "reviewer_notes": reviewer_notes,
-        "test_output_excerpt": test_output_excerpt,
-        "agent_error_excerpt": agent_error_excerpt,
-        "artifacts": _list_artifact_summaries(db, spec.id),
-        "prior_decisions": _load_prior_decisions(db, spec.id),
-    }
-
-
-def _retry_role_with_feedback(db: Database, spec: Spec, target_role: str,
-                              feedback: str, *, current_task) -> None:
-    """Apply a supervisor-issued retry to *target_role*.
-
-    For implementer/reviewer-driven retries that originate from the reviewer
-    task (test failure or release rejection), we also reset the current_task
-    (typically the reviewer) to PENDING so it re-runs after the implementer.
-    """
-    role_tasks = db.list_tasks_for_spec_by_role(spec.id, target_role)
-    target = role_tasks[0] if role_tasks else None
-    if target is None:
-        _abort(db, spec, current_task,
-               f"supervisor said retry {target_role} but no such task",
-               phase="supervisor", role="supervisor")
-        return
-
-    if target.retry_count >= MAX_RETRIES:
-        _abort(db, spec, current_task,
-               f"supervisor said retry {target_role} but retry budget exhausted ({target.retry_count}/{MAX_RETRIES})",
-               phase="supervisor", role="supervisor")
-        return
-
-    if target_role == "implementer":
-        synth = db.create_gate(
-            spec_id=spec.id, task_id=target.id,
-            gate_type=GateType.CODE_REVIEW,
-            prompt_md="## Supervisor-issued retry",
-        )
-        db.respond_to_gate(synth.id, "rejected", notes=feedback)
-    elif target_role == "architect":
-        synth = db.create_gate(
-            spec_id=spec.id,
-            gate_type=GateType.CLARIFICATION,
-            prompt_md="## Supervisor-issued architect retry",
-        )
-        db.respond_to_gate(synth.id, "approved", notes=feedback)
-    # reviewer: no feedback channel; just rerun
-
-    db.increment_task_retry(target.id)
-    db.update_task_status(target.id, TaskStatus.PENDING)
-    # Reset EVERY downstream task so the chain re-runs against the target's new
-    # output. Retrying the architect must also reset the implementer (and
-    # reviewer): otherwise the revised design is never re-implemented and the
-    # reviewer would judge stale code against a new design. (Previously only the
-    # current_task was reset, leaving the implementer DONE on an architect retry.)
-    target_rank = _ROLE_ORDER.get(target_role, 0)
-    for t in db.list_tasks_for_spec(spec.id):
-        if t.id == target.id:
-            continue
-        if (_ROLE_ORDER.get(t.role, 99) > target_rank
-                and t.status not in (TaskStatus.PENDING, TaskStatus.SKIPPED)):
-            db.update_task_status(t.id, TaskStatus.PENDING)
-    logger.info("spec %s: supervisor retry %s (attempt %d/%d)",
-                spec.id, target_role, target.retry_count + 1, MAX_RETRIES)
-
-
-def _apply_supervisor_decision(db: Database, spec: Spec, task,
-                               decision: "_supervisor.SupervisorDecision",
-                               *, legacy_feedback: str | None) -> None:
-    """Translate a SupervisorDecision into DB state changes.
-
-    `legacy_feedback` is the failure_detail / reviewer_notes the legacy code
-    would have used — passed through when the supervisor declines to provide
-    its own feedback (defensive default for retry/replan).
-    """
-    db.record_event(
-        EventKind.SUPERVISOR_DECISION,
-        spec_id=spec.id, task_id=task.id,
-        payload={
-            "action": decision.action,
-            "target_role": decision.target_role,
-            "reason": decision.reason,
-            "feedback_to_inject": decision.feedback_to_inject,
-        },
-    )
-
-    if decision.action == "advance":
-        logger.info("spec %s: supervisor → advance: %s", spec.id, decision.reason)
-        db.update_task_status(task.id, TaskStatus.DONE)
-        return
-
-    if decision.action == "abort":
-        logger.warning("spec %s: supervisor → abort: %s", spec.id, decision.reason)
-        _outcome.terminate(db, spec, task, Failure(
-            FailureClass.ABORTED, task.role, "gate",
-            f"supervisor abort: {decision.reason}"))
-        return
-
-    if decision.action == "retry":
-        feedback = decision.feedback_to_inject or legacy_feedback or ""
-        logger.info("spec %s: supervisor → retry %s: %s",
-                    spec.id, decision.target_role, decision.reason)
-        # supervisor._parse_decision rejects a retry without a target_role.
-        assert decision.target_role is not None
-        _retry_role_with_feedback(db, spec, decision.target_role, feedback,
-                                  current_task=task)
-        return
-
-    if decision.action == "replan":
-        logger.info("spec %s: supervisor → replan: %s", spec.id, decision.reason)
-        feedback = decision.feedback_to_inject or legacy_feedback or ""
-        if feedback:
-            synth = db.create_gate(
-                spec_id=spec.id,
-                gate_type=GateType.CLARIFICATION,
-                prompt_md="## Supervisor-requested replan",
-            )
-            db.respond_to_gate(synth.id, "approved", notes=feedback)
-        # Mark ALL existing tasks SKIPPED (including DONE ones) so the new
-        # plan produces a fresh task DAG. Leaving DONE tasks in place causes
-        # _process_executing to skip the bootstrap branch and falsely mark
-        # the spec DONE without running the new plan.
-        for t in db.list_tasks_for_spec(spec.id):
-            if t.status != TaskStatus.SKIPPED:
-                db.update_task_status(t.id, TaskStatus.SKIPPED)
-        db.update_spec_status(spec.id, SpecStatus.PENDING_PLAN)
-        return
-
-    if decision.action == "request_clarification":
-        logger.info("spec %s: supervisor → request_clarification: %s",
-                    spec.id, decision.reason)
-        db.update_task_status(task.id, TaskStatus.BLOCKED_ON_REVIEW)
-        db.create_gate(
-            spec_id=spec.id, task_id=task.id,
-            gate_type=GateType.CLARIFICATION,
-            prompt_md=(
-                "## Supervisor needs clarification\n\n"
-                f"{decision.feedback_to_inject}\n\n"
-                "Approve with notes to provide an answer, or reject to abort."
-            ),
-        )
-        return
-
-    # Defensive: schema validation in supervisor.py should make this unreachable
-    _abort(db, spec, task,
-           f"unknown supervisor action {decision.action!r}",
-           phase="supervisor", role="supervisor")
-
-
 # Free (non-budget) harness-fix retries per spec. Capped so a model that
 # keeps emitting a broken harness still converges onto the normal retry
 # budget instead of looping forever.
@@ -6002,8 +5768,8 @@ def _harness_retry(db: Database, spec: Spec, task, spec_dir: Path,
     ArtifactLedger.open(db, spec, spec_dir).note(
         "failure_report.md", failure_detail)
 
-    # Same feedback channel _retry_role_with_feedback uses for implementer
-    # retries — a rejected CODE_REVIEW gate — minus the budget increment.
+    # Same feedback channel a charged implementer retry uses — a rejected
+    # CODE_REVIEW gate — minus the budget increment.
     gate = db.create_gate(
         spec_id=spec.id, task_id=impl_task.id,
         gate_type=GateType.CODE_REVIEW,
@@ -6025,8 +5791,7 @@ def _harness_retry(db: Database, spec: Spec, task, spec_dir: Path,
 
 def _attempt_retry(db: Database, spec: Spec, task, failure_detail: str) -> None:
     """A test-failure / reviewer-FAIL outcome at the reviewer stage: a
-    verdict against the implementer's budget (DEV-629). The supervisor, when
-    enabled, is consulted inside dispose as a Strategy."""
+    verdict against the implementer's budget (DEV-629)."""
     _dispose(db, spec, task, _test_failure(failure_detail))
 
 
@@ -6813,62 +6578,41 @@ def _synthesize_or_fail(db: Database, spec: Spec, impl_task, reviewer_task,
 def _latest_task_clarification(db: Database, spec_id: str, task_id: str):
     """Newest CLARIFICATION gate bound to *task_id*.
 
-    Supervisor request_clarification gates are the only CLARIFICATION gates
-    created with a task_id; the planner/architect feedback synthetics are
-    spec-level (task_id None) and must not match here.
+    outcome.park is the only creator of CLARIFICATION gates with a task_id: it
+    parks an attempt whose consecutive failures gave no verdict. The planner
+    and architect feedback synthetics are spec-level (task_id None) and must
+    not match here.
     """
     gates = [g for g in db.list_gates_for_spec(spec_id, GateType.CLARIFICATION)
              if g.task_id == task_id]
     return gates[-1] if gates else None
 
 
-def _resume_from_clarification(db: Database, spec: Spec, task, answer: str) -> None:
-    """A human answered the supervisor's question — feed the answer back.
+def _resume_from_clarification(db: Database, spec: Spec, task) -> None:
+    """A human approved a parked task's clarification gate: re-run the task.
 
-    Re-invokes the supervisor with outcome=clarification_answered so the
-    answer drives the next transition. Before DEV-122 the answer was read
-    by nothing: the spec parked in EXECUTING forever.
+    The gate's prompt names the infrastructure fault behind the no-verdicts,
+    so approving it means "fixed, try again". Before DEV-122 an approval was
+    read by nothing and the spec sat in EXECUTING forever.
     """
-    logger.info("spec %s: clarification answered for task %s — resuming",
-                spec.id, task.id)
-    if not SUPERVISOR_ENABLED:
-        # Supervisor toggled off since the gate was created. Deterministic
-        # un-wedge: re-run the parked phase.
-        logger.warning("spec %s: supervisor disabled; re-running %s after "
-                       "clarification", spec.id, task.role)
-        db.update_task_status(task.id, TaskStatus.PENDING)
-        return
-    ctx = _build_supervisor_context(
-        db, spec, task,
-        outcome="clarification_answered",
-        reviewer_notes=answer,
-    )
-    try:
-        decision = _supervisor.decide(ctx)
-    except _supervisor.SupervisorError as e:
-        logger.warning("spec %s: supervisor failed on clarification resume "
-                       "(%s); re-running %s", spec.id, e, task.role)
-        db.update_task_status(task.id, TaskStatus.PENDING)
-        return
-    _apply_supervisor_decision(db, spec, task, decision, legacy_feedback=answer)
+    logger.info("spec %s: clarification approved for task %s — re-running %s",
+                spec.id, task.id, task.role)
+    db.update_task_status(task.id, TaskStatus.PENDING)
 
 
 def _check_execution_gate(db: Database, spec: Spec, task) -> None:
     """Check the review gate for a task in BLOCKED_ON_REVIEW."""
-    # A supervisor request_clarification parks the task here with a
-    # CLARIFICATION gate bound to it — that gate, not the role's review
-    # gate, is what this tick must read. Before DEV-122 only the role gate
-    # was consulted, so the human's answer was read by nothing (spec wedged
-    # in EXECUTING), while a REJECTED role gate below re-invoked the
-    # supervisor every tick until the transition budget aborted the spec.
+    # outcome.park leaves the task here with a CLARIFICATION gate bound to
+    # it — that gate, not the role's review gate, is what this tick must
+    # read. Before DEV-122 only the role gate was consulted, so the human's
+    # answer was read by nothing and the spec wedged in EXECUTING.
     clar = _latest_task_clarification(db, spec.id, task.id)
     if clar is not None and clar.status != GateStatus.CANCELLED:
         if clar.status == GateStatus.PENDING:
             return  # waiting on the human's answer
         if clar.status == GateStatus.APPROVED:
-            answer = clar.reviewer_notes or ""
             db.cancel_gate(clar.id)  # consume first — never process twice
-            _resume_from_clarification(db, spec, task, answer)
+            _resume_from_clarification(db, spec, task)
             return
         # REJECTED: the gate says "reject to abort".
         db.cancel_gate(clar.id)
@@ -6904,21 +6648,18 @@ def _check_execution_gate(db: Database, spec: Spec, task) -> None:
                 pass
     elif gate.status == GateStatus.REJECTED:
         _handle_gate_rejection(db, spec, task, gate)
-        # If handling left the task parked in BLOCKED_ON_REVIEW (the
-        # request_clarification path), retire the rejected gate: leaving it
-        # REJECTED re-runs _handle_gate_rejection on it every tick —
-        # duplicate supervisor calls and CLARIFICATION gates (each mirrored
-        # to Jira) until the transition budget aborts the spec (DEV-122).
-        # Rejections that moved the task on (retry paths) keep their gate:
-        # _run_implementer reads REJECTED CODE_REVIEW gates for notes.
+        # If handling left the task parked in BLOCKED_ON_REVIEW, retire the
+        # rejected gate: leaving it REJECTED would re-run
+        # _handle_gate_rejection on it every tick (DEV-122). Rejections that
+        # moved the task on (retry paths) keep their gate: _run_implementer
+        # reads REJECTED CODE_REVIEW gates for notes.
         fresh = db.get_task(task.id)
         if fresh is not None and fresh.status == TaskStatus.BLOCKED_ON_REVIEW:
             db.cancel_gate(gate.id)
 
 
 def _handle_gate_rejection(db: Database, spec: Spec, task, gate) -> None:
-    """A human rejected a review gate: a verdict (DEV-629). The supervisor,
-    when enabled, is consulted inside dispose as a Strategy."""
+    """A human rejected a review gate: a verdict (DEV-629)."""
     _persist_human_design_feedback(db, spec, task, gate)
     _dispose(db, spec, task, _gate_rejection(task, gate))
 

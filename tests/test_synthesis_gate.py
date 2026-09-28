@@ -46,7 +46,7 @@ def exhausted_spec(db):
 
 
 def _run_retry(db, spec, reviewer_task, *, tests_pass, test_output):
-    """Drive _attempt_retry (supervisor off) into the synthesis branch with mocks."""
+    """Drive _attempt_retry into the synthesis branch with mocks."""
     synth_result = SimpleNamespace(
         files=[("impl.py", "def f():\n    return 2\n")],
     )

@@ -43,7 +43,6 @@ stateDiagram-v2
     plan_review --> failed: gate vanished (defensive)
     executing --> done: release gate approved
     executing --> failed: budget exhausted / unrecoverable
-    executing --> pending_plan: supervisor replans (AUTONOMOUS_SUPERVISOR=1 only)
     pending_plan --> cancelled: operator cancel
     plan_review --> cancelled: operator cancel
     executing --> cancelled: operator cancel
@@ -349,8 +348,6 @@ question it asks is whether the model's output was ever evaluated:
 
 Each disposition is one `failure_classified` event — the queryable taxonomy;
 its fields are fixed and listed in section 11.
-The supervisor, when enabled, is consulted inside `dispose` for rejected
-gates and failed test runs only, and only its own decisions bypass the table.
 
 ### Inside `dispose`
 
@@ -370,9 +367,7 @@ flowchart TD
     ROT -->|yes| ROTATE(["rotate<br/>PENDING, retry_count unchanged,<br/>next pick moves one agent on"])
     ROT -->|no| REQ(["requeue<br/>PENDING, retry_count unchanged"])
 
-    OUT -->|verdict| SUP{"supervisor on, source is<br/>gate or tests, and it acts?"}
-    SUP -->|yes| HAND(["handled"])
-    SUP -->|no| WHO{"who pays?<br/>charge_role, else role"}
+    OUT -->|verdict| WHO{"who pays?<br/>charge_role, else role"}
     WHO -->|architect| ACAP{"architect retry_count<br/>at MAX_RETRIES?"}
     ACAP -->|"yes: design_exhausted"| TERM
     ACAP -->|no| ACH(["charge the architect"])
@@ -393,8 +388,7 @@ flowchart TD
 ```
 
 Every box but `discarded` writes a `failure_classified` row whose
-`disposition` is the box's name; `handled` is recorded as `supervisor`. A
-synthesis that ends the spec writes two rows, `synthesize` and then
+`disposition` is the box's name. A synthesis that ends the spec writes two rows, `synthesize` and then
 `terminal`. `rotate` does not pick the next agent itself; the row it writes
 is what `outcome.rotation_offset` counts at the next dispatch (section 7).
 The caps come from `Failure.cap`: `AUTONOMOUS_NO_VERDICT_CAP` (5) unless
@@ -511,7 +505,6 @@ table to read first when a run ends somewhere surprising.
 | Context refresh window | 600 s | `AUTONOMOUS_CONTEXT_REFRESH_SECONDS` | How old a context fetched at a *symbolic* `base_ref` may be before the next role re-verifies it against the runner (section 8). `0` re-verifies at every role boundary; a pinned commit is never re-verified. |
 | Collision policy | rename | `AUTONOMOUS_COLLISION_POLICY` | What the artifact ledger does with a cross-role write at a produced path (section 4): `rename` or `refuse`. |
 | Shrink refusal | 0.25 / 40 | `AUTONOMOUS_SHRINK_REFUSE_RATIO`, `AUTONOMOUS_SHRINK_MIN_BASELINE_LINES` | A write under this fraction of the repository file's lines and declarations is refused; baselines smaller than the line floor are never checked. |
-| Supervisor transitions | 8 | `AUTONOMOUS_MAX_SUPERVISOR_TRANSITIONS` | Budget for the supervisor, which is **off by default** (`AUTONOMOUS_SUPERVISOR=0`). When enabled, it replaces the fixed rejection edges in diagram 3 with an agent decision; nothing else in this document changes. |
 
 **Three traps in the accounting**, each of which has cost a real run:
 

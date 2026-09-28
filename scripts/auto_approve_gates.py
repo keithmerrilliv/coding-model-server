@@ -2,8 +2,8 @@
 """Auto-approve every PENDING review gate for a spec, in a polling loop.
 
 Used to drive the autonomous pipeline through to terminal status without
-human intervention — the supervisor's transition decisions are still
-exercised via test failures, not gate rejections.
+human intervention — retries are still exercised via test failures, not gate
+rejections.
 
 Exits when the spec reaches a terminal status (done / failed / cancelled).
 

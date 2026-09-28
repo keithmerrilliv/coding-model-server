@@ -31,7 +31,7 @@ def _reviewer_gate_source() -> str:
     """The reviewer-completion block, from the test-run setup to the gate."""
     body = SRC.read_text()
     start = body.index("# Run tests if required")
-    end = body.index("# ── Supervisor-driven transition layer", start)
+    end = body.index("# Free (non-budget) harness-fix retries", start)
     return body[start:end]
 
 

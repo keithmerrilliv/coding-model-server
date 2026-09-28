@@ -1,4 +1,4 @@
-"""State-transition tests for the legacy (non-supervisor) retry path (DEV-129).
+"""State-transition tests for the retry path (DEV-129).
 
 _attempt_retry and _rotation_pick run exactly when a spec is already
 going wrong, and had zero coverage. These pin the normal (non-exhausted)

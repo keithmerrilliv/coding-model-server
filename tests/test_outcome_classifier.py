@@ -27,9 +27,9 @@ def spec_tasks(db):
     return spec, db.get_task(impl.id), db.get_task(rev.id)
 
 
-def hooks(max_retries=5, synthesize=None, supervisor=None):
+def hooks(max_retries=5, synthesize=None):
     return Hooks(max_retries=lambda: max_retries, synthesize=synthesize,
-                 supervisor=supervisor, reviewer_parse_retries=lambda: 1)
+                 reviewer_parse_retries=lambda: 1)
 
 
 def classified(db, spec_id):
@@ -257,19 +257,6 @@ class TestDisposeVerdict:
         assert db.get_task(impl.id).retry_count == 0
         d2 = dispose(db, spec, db.get_task(rev.id), f, hooks())
         assert d2.action == "charge" and db.get_task(impl.id).retry_count == 1
-
-    def test_supervisor_strategy_is_consulted_for_gate_and_tests_only(self, db, spec_tasks):
-        spec, impl, rev = spec_tasks
-        seen = []
-        def strategy(db_, spec_, task, failure):
-            seen.append(failure.source); return True
-        h = hooks(supervisor=strategy)
-        dispose(db, spec, db.get_task(rev.id),
-                Failure(FailureClass.REVIEW_REJECTED, "reviewer", "gate", "no", charge_role="implementer"), h)
-        dispose(db, spec, db.get_task(impl.id),
-                Failure(FailureClass.PARSE_FAILURE, "implementer", "parse", "no"), h)
-        assert seen == ["gate"]
-        assert db.get_task(impl.id).retry_count == 1  # the parse verdict took the default path
 
 
 class TestDisposeAfterTheSpecEnded:
