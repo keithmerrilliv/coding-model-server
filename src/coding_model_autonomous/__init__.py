@@ -10,10 +10,13 @@ Submodules, by role:
   kernel     workspace (artifact ledger) · outcome (failure classification and
              disposition) · context (one read, one prompt budget) ·
              retry_policy (what a retry keeps, and who retries)
-  agents     planner · executor (prompts, parsers, call_agent) ·
-             architect_tools · plan_paths · apply_edits · _http ·
+  agents     settings · prompts · _http (call_agent) · parsers · messages ·
+             normalize · executor (a re-exporting façade) · planner ·
+             architect_tools · plan_paths · apply_edits ·
              thinking (strip reasoning from a response)
-  guards     design_testability · swift_prechecks · swift_rules
+  languages  languages (detection, the pack interface) · languages.swift ·
+             .python · .javascript · .c_family
+  guards     design_testability · citations (cited diagnostics in repair)
   testing    test_runner (sandboxed dispatch, Mac runner transport) ·
              seccomp_filter · gate_output · delivery
   jira       jira_client · jira_sync

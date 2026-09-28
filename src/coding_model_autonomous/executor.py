@@ -9,6 +9,9 @@ The agent layer lives in six modules:
 * ``messages``  — what each role is sent, and the design-sized budgets
 * ``normalize`` — deterministic fixes and scans on generated files
 
+Language-specific knowledge (the Swift fixes, package.json pinning, the
+language detector) lives in the ``languages`` packs.
+
 Every name below lives in the module it is imported from and is re-exported
 here only so existing importers keep working. Read and patch a knob on
 ``settings``, and a function in its home module: a patch on this façade
@@ -34,9 +37,7 @@ from .settings import (  # noqa: F401
     REVIEWER_PARSE_RETRIES,
     _parse_memory_roles,
     AUTONOMOUS_MEMORY_ROLES,
-    _LANGUAGE_ALIASES,
     normalize_language,
-    _EXTENSION_LANGUAGES,
     language_from_paths,
     AUTONOMOUS_MEMORY_LANGUAGES,
     retrieval_decision,
@@ -118,9 +119,11 @@ from .parsers import (  # noqa: F401
     _LIST_MARKER_RE,
     parse_manifest_response,
 )
-from .normalize import (  # noqa: F401
+from .languages.javascript import (  # noqa: F401
     pin_version,
     _pin_package_json,
+)
+from .languages.swift.normalize import (  # noqa: F401
     _FOUNDATION_ONLY_SYMBOLS,
     _FOUNDATION_REEXPORTERS,
     _SWIFT_IMPORT_RE,
@@ -128,8 +131,10 @@ from .normalize import (  # noqa: F401
     _swift_code_only,
     _first_swift_code_line,
     declared_top_level_types,
-    protected_type_collisions,
     _ensure_foundation_import,
+)
+from .normalize import (  # noqa: F401
+    protected_type_collisions,
     normalize_boilerplate,
     _blank_ts_comments_and_strings,
     _ANY_TYPE_RE,

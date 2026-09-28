@@ -55,6 +55,27 @@ The layering release ([DEV-835](https://keith-merrill4.atlassian.net/browse/DEV-
     `executor` is a 190-line re-exporting façade. A script moved each statement verbatim. An AST comparison confirms all 152 names are unchanged except that knobs are now read as `settings.X` at call time. A one-token negative control proves the comparison can fail. Knobs have one home, because a from-import freezes a value and a patch on the façade reaches nothing. The daemon, planner and scripts import from the real modules. 91 test patches moved to `settings`, and 10 more to the module that actually reads the name. `test_agent_layer_boundaries.py` keeps it that way.
   - **`config.py` is split.** The roster (the model configs, with the measurements behind each, plus `AGENTS` and the aliases) moved to `roster.py`. The interactive agents' prompt texts (tool reference, budget guidance, macOS toolkit, executor prompt, few-shot, system prompts) moved to `agent_prompts.py`. `config.py` went from 940 lines to 92: the server settings, `resolve_agent` and `validate`, plus an explicit binding of every moved name onto `Config`. `Config` stays the one interface, read and patched as before. All 34 of its attributes compare deeply equal before and after, including every prompt string and the whole `AGENTS` dict, and `Config.AGENTS` is the roster's own dict, not a copy. `test_config_boundaries.py` stops other modules importing the roster or prompts past `Config`. The interactive client is untouched.
   - **Tests cannot reach the live inference server.** `tests/conftest.py`'s guard, which covered only the Mac runner's port, now also blocks :5000. It raises an error the transport does not retry, so a test that misses its stub fails at once. While the split was in progress, tests whose stubs sat on the façade sent real completions to the live server.
+  - **Languages have one home.** New package `coding_model_autonomous.languages` decides what language a file, a file set or a design is in, replacing the four separate detectors (`language_from_paths`, `has_swift`, `is_python_design`, `is_c_family_design`). Each language gets a pack behind one interface (`LanguagePack`), whose hooks are:
+    - standing prompt rules;
+    - rules the operator's `test_strategy` switches on;
+    - compiler fix hints;
+    - prechecks;
+    - declared types;
+    - test counting;
+    - file normalizers;
+    - the design rules the language opts into.
+
+    The packs:
+    - **Swift**: `swift_prechecks` and `swift_rules` moved in (`git mv`), along with the Foundation-import fix and the test counter.
+    - **Python**: the pytest counter and the seam-import rule.
+    - **JavaScript/TypeScript**: package.json pinning.
+    - **C-family**: detection.
+
+    The daemon, `messages`, `normalize`, `workspace` and `test_runner` name no language: they ask the packs. The repair round's cited diagnostics and cite-or-refuse are language-neutral, so they moved to `citations.py`. An AST comparison confirms all 67 moved definitions unchanged apart from named renames, and a one-token negative control proves the comparison can fail.
+
+    Design rules now **opt in** instead of being carved out. A rule runs only when every language the design's File Structure allocates files in opts into it. That changed six findings across the 472 archived designs, all of them false positives on one TypeScript design: completeness asked for a file for each type its `types.ts` declares. Completeness still fires on 79 Swift cases.
+
+    `test_languages.py` registers a new pack in a test and shows the daemon's precheck path serving it with no daemon edit. It also stops callers from reaching into a pack's modules past the interface. Test-output parsing stays in `diagnostics`, keyed by test framework rather than language.
 
 ## v0.5.0 — 2026-09-27
 

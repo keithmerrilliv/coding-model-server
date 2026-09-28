@@ -52,6 +52,7 @@ from enum import Enum
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Optional
 
+from . import languages
 from .models import ArtifactKind
 from .plan_paths import is_placeholder
 
@@ -298,14 +299,6 @@ class WriteOutcome:
         return f"`{self.path}` written by the {self.role}"
 
 
-# Suffixes whose files share one namespace per build target, so two of them
-# cannot coexist in the same directory no matter what they are called
-# (DEV-738). A sibling rename is containment only where the copy is
-# independently loadable; for these it is a guaranteed redeclaration.
-# Extend this set when a language is added, not speculatively — each entry
-# should be one we have actually compiled.
-SHARED_NAMESPACE_SUFFIXES = frozenset({".swift"})
-
 # Where a contained artifact goes when a sibling rename would be compiled.
 # Nothing under this prefix is a source directory of any target, so the copy
 # is preserved for inspection and participates in no build.
@@ -313,8 +306,16 @@ CONTAINED_DIR = "_contained"
 
 
 def shares_namespace_per_target(rel_path: str) -> bool:
-    """True when a sibling copy of *rel_path* would redeclare its contents."""
-    return PurePosixPath(rel_path).suffix.lower() in SHARED_NAMESPACE_SUFFIXES
+    """True when a sibling copy of *rel_path* would redeclare its contents.
+
+    Files of a language whose build target is one namespace cannot coexist
+    in the same directory no matter what they are called (DEV-738). A sibling
+    rename is containment only where the copy is independently loadable; for
+    these it is a guaranteed redeclaration. The language pack says which
+    languages those are (``shares_target_namespace``).
+    """
+    pack = languages.pack_for_path(rel_path)
+    return bool(pack and pack.shares_target_namespace)
 
 
 def renamed_path(rel_path: str, role: str) -> str:

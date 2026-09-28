@@ -15,9 +15,14 @@ import pytest
 from coding_model_autonomous import design_testability as dt
 
 # ── fixtures modelled on the real designs ────────────────────────────────────
+# Each allocates a Swift file: the Swift rules run only on a design whose
+# File Structure is in a language that opts into them.
 
 CLEAN = """\
 # Architecture: Demo
+
+## File Structure
+- `Sources/Demo/World.swift`
 
 ## Data Models
 - `Position`: `{ col: Int, row: Int }` — Equatable, Hashable
@@ -50,6 +55,9 @@ RUN6 = CLEAN.replace("- `Mushroom`: `{ hits: Int }` — Equatable",
 # Run 4: an enum with associated values, compared against a `.case` literal.
 RUN4_ENUM = """\
 # Architecture: Demo
+
+## File Structure
+- `Sources/Demo/World.swift`
 
 ## Data Models
 - `HitOutcome`: enum — `.mushroom(damage: Int)`, `.chain(id: Int)`, `.empty`

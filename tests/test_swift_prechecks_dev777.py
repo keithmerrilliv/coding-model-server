@@ -6,7 +6,7 @@ var/tasks_db/specs), plus a delivered-artifact shape as the negative control.
 The archive sweep (scripts/sweep_swift_prechecks.py) is the population-level
 check; these are the unit contracts.
 """
-from coding_model_autonomous import swift_prechecks as sp
+from coding_model_autonomous.languages.swift import prechecks as sp
 
 
 # ── class 1: `throws` missing on a test that uses `try` (run 48) ─────────────

@@ -709,11 +709,16 @@ coding-model-server/
 │       ├── architect_tools.py  #   The architect's bounded, read-only tool loop
 │       ├── plan_paths.py       #   Resolves the plan's phase paths against the target repo
 │       ├── apply_edits.py      #   Applies anchored SEARCH/REPLACE edit blocks
-│       ├── _http.py            #   HTTP access to the inference API for the agents
+│       │                       #   ── languages ──
+│       ├── languages/          #   The one language detector, and a pack per language
+│       │   ├── base.py         #     The pack interface: rules, prechecks, fixes, counting
+│       │   ├── swift/          #     Swift: prechecks, prompt rules, fixes, test counting
+│       │   ├── python.py       #     Python: pytest counting, the seam-import rule
+│       │   ├── javascript.py   #     JavaScript/TypeScript: package.json pinning
+│       │   └── c_family.py     #     C, C++, Objective-C(++): detection
 │       │                       #   ── guards ──
 │       ├── design_testability.py  # Can each criterion of a design be tested as written?
-│       ├── swift_prechecks.py  #   Static pre-dispatch checks on generated Swift
-│       ├── swift_rules.py      #   Swift guidance and repair targeting
+│       ├── citations.py        #   Cited diagnostics in retries and repair; cite-or-refuse
 │       │                       #   ── testing and delivery ──
 │       ├── test_runner.py      #   Sandboxed test dispatch (bwrap+seccomp) and the Mac runner transport
 │       ├── seccomp_filter.py   #   seccomp-BPF filter for sandboxed test runs

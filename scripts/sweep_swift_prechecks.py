@@ -25,7 +25,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from coding_model_autonomous import swift_prechecks as sp  # noqa: E402
+from coding_model_autonomous.languages.swift import prechecks as sp  # noqa: E402
 
 _GREEN = re.compile(r"TEST SUCCEEDED|Test run with \d+ tests? passed|"
                     r"Executed \d+ tests?, with 0 failures|\b\d+ passed\b")

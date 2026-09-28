@@ -15,6 +15,10 @@ from coding_model_autonomous.models import GateType, SpecStatus
 STRANDED = """\
 # Architecture: Demo
 
+## File Structure
+- `Sources/Demo/Mushroom.swift`
+- `Sources/Demo/MushroomField.swift`
+
 ## Data Models
 - `Mushroom`: `{ hits: Int }`
 - `MushroomField`: `{ cells: [Position: Mushroom] }`
