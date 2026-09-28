@@ -33,6 +33,7 @@ The layering release ([DEV-835](https://keith-merrill4.atlassian.net/browse/DEV-
   - **Kept.** `supervisor` stays: deleting the supervisor feature is a separate decision.
   - **Defaults.** The code defaults for the reviewer and design-review agents are now `deep_reviewer`. `/review`'s first local judge is now `implementer`.
   - **Disk.** Every model file the roster no longer references was deleted from disk, 144 GiB.
+  - **Gates.** mypy now covers `orchestrator_daemon.py`. Its 33 findings were type-only: parse loops that always run at least once now assert their result instead of leaving it `Optional`, one path reads a precomputed length, and the supervisor context uses the supervisor's own TypedDicts. Ruff adds C901 at a complexity threshold of 30. The seven functions already over it, from 32 (`_run_implementer`) to 63 (the client's `get_completion`), carry `# noqa: C901`. The threshold drops as they shrink.
 
 ## v0.5.0 — 2026-09-27
 

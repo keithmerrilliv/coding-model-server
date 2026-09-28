@@ -289,7 +289,7 @@ class TurnState:
     recent_response_hashes: list = field(default_factory=list)
 
 
-def _run_one_turn(state: TurnState) -> TurnOutcome:
+def _run_one_turn(state: TurnState) -> TurnOutcome:  # noqa: C901
     """Run a single turn of the agent loop and report what to do next."""
     # ── Safety cap: absolute turn limit ──
     state.turn_count += 1

@@ -22,7 +22,7 @@ def set_tool_handlers(th_module):
     _tool_handlers = th_module
 
 
-def handle_user_command(user_input, history, model, agent_theme):
+def handle_user_command(user_input, history, model, agent_theme):  # noqa: C901
     """Handle special slash commands. Returns (should_continue, updated_model)."""
 
     # ── Help ──────────────────────────────────────────────────────────────

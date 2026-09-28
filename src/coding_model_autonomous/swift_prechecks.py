@@ -322,7 +322,7 @@ _BINDING_KEYWORDS = {"let", "var", "for", "case", "catch", "func", "class",
 _FUNC_KEYWORDS = {"func", "init"}
 
 
-def unqualified_static_member_references(
+def unqualified_static_member_references(  # noqa: C901
     files: list[tuple[str, str]],
 ) -> list[Violation]:
     """Bare `NAME` inside an instance method where `NAME` is a `static`

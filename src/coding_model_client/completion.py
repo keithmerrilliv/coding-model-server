@@ -123,7 +123,7 @@ def _compress_history(messages, keep_recent=6, summary_len=200):
 # Main completion function
 # ---------------------------------------------------------------------------
 
-def get_completion(history, model, agent_theme, agentic_context=None,
+def get_completion(history, model, agent_theme, agentic_context=None,  # noqa: C901
                    tools=None, tool_choice=None):
     """Get a streaming completion from the server.
 

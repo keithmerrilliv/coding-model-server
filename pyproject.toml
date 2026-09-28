@@ -78,11 +78,17 @@ markers = [
 ]
 
 [tool.mypy]
-# Scoped deliberately (DEV-169): type-hint coverage is bimodal, and these
-# two packages are already at 98-100% annotated. Gating them locks that in
-# without drowning CI in the 40-49% packages' pre-existing findings —
-# ratchet coding_model_server / coding_model_client in later.
-files = ["src/coding_model_autonomous", "mac_runner"]
+# Scoped deliberately (DEV-169): type-hint coverage is bimodal. The kernel
+# package and mac_runner are fully annotated, and the orchestrator daemon is
+# the one server module that routes every pipeline decision, so it is gated
+# too. The rest of coding_model_server and coding_model_client sit around
+# 40-50% annotated; gating them would bury real findings, so they ratchet in
+# module by module.
+files = [
+    "src/coding_model_autonomous",
+    "mac_runner",
+    "src/coding_model_server/orchestrator_daemon.py",
+]
 python_version = "3.12"
 ignore_missing_imports = true
 
@@ -93,7 +99,13 @@ target-version = "py312"
 # CI gates on correctness only (undefined names, unused imports/variables,
 # syntax errors). Style rules are deliberately out of scope — this codebase
 # predates the linter and a style sweep would bury real regressions.
-select = ["F", "E9"]
+# C901 is the one structural rule: it stops a function growing past the
+# threshold below. The functions already over it carry `# noqa: C901`; lower
+# the threshold as they shrink.
+select = ["F", "E9", "C901"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 30
 
 [tool.ruff.lint.per-file-ignores]
 # Package roots re-export their public API.

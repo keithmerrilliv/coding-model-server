@@ -741,7 +741,8 @@ def _drop_undeliverable_manifest_entries(spec: Spec, entries: list) -> list:
         protected = {str(p).strip() for p in (strategy.get("protected_paths") or []) if p}
     if not protected:
         return entries
-    kept, dropped = [], []
+    kept: list = []
+    dropped: list = []
     for e in entries:
         (dropped if e.path.strip() in protected else kept).append(e)
     if dropped:
@@ -773,7 +774,8 @@ def _drop_undeclared_manifest_entries(spec: Spec, entries: list) -> list:
     declared = set(_planned_implement_outputs(spec))
     if not declared:
         return entries
-    kept, dropped = [], []
+    kept: list = []
+    dropped: list = []
     for e in entries:
         (kept if e.path.strip() in declared else dropped).append(e)
     if not kept:
@@ -1651,7 +1653,7 @@ def _testability_rounds_used(db: Database, spec_id: str) -> int:
         what="revision cap")
 
 
-def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
+def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:  # noqa: C901
     spec_md = (spec_dir / spec.source_md_path).read_text()
     # On a re-run (design-review rejection #3, or supervisor design-revision #4),
     # feed the failure back so the architect fixes the design instead of
@@ -1928,6 +1930,9 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
                       f"<<<DESIGN>>> ... <<<END>>> markers, followed by the "
                       f"<<<COMPLEXITY>>> block.")))
         return
+    # The parse loop runs at least once (ARCHITECT_PARSE_RETRIES >= 0), and a
+    # ParseError has returned above, so a result exists here.
+    assert result is not None
 
     # Write design.md. DEV-647: the outcome used to be discarded, so a refused
     # write was one WARNING followed by an unqualified "architect done" and a
@@ -3153,7 +3158,9 @@ def _generate_via_manifest(
                      **executor.agent_event_fields(meta)})
     if isinstance(manifest, ParseError):
         return manifest  # the caller classifies it
-    manifest.entries = _drop_undeliverable_manifest_entries(spec, manifest.entries)
+    # The parse loop runs at least once (MANIFEST_PARSE_RETRIES >= 0).
+    assert manifest is not None
+    manifest.entries =_drop_undeliverable_manifest_entries(spec, manifest.entries)
     db.record_event(EventKind.AGENT_RAN, spec_id=spec.id, task_id=task.id,
                     payload={"role": "manifest",
                              "files": len(manifest.entries),
@@ -3359,10 +3366,11 @@ def _generate_one_file(
     the next attempt's prompt."""
     written_summary = summarize_written_files(written)
     existing_content = (existing_by_path or {}).get(entry.path)
+    existing_chars = len(existing_content) if existing_content is not None else 0
     edit_mode = executor.DIFF_BASED_EDITS and existing_content is not None
     oversized = (existing_content is not None
                  and executor.MANIFEST_WHOLE_FILE_MAX_CHARS
-                 and len(existing_content) > executor.MANIFEST_WHOLE_FILE_MAX_CHARS)
+                 and existing_chars > executor.MANIFEST_WHOLE_FILE_MAX_CHARS)
     if oversized and not edit_mode:
         # Whole-file re-emission at this size ships fragments — run 18 gutted a
         # 117-line class to 33 lines, run 19 emitted 43 lines of a 5,804-line
@@ -3374,9 +3382,9 @@ def _generate_one_file(
             "whole and lose content (DEV-604); enable "
             "AUTONOMOUS_DIFF_BASED_EDITS or raise "
             "AUTONOMOUS_MANIFEST_WHOLE_FILE_MAX_CHARS",
-            spec.id, entry.path, len(existing_content))
+            spec.id, entry.path, existing_chars)
         _anomaly(db, spec, task, "implementer", anomaly="oversized_whole_file_refused",
-                 path=entry.path, existing_chars=len(existing_content))
+                 path=entry.path, existing_chars=existing_chars)
         return None
     target_base = os.path.basename(entry.path)
 
@@ -3446,6 +3454,7 @@ def _generate_one_file(
             return None
         parsed = parse_implementer_response(raw)
         if edit_mode:
+            assert existing_content is not None  # edit_mode requires it
             whole = parsed.files if isinstance(parsed, ImplementerResult) else []
             if oversized and _target_content(whole) is not None:
                 # The model ignored rule 5 and re-emitted the file whole. At a
@@ -3868,7 +3877,7 @@ def _pre_gate_build_check(db: Database, spec: Spec, task, spec_dir: Path,
                       blocking_warnings, test_split, ts_for_build)
 
 
-def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:
+def _run_implementer(db: Database, spec: Spec, task, spec_dir) -> None:  # noqa: C901
     # Wipe artifacts from earlier retries so the new implementer starts
     # from a clean slate. No-op on retry-0.
     _clean_spec_dir_for_retry(spec_dir, task.retry_count)
@@ -5769,21 +5778,23 @@ def _run_reviewer(db: Database, spec: Spec, task, spec_dir) -> None:
 #     _latest_supervisor_feedback (in _latest_architect_feedback), and the
 #     next reviewer run reads it the same way in _run_reviewer.
 
-def _list_artifact_summaries(db: Database, spec_id: str) -> list[dict]:
+def _list_artifact_summaries(db: Database, spec_id: str,
+                             ) -> "list[_supervisor.ArtifactSummary]":
     """Compact summary of all artifacts on disk — for the supervisor context."""
     spec_dir = db.spec_dir(spec_id)
     out = []
     for art in db.list_artifacts(spec_id):
         full = spec_dir / art.path
         size = full.stat().st_size if full.exists() else None
-        item = {"kind": art.kind.value, "path": art.path}
+        item: _supervisor.ArtifactSummary = {"kind": art.kind.value, "path": art.path}
         if size is not None:
             item["bytes"] = size
         out.append(item)
     return out
 
 
-def _build_supervisor_context(db: Database, spec: Spec, task, outcome: str,
+def _build_supervisor_context(db: Database, spec: Spec, task,
+                              outcome: "_supervisor.Outcome",
                               *, reviewer_notes: str | None = None,
                               test_output_excerpt: str | None = None,
                               agent_error_excerpt: str | None = None,
@@ -5901,13 +5912,15 @@ def _apply_supervisor_decision(db: Database, spec: Spec, task,
         feedback = decision.feedback_to_inject or legacy_feedback or ""
         logger.info("spec %s: supervisor → retry %s: %s",
                     spec.id, decision.target_role, decision.reason)
+        # supervisor._parse_decision rejects a retry without a target_role.
+        assert decision.target_role is not None
         _retry_role_with_feedback(db, spec, decision.target_role, feedback,
                                   current_task=task)
         return
 
     if decision.action == "replan":
         logger.info("spec %s: supervisor → replan: %s", spec.id, decision.reason)
-        feedback = decision.feedback_to_inject or legacy_feedback
+        feedback = decision.feedback_to_inject or legacy_feedback or ""
         if feedback:
             synth = db.create_gate(
                 spec_id=spec.id,
@@ -6085,7 +6098,7 @@ def _repair_verdict(repair_passed: bool, pre_diags: list, post_diags: list,
     return improved, poisoned
 
 
-def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
+def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,  # noqa: C901
                    framework: str, framework_opts: dict) -> tuple[bool, str]:
     """MAX_RETRIES escape hatch: synthesize the union of correct behaviors
     across all rotation attempts, then re-run the test phase against the
@@ -6206,7 +6219,7 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,
     protected_files = synth_alloc.files(_context.SECTION_PROTECTED)
     omitted_protected = synth_alloc.dropped(_context.SECTION_PROTECTED)
 
-    meta = {}
+    meta: dict = {}
     raw = None
     while True:
         messages = _synthesis_prompt(kept, protected_files, omitted_protected)
