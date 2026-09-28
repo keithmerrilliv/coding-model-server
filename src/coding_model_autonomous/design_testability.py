@@ -1187,7 +1187,62 @@ def _heading_types(design_md: str) -> set[str]:
             if (m := _HEADING_TYPE_RE.match(line.strip()))}
 
 
-def check_design_completeness(design_md: str) -> list[Finding]:
+# DEV-855: a Data Models bullet can name a type the design only USES. Run 73's
+# test-only design wrote "No new types declared. The design references only
+# pre-existing symbols" over bullets for HalluRenderer and
+# HallucinationSimulator, and was told to allocate a file for each. Three
+# signals say a bullet-form type is used, not created; a fenced declaration is
+# always a claim to create.
+_NO_NEW_TYPES_RE = re.compile(
+    r"(?i)\bno\s+new\s+(?:types?|data\s+(?:models?|structures?)|declarations?)\b")
+# "No new types except `Foo`" still creates Foo.
+_CARVE_OUT_RE = re.compile(
+    r"(?i)\b(?:except|beyond|besides|other\s+than|apart\s+from|but|save)\b")
+_EXISTING_DECL_WORDS = "struct|class|enum|protocol|actor|typealias"
+
+
+def _types_used_not_created(design_md: str,
+                            served: "dict[str, str] | None") -> set[str]:
+    """Bullet-form Data Models types the design says, or the served code shows,
+    already exist — DEV-855.
+
+    * the section states it adds no new types, with no carve-out in the same
+      sentence;
+    * the type's own bullet marks it existing: ``- `Foo` (existing)``;
+    * a file the roles were served declares it.
+    """
+    body = _section(design_md, DATA_MODELS_HEADING)
+    bulleted = set()
+    marked_existing = set()
+    for b in _bullets(body):
+        m = re.match(r"^[-*]\s*`?([A-Z]\w*)`?\s*[:—(-]", b)
+        if not m:
+            continue
+        bulleted.add(m.group(1))
+        if re.match(rf"^[-*]\s*`?{m.group(1)}`?\s*(?:\(|[:—-])\s*\(?"
+                    r"(?:pre-?)?existing\b", b, re.IGNORECASE):
+            marked_existing.add(m.group(1))
+
+    used = set(marked_existing)
+    for stated in _NO_NEW_TYPES_RE.finditer(body):
+        sentence = re.split(r"[.\n]", body[stated.end():], maxsplit=1)[0]
+        if not _CARVE_OUT_RE.search(sentence):
+            used |= bulleted
+            break
+    for name in bulleted - used:
+        decl = re.compile(rf"\b(?:{_EXISTING_DECL_WORDS})\s+{re.escape(name)}\b")
+        if any(decl.search(text) for text in (served or {}).values()):
+            used.add(name)
+
+    fenced = {m.group(2) for m in re.finditer(
+        rf"^(\s*)(?:{_EXISTING_DECL_WORDS}|interface)\s+([A-Z]\w*)",
+        body, re.MULTILINE)}
+    return used - fenced
+
+
+def check_design_completeness(design_md: str,
+                              served: "dict[str, str] | None" = None
+                              ) -> list[Finding]:
     """Findings where the design's types and its files disagree — DEV-509.
 
     Two directions of one invariant, each from a run that died on it:
@@ -1219,19 +1274,24 @@ def check_design_completeness(design_md: str) -> list[Finding]:
     Not C-family either (DEV-831), for the same reason: run 66's round-2 design
     listed `NodeType`, `ProductionMap` and `LSystem` in Data Models, all housed
     in existing headers, and was told to allocate a file for each.
+
+    *served* is what the roles were shown, path → content; a type one of those
+    files already declares is used, not created (DEV-855).
     """
     if is_python_design(design_md) or is_c_family_design(design_md):
         return []
     declared = declared_types(design_md) | _heading_types(design_md)
     files = allocated_files(design_md)
     housed = _types_named_beside_a_file(design_md)
+    used = _types_used_not_created(design_md, served)
     findings: list[Finding] = []
 
     # No File Structure section, or one that parsed to nothing, means we cannot
     # tell "allocated nowhere" from "we failed to read it". Judging every
     # declared type unallocated on that basis would reject a whole design over
     # a parsing gap, so this direction stays silent instead.
-    for name in sorted(top_level_types(design_md) - files - housed) if files else ():
+    for name in (sorted(top_level_types(design_md) - files - housed - used)
+                 if files else ()):
         findings.append(Finding(
             kind=KIND_TYPE_WITHOUT_FILE,
             criterion="",

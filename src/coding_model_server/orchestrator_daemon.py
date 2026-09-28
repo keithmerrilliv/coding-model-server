@@ -1997,7 +1997,8 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:
             served_for_check = {**dict(view.reference_files),
                                 **dict(view.existing_files)}
             findings = (
-                design_testability.check_design_completeness(result.design_md)
+                design_testability.check_design_completeness(
+                    result.design_md, served_for_check)
                 + design_testability.check_design_testability(result.design_md)
                 + design_testability.check_declared_mutability(
                     result.design_md, served_for_check)
