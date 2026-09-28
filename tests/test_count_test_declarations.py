@@ -214,3 +214,40 @@ def test_snake_case_xctest_methods_are_counted_dev751():
     from coding_model_autonomous.test_runner import count_test_declarations
     assert count_test_declarations(RUN44_SNAKE, "xcodebuild_test") == 3
     assert count_test_declarations(RUN44_SNAKE, "swift_test") == 3
+
+
+# DEV-911: an `@Test` owns the next `func`, on whichever line it sits.
+TWO_LINE_TESTS = """import Testing
+
+struct MovementTests {
+    @Test
+    func testMovesRight() {}
+
+    @Test
+    @MainActor
+    func testMovesLeft() async throws {}
+
+    @Test func testInline() {}
+
+    @Test
+    func stepsDown() {}
+}
+
+final class Legacy: XCTestCase {
+    func testLegacy() {}
+}
+"""
+
+
+def test_an_attributed_test_named_test_counts_once_dev911():
+    from coding_model_autonomous.test_runner import count_test_declarations
+    # Four @Test functions and one XCTest method.
+    assert count_test_declarations(TWO_LINE_TESTS, "swift_test") == 5
+
+
+def test_the_attribute_releases_after_its_func_dev911():
+    """The attribute owns one func only: an XCTest method after an attributed
+    test is still counted (a counter that never released would miss it)."""
+    from coding_model_autonomous.test_runner import count_test_declarations
+    src = "@Test\nfunc testA() {}\nfunc testB() {}\n"
+    assert count_test_declarations(src, "swift_test") == 2
