@@ -456,6 +456,14 @@ def _is_vacuous_span(span: str) -> bool:
 
 # ── the design's own vocabulary ──────────────────────────────────────────────
 
+# A Data Models bullet declares a type only when the name is code-quoted:
+# ``- `Position`: {col, row}``. The bare form is how architects write labels —
+# ``- Input: CGPoint``, ``- Internal: World stays internal``, ``- Top-K Indices``
+# — and reading those as types charges the design for files it never needs
+# (DEV-872). Every bullet-form type in the spec archive is backticked.
+_TYPE_BULLET_RE = re.compile(r"^[-*]\s*`([A-Z]\w*)`\s*[:—-]")
+
+
 def declared_types(design_md: str) -> set[str]:
     """Type names the design declares in Data Models.
 
@@ -469,7 +477,7 @@ def declared_types(design_md: str) -> set[str]:
     body = _section(design_md, DATA_MODELS_HEADING)
     types = set()
     for b in _bullets(body):
-        m = re.match(r"^[-*]\s*`?([A-Z]\w*)`?\s*[:—-]", b)
+        m = _TYPE_BULLET_RE.match(b)
         if m:
             types.add(m.group(1))
     for m in re.finditer(
@@ -501,7 +509,7 @@ def top_level_types(design_md: str) -> set[str]:
         if m and not m.group(1):
             top.add(m.group(2))
     for b in _bullets(body):
-        m = re.match(r"^[-*]\s*`?([A-Z]\w*)`?\s*[:—-]", b)
+        m = _TYPE_BULLET_RE.match(b)
         if m:
             top.add(m.group(1))
     return top
@@ -705,7 +713,7 @@ def _enum_literal_types(assert_text: str, types: set[str],
             continue
         for case in re.findall(r"[=!]=\s*\.(\w+)", span):
             for b in _bullets(_section(design_md, DATA_MODELS_HEADING)):
-                m = re.match(r"^[-*]\s*`?([A-Z]\w*)`?\s*[:—-]", b)
+                m = _TYPE_BULLET_RE.match(b)
                 if m and m.group(1) in types and \
                         re.search(r"\." + re.escape(case) + r"\b", b):
                     hits.add(m.group(1))
@@ -982,6 +990,33 @@ def _criterion_count(seams: "list[Seam]") -> int:
     return plain + len(grouped)
 
 
+# The criterion label an entry starts with — `C7`, `T1`, `C6a` → `C6` — or "".
+_CRITERION_LABEL_RE = re.compile(r"^\W*([A-Za-z]{0,3}\d+)[a-z]?\b")
+
+
+def _criterion_label(text: str) -> str:
+    m = _CRITERION_LABEL_RE.match(text)
+    return m.group(1).upper() if m else ""
+
+
+def _suite_level_count(criteria: list[str], seams: "list[Seam]") -> int:
+    """How many criteria are exempt from needing a seam.
+
+    The suite-level marker may sit on the criterion's checklist line or on its
+    seam entry — the seam list is where the design instructions ask for it —
+    and either one exempts that criterion (DEV-715 honoured only the checklist
+    side; DEV-907). Labels identify a criterion marked on both sides so it is
+    exempted once; without labels on every marker, the larger side's count is
+    the best available estimate.
+    """
+    on_checklist = [c for c in criteria if is_suite_level_text(c)]
+    on_seams = [s.criterion for s in seams if is_suite_level(s)]
+    labels = [_criterion_label(t) for t in on_checklist + on_seams]
+    if labels and all(labels):
+        return len(set(labels))
+    return max(len(on_checklist), len(on_seams))
+
+
 def check_design_testability(design_md: str) -> list[Finding]:
     """Findings for a design whose checklist its own API cannot carry out.
 
@@ -1034,15 +1069,16 @@ def check_design_testability(design_md: str) -> list[Finding]:
     # and was rejected for "6 criteria but 3 seams". The prompt half of the
     # hatch shipped without this half.
     seam_bearing = [c for c in criteria if not is_suite_level_text(c)]
+    skipped = _suite_level_count(criteria, seams)
+    needed = len(criteria) - skipped
     # A suite-level SEAM entry is a marker, not a seam; count only real ones.
     real_seams = [s for s in seams if not is_suite_level(s)]
     # DEV-809: lettered sub-seams (C6a, C6b) are steps of one criterion. Run
     # 60 split two criteria that way and was told "9 need a seam but 13 were
     # emitted" for a design with exactly one seam per criterion.
     seam_count = _criterion_count(real_seams)
-    if seam_count != len(seam_bearing) and len(seams) != len(criteria):
-        skipped = len(criteria) - len(seam_bearing)
-        detail = (f"{len(seam_bearing)} acceptance criteria need a seam but "
+    if seam_count != needed and len(seams) != len(criteria):
+        detail = (f"{needed} acceptance criteria need a seam but "
                   f"{seam_count} were emitted. Emit exactly one seam per "
                   f"criterion, in checklist order.")
         if skipped:
@@ -1215,7 +1251,7 @@ def _types_used_not_created(design_md: str,
     bulleted = set()
     marked_existing = set()
     for b in _bullets(body):
-        m = re.match(r"^[-*]\s*`?([A-Z]\w*)`?\s*[:—(-]", b)
+        m = re.match(r"^[-*]\s*`([A-Z]\w*)`\s*[:—(-]", b)
         if not m:
             continue
         bulleted.add(m.group(1))
