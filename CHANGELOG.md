@@ -77,6 +77,8 @@ The layering release ([DEV-835](https://keith-merrill4.atlassian.net/browse/DEV-
 
     `test_languages.py` registers a new pack in a test and shows the daemon's precheck path serving it with no daemon edit. It also stops callers from reaching into a pack's modules past the interface. Test-output parsing stays in `diagnostics`, keyed by test framework rather than language.
 
+    The Swift pack also owns the Apple SDK symbol tables that the unresolved-symbol scan reads (what `import SwiftUI` or `import Metal` provides), consulted for Swift files only. Before, they applied to any file with a line-start `import`. That included ten archived copies of a Python test whose Swift fixture strings import Foundation. The value-type mutability rule opts in per served file, like the design rules. `design_testability` makes no language decision of its own now. Its Swift-shaped rules are still implemented there, and the Swift pack's opt-in decides where they run. Moving the code itself would need a design-document parser module beneath both, for no change in behaviour.
+
 ## v0.5.0 — 2026-09-27
 
 The honest-guards release ([DEV-818](https://keith-merrill4.atlassian.net/browse/DEV-818)): a guard reports what it observed and names a cause only when it has actually isolated one. Runs 56 to 68 all reached release approval. Nine were pushed by the pipeline and four were delivered by hand, one because of a false stale-base refusal fixed by DEV-810, and three because LLab had no delivery remote until 2026-09-27. LLab joined Electric Sheep and Centipede as a third target, and is tested through Swift's C++ interop.

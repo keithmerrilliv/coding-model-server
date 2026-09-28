@@ -36,6 +36,7 @@ from .languages import (
     RULE_EQUATABLE,
     RULE_SEAM_IMPORTS,
     RULE_TUPLE_CONFORMANCE,
+    RULE_VALUE_MUTABILITY,
 )
 
 # Rules are keyed so callers (and tests) can assert on kind rather than prose.
@@ -245,14 +246,15 @@ def served_value_types(served: dict) -> dict:
     SwiftUI view types are excluded: their state lives in property wrappers,
     so they have no mutability contract to declare.
 
-    Swift files only (DEV-831). The contract this check asks for — `mutating`,
-    value or reference — is Swift's. Run 66 served LLab's C++ `LSystem.h`,
-    whose only column-0 `struct|enum` is `enum NodeType`; the design added a
-    member to `class LSystem`, and the single-type rule charged it to the enum.
+    Opt-in, per served file (DEV-831): Swift declares it. The contract this
+    check asks for — `mutating`, value or reference — is Swift's. Run 66
+    served LLab's C++ `LSystem.h`, whose only column-0 `struct|enum` is
+    `enum NodeType`; the design added a member to `class LSystem`, and the
+    single-type rule charged it to the enum.
     """
     out: dict = {}
     for path, source in (served or {}).items():
-        if not str(path).endswith(".swift"):
+        if not languages.path_opts_in(str(path), RULE_VALUE_MUTABILITY):
             continue
         src = source or ""
         swiftui = {m.group(2) for m in _SWIFTUI_CONFORMANCE_RE.finditer(src)}

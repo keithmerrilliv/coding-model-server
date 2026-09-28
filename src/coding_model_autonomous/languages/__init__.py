@@ -23,6 +23,7 @@ from .base import (  # noqa: F401  (re-exported: the interface's names)
     RULE_EQUATABLE,
     RULE_SEAM_IMPORTS,
     RULE_TUPLE_CONFORMANCE,
+    RULE_VALUE_MUTABILITY,
     LanguagePack,
     PrecheckResult,
 )
@@ -131,6 +132,12 @@ def rule_applies(text: str, rule: str) -> bool:
     return bool(packs) and all(rule in p.design_rules for p in packs)
 
 
+def path_opts_in(path: str, rule: str) -> bool:
+    """True when the language of the file at *path* opts into *rule*."""
+    pack = pack_for_path(path)
+    return bool(pack and rule in pack.design_rules)
+
+
 def pack_for_framework(framework: "str | None") -> Optional[LanguagePack]:
     """The pack whose code a test framework builds and tests."""
     fw = str(framework or "").lower()
@@ -163,6 +170,13 @@ def declared_types(path: str, content: str) -> set[str]:
     """Type names *content* declares at file scope, per its language."""
     pack = pack_for_path(path)
     return pack.declared_types(content) if pack else set()
+
+
+def provided_symbols(path: str, source: str) -> tuple[frozenset[str], tuple[str, ...]]:
+    """What the file's own imports provide, per its language: exact names
+    and name prefixes."""
+    pack = pack_for_path(path)
+    return pack.provided_symbols(source) if pack else (frozenset(), ())
 
 
 def normalize_file(path: str, content: str) -> tuple[str, list[str]]:

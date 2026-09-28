@@ -109,6 +109,23 @@ def test_declared_types_are_read_per_language():
     assert languages.declared_types("a.py", "class Field: pass\n") == set()
 
 
+def test_imports_provide_symbols_only_in_their_own_language():
+    """`import SwiftUI` provides `Button` to a Swift file. The same line in a
+    Python file (a Swift fixture inside a string, as the archive has) provides
+    nothing: Swift's import tables are Swift's."""
+    swift_src = "import SwiftUI\nimport Metal\n"
+    names, prefixes = languages.provided_symbols("App.swift", swift_src)
+    assert "Button" in names and "sinf" in names and "MTL" in prefixes
+    assert languages.provided_symbols("fixture.py", swift_src) == (frozenset(), ())
+
+
+def test_value_mutability_is_opted_into_per_file():
+    assert languages.path_opts_in("Sources/A/Model.swift",
+                                  languages.RULE_VALUE_MUTABILITY)
+    assert not languages.path_opts_in("LLab Shared/Generator/LSystem.h",
+                                      languages.RULE_VALUE_MUTABILITY)
+
+
 def test_normalize_file_applies_the_owning_pack_only():
     content, notes = languages.normalize_file(
         "package.json", '{"dependencies": {"a": "^1.2.3"}}')
