@@ -213,7 +213,7 @@ same flags.
 ## Agents
 
 Each agent maps to a model configuration and system prompt, both defined in
-`src/coding_model_server/config.py` (`Config.AGENTS`). Switch with
+`src/coding_model_server/roster.py` (read as `Config.AGENTS`). Switch with
 `/agent <name>` or `@agent_name message`.
 
 Decode tok/s measured end-to-end on an RTX 5080, 2026-07-14 (see
@@ -272,7 +272,7 @@ deliberately no `spark` alias.
 on CPU. `n_cpu_moe=N` (`--n-cpu-moe N`) keeps only the first N layers' experts
 on CPU and pushes the rest onto the GPU — faster decode, bounded by VRAM. The
 agents tuned with `n_cpu_moe` trade context for decode speed; see the
-per-config comments in `config.py`, which record the measurements. KV-cache preference is Q8_0 wherever it fits —
+per-config comments in `roster.py`, which record the measurements. KV-cache preference is Q8_0 wherever it fits —
 KV-quant noise produces diffuse quality degradation that is harder to manage
 than a smaller context.
 
@@ -326,7 +326,7 @@ with DEV-839. The interactive client
 ## Tool System
 
 Agents execute tools by emitting markers in their responses. The full reference
-the model sees is `Config.BASE_TOOLS` in `src/coding_model_server/config.py`.
+the model sees is `Config.BASE_TOOLS`, defined in `src/coding_model_server/agent_prompts.py`.
 
 | Marker | Purpose |
 |--------|---------|
@@ -655,7 +655,9 @@ coding-model-server/
 │   ├── coding_model_server/     # FastAPI server + orchestrator daemon + shared modules
 │   │   ├── server.py           #   FastAPI app assembly, CORS, router wiring
 │   │   ├── routes/             #   Endpoints: chat, memory, autonomous, admin, meta
-│   │   ├── config.py           #   Config: model configs, agent registry, system prompts
+│   │   ├── config.py           #   Config: server settings; the interface to the two below
+│   │   ├── roster.py           #   Model configs (with their measurements) and the agents
+│   │   ├── agent_prompts.py    #   Interactive agents' prompts, tool reference, budget guidance
 │   │   ├── llama_server.py     #   llama-server subprocess manager (VRAM coord)
 │   │   ├── runtime.py          #   Shared singletons, auth, in-flight limits
 │   │   ├── schemas.py          #   Pydantic request/response models

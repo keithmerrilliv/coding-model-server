@@ -31,7 +31,7 @@ whatever `.env.example` happens to ship.
 | `CODING_MODEL_NPM_INSTALL_TIMEOUT` | `300` | Seconds allowed for the `jest`/`vitest` dependency-install phase. Budgeted separately from the test timeout — a cold React install fetches a few hundred MB. |
 | `CODING_MODEL_MIN_COMPLETION_TOKENS` | `16` | Floor on the completion budget after the prompt is subtracted from the window. A request that cannot be given this many output tokens is refused up front instead of clamped to a stub the caller's parser then fails on (DEV-195). |
 | `CODING_MODEL_MEMORY_COUNT_WARN` | `100000` | Memory-collection size at which the server logs a warning that retrieval quality and per-query scan cost are degrading. No automatic eviction (DEV-162). |
-| `CODING_MODEL_MODELS_ROOT` | `~/.lmstudio/models` | Root the relative GGUF paths in `config.py` resolve against. |
+| `CODING_MODEL_MODELS_ROOT` | `~/.lmstudio/models` | Root the relative GGUF paths in `roster.py` resolve against. |
 | `CODING_MODEL_POLL_ACCESS_LOG` | `/tmp/coding-model-poll-access.log` | Where the dashboard's ~1 Hz polls (`/health`, `/v1/admin/*`, the autonomous status reads) are logged instead of the main access log. Empty drops them silently. |
 | `CODING_MODEL_REQUIRE_SECCOMP` | `0` | `1` makes a test dispatch refuse to run when the seccomp filter cannot be installed inside bubblewrap; the default warns and runs with bubblewrap alone. |
 | `CODING_MODEL_WORKSPACE` | *(unset)* | Root the interactive client's file tools may write under. Unset means the repository root; set it when the client is used against another tree. |
@@ -373,8 +373,8 @@ executes silently on the strength of "the denylist didn't match".
 ## Per-Model Configuration
 
 Each model is defined via `_create_model_config()` in
-`src/coding_model_server/config.py` (all 12 configs and the agent registry live
-there; `server.py` is app assembly only):
+`src/coding_model_server/roster.py` (all the configs and the agent registry live
+there, read through `Config` in `config.py`; `server.py` is app assembly only):
 
 ```python
 _MY_MODEL = _create_model_config(

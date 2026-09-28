@@ -13,7 +13,7 @@ The code:
 | The request path, and how refusals become HTTP statuses | `chat_completions` in `coding_model_server/routes/chat.py` |
 | The in-flight cap, and the manager singleton | `AdmissionController` and `llama_server_manager` in `coding_model_server/runtime.py` |
 | The client side of a refusal | `post_chat_completion` in `coding_model_autonomous/_http.py` |
-| Each agent's model config and the VRAM measurements behind it | `coding_model_server/config.py` (the comment above each config) |
+| Each agent's model config and the VRAM measurements behind it | `coding_model_server/roster.py` (the comment above each config) |
 
 The knobs (`CODING_MODEL_CHAT_MAX_INFLIGHT`, `LLAMA_SERVER_REQUEST_TIMEOUT`,
 `LLAMA_CACHE_RAM_MIB`, the `LLAMA_SLOT_SAVE*` variables,
