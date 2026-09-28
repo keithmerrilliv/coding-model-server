@@ -6,7 +6,9 @@ import re
 from .base import RULE_SEAM_IMPORTS, LanguagePack
 
 
-_PYTEST_TEST_RE = re.compile(r'^\s*def\s+test_\w+\s*\(')
+# `async def test_…` is a test too (pytest-asyncio, anyio); delivery's
+# test_names already reads it (DEV-911).
+_PYTEST_TEST_RE = re.compile(r'^\s*(?:async\s+)?def\s+test_\w+\s*\(')
 
 
 def _count_pytest_tests(source: str) -> int:
