@@ -124,7 +124,7 @@ def wiring() -> "dict[str, list[str]]":
     if settings.DESIGN_REVIEW_ENABLED:
         wired[Config.resolve_agent(settings.DESIGN_REVIEW_AGENT)].append("design_review")
     wired[Config.resolve_agent(
-        os.getenv("AUTONOMOUS_SYNTHESIS_AGENT", "deep_reviewer"))].append("synthesis")
+        os.getenv("AUTONOMOUS_SYNTHESIS_AGENT", "synthesizer"))].append("synthesis")
     names = set(Config.AGENTS) | set(Config.AGENT_ALIASES)
     for key, value in dotenv_values(ROOT / ".env").items():
         if value in names:

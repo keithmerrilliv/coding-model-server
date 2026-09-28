@@ -88,7 +88,7 @@ because every one of them is a VRAM-budget decision that has been measured.
 | `AUTONOMOUS_ARCHITECT_TOOLS` | `1` | Let the architect read repository files it was not served, with `<<<READ_FILE>>>` (DEV-714). Read-only, at most 3 rounds, capped by whatever the prompt budget leaves free. Set `0` to withdraw the offer. |
 | `AUTONOMOUS_IMPLEMENTER_AGENT` | `implementer` | First-attempt implementer only when the architect makes **no** recommendation; in practice the recommendation wins (33 of 33 first picks from 2026-09-13 to 09-26). Do not set it to `deep_implementer`: it is the rotation's window fallback, not a first pick (DEV-821). |
 | `AUTONOMOUS_REVIEWER_AGENT` | `deep_reviewer` | Reviewer agent. |
-| `AUTONOMOUS_SYNTHESIS_AGENT` | `deep_reviewer` | Agent that synthesizes per-file implementation output. |
+| `AUTONOMOUS_SYNTHESIS_AGENT` | `synthesizer` | Agent for synthesis and its repair round. Its own roster entry, on the same model as `deep_reviewer` today (DEV-900). |
 | `AUTONOMOUS_PLANNER_TIMEOUT` | `900` | Seconds. Must be ≤ `LLAMA_SERVER_REQUEST_TIMEOUT`. |
 | `AUTONOMOUS_ARCHITECT_TIMEOUT` | `2700` | Seconds. |
 | `AUTONOMOUS_IMPLEMENTER_TIMEOUT` | `1800` | Seconds. |

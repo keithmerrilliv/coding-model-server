@@ -279,3 +279,15 @@ _UNICODE_GUARD = (
     '  `-- for last items\n'
     'For architecture diagrams, prefer Mermaid syntax in code blocks.\n'
 )
+
+# The synthesizer is always called by the pipeline with its own system message
+# (executor.SYNTHESIS_SYSTEM_PROMPT), which the server puts in place of this
+# one. This prompt covers only a direct call, such as from the client. It is
+# not imported from the pipeline because that would pull the whole autonomous
+# package into every import of this module, the client's included.
+_SYNTHESIZER_SYSTEM_PROMPT = (
+    'You are a code-synthesis agent. You are given several attempts at the '
+    'same change, the tests each one ran and the reviewers\' notes. Keep what '
+    'each attempt got right, fix what the notes and test failures show is '
+    'wrong, and write the complete corrected files.'
+)
