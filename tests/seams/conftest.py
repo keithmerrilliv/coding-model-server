@@ -82,7 +82,7 @@ def seam_env(monkeypatch):
         "reviewer": "reviewer"})
     monkeypatch.setattr(settings, "DESIGN_REVIEW_AGENT", "reviewer")
     monkeypatch.setattr(planner, "PLANNER_AGENT", "dense_architect")
-    monkeypatch.setattr(d, "_SYNTHESIS_AGENT", "deep_reviewer")
+    monkeypatch.setattr(d, "_SYNTHESIS_AGENT", "synthesizer")
     monkeypatch.setattr(retry_policy, "_IMPLEMENTER_ROTATION", list(ROTATION))
     monkeypatch.setattr(d, "_IMPLEMENTER_ROTATION", list(ROTATION))
     # Delivery: no remote → skipped, never touches git.

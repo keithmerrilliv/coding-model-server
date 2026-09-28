@@ -105,7 +105,7 @@ class TestUnappliableEdits:
         assert [c.model for c in model.calls_for("implementer")] == [
             "implementer", "deep_implementer", "moe_implementer",
             "fast_implementer", "implementer", "deep_implementer"]
-        assert [c.model for c in model.calls_for("synthesis")] == ["deep_reviewer"]
+        assert [c.model for c in model.calls_for("synthesis")] == ["synthesizer"]
         assert out.task("implementer").status == TaskStatus.DONE
         assert len(rejected_gates(db, spec.id)) == 5
 
@@ -133,7 +133,7 @@ class TestUnappliableEdits:
         # model produced the same coarse_key as the first.
         assert [c.model for c in model.calls_for("implementer")] == [
             "implementer", "deep_implementer"]
-        assert [c.model for c in model.calls_for("synthesis")] == ["deep_reviewer"]
+        assert [c.model for c in model.calls_for("synthesis")] == ["synthesizer"]
         ev = events(db, spec.id, EventKind.FAILURE_CLASSIFIED,
                     disposition="synthesize")
         assert "invariant across 2 agents" in ev[0]["disposition_detail"]

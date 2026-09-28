@@ -599,7 +599,7 @@ still move a dispatch, and each records that it did:
 
 The architect and reviewer have fixed picks with no rotation
 (`settings.role_to_agent`), and so does synthesis (`_SYNTHESIS_AGENT`,
-`AUTONOMOUS_SYNTHESIS_AGENT`, default `deep_reviewer`).
+`AUTONOMOUS_SYNTHESIS_AGENT`, default `synthesizer`, on the same model as `deep_reviewer`).
 
 What the model server does when the chosen agent is not the one loaded is in
 [SERVING.md](SERVING.md).

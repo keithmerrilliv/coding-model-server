@@ -5825,7 +5825,9 @@ def _test_failure(failure_detail: str) -> Failure:
                    feedback=failure_detail, charge_role="implementer")
 
 
-_SYNTHESIS_AGENT = os.getenv("AUTONOMOUS_SYNTHESIS_AGENT", "deep_reviewer")
+# Synthesis has its own roster entry (DEV-900), today on the same model as
+# deep_reviewer, so a reviewer repoint cannot change it by accident.
+_SYNTHESIS_AGENT = os.getenv("AUTONOMOUS_SYNTHESIS_AGENT", "synthesizer")
 
 # A synthesized artifact failing only a small minority of tests gets ONE
 # targeted repair round before the spec fails (DEV-406 — spec_96d7e07f's

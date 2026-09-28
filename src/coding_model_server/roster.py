@@ -11,6 +11,7 @@ from .agent_prompts import (
     _ARCHITECT_SYSTEM_PROMPT,
     _IMPLEMENTER_SYSTEM_PROMPT,
     _REVIEWER_SYSTEM_PROMPT,
+    _SYNTHESIZER_SYSTEM_PROMPT,
     _UNICODE_GUARD,
 )
 
@@ -587,6 +588,18 @@ AGENTS = {
     'deep_reviewer': _create_agent_config(
         'Reviewer — Qwen3.5-122B Q4_K_M (10B/122B MoE, 256K ctx Q8_0, ngl=49 cpu_moe ub=3072, deep judgment)',
         _REVIEWER_SYSTEM_PROMPT,
+        _MOE_122B,
+        executor=True
+    ),
+    # Synthesis and its repair round (DEV-406) have their own entry so that a
+    # reviewer repoint does not silently change the synthesizer, and usage
+    # telemetry can tell the two roles apart (DEV-900). It shares _MOE_122B
+    # with deep_reviewer, so both run in one llama-server child and a switch
+    # between them is no swap. The model was chosen for its size and 256K
+    # context, not measured for this job; DEV-902's replay eval decides it.
+    'synthesizer': _create_agent_config(
+        'Synthesizer — Qwen3.5-122B Q4_K_M (10B/122B MoE, 256K ctx Q8_0, ngl=49 cpu_moe ub=3072, same model as deep_reviewer)',
+        _SYNTHESIZER_SYSTEM_PROMPT,
         _MOE_122B,
         executor=True
     ),
