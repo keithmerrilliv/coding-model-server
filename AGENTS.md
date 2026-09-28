@@ -37,7 +37,7 @@ a Mac. It deploys there and nowhere else; see [docs/MAC_RUNNER.md](docs/MAC_RUNN
 | What each role is shown, and the prompt budget | `coding_model_autonomous/context.py` |
 | Agent prompts and response parsing | `coding_model_autonomous/prompts.py`, `parsers.py`; what each role is sent, `messages.py` |
 | An agent-layer knob (`AUTONOMOUS_*` budgets, retries, modes) | `coding_model_autonomous/settings.py`: read and patch it there, never on `executor` |
-| The agent roster, model configs, VRAM numbers | `coding_model_server/config.py` (each model config's comments record the measurements behind it) |
+| The agent roster, model configs, VRAM numbers | `coding_model_server/roster.py` (each model config's comments record the measurements behind it), read as `Config.AGENTS` |
 | Model loading, swapping, VRAM admission | `coding_model_server/llama_server.py` |
 | Env vars and their defaults | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) |
 | Operational scripts | [scripts/README.md](scripts/README.md) |
