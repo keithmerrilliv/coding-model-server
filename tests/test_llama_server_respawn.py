@@ -151,3 +151,43 @@ def test_has_active_requests_is_wired(mgr):
     assert mgr.has_active_requests() is False
     mgr._active_requests = 2
     assert mgr.has_active_requests() is True
+
+
+# ── DEV-857: the dead child's restored slot is not restored into its successor ──
+
+@pytest.fixture
+def slot_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(type(LlamaServerManager()), "_slot_save_dir",
+                        property(lambda self: tmp_path / "kv_cache"))
+    (tmp_path / "kv_cache").mkdir()
+    return tmp_path
+
+
+def test_dead_child_with_an_unconfirmed_restore_quarantines_it(mgr, slot_dir):
+    path = mgr._slot_save_dir / mgr._slot_cache_filename(
+        mgr._runtime_signature(MODEL_CONFIG))
+    path.write_bytes(b"kv")
+    _attach_child(mgr, returncode=-6)            # SIGABRT on the first decode
+    mgr._unconfirmed_restore = path
+    mgr._session = mock.Mock()
+
+    mgr.ensure_running(MODEL_CONFIG, agent_id="moe_implementer")
+
+    mgr.start.assert_called_once_with(MODEL_CONFIG)
+    assert (slot_dir / "kv_cache_quarantine" / path.name).exists()
+    mgr._session.post.assert_not_called()        # nothing left to restore
+
+
+def test_a_clean_swap_quarantines_nothing(mgr, slot_dir):
+    path = mgr._slot_save_dir / mgr._slot_cache_filename(
+        mgr._runtime_signature(MODEL_CONFIG))
+    path.write_bytes(b"kv")
+    _attach_child(mgr, returncode=None)          # alive: a genuine swap
+    mgr._unconfirmed_restore = path
+    mgr._save_slot_state = mock.Mock()
+    other = dict(MODEL_CONFIG, n_ctx=32768)
+
+    mgr.ensure_running(other, agent_id="reviewer")
+
+    assert path.exists()
+    assert not (slot_dir / "kv_cache_quarantine").exists()
