@@ -22,4 +22,4 @@ jobs:
         # Scoped to the fully-annotated packages — see [tool.mypy] (DEV-169).
         run: mypy
       - name: Test
-        run: pytest -q
+        run: pytest -q -n auto

@@ -78,7 +78,9 @@ RUFF_RC=$?
 MYPY_RC=$?
 # `network` tests (a real npm install) are CI's job: here they cost ~20 s and
 # their timing depends on the registry, not on the change (DEV-836).
-"$PY" -m pytest -q -m "not network" > "$PYTEST_LOG" 2>&1
+# Eight xdist workers: measured on this box, 16 is no faster, because the
+# real-sandbox and subprocess tests are the long poles, not the core count.
+"$PY" -m pytest -q -m "not network" -n 8 > "$PYTEST_LOG" 2>&1
 PYTEST_RC=$?
 
 SUMMARY="$(grep -E '^(=+ )?[0-9]+ (passed|failed)' "$PYTEST_LOG" | tail -1)"

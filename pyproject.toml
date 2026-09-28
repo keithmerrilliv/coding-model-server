@@ -52,6 +52,7 @@ scripts = [
 ]
 dev = [
     "pytest>=8.0",
+    "pytest-xdist>=3.6",
     "ruff>=0.14",
     "mypy>=1.11",
 ]
