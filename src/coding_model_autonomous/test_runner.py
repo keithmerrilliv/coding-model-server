@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Collection, Iterable, Optional
 
-from . import seccomp_filter
+from . import languages, seccomp_filter
 from .workspace import CONTAINED_DIR
 
 # Mac-runner dispatch session only. Inference calls never touch this — they
@@ -1733,13 +1733,11 @@ def count_test_declarations(source: str, framework: str) -> int:
     Returns an integer count of test function declarations found. This is a
     pure helper that does not perform any I/O and has no side effects.
 
-    Frameworks supported:
-      - "pytest": counts lines matching `def test_...(` pattern (indented or
-        top-level), excluding commented-out lines (`# def test_x(`).
-      - "swift_test": counts both XCTest (`func testFoo(`) and swift-testing
-        (`@Test` attribute line followed by a function declaration).
-
-    Unknown frameworks or empty/whitespace-only sources return 0.
+    The count is the framework's language pack's (``count_tests``): pytest
+    counts `def test_...(`; swift_test and xcodebuild_test count XCTest
+    `func test…(` and swift-testing `@Test`. A framework whose pack does not
+    count (jest, vitest, node_test), an unknown framework, or an
+    empty/whitespace-only source returns 0.
     """
     source = source.strip()
     if not source:
@@ -1748,95 +1746,8 @@ def count_test_declarations(source: str, framework: str) -> int:
     # Normalize framework name using existing aliases
     normalized_framework = _APPLE_FRAMEWORK_ALIASES.get(framework.lower(), framework.lower())
 
-    if normalized_framework == "pytest":
-        return _count_pytest_tests(source)
-    elif normalized_framework in ("swift_test", "xcodebuild_test"):
-        return _count_swift_tests(source)
-    else:
-        return 0
-
-
-_PYTEST_TEST_RE = re.compile(r'^\s*def\s+test_\w+\s*\(')
-
-
-def _count_pytest_tests(source: str) -> int:
-    """Count pytest-style test functions in Python source."""
-    count = 0
-    in_multiline_string = False
-    
-    for line in source.splitlines():
-        stripped = line.lstrip()
-        
-        # Skip comment lines entirely
-        if stripped.startswith('#'):
-            continue
-        
-        # Handle triple-quote state tracking
-        if '"""' in line or "'''" in line:
-            # Count occurrences of triple quotes on this line
-            double_quotes = line.count('"""')
-            single_quotes = line.count("'''")
-            
-            # If odd number of triple quotes, toggle state
-            total_triple_quotes = double_quotes + single_quotes
-            if total_triple_quotes % 2 == 1:
-                in_multiline_string = not in_multiline_string
-            
-            # If we're now inside a multiline string, skip this line
-            if in_multiline_string:
-                continue
-        
-        # Skip if currently inside a multiline string
-        if in_multiline_string:
-            continue
-        
-        # Check for pytest test pattern
-        if _PYTEST_TEST_RE.match(line):
-            count += 1
-    
-    return count
-
-
-# DEV-751: XCTest discovers ANY method whose name begins with `test` —
-# `testFoo` and `test_foo` both run. The former `test[A-Z]` form read run 44's
-# twelve snake_case tests as zero and under-counted 37 of 386 archived files.
-_SWIFT_FUNC_TEST_RE = re.compile(r'\bfunc\s+test\w*\s*\(')
-_SWIFT_ATTRIBUTE_RE = re.compile(r'^\s*@Test\b')
-
-
-def _count_swift_tests(source: str) -> int:
-    """Count Swift test functions (XCTest and swift-testing).
-
-    Counts @Test attribute lines immediately without lookahead. Each @Test
-    contributes exactly 1. Also counts func testFoo( declarations separately.
-    A line matching both (@Test func testFoo()) counts as ONE, not two.
-    """
-    count = 0
-    lines = source.splitlines()
-    
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        
-        # Skip comment lines
-        stripped = line.lstrip()
-        if stripped.startswith('//'):
-            i += 1
-            continue
-        
-        # Check for @Test attribute - count it immediately on its own line
-        if _SWIFT_ATTRIBUTE_RE.match(line):
-            count += 1
-            i += 1
-            continue
-        
-        # Check for XCTest-style func testFoo( pattern
-        if _SWIFT_FUNC_TEST_RE.search(line):
-            count += 1
-        
-        i += 1
-    
-    return count
+    pack = languages.pack_for_framework(normalized_framework)
+    return pack.count_tests(source) if pack else 0
 
 
 def declaration_delta(

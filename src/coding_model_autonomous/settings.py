@@ -10,7 +10,9 @@ from __future__ import annotations
 import logging
 import os
 
-
+# The language names are the language packs'; re-exported for callers of
+# the agent layer that already read them here.
+from .languages import language_from_paths, normalize_language  # noqa: F401
 
 logger = logging.getLogger("orchestrator.executor")
 
@@ -103,57 +105,7 @@ AUTONOMOUS_MEMORY_ROLES = _parse_memory_roles(os.getenv("AUTONOMOUS_MEMORY_ROLES
 # This is config, not a hardcoded "swift", because it is a statement about
 # what the CORPUS covers rather than about the pipeline. The day a Python
 # corpus is indexed, this is the line that changes.
-# DEV-781: one spelling per language, so the planner's choice of "objc",
-# "Obj-C" or "Objective-C" cannot switch retrieval off. Unknown names pass
-# through lowercased — the gate then says "language_not_covered" for them.
-_LANGUAGE_ALIASES = {
-    "objc": "objective-c", "obj-c": "objective-c", "objectivec": "objective-c",
-    "objective c": "objective-c", "objective-c": "objective-c",
-    "objc++": "objective-c++", "obj-c++": "objective-c++",
-    "objcpp": "objective-c++", "objective c++": "objective-c++",
-    "objective-c++": "objective-c++", "objectivec++": "objective-c++",
-    "py": "python", "swiftui": "swift",
-}
-
-
-def normalize_language(name: "str | None") -> "str | None":
-    """Canonical lowercase language name, or None for empty input."""
-    if name is None:
-        return None
-    key = str(name).strip().lower()
-    if not key:
-        return None
-    return _LANGUAGE_ALIASES.get(key, key)
-
-
-# Extension -> language, in precedence order: Objective-C++ is the most
-# specific claim a change surface can make, then Objective-C, then Swift. A
-# `.h` alone decides nothing (it could be any of the three).
-_EXTENSION_LANGUAGES = (
-    (".mm", "objective-c++"),
-    (".m", "objective-c"),
-    (".swift", "swift"),
-    (".py", "python"),
-    (".ts", "typescript"), (".tsx", "typescript"),
-    (".js", "javascript"), (".jsx", "javascript"),
-    (".rs", "rust"), (".go", "go"), (".kt", "kotlin"), (".java", "java"),
-)
-
-
-def language_from_paths(paths: "list[str] | None") -> "str | None":
-    """The language a set of file paths implies (DEV-781), or None.
-
-    The change surface is the one deterministic signal for Objective-C++:
-    a `.mm` file is Objective-C++ by definition, where the prose and the
-    planner's guess are not. Used only when the plan does not say.
-    """
-    exts = {os.path.splitext(str(p))[1].lower() for p in (paths or [])}
-    for ext, lang in _EXTENSION_LANGUAGES:
-        if ext in exts:
-            return lang
-    return None
-
-
+#
 # The corpus is Apple API documentation, so it applies to every language that
 # calls those APIs: Swift, Objective-C and the Objective-C half of
 # Objective-C++ (DEV-781; probed 2026-09-21 — Objective-C phrasings land on

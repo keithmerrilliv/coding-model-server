@@ -3,19 +3,18 @@
 Seven parsers across four modules each read the same build and test logs, and
 each had its own copy of "what an error line looks like". They live here now,
 moved verbatim; the old names stay importable from ``outcome``,
-``swift_rules``, ``gate_output`` and the daemon as aliases. :func:`read`
-composes them into one :class:`Report` and adds no judgement of its own.
+``gate_output`` and the daemon as aliases. :func:`read` composes them into
+one :class:`Report` and adds no judgement of its own.
 
 This module is a leaf: it imports only the standard library, so the kernel,
-``swift_rules`` (imported by ``executor``) and the daemon can all depend on it
+``citations``, the language packs and the daemon can all depend on it
 without a cycle.
 
 Map: what each piece matches; its callers; the tests that pin it.
 
 1. Located compiler diagnostics and path normalization
  - ANSI_SGR_RE: SGR colour escapes (DEV-755); every stripper here, the daemon's
-   feedback; test_outcome_diagnostics. outcome and swift_rules each defined it,
-   identically; this is the one copy.
+   feedback; test_outcome_diagnostics. This is the one copy.
  - SIG_PATH_RE, SIG_ERROR_RE, ATTRIBUTED_ERROR_RE / attributed_diagnostics,
    diagnostic_messages: location-stripped message per `path:l:c: error:` line;
    outcome._record, retry_policy, daemon repair and widening, the completeness
@@ -33,8 +32,9 @@ Map: what each piece matches; its callers; the tests that pin it.
    and first compiler message; outcome.coarse_key;
    test_invariant_failure_detection.
  - LOCATED_RE, MACRO_LOCATED_RE / located_diagnostics, map_to_artifact: located
-   errors incl. macro expansions (DEV-791); swift_rules, the daemon's build
-   feedback and synthesis repair; test_swift_rules, test_swift_prechecks_dev791.
+   errors incl. macro expansions (DEV-791); the daemon's build feedback and
+   synthesis repair, via ``citations``; test_swift_rules,
+   test_swift_prechecks_dev791.
 
 2. The build verdict
  - BUILD_FAILURE_RES, BUILD_COMPLETE_RES, LINE_ATTRIBUTED_RE,
@@ -360,7 +360,7 @@ def diagnostic_identity(detail: str) -> str:
 
 # DEV-764/767: the `path:line` citations a build reported, for the repair
 # round's cite-or-refuse filter and the per-diagnostic fix hints in
-# swift_rules. Unlike attributed_diagnostics these keep the location.
+# ``citations``. Unlike attributed_diagnostics these keep the location.
 LOCATED_RE = re.compile(
     r"^\s*(?P<path>\S.*?\.\w+):(?P<line>\d+):(?P<col>\d+): error: (?P<msg>.+?)\s*$",
     re.MULTILINE,

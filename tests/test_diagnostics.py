@@ -1,7 +1,7 @@
 """DEV-838: every reader of compiler and test-runner output is one module.
 
-``diagnostics.read`` composes the parsers the daemon, ``outcome``,
-``swift_rules`` and ``gate_output`` used separately, and returns one report.
+``diagnostics.read`` composes the parsers the daemon, ``outcome``, the Swift
+rules and ``gate_output`` used separately, and returns one report.
 The fixtures are real runner output (tests/fixtures/README.md), so these pin
 what the pipeline reads today rather than what a hand-written log would say.
 """
@@ -108,14 +108,13 @@ def test_no_evidence_is_inconclusive():
 # ── the old names still reach the moved code ─────────────────────────────────
 
 def test_old_names_are_aliases_of_the_moved_code():
-    from coding_model_autonomous import gate_output, outcome, swift_rules
+    from coding_model_autonomous import gate_output, outcome
     from coding_model_server import orchestrator_daemon as d
 
     assert outcome.attributed_diagnostics is dg.attributed_diagnostics
     assert outcome.repo_relative is dg.repo_relative
     assert outcome._diagnostic_identity is dg.diagnostic_identity
-    assert swift_rules.located_diagnostics is dg.located_diagnostics
-    assert swift_rules.ANSI_SGR_RE is outcome.ANSI_SGR_RE is dg.ANSI_SGR_RE
+    assert outcome.ANSI_SGR_RE is dg.ANSI_SGR_RE
     assert gate_output.summarize_test_output is dg.summarize_test_output
     assert d._detect_build_failure is dg.detect_build_failure
     assert d._observed_a_test_run is dg.observed_a_test_run
@@ -162,7 +161,8 @@ def _compiled_patterns(path: Path) -> set:
 @pytest.mark.parametrize("module", [
     "coding_model_server/orchestrator_daemon.py",
     "coding_model_autonomous/outcome.py",
-    "coding_model_autonomous/swift_rules.py",
+    "coding_model_autonomous/languages/swift/rules.py",
+    "coding_model_autonomous/citations.py",
     "coding_model_autonomous/gate_output.py",
 ])
 def test_no_moved_regex_is_compiled_anywhere_else(module):

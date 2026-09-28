@@ -17,7 +17,7 @@ from unittest import mock
 import pytest
 
 import coding_model_server.orchestrator_daemon as d
-from coding_model_autonomous import swift_prechecks as sp
+from coding_model_autonomous.languages.swift import prechecks as sp
 from coding_model_autonomous.executor import ImplementerResult
 from coding_model_autonomous.models import (
     GateStatus, GateType, SpecStatus, TaskStatus,
@@ -317,7 +317,7 @@ def test_clean_swift_still_dispatches_to_the_mac(db, impl_spec):
 
 # ── DEV-764: unqualified static members in instance context ──────────────────
 
-from coding_model_autonomous.swift_prechecks import unqualified_static_member_references
+from coding_model_autonomous.languages.swift.prechecks import unqualified_static_member_references
 
 
 def _static(files):

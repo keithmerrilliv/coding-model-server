@@ -90,9 +90,9 @@ from coding_model_autonomous.jira_client import (
 )
 from coding_model_autonomous.jira_sync import JiraSync
 from coding_model_autonomous import (
-    apply_edits, architect_tools, delivery, design_testability,
-    gate_output, plan_paths,
-    settings, swift_prechecks, swift_rules, test_runner,
+    apply_edits, architect_tools, citations, delivery, design_testability,
+    gate_output, languages, plan_paths,
+    settings, test_runner,
 )
 from coding_model_autonomous.test_runner import run_tests
 from coding_model_autonomous.retry_policy import (
@@ -137,7 +137,6 @@ from coding_model_autonomous.messages import (
     whole_file_emission_tokens,
 )
 from coding_model_autonomous.normalize import (
-    declared_top_level_types,
     normalize_boilerplate,
     protected_type_collisions,
 )
@@ -1498,11 +1497,11 @@ def _spec_language(spec: Spec) -> "str | None":
     treats as "not known to be covered" rather than as a default.
     """
     plan = _load_plan(spec)
-    declared = settings.normalize_language(plan.get("language"))
+    declared = languages.normalize_language(plan.get("language"))
     # DEV-781: when the plan cannot say, the implement phase's own paths
     # can — a `.mm` is Objective-C++ whatever the prose called it. The plan
     # wins when both exist; a disagreement is logged, not resolved.
-    implied = settings.language_from_paths(_context.planned_outputs(plan))
+    implied = languages.language_from_paths(_context.planned_outputs(plan))
     if declared and implied and declared != implied:
         logger.info("spec %s: plan says language=%s but its implement "
                     "outputs imply %s — using the plan's (DEV-781)",
@@ -1730,8 +1729,8 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:  # noqa: C
                        spec.id, len(unreadable), ctx.base_ref,
                        ", ".join(p for p, _, _ in unreadable))
 
-    standing_rules = swift_rules.render_default_isolation_rule(
-        _default_actor_isolation(spec))   # DEV-784
+    standing_rules = languages.render_target_rules(
+        _operator_test_strategy(spec))   # DEV-784
 
     def _architect_prompt(existing, reference, omitted_e=None, omitted_r=None):
         return build_architect_message(
@@ -2509,8 +2508,8 @@ def _generate_implementation(
     # not the budget-trimmed render.
     unresolved = _unresolved_for(view)
 
-    standing_rules = swift_rules.render_default_isolation_rule(
-        _default_actor_isolation(spec))   # DEV-784
+    standing_rules = languages.render_target_rules(
+        _operator_test_strategy(spec))   # DEV-784
 
     def _implementer_prompt(existing, reference, omitted_e=None, omitted_r=None):
         return build_implementer_message(
@@ -3615,55 +3614,58 @@ def _normalize_generated_files(db: Database, spec: Spec, task, files, role: str,
     return normalized
 
 
-def _default_actor_isolation(spec: Spec) -> "str | None":
-    """The target's `SWIFT_DEFAULT_ACTOR_ISOLATION`, as the spec's operator
-    test_strategy declares it (`default_actor_isolation: MainActor`), or None
-    (DEV-784). Electric Sheep's app target is default-isolated; nothing in a
-    served file says so."""
+def _operator_test_strategy(spec: Spec) -> dict:
+    """The plan's test_strategy, or {} when it is absent or unreadable.
+
+    The operator's keys in it describe the target in ways no served file
+    does (DEV-784: Electric Sheep's app target is default-isolated to the
+    main actor), and the language packs read the ones they own.
+    """
     try:
         ts = _load_plan(spec).get("test_strategy")
     except Exception:
-        return None
-    if not isinstance(ts, dict):
-        return None
-    v = ts.get("default_actor_isolation")
-    return str(v) if v else None
+        return {}
+    return ts if isinstance(ts, dict) else {}
 
 
-def _local_swift_precheck(db: Database, spec: Spec, task, files,
-                          protected_files) -> "tuple[str | None, str]":
-    """Statically-decidable Swift errors, caught before the ~300s Mac dispatch.
+def _local_precheck(db: Database, spec: Spec, task, files,
+                    protected_files, framework: str) -> "tuple[str | None, str]":
+    """Statically-decidable build errors, caught before the build dispatch.
 
-    DEV-512. Two of the pipeline's largest error signatures — `invalid
+    DEV-512. Two of the pipeline's largest Swift error signatures — `invalid
     redeclaration of 'X'` and `'mutating' is not valid on instance methods in
-    classes` — need no Swift toolchain to see. We check them locally over the
-    generated files (plus the protected scaffold as read-only collision
-    context) and, on a hit, return `(reason, report)` shaped exactly like a
-    swiftc failure so the caller can route it back to the implementer on the
-    same `build_reason` path a real build failure takes — skipping the dispatch
-    entirely. `(None, "")` means clean: dispatch as usual.
+    classes` — need no toolchain to see, and a Mac dispatch costs ~300s. The
+    language pack that owns *framework* checks the generated files (plus the
+    protected scaffold as read-only collision context) and, on a hit, this
+    returns `(reason, report)` shaped exactly like a compiler failure, so the
+    caller routes it back to the implementer on the same `build_reason` path a
+    real build failure takes, skipping the dispatch entirely. `(None, "")`
+    means clean, or that the pack has no prechecks: dispatch as usual.
 
     Runs AFTER `_drop_protected_type_collisions`, which has already removed the
     pure-duplicate-of-protected files; what remains for the duplicate check is
     generated-vs-generated clashes and the partial protected collisions that
-    would otherwise only surface 300s later on the Mac.
+    would otherwise only surface after the build.
 
     Never raises: a static lint must not be able to stall a spec.
     """
-    try:
-        result = swift_prechecks.run_swift_prechecks(
-            files, protected_files or [],
-            default_isolation=_default_actor_isolation(spec))
-    except Exception as e:  # never let the check itself break a generation
-        logger.warning("spec %s: local Swift pre-check errored (%s) — "
-                       "falling through to the Mac build check", spec.id, e)
+    pack = languages.pack_for_framework(framework)
+    if pack is None:
         return None, ""
-    if not result.failed():
+    try:
+        result = pack.run_prechecks(files, protected_files or [],
+                                    _operator_test_strategy(spec))
+    except Exception as e:  # never let the check itself break a generation
+        logger.warning("spec %s: local %s pre-check errored (%s) — "
+                       "falling through to the build check", spec.id,
+                       pack.name, e)
+        return None, ""
+    if result is None or not result.failed():
         return None, ""
 
     for v in result.violations:
-        logger.warning("spec %s: local Swift pre-check — %s:%d: %s",
-                       spec.id, v.path, v.line, v.message)
+        logger.warning("spec %s: local %s pre-check — %s:%d: %s",
+                       spec.id, pack.name, v.path, v.line, v.message)
     db.record_event(EventKind.TEST_RAN, spec_id=spec.id, task_id=task.id,
                     payload={"phase": "pre_gate_build_check",
                              "passed": False,
@@ -3744,19 +3746,17 @@ def _pre_gate_build_check(db: Database, spec: Spec, task, spec_dir: Path,
     ts_for_build = _load_plan(spec).get("test_strategy")
     if isinstance(ts_for_build, dict) and ts_for_build.get("framework"):
         fw = build_framework = ts_for_build["framework"]
-        # DEV-512: statically-decidable Swift errors are caught here, before the
-        # ~300s Mac dispatch. A hit takes the SAME build_reason path a real
-        # compiler diagnostic would (its report is swiftc-shaped), so the whole
+        # DEV-512: statically-decidable build errors are caught here, before
+        # the dispatch. A hit takes the SAME build_reason path a real compiler
+        # diagnostic would (its report is compiler-shaped), so the whole
         # routing/retry machinery below is unchanged — we just skip the runner.
-        # Gated to the Swift frameworks: the checks and the "does not compile"
-        # feedback only make sense for a Swift build.
+        # The framework's language pack decides whether it has checks.
         precheck_failed = False
-        if fw.lower() in ("swift_test", "xcodebuild_test"):
-            build_reason, build_output = _local_swift_precheck(
-                db, spec, task, files, protected_files)
-            if build_reason is not None:
-                build_passed = False
-                precheck_failed = True  # its own event is recorded in the helper
+        build_reason, build_output = _local_precheck(
+            db, spec, task, files, protected_files, fw)
+        if build_reason is not None:
+            build_passed = False
+            precheck_failed = True  # its own event is recorded in the helper
 
         # Only dispatch — and only record the dispatch's own TEST_RAN event —
         # when the local pre-check let the code through.
@@ -4309,7 +4309,7 @@ def _build_failure_feedback(build_output: str, build_reason: str,
     bare `error: SwiftCompile … failed` line for the same reason.
     """
     clean = _diagnostics.ANSI_SGR_RE.sub("", build_output or "")
-    cited = swift_rules.located_diagnostics(clean, artifact_paths)
+    cited = _diagnostics.located_diagnostics(clean, artifact_paths)
     headline = (f"{cited[0].located()}: error: {cited[0].message}"
                 if cited else build_reason)
     actionable = _extract_actionable_test_output(clean, framework)
@@ -4319,7 +4319,7 @@ def _build_failure_feedback(build_output: str, build_reason: str,
         f"to review yet. First compiler diagnostic:\n\n"
         f"    {headline}\n\n"
         f"{_diagnostic_completeness_note(clean)}"
-        f"{swift_rules.render_cited_diagnostics(cited, repair=False)}"
+        f"{citations.render_cited_diagnostics(cited, repair=False)}"
         f"{_reemit_instruction('Fix every diagnostic below and re-emit ALL files.')}\n\n"
         f"```\n{actionable}\n```\n"
     )
@@ -5878,8 +5878,7 @@ def _repair_verdict(repair_passed: bool, pre_diags: list, post_diags: list,
     """
     symbols: set = set()
     for path, content in (protected_files or []):
-        if path.endswith(".swift"):
-            symbols |= declared_top_level_types(content)
+        symbols |= languages.declared_types(path, content)
     poisoned = sorted(
         {sym for sym in symbols for cls in new_classes
          if re.search(rf"\b{re.escape(sym)}\b", cls)})
@@ -6169,7 +6168,7 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,  # noqa:
     # DEV-767: the located diagnostics, mapped onto the synthesized files.
     # Only a BUILD failure cites lines; a near-miss test failure does not, and
     # the filter below is a no-op without citations.
-    cited = (swift_rules.located_diagnostics(
+    cited = (_diagnostics.located_diagnostics(
                  test_output, [p for p, _ in result.files])
              if rate is None and build_failed else [])
     repair_messages = build_synthesis_repair_message(
@@ -6220,7 +6219,7 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,  # noqa:
             continue
         cited_before[rel_path] = (
             target.read_text() if target.is_file() else None)
-    cite = swift_rules.filter_repair_to_cited(repair.files, cited_before, cited)
+    cite = citations.filter_repair_to_cited(repair.files, cited_before, cited)
     if cite.dropped:
         logger.warning("spec %s: synthesis repair emitted %d file(s) no "
                        "diagnostic cites — dropped: %s", spec.id,

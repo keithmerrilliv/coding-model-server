@@ -1,6 +1,6 @@
 """DEV-784: default-MainActor isolation — the implicit form of DEV-753."""
-from coding_model_autonomous import swift_prechecks as sp
-from coding_model_autonomous import swift_rules as sr
+from coding_model_autonomous.languages.swift import prechecks as sp
+from coding_model_autonomous.languages.swift import rules as sr
 from coding_model_autonomous import executor
 
 # Run 50's synthesis repair, trimmed: a Combine sink calling an instance

@@ -1,4 +1,5 @@
-"""Swift-specific guidance and repair targeting (DEV-764, DEV-767).
+"""Swift's prompt rules: the standing paragraph, the fix hints, and the
+default-isolation rule (DEV-764, DEV-767, DEV-778, DEV-784).
 
 Runs 44-48 (2026-09-19/20) each ended a few one-token Swift slips from
 delivery, and the repair round could not turn the compiler's diagnostic into
@@ -11,42 +12,31 @@ the edit it named:
   ``@Test func`` not declared ``throws``); the repair rewrote the renderer and
   never touched the test file (14 -> 14).
 
-This module is the DEV-644 treatment for Swift. DEV-644 fixed "the feedback
-named the module, so each agent fixed the module rather than the import" with
-a standing paragraph rendered into every Python prompt. Three pieces here:
+This is the DEV-644 treatment for Swift. DEV-644 fixed "the feedback named
+the module, so each agent fixed the module rather than the import" with a
+standing paragraph rendered into every Python prompt. Here:
 
-1. :func:`render_swift_rules` — the standing paragraph, rendered into the
+1. :data:`SWIFT_RULES` — the standing paragraph, rendered into the
    implementer, synthesis and repair prompts whenever the file set has Swift.
-2. :func:`located_diagnostics` + :func:`fix_hints` — the ``path:line``
-   citations a build reported, ANSI-stripped, mapped onto artifact paths, with
-   a per-class hint saying what the diagnostic MEANS to change.
-3. :func:`filter_repair_to_cited` — cite-or-refuse: a repair may only replace
-   files the diagnostics name, and is not worth a Mac round trip unless it
-   changed at least one cited line.
+2. :func:`fix_hint` — what a Swift diagnostic MEANS to change, rendered
+   beside each cited location (``citations``).
+3. :func:`render_default_isolation_rule` — the rules a default-MainActor
+   target needs, when the operator's test_strategy declares one.
 
-Everything here is pure; the daemon wires it in and the tests drive it
-directly.
+Locating diagnostics and refusing uncited repairs are language-neutral, and
+live in ``diagnostics`` and ``citations``. Everything here is pure.
 """
 from __future__ import annotations
 
-import difflib
 import re
-from dataclasses import dataclass, field
-
-from . import diagnostics as _diagnostics
-
-# diagnostics is a leaf module, so this import cannot close the cycle that
-# importing outcome would (outcome -> context -> test_runner -> workspace ->
-# executor -> here).
-ANSI_SGR_RE = _diagnostics.ANSI_SGR_RE
 
 # ── 1. The standing paragraph ────────────────────────────────────────────────
 
 # FROZEN as of DEV-778 (2026-09-20): a new diagnostic class goes into
 # _FIX_HINTS (reactive, rendered only when the diagnostic is present) and
-# swift_prechecks (detected before the build) — NOT into this paragraph,
+# prechecks (detected before the build) — NOT into this paragraph,
 # which every Swift prompt pays for whether or not the class is at issue.
-_SWIFT_RULES = (
+SWIFT_RULES = (
     "## Swift rules — MANDATORY\n\n"
     "Each of these has cost a full attempt; the compiler's message for each is "
     "quoted so you recognise it and apply the ONE edit it asks for.\n\n"
@@ -75,27 +65,7 @@ _SWIFT_RULES = (
 )
 
 
-def has_swift(paths: "list[str]") -> bool:
-    return any(str(p).endswith(".swift") for p in paths or [])
-
-
-def render_swift_rules(paths: "list[str]") -> str:
-    """The Swift rules section, or "" when no path is Swift (so every
-    non-Swift prompt stays byte-identical)."""
-    return _SWIFT_RULES if has_swift(paths) else ""
-
-
-# ── 2. Located diagnostics and fix hints ─────────────────────────────────────
-
-# The located-diagnostic parser lives in diagnostics.py (DEV-838); swift_rules
-# keeps the Swift knowledge (the rules paragraph, the fix hints, the repair
-# filter) and re-exports the parser under its old names.
-_LOCATED_RE = _diagnostics.LOCATED_RE
-_MACRO_LOCATED_RE = _diagnostics.MACRO_LOCATED_RE
-LocatedDiagnostic = _diagnostics.LocatedDiagnostic
-map_to_artifact = _diagnostics.map_to_artifact
-located_diagnostics = _diagnostics.located_diagnostics
-
+# ── 2. Fix hints ────────────────────────────────────────────────────────────
 
 # (regex on the message, the hint). First match wins.
 _FIX_HINTS: "list[tuple[re.Pattern, str]]" = [
@@ -165,119 +135,6 @@ def fix_hint(message: str) -> str | None:
             except (IndexError, KeyError):
                 return hint
     return None
-
-
-def render_cited_diagnostics(diags: "list[LocatedDiagnostic]",
-                             *, repair: bool = True) -> str:
-    """Every cited location with its hint (DEV-778: rendered ONLY for the
-    diagnostics actually present), followed by the rule for this prompt.
-
-    ``repair=True`` is the synthesis repair round (DEV-767): edits must land
-    on cited files and lines or the repair is refused. ``repair=False`` is
-    the implementer's build-failure retry, where whole-file re-emission is
-    the contract and other files are legal, so the rule is softer: change
-    the named lines, and nothing a diagnostic does not require.
-    """
-    if not diags:
-        return ""
-    lines = ["## Cited locations — your edits MUST land here\n\n"]
-    for d in diags[:40]:
-        hint = fix_hint(d.message)
-        lines.append(f"- `{d.located()}`: {d.message}")
-        if hint:
-            lines.append(f"  → fix: {hint}")
-        lines.append("")
-    if repair:
-        lines.append(
-            "Emit a <<<FILE: path>>> block ONLY for files listed above, and make "
-            "sure each block changes at least one of its cited lines. A block for "
-            "any other file is discarded before the build; a repair that changes "
-            "no cited line is not built at all.\n\n"
-        )
-    else:
-        lines.append(
-            "Each `→ fix` is the ONE edit that diagnostic asks for; apply it on "
-            "the line named (or on the declaration it points at). Do not "
-            "rewrite lines no diagnostic names, and do not restructure a "
-            "function to avoid a one-token fix.\n\n"
-        )
-    return "\n".join(lines)
-
-
-# ── 3. Cite-or-refuse ────────────────────────────────────────────────────────
-
-@dataclass
-class CiteFilterResult:
-    kept: "list[tuple[str, str]]"
-    dropped: "list[str]" = field(default_factory=list)      # uncited paths
-    untouched: "list[str]" = field(default_factory=list)    # cited, no cited line changed
-    touched_cited_line: bool = False
-    applied: bool = False   # False when there was nothing to cite against
-
-    def refuse(self) -> bool:
-        """True when the repair is not worth building."""
-        return self.applied and not self.touched_cited_line
-
-
-def _changed_line_indices(before: str, after: str) -> set:
-    """0-based indices of *before* lines that a diff replaces or deletes,
-    plus the neighbours of pure insertions (an insertion between lines
-    i-1 and i touches both)."""
-    a = before.splitlines()
-    b = after.splitlines()
-    changed: set = set()
-    for tag, i1, i2, _j1, _j2 in difflib.SequenceMatcher(
-            None, a, b, autojunk=False).get_opcodes():
-        if tag == "equal":
-            continue
-        if tag == "insert":
-            changed.update({i1 - 1, i1})
-        else:
-            changed.update(range(i1, i2))
-    return changed
-
-
-def filter_repair_to_cited(repair_files: "list[tuple[str, str]]",
-                           before: "dict[str, str | None]",
-                           diags: "list[LocatedDiagnostic]") -> CiteFilterResult:
-    """Keep only the emitted files a diagnostic cites, and say whether any
-    cited line changed.
-
-    *before* maps each emitted relpath to its pre-repair content (None when
-    the file did not exist). When no diagnostic maps onto an artifact the
-    filter is a no-op (``applied=False``) — there is nothing to cite against,
-    e.g. a near-miss test failure rather than a build failure.
-    """
-    cited: "dict[str, set]" = {}
-    for d in diags:
-        if d.artifact:
-            cited.setdefault(d.artifact, set()).add(d.line - 1)  # 0-based
-    if not cited:
-        return CiteFilterResult(kept=list(repair_files), applied=False,
-                                touched_cited_line=True)
-    res = CiteFilterResult(kept=[], applied=True)
-    for rel, content in repair_files:
-        if rel not in cited:
-            res.dropped.append(rel)
-            continue
-        prev = before.get(rel)
-        if prev is None:
-            # A cited file the workspace does not have: nothing to compare
-            # against, keep it and count it as touched.
-            res.kept.append((rel, content))
-            res.touched_cited_line = True
-            continue
-        changed = _changed_line_indices(prev, content)
-        # A cited line counts as touched if it, or an immediate neighbour,
-        # changed — `throws` lands on the `func` line one above a cited `try`.
-        hits = {i + off for i in cited[rel] for off in (-1, 0, 1)}
-        if changed & hits:
-            res.kept.append((rel, content))
-            res.touched_cited_line = True
-        else:
-            res.kept.append((rel, content))
-            res.untouched.append(rel)
-    return res
 
 
 # DEV-784: rendered only when the spec's test_strategy declares the target's

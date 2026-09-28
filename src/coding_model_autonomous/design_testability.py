@@ -30,6 +30,14 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from . import languages
+from .languages import (
+    RULE_COMPLETENESS,
+    RULE_EQUATABLE,
+    RULE_SEAM_IMPORTS,
+    RULE_TUPLE_CONFORMANCE,
+)
+
 # Rules are keyed so callers (and tests) can assert on kind rather than prose.
 KIND_NO_SECTION = "no_seams_section"
 KIND_COUNT_MISMATCH = "seam_count_mismatch"
@@ -362,21 +370,12 @@ def check_declared_mutability(design_md: str, served: dict) -> list:
     return findings
 
 
-def is_python_design(design_md: str) -> bool:
-    """True when the File Structure allocates a `.py` path (DEV-661)."""
-    return ".py" in _section(design_md, FILE_STRUCTURE_HEADING)
-
-
-_C_FAMILY_PATH_RE = re.compile(r"\.(?:hpp|hh|h|cc|cpp|cxx|c|mm|m)\b")
-
-
-def is_c_family_design(design_md: str) -> bool:
-    """True when the File Structure allocates a C, C++ or Objective-C path (DEV-831).
-
-    A header holds many types and is named for none of them in particular:
-    LLab's `LSystem.h` declares `NodeType`, `Texture`, `Node` and `LSystem`.
-    """
-    return bool(_C_FAMILY_PATH_RE.search(_section(design_md, FILE_STRUCTURE_HEADING)))
+def rule_applies(design_md: str, rule: str) -> bool:
+    """True when every language the design's File Structure allocates files
+    in opts into *rule* (``languages.RULE_*``). A rule built on one
+    language's conventions then never judges another language's files."""
+    return languages.rule_applies(
+        _section(design_md, FILE_STRUCTURE_HEADING), rule)
 
 
 # DEV-710: not every criterion HAS a call. "at least 6 new tests exist and the
@@ -727,15 +726,15 @@ def _check_equatable(seam: Seam, types: set[str], members: dict[str, str],
     Run 4 (`HitOutcome`) and run 6 (`Mushroom`) both died here, one word short
     each time.
 
-    Swift only (DEV-687). Python has no conformance to declare: `==` works on
-    any object, and a `@dataclass` generates `__eq__` for free. Run 37 and run
-    38 both drew this finding on a design comparing dataclass instances, and
-    an architect cannot satisfy it — run 37's revision added
-    `@dataclass(frozen=True, eq=True)` and an Implementation Note explaining
-    that "the previous design failed because OverlayRef was not declared
-    Equatable", which is not a defect the design had.
+    Opt-in (DEV-687): Swift declares it. Python has no conformance to
+    declare: `==` works on any object, and a `@dataclass` generates `__eq__`
+    for free. Run 37 and run 38 both drew this finding on a design comparing
+    dataclass instances, and an architect cannot satisfy it — run 37's
+    revision added `@dataclass(frozen=True, eq=True)` and an Implementation
+    Note explaining that "the previous design failed because OverlayRef was
+    not declared Equatable", which is not a defect the design had.
     """
-    if is_python_design(design_md):
+    if not rule_applies(design_md, RULE_EQUATABLE):
         return []
     if not re.search(r"[=!]=", seam.assert_):
         return []
@@ -946,7 +945,7 @@ def _check_seam_imports(design_md: str, seams: list[Seam]) -> list[Finding]:
     """DEV-661: a Python design's seams must import the code under test —
     and never through `src.`. Swift designs are out of scope (module-level
     visibility, no import in a seam)."""
-    if not is_python_design(design_md):
+    if not rule_applies(design_md, RULE_SEAM_IMPORTS):
         return []
     body = _section(design_md, SEAMS_HEADING)
     if _SRC_IMPORT_RE.search(body):
@@ -1023,10 +1022,12 @@ def check_design_testability(design_md: str) -> list[Finding]:
     Empty list means "nothing mechanically detectable", NOT "the design is
     testable" — the design review and the human gate remain the real checks.
     """
-    # DEV-525 runs FIRST and unconditionally: this defect is in the type
-    # declaration, so it holds whether or not the design has a checklist or a
-    # seam section to strand. Every other rule below reasons about criteria;
-    # this one reasons about Swift.
+    # DEV-525 runs FIRST, whenever the design's languages opt in: this defect
+    # is in the type declaration, so it holds whether or not the design has a
+    # checklist or a seam section to strand. Every other rule below reasons
+    # about criteria; this one reasons about Swift.
+    tuple_members = (_tuple_collection_members(design_md)
+                     if rule_applies(design_md, RULE_TUPLE_CONFORMANCE) else [])
     tuple_findings = [
         Finding(
             kind=KIND_TUPLE_CONFORMANCE,
@@ -1040,7 +1041,7 @@ def check_design_testability(design_md: str) -> list[Finding]:
                 f"Equatable, and check every sibling property for the same "
                 f"shape before re-emitting."),
         )
-        for owner, member, typ in _tuple_collection_members(design_md)
+        for owner, member, typ in tuple_members
     ]
 
     criteria = parse_checklist(design_md)
@@ -1298,23 +1299,24 @@ def check_design_completeness(design_md: str,
     Fail-open: a name is only reported when the design commits to it in BOTH a
     file and a signature, or declares it outright. Ambiguity stays silent.
 
-    Swift only (DEV-687). Both directions compare declared type names against
-    FILE BASENAMES, which is meaningful under Swift's one-type-per-eponymous-
-    file convention and meaningless in Python, where one module holds many
-    classes and is named for the module: `test_runner.py` declaring
-    `OverlayRef` is correct and ordinary, and there will never be an
-    `OverlayRef.py`. Runs 37 and 38 each spent a revision round on that
-    finding, and the architect can only satisfy it by inventing a file the
-    spec does not want.
+    Opt-in (DEV-687): Swift declares it. Both directions compare declared
+    type names against FILE BASENAMES, which is meaningful under Swift's
+    one-type-per-eponymous-file convention and meaningless in Python, where
+    one module holds many classes and is named for the module:
+    `test_runner.py` declaring `OverlayRef` is correct and ordinary, and there
+    will never be an `OverlayRef.py`. Runs 37 and 38 each spent a revision
+    round on that finding, and the architect can only satisfy it by inventing
+    a file the spec does not want.
 
-    Not C-family either (DEV-831), for the same reason: run 66's round-2 design
-    listed `NodeType`, `ProductionMap` and `LSystem` in Data Models, all housed
-    in existing headers, and was told to allocate a file for each.
+    C-family does not opt in either (DEV-831), for the same reason: run 66's
+    round-2 design listed `NodeType`, `ProductionMap` and `LSystem` in Data
+    Models, all housed in existing headers, and was told to allocate a file
+    for each.
 
     *served* is what the roles were shown, path → content; a type one of those
     files already declares is used, not created (DEV-855).
     """
-    if is_python_design(design_md) or is_c_family_design(design_md):
+    if not rule_applies(design_md, RULE_COMPLETENESS):
         return []
     declared = declared_types(design_md) | _heading_types(design_md)
     files = allocated_files(design_md)

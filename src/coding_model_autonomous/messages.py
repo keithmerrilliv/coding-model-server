@@ -26,7 +26,8 @@ from .prompts import (
     REVIEWER_SYSTEM_PROMPT,
     SYNTHESIS_SYSTEM_PROMPT,
 )
-from .swift_rules import render_cited_diagnostics, render_swift_rules
+from . import languages
+from .citations import render_cited_diagnostics
 
 
 logger = logging.getLogger("orchestrator.executor")
@@ -776,12 +777,13 @@ def build_implementer_message(
         [p for p, _ in (existing_files or [])] + list(new_files or []))
     if import_root:
         user_parts.append("\n\n" + import_root)
-    # DEV-764: the Swift counterpart of the import-root paragraph. Empty for
-    # a non-Swift file set, so every other prompt stays byte-identical.
-    swift_rules = render_swift_rules(
+    # DEV-764: the language packs' standing rules (Swift's is the counterpart
+    # of the import-root paragraph). Empty for a file set whose languages
+    # carry none, so every such prompt stays byte-identical.
+    language_rules = languages.render_rules(
         [p for p, _ in (existing_files or [])] + list(new_files or []))
-    if swift_rules:
-        user_parts.append("\n\n" + swift_rules)
+    if language_rules:
+        user_parts.append("\n\n" + language_rules)
     if standing_rules:   # DEV-784
         user_parts.append("\n\n" + standing_rules)
     if reference_files or omitted_reference:
@@ -1351,10 +1353,10 @@ def build_synthesis_message(
             parts.append(f"#### {relpath}\n\n```\n{content}\n```\n\n")
     # DEV-764: synthesis reproduced retry 1's unqualified static member
     # verbatim on run 47; it merges text and needs the same rules.
-    swift_rules = render_swift_rules(
+    language_rules = languages.render_rules(
         [p for att in attempts for p in att.get("files", {})])
-    if swift_rules:
-        parts.append(swift_rules)
+    if language_rules:
+        parts.append(language_rules)
     parts.append(
         "---\n\n"
         "Synthesize a single correct implementation by taking the union of "
@@ -1460,7 +1462,7 @@ def build_synthesis_repair_message(
     elif building:
         # DEV-764 / DEV-767: rules first, then the cited locations with their
         # hints, then the raw diagnostics the two are drawn from.
-        parts.append(render_swift_rules([p for p, _ in files]))
+        parts.append(languages.render_rules([p for p, _ in files]))
         parts.append(render_cited_diagnostics(cited_diagnostics or []))
         parts.append(
             "## Compiler diagnostics\n\n```\n" + failing_output + "\n```\n\n"

@@ -27,7 +27,8 @@ from coding_model_autonomous import design_testability as dt
 
 
 def _design(body: str) -> str:
-    return "## Data Models\n\n```swift\n" + body + "\n```\n"
+    return ("## File Structure\n- `Sources/App/S.swift`\n\n"
+            "## Data Models\n\n```swift\n" + body + "\n```\n")
 
 
 class TestTheShapeThatIsAlwaysWrong:

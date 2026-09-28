@@ -4,8 +4,9 @@
 from coding_model_autonomous.design_testability import (
     KIND_SEAM_NO_IMPORT,
     check_design_testability,
-    is_python_design,
+    rule_applies,
 )
+from coding_model_autonomous.languages import RULE_SEAM_IMPORTS
 
 # Fixtures - exactly as specified in the design document
 PY_DESIGN = '''# Design: placeholder rules
@@ -103,14 +104,14 @@ def test_T5_import_in_seam_counts_as_shared_setup():
 def test_T6_swift_design_returns_empty_and_is_not_python():
     """T6 — Swift design has no findings and is not a Python design."""
     findings = check_design_testability(SWIFT_DESIGN)
-    py_check = is_python_design(SWIFT_DESIGN)
+    py_check = rule_applies(SWIFT_DESIGN, RULE_SEAM_IMPORTS)
     assert findings == []
     assert py_check is False
 
 
 def test_T7_python_design_detected_correctly():
-    """T7 — is_python_design(PY_DESIGN) is True."""
-    result = is_python_design(PY_DESIGN)
+    """T7 — the Python design opts into the seam-import rule."""
+    result = rule_applies(PY_DESIGN, RULE_SEAM_IMPORTS)
     assert result is True
 
 

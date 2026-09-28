@@ -1,6 +1,7 @@
 """DEV-791: `#require` without `try`, and the macro-expansion diagnostic shape."""
-from coding_model_autonomous import swift_prechecks as sp
-from coding_model_autonomous import swift_rules as sr
+from coding_model_autonomous.languages.swift import prechecks as sp
+from coding_model_autonomous.languages.swift import rules as sr
+from coding_model_autonomous import diagnostics as dg
 
 RUN52_RETRY3_OUTPUT = """\
 error: SwiftCompile normal arm64 /Users/km4/x/worktrees/spec_130f84de-ab6f04d4/Tests/CentipedeCoreTests/BoardSnapshotTests.swift failed with a nonzero exit code. Command line: cd /Users/km4
@@ -15,7 +16,7 @@ error: Build failed
 
 
 def test_macro_expansion_error_is_located_at_the_originating_line():
-    diags = sr.located_diagnostics(
+    diags = dg.located_diagnostics(
         RUN52_RETRY3_OUTPUT, ["Tests/CentipedeCoreTests/BoardSnapshotTests.swift"])
     assert len(diags) == 1
     d = diags[0]
