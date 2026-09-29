@@ -44,6 +44,7 @@ Run Python scripts from the repo root with `venv/bin/python scripts/<name>`.
 | `download_models.py` | Downloads model GGUFs from Hugging Face. |
 | `benchmark_prefill.py`, `benchmark_decode.py` | Prefill and decode speed through the real server path. |
 | `benchmark_builds.py` | A/B two `llama-server` builds on the same model and flags. |
+| `benchmark_roster_builds.py --new DIR [--agents …]` | Measures every roster model on `tools/` and on the build in `DIR`, each with the exact argv production passes it. Records VRAM, free VRAM, prefill and decode speed on a short prompt and a ~26K-token one, and temperature-0 output parity. Refuses to spawn while the card is in use. Run it before any llama.cpp upgrade. |
 | `_llama_bench.py` | Shared harness for the benchmarks above. |
 | `sweep_cpu_moe.py` | Sweeps `--n-cpu-moe` per agent to find each model's expert-offload point. |
 | `eval_agents.py` + `eval_tasks.json` | Blind, counterbalanced head-to-head between two agents, scored by an external judge. |
