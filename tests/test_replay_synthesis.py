@@ -7,7 +7,9 @@ one written after, and a release gate that records the synthesis passed.
 """
 import importlib.util
 import json
+import os
 import sqlite3
+import subprocess
 import sys
 from pathlib import Path
 from unittest import mock
@@ -190,32 +192,55 @@ def test_a_missing_attempt_is_unreproducible_not_failed(archive, tmp_path):
     assert "retry_0" in row["reason"]
 
 
-def test_a_self_target_overlay_is_the_pinned_commit_both_halves(archive, tmp_path):
+def _commit_at(root, when, message):
+    env = {**os.environ, "GIT_AUTHOR_DATE": when, "GIT_COMMITTER_DATE": when}
+    subprocess.run(["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t",
+                    "add", "."], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t",
+                    "commit", "-q", "-m", message], check=True, capture_output=True, env=env)
+
+
+def test_a_self_target_overlay_is_the_pinned_commit_both_halves(archive, tmp_path,
+                                                               monkeypatch):
     """The overlay's src/ AND the tree the existing tests come from are read at
     the commit synthesis ran against (main as of 2026-09-01 here), never at
-    HEAD. settings.py and this test file are both younger than that commit."""
+    HEAD. The repository is a throwaway one with backdated commits: CI checks
+    out one commit deep, so the real history cannot stand in for it."""
     root, spec_id = archive
+    repo = tmp_path / rs.REPO.name
+    (repo / "src" / "pkg").mkdir(parents=True)
+    (repo / "tests").mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    (repo / "src" / "pkg" / "old.py").write_text("OLD\n")
+    (repo / "tests" / "test_old.py").write_text("def test_old(): pass\n")
+    _commit_at(repo, "2026-08-31T00:00:00+00:00", "before synthesis")
+    (repo / "src" / "pkg" / "settings.py").write_text("NEW\n")
+    (repo / "tests" / "test_new.py").write_text("def test_new(): pass\n")
+    _commit_at(repo, "2026-09-02T00:00:00+00:00", "after synthesis")
+    monkeypatch.setattr(rs, "REPO", repo)
     # The daemon reads the plan from the spec row, not from plan.yaml.
     conn = sqlite3.connect(root / "tasks.sqlite")
     conn.execute("UPDATE specs SET normalized_yaml=? WHERE id=?",
-                 (PLAN + f"  repo: {rs.REPO.name}\n", spec_id))
+                 (PLAN + f"  repo: {repo.name}\n", spec_id))
     conn.commit()
     conn.close()
     seen = {}
 
     def fake_synthesis(db, spec, task, spec_dir, framework, opts):
         from coding_model_autonomous import test_runner
-        test_runner._extract_committed_src(rs.REPO, tmp_path / "o")
-        test_runner._extract_committed_tree(rs.REPO, tmp_path / "o")
-        seen["settings"] = (tmp_path / "o/src/coding_model_autonomous/settings.py").exists()
-        seen["this_test"] = (tmp_path / "o/tests/test_replay_synthesis.py").exists()
-        seen["tests_dir"] = (tmp_path / "o/tests").is_dir()
+        out = tmp_path / "o"
+        test_runner._extract_committed_src(repo, out)
+        test_runner._extract_committed_tree(repo, out)
+        seen["old_src"] = (out / "src/pkg/old.py").exists()
+        seen["new_src"] = (out / "src/pkg/settings.py").exists()
+        seen["old_test"] = (out / "tests/test_old.py").exists()
+        seen["new_test"] = (out / "tests/test_new.py").exists()
         return False, ""
 
     with mock.patch.object(d, "_run_synthesis", fake_synthesis):
         row = _replay(root, tmp_path)
     assert row["pinned_ref"]
-    assert seen == {"settings": False, "this_test": False, "tests_dir": True}
+    assert seen == {"old_src": True, "new_src": False, "old_test": True, "new_test": False}
 
 
 def test_the_scratch_database_holds_only_what_preceded_synthesis(archive, tmp_path):
