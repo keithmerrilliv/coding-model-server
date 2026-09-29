@@ -266,6 +266,13 @@ that root, deletes `AUTONOMOUS_OVERLAY_FROM_WORKING_TREE` from the
 environment, and returns `(root, spec_dir)` with `spec_dir = tmp_path / "spec"`
 created. `head(root)` returns `git -C root rev-parse --short HEAD` stripped.
 
+**There is no `spec_dir` fixture.** A test that needs the spec directory takes
+the `repo` fixture and unpacks it: `root, spec_dir = repo`. T1–T5 need neither
+(`tmp_path` at most). T9 builds its own non-git directory under `tmp_path` and
+its own `spec_dir = tmp_path / "spec"`. A test that names `spec_dir` as a
+parameter fails at setup with `fixture 'spec_dir' not found`, which is how the
+09-29 run lost all five of those tests.
+
 ## Acceptance criteria (hermetic pytest, no model calls, no runner, no network)
 
 - **T1** — `tr.OverlayRef("committed", "abc1234", 0).header() == "[repo overlay] source=committed head=abc1234 dirty=0"` and its `payload() == {"overlay_source": "committed", "overlay_head": "abc1234", "overlay_dirty": 0}`.
