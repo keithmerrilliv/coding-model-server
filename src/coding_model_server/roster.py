@@ -16,6 +16,25 @@ from .agent_prompts import (
 )
 
 
+# llama-server v0.5.0 (patched for upstream #27792, DEV-852) serves every config
+# below. Each was measured on v0.4.1 and v0.5.0 back to back, on the argv
+# LlamaServerManager builds, with the desktop holding 921 MiB (the free-MiB
+# figures in the per-config notes were taken on other builds and other desktop
+# sizes: read them as deltas, not absolutes). Decode tok/s, short (116-token)
+# prompt / ~22K-token prompt, then MiB free after load:
+#   implementer      69.8 / 65.9    823    (v0.4.1: 70.9 / 66.9   827)
+#   deep_implementer 23.2 / 22.5   5285    (v0.4.1: 23.3 / 22.8  5541)
+#   fast_implementer 52.8 / 41.2   1559    (v0.4.1: 53.6 / 41.6  1557)
+#   deep_reviewer    17.0 / 16.0   2635    (v0.4.1: 17.7 / 16.9  2593)
+#   moe_implementer   9.9 /  8.8   1650    (v0.4.1: 10.2 /  9.0  1615)
+#   dense_architect  20.5 / 15.8    710    (identical to v0.4.1)
+#   glimmer          11.2 /  9.9   1573    (identical to v0.4.1)
+# Speed is within run-to-run noise and prefill within 1%. Only deep_implementer
+# moved in memory (256 MiB more). Greedy output differs from v0.4.1 on the five
+# MoE configs and matches on the two dense ones. dense_architect has the least
+# headroom of the seven.
+
+
 # Root for model weights. Every model config also has its own MODEL_PATH_*
 # env override; this only de-personalizes the defaults (DEV-199) — derived
 # from the running user's home instead of a hardcoded username, so it
@@ -155,6 +174,7 @@ _MOE_30B_FAST = _create_model_config(
 # NEXT: Qwen3-Coder-Next-Q8_0 (80B MoE with 3B active params)
 # Very smart but runs mostly on system RAM (slow). Native 256k context enabled.
 # ngl=48 (--cpu-moe): 8,304 MiB free. All 48 attention layers on GPU.
+# v0.5.0 needs 256 MiB more than v0.4.1 for this config (5,285 vs 5,541 free).
 # --swa-full enables prompt cache reuse (avoids full re-prefill each turn).
 # n_batch/n_ubatch=4096 for faster prefill (8 GB headroom supports large batches).
 _MOE_80B_Q8 = _create_model_config(

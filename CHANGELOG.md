@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.6.1 — unreleased
+
+### Shipped
+
+- [DEV-903](https://keith-merrill4.atlassian.net/browse/DEV-903): `llama-server` moves from v0.4.1 to v0.5.0, carrying the local one-line fix for upstream [#27792](https://github.com/ggml-org/llama.cpp/issues/27792) (DEV-852), which v0.5.0 still lacks. The DEV-852 reproducer (run 70's 27K-token prompt on a cold `implementer`) faults 3 of 3 on unpatched v0.4.1 and on unpatched v0.5.0, and 0 of 3 on the patched build, in production too. Every roster config was measured on both builds with its production flags: decode and prefill are within run-to-run noise, `deep_implementer` needs 256 MiB more, and greedy output differs on the five MoE configs. `dense_architect` has the least headroom, 710 MiB. The measurements are at the top of `roster.py`.
+  - `scripts/install_llama_server.sh` installs a build into `tools/` with a rollback copy, repoints all seven versioned-library symlinks, checks with `ldd` and a sha that the new libraries are the ones that load, and rolls back by itself if not.
+  - `scripts/benchmark_roster_builds.py` measures every roster model on two builds with the exact argv production passes.
+  - Glimmer's harmony tool-call 502 (DEV-727, DEV-747) did not reproduce on v0.4.1 or v0.5.0 (0 of 16), but `glimmer_implementer` returned an empty answer on 4 of 4 implementer calls, which DEV-747 still owes.
+- [DEV-901](https://keith-merrill4.atlassian.net/browse/DEV-901): `scripts/replay_synthesis.py` replays every archived synthesis through any roster agent, offline, on scratch copies of the workspace and the task database as they stood when synthesis started, and scores the output with the pipeline's own tests, pinned to the commit the run used. The incumbent passes on all 8 reproducible specs that ended done. It is the instrument for the synthesizer-model eval (DEV-902).
+
 ## v0.6.0 — 2026-09-29
 
 The layering release ([DEV-835](https://keith-merrill4.atlassian.net/browse/DEV-835)): imports point one way, each decision has one home, and language-specific logic sits behind one interface.
