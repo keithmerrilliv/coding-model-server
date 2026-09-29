@@ -21,6 +21,7 @@ Run Python scripts from the repo root with `venv/bin/python scripts/<name>`.
 | `redeploy.sh [--restart-only]` | Syncs the systemd units and restarts the Linux services. `--restart-only` needs no sudo. Deploys nothing to the Mac: see [docs/MAC_RUNNER.md](../docs/MAC_RUNNER.md). |
 | `mac_update_runner.sh [--execute]` | Run **on the Mac**, from the runner's checkout: pulls, reclaims leaked tart VMs, restarts the runner. Dry run by default. The other half of every deploy that touches `mac_runner/`. |
 | `reclaim_tart_vms.sh` | Run on the Mac: deletes leaked `coding-model-runner` tart VMs. Called by `mac_update_runner.sh` and the runner itself. |
+| `install_llama_server.sh <build/bin> [--execute]` | Installs a llama.cpp build into `tools/` (which production loads) with a rollback copy: repoints every versioned-library symlink, then checks with `ldd` and a sha that the new libraries are the ones that load, and rolls back by itself if not. Refuses while a model is loaded or a spec is mid-generation. `--rollback` restores the newest backup. Dry run by default. |
 | `env_keys.sh [file]` | Lists the keys an `.env` sets, with value lengths only, never values. |
 | `enable_rapl_reading.sh` | Lets the resource monitor read CPU package power (needs sudo once). |
 | `monitor_resources.py` | GPU, CPU and power sampler behind `coding-model-monitor.service`. |
