@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.6.0 — unreleased
+## v0.6.0 — 2026-09-29
 
 The layering release ([DEV-835](https://keith-merrill4.atlassian.net/browse/DEV-835)): imports point one way, each decision has one home, and language-specific logic sits behind one interface.
 
