@@ -406,9 +406,19 @@ def _head_file(rel: str) -> str:
                           capture_output=True, text=True, check=True).stdout
 
 
+def _repo_root_is_a_checkout() -> bool:
+    """False inside the pipeline's sandbox, where _SERVER_REPO_ROOT is a
+    `git archive` extract with no history to read HEAD from (DEV-915)."""
+    if shutil.which("git") is None:
+        return False
+    return subprocess.run(["git", "-C", str(tr._SERVER_REPO_ROOT), "rev-parse", "HEAD"],
+                          capture_output=True).returncode == 0
+
+
 @pytest.mark.slow
 @pytest.mark.skipif(not tr._sandbox_available(), reason="bwrap sandbox unavailable")
-@pytest.mark.skipif(shutil.which("git") is None, reason="git unavailable")
+@pytest.mark.skipif(not _repo_root_is_a_checkout(),
+                    reason="the repository root is not a git checkout")
 class TestInTheRealSandbox:
     """Run 32's shape, end to end: a workspace edit to a real module of this
     repository, and the existing test that pins it. The control is the same

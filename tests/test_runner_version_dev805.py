@@ -35,11 +35,16 @@ def test_version_needs_the_key(client):
 def test_version_reports_the_commit_and_the_timeout_table(client):
     body = client.get("/v1/version", headers={"X-Runner-Key": "test-key"}).json()
     assert set(body) == {"commit", "dirty", "timeouts"}
-    # This checkout is a git repo, so the runner can answer honestly here.
+    assert body["timeouts"]["xcodebuild_test"] == 1200
+    # The commit can only be checked against a git checkout. The pipeline's
+    # sandbox runs this test on a `git archive` extract, where there is no
+    # HEAD to compare with, and abstaining there is the runner's contract
+    # (the next test) rather than a failure of it (DEV-915).
     head = subprocess.run(["git", "rev-parse", "HEAD"],
                           capture_output=True, text=True).stdout.strip()
+    if not head:
+        pytest.skip("not a git checkout: nothing to compare the commit with")
     assert body["commit"] == head
-    assert body["timeouts"]["xcodebuild_test"] == 1200
 
 
 def test_version_abstains_rather_than_guessing(monkeypatch, client):
