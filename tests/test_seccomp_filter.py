@@ -160,6 +160,20 @@ def test_the_denylist_names_the_escape_and_cve_surfaces():
     assert len(set(seccomp_filter.DENYLIST)) == len(seccomp_filter.DENYLIST)
 
 
+def test_the_dist_packages_fallback_never_shadows_the_venv(monkeypatch):
+    """The fallback leaves dist-packages on sys.path for the life of the
+    process, so it has to sit behind the venv. At the front it served apt's
+    regex 2025.9.18 to transformers, whose version check then failed (DEV-917)."""
+    path = [p for p in sys.path if p != seccomp_filter._DIST_PACKAGES]
+    path.insert(0, "/venv-stand-in")
+    monkeypatch.setattr(sys, "path", path)
+    monkeypatch.delitem(sys.modules, "seccomp", raising=False)
+    seccomp_filter._try_import_seccomp()
+    if seccomp_filter._DIST_PACKAGES in sys.path:
+        assert sys.path[-1] == seccomp_filter._DIST_PACKAGES
+    assert sys.path[0] == "/venv-stand-in"
+
+
 def test_no_binding_means_no_fd(monkeypatch):
     """test_runner reads None as 'run bwrap without --seccomp' and says so."""
     monkeypatch.setattr(seccomp_filter, "_seccomp", None)

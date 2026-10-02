@@ -16,8 +16,8 @@ The libseccomp Python binding ships as the apt package
 ``python3-seccomp`` on Ubuntu/Debian. The .so lands in
 ``/usr/lib/python3/dist-packages``, which is outside this venv (the
 venv was created without ``--system-site-packages``). We try a normal
-import first, then fall back to injecting that dist-packages dir into
-``sys.path``. If neither works ``build_seccomp_bpf_fd()`` returns None
+import first, then fall back to appending that dist-packages dir to the
+end of ``sys.path``. If neither works ``build_seccomp_bpf_fd()`` returns None
 and the caller logs a warning + runs bwrap without ``--seccomp``.
 """
 from __future__ import annotations
@@ -40,7 +40,11 @@ def _try_import_seccomp():
     except ImportError:
         pass
     if os.path.isdir(_DIST_PACKAGES) and _DIST_PACKAGES not in sys.path:
-        sys.path.insert(0, _DIST_PACKAGES)
+        # Last, never first: the entry outlives this import, and apt's
+        # copies of packages the venv also ships (regex, requests, ...) must
+        # not shadow the venv's for the rest of the process. seccomp itself
+        # exists only in dist-packages, so it resolves either way.
+        sys.path.append(_DIST_PACKAGES)
         try:
             import seccomp
             return seccomp
