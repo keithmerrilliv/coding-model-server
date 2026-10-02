@@ -63,6 +63,26 @@ def memory_title(document: str, limit: int = 80) -> str:
     return ""
 
 
+EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+
+
+def _load_embedding_model(sentence_transformer_cls):
+    """The embedding model, from the local HF cache when it is there.
+
+    A plain load sends HEAD requests to huggingface.co even with the model
+    cached, so a boot before DNS is up (or with HF unreachable) failed memory
+    init for the whole process lifetime (DEV-918). Only a model that was never
+    downloaded needs the network.
+    """
+    try:
+        return sentence_transformer_cls(EMBEDDING_MODEL, device="cpu",
+                                        local_files_only=True)
+    except Exception as e:
+        logger.info("Embedding model not loadable from the local cache (%s); "
+                    "downloading", e)
+        return sentence_transformer_cls(EMBEDDING_MODEL, device="cpu")
+
+
 class MemoryService:
     def __init__(self, persist_directory: str = DEFAULT_MEMORY_DB):
         self.persist_directory = persist_directory
@@ -84,7 +104,7 @@ class MemoryService:
                 logger.info(f"Initializing Memory Service at {self.persist_directory}... (attempt {attempt}/{max_retries})")
 
                 # Initialize Embedding Model (Force CPU to avoid RTX 5080 sm_120 compatibility issues)
-                self._embedding_model = SentenceTransformer('all-MiniLM-L6-v2', device='cpu')
+                self._embedding_model = _load_embedding_model(SentenceTransformer)
 
                 # Initialize ChromaDB Client
                 self.client = chromadb.PersistentClient(path=self.persist_directory)

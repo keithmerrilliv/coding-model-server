@@ -72,7 +72,12 @@ fi
 # Reinstall deps only if the manifest moved; the MCP carries its own venv.
 if git -C "$MCP" diff --name-only "$OLD" HEAD | grep -qE 'pyproject.toml|requirements.*\.txt'; then
   echo "  dependency manifest changed — reinstalling into the MCP venv"
-  "$MCP/venv/bin/pip" install --quiet -e "$MCP" || echo "  (pip install reported an error; smoke test will judge)"
+  # The declared dependencies, not `pip install -e .`: the MCP runs as
+  # `python main.py`, and current hatchling refuses an editable build of its
+  # flat layout ("Unable to determine which files to ship"), so -e failed
+  # without installing anything.
+  DEPS="$("$MCP/venv/bin/python" -c "import tomllib; print(' '.join(tomllib.load(open('$MCP/pyproject.toml','rb'))['project']['dependencies']))")"
+  "$MCP/venv/bin/pip" install --quiet $DEPS || echo "  (pip install reported an error; smoke test will judge)"
 fi
 
 # The MCP is a child of the server, so it only picks up new code on restart.
