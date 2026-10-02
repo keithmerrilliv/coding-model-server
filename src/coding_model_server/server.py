@@ -37,6 +37,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Backoff for a failed background memory init: fast enough to recover soon
+# after the network comes up, slow enough not to spin on a broken install.
+MEMORY_INIT_RETRY_MIN_S = 30
+MEMORY_INIT_RETRY_MAX_S = 600
+
 
 # ============================================================================
 # Lifespan
@@ -78,14 +83,24 @@ async def lifespan(app: FastAPI):
     # needs memory until it's used, and every consumer already handles
     # services.memory being None (requests during the warm-up window are
     # simply served without RAG).
+    # A failed init keeps retrying with backoff rather than giving up: one bad
+    # boot (DNS not up yet) otherwise left RAG off for the whole process
+    # lifetime, and a None service records no RAG outcome at all, so the
+    # outage read as "never ran" on the dashboard (DEV-918).
     def _init_memory_service():
-        try:
-            logger.info("Initializing Memory Service (background)...")
-            runtime.services.memory = MemoryService()
-            logger.info("Memory Service initialized successfully")
-        except Exception as e:
-            logger.error("Failed to initialize memory service: %s", e)
-            runtime.services.memory = None
+        delay = MEMORY_INIT_RETRY_MIN_S
+        while True:
+            try:
+                logger.info("Initializing Memory Service (background)...")
+                runtime.services.memory = MemoryService()
+                logger.info("Memory Service initialized successfully")
+                return
+            except Exception as e:
+                runtime.services.memory = None
+                logger.error("Failed to initialize memory service: %s — "
+                             "retrying in %ds", e, delay)
+            time.sleep(delay)
+            delay = min(delay * 2, MEMORY_INIT_RETRY_MAX_S)
 
     threading.Thread(
         target=_init_memory_service, name="memory-init", daemon=True,
@@ -107,12 +122,17 @@ async def lifespan(app: FastAPI):
         # repo-relative default.
         mcp_path = os.getenv("APPLE_DEEP_DOCS_PATH") or None
         svc = AppleDeepDocsService(mcp_path)
+        # Kept even when the first start fails: every request re-tries the
+        # start, so a fixed venv or a transient failure recovers without a
+        # server restart. Dropping it made the route 503 for the life of the
+        # process (DEV-918).
+        runtime.services.apple_deep_docs = svc
         if svc.start():
-            runtime.services.apple_deep_docs = svc
             logger.info("Apple Deep Docs Service initialized successfully")
         else:
-            logger.error("Apple Deep Docs Service failed to start")
-            runtime.services.apple_deep_docs = None
+            logger.error("Apple Deep Docs Service failed to start; the next "
+                         "request will retry (child stderr: %s)",
+                         svc.stderr_log_path)
     except Exception as e:
         logger.error("Failed to initialize Apple Deep Docs Service: %s", e)
         runtime.services.apple_deep_docs = None

@@ -78,6 +78,12 @@ class AppleDeepDocsService(StdioJsonRpcClient):
         else:
             self.mcp_path = mcp_path
         self.venv_python = self._get_venv_python_path()
+        # Beside the vendored checkout, not inside it: the update script pulls
+        # and resets that third-party tree.
+        self.stderr_log_path = os.path.join(
+            os.path.dirname(os.path.abspath(self.mcp_path)),
+            "appledeepdoc-mcp.stderr.log")
+        self._stderr_file = None
         # Public liveness flag the CLI and /health surface. Kept in sync with
         # the base's lifecycle via the _on_started/_on_stopped hooks.
         self.is_running = False
@@ -96,19 +102,45 @@ class AppleDeepDocsService(StdioJsonRpcClient):
         if not os.path.exists(self.venv_python):
             logger.error(f"Apple Deep Docs venv not found at {self.venv_python}")
             return None
-        # DEVNULL for stderr to avoid deadlocks from full buffers.
+        # stderr goes to a file, never a pipe: nothing drains a pipe, and a
+        # full one deadlocks the child. A file also keeps the reason a start
+        # failed — with DEVNULL the journal only ever said "failed to start"
+        # (DEV-918). Truncated per spawn, so it holds one child's output.
         # env: a scrubbed copy (DEV-485) — no server secrets, execution mode
         # pinned off — rather than inheriting the server's full environment.
         return subprocess.Popen(
             [self.venv_python, main_py],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=self._open_stderr_log(),
             text=True,
             bufsize=1,
             cwd=self.mcp_path,
             env=_scrubbed_child_env(),
         )
+
+    def _open_stderr_log(self):
+        self._close_stderr_log()
+        try:
+            self._stderr_file = open(self.stderr_log_path, "w")
+        except OSError as e:
+            logger.warning("Cannot write MCP stderr to %s (%s); discarding it",
+                           self.stderr_log_path, e)
+            return subprocess.DEVNULL
+        return self._stderr_file
+
+    def _close_stderr_log(self):
+        if self._stderr_file is not None:
+            self._stderr_file.close()
+            self._stderr_file = None
+
+    def stderr_tail(self, limit: int = 2000) -> str:
+        """The end of the current child's stderr, or "" if there is none."""
+        try:
+            with open(self.stderr_log_path, errors="replace") as f:
+                return f.read()[-limit:].strip()
+        except OSError:
+            return ""
 
     def _handshake(self, proc) -> bool:
         """MCP initialize / initialized exchange, before the reader takes stdout."""
@@ -129,7 +161,9 @@ class AppleDeepDocsService(StdioJsonRpcClient):
         while True:
             line = self._readline_with_timeout(timeout=30)
             if not line:
-                logger.error("Failed to receive initialize response from MCP")
+                logger.error("Failed to receive initialize response from MCP. "
+                             "Child stderr (%s):\n%s", self.stderr_log_path,
+                             self.stderr_tail() or "(empty)")
                 return False
             line = line.strip()
             if not line:
@@ -157,6 +191,7 @@ class AppleDeepDocsService(StdioJsonRpcClient):
     def stop(self):
         had_process = self.process is not None
         super().stop()
+        self._close_stderr_log()
         if had_process:
             logger.info("Apple Deep Docs MCP server stopped")
 
