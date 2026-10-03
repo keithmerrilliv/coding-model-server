@@ -57,6 +57,20 @@ def _pin_package_json(content: str) -> tuple[str, int]:
 class JavaScriptPack(LanguagePack):
     name = "javascript"
     frameworks = frozenset({"jest", "vitest", "node_test"})
+    # A package-lock.json is routinely the largest file in a repository: one
+    # of 252,037 characters, served as protected context, was by itself more
+    # than every implementer window but the largest could hold. package.json
+    # is NOT here — it is hand-written and names the scripts and dependencies
+    # the code relies on.
+    generated_files = frozenset({
+        "package-lock.json", "npm-shrinkwrap.json", "yarn.lock",
+        "pnpm-lock.yaml", "bun.lock", "bun.lockb", "deno.lock",
+    })
+    # Minified bundles and source maps: build output, one unreadable line each.
+    # Source maps are matched with the extension they map, not as a bare
+    # `.map` — a game's `level1.map` is data a person wrote.
+    generated_suffixes = (".min.js", ".min.mjs", ".min.cjs", ".min.css",
+                          ".js.map", ".mjs.map", ".cjs.map", ".css.map")
 
     def normalize(self, path: str, content: str) -> tuple[str, Optional[str]]:
         if os.path.basename(path) != "package.json":

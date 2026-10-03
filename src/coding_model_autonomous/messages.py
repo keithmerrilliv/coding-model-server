@@ -312,9 +312,20 @@ def _render_reference_files(reference_files: list[tuple[str, str]],
     # a section more than its knob when the window has room, and re-applying
     # the knob here would drop the file it just chose to include. The knob
     # survives only as the fallback for a caller that renders unbudgeted.
-    dropped: list[str] = list(omitted or [])
+    #
+    # Lockfiles and build output are a separate kind of not-shown: they are
+    # withheld whatever the budget (a 252K package-lock.json declares nothing
+    # a role can use), and the sentence that names them says so — "over the
+    # context budget" would invite the model to wish it had seen them. The
+    # allocator takes them out before it sums; the check is repeated on the
+    # files themselves so an unbudgeted caller withholds them too.
+    generated = [p for p in (omitted or []) if languages.is_machine_generated(p)]
+    dropped = [p for p in (omitted or []) if p not in generated]
     budget = float("inf") if omitted is not None else settings.PROTECTED_FILES_MAX_CHARS
     for path, content in reference_files:
+        if languages.is_machine_generated(path):
+            generated.append(path)
+            continue
         if len(content) > budget:
             dropped.append(path)
             continue
@@ -324,6 +335,13 @@ def _render_reference_files(reference_files: list[tuple[str, str]],
         out.append(
             "**Not shown** (over the context budget), but still off-limits and "
             "still compiled in: " + ", ".join(dropped) + "\n\n"
+        )
+    if generated:
+        out.append(
+            "**Not shown** (lockfiles and build output — written by tooling, "
+            "and declaring nothing your code can reference), but they exist "
+            "and are off-limits like the rest; do not emit, regenerate or "
+            "edit them: " + ", ".join(generated) + "\n\n"
         )
     return "".join(out)
 

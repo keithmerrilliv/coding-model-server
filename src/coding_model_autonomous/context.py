@@ -58,7 +58,7 @@ import logging
 import os
 import re
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
@@ -951,6 +951,8 @@ class SectionBudget:
     dropped: list[str]
     budget: int                     # chars the allocator gave it
     preferred: Optional[int]        # its knob, for the log line
+    # Named but never shown, at any budget: see _withhold_generated.
+    withheld: list[str] = field(default_factory=list)
 
     @property
     def chars(self) -> int:
@@ -988,6 +990,14 @@ class Allocation:
         sec = self.sections.get(name)
         return list(sec.dropped) if sec else []
 
+    def not_shown(self, name: str) -> list[str]:
+        """Every path of the section the prompt must still NAME: what was
+        withheld by kind, then what the budget dropped. This is the list a
+        render takes as ``omitted``; :meth:`dropped` alone is the budget's
+        own decision, which is what escalation and the journal care about."""
+        sec = self.sections.get(name)
+        return [*sec.withheld, *sec.dropped] if sec else []
+
     @property
     def section_chars(self) -> int:
         return sum(s.chars for s in self.sections.values())
@@ -1017,6 +1027,8 @@ class Allocation:
     def describe(self) -> str:
         parts = [f"{s.name} {s.chars}/{s.budget}"
                  + (f" (-{len(s.dropped)})" if s.dropped else "")
+                 + (f" ({len(s.withheld)} generated withheld)"
+                    if s.withheld else "")
                  for s in self.sections.values()]
         return (f"fixed {self.fixed_chars} + " + ", ".join(parts)
                 + f" = ~{self.prompt_tokens} tok + {self.completion_tokens} "
@@ -1042,6 +1054,36 @@ def _fill(section: Section, budget: int) -> SectionBudget:
                          preferred=section.preferred_max_chars)
 
 
+def _withhold_generated(section: Section) -> tuple[Section, list[str]]:
+    """Take lockfiles and build output out of the protected section before
+    anything is summed: ``(the section without them, their paths)``.
+
+    A protected file is shown so a role can USE what it declares, and a
+    lockfile declares nothing — while being routinely the largest file in the
+    repository. One 252,037-character package-lock.json fit no implementer
+    window but the largest, so it alone chose the slowest model for every
+    call of the spec and was then re-read by it on each one.
+
+    This has to happen ahead of the fill, not as a drop inside it: a dropped
+    file makes :func:`plan_dispatch` escalate to a bigger window to keep it,
+    which is the routing the withholding exists to prevent. The file stays
+    protected and stays in the tree; only its text is kept out of the prompt,
+    and its path is still handed to the render to be named as off-limits.
+
+    Only the protected section. A lockfile in the EDITABLE section is there
+    because the spec asks for it to be changed, and a role that cannot see
+    what it must edit invents it.
+    """
+    if section.name != SECTION_PROTECTED:
+        return section, []
+    withheld = [p for p, _ in section.files if languages.is_machine_generated(p)]
+    if not withheld:
+        return section, []
+    hidden = set(withheld)
+    return replace(section, files=[(p, c) for p, c in section.files
+                                   if p not in hidden]), withheld
+
+
 def allocate(sections: Iterable[Section], *, fixed_chars: int,
              window_tokens: Optional[int], completion_tokens: int,
              agent: Optional[str] = None) -> Allocation:
@@ -1059,7 +1101,9 @@ def allocate(sections: Iterable[Section], *, fixed_chars: int,
     applies no aggregate pressure and every section gets its knob, which is
     exactly the pre-DEV-633 behaviour.
     """
-    sections = list(sections)
+    split = [_withhold_generated(s) for s in sections]
+    sections = [s for s, _ in split]
+    withheld = {s.name: paths for s, paths in split}
     if window_tokens is None:
         budget_chars = -1  # unbounded
     else:
@@ -1077,6 +1121,7 @@ def allocate(sections: Iterable[Section], *, fixed_chars: int,
         else:
             share = left if knob is None else min(knob, left)
         got = _fill(section, share)
+        got.withheld = withheld[section.name]
         alloc.sections[section.name] = got
         if budget_chars >= 0:
             left = max(0, left - got.chars)
@@ -1100,6 +1145,7 @@ def allocate(sections: Iterable[Section], *, fixed_chars: int,
             # chars twice — which overflows the window and turns a prompt that
             # fits into a spurious PromptTooLarge.
             grown = _fill(section, got.chars + left)
+            grown.withheld = got.withheld
             gained = grown.chars - got.chars
             if gained > 0:
                 alloc.sections[section.name] = grown

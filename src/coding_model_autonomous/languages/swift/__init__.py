@@ -35,6 +35,12 @@ class SwiftPack(LanguagePack):
     # A Swift module is one namespace: two files each declaring `struct Foo`
     # fail to build together even in different directories.
     shares_target_namespace = True
+    # The dependency pins SwiftPM, CocoaPods and Carthage write. Package.swift
+    # is NOT here: it is the hand-written manifest that names the targets and
+    # products a design allocates files into.
+    generated_files = frozenset({
+        "Package.resolved", "Podfile.lock", "Cartfile.resolved",
+    })
 
     def standing_rules(self, paths: list[str]) -> str:
         return rules.SWIFT_RULES

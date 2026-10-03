@@ -179,6 +179,40 @@ def provided_symbols(path: str, source: str) -> tuple[frozenset[str], tuple[str,
     return pack.provided_symbols(source) if pack else (frozenset(), ())
 
 
+# Lockfiles of ecosystems that have no pack. Like the packless rows of
+# _EXTENSIONS, the names are known here because a repository in any language
+# can carry them; a pack that arrives for one of these takes its row with it.
+_PACKLESS_GENERATED_FILES = frozenset({
+    "Cargo.lock",                 # Rust
+    "go.sum",                     # Go (go.mod is hand-written and stays shown)
+    "Gemfile.lock",               # Ruby
+    "composer.lock",              # PHP
+    "gradle.lockfile",            # JVM
+    "packages.lock.json",         # .NET
+    "pubspec.lock",               # Dart
+    "mix.lock",                   # Elixir
+    "flake.lock",                 # Nix
+})
+
+
+def is_machine_generated(path: str) -> bool:
+    """True for a lockfile or build output: a file tooling writes, no person
+    edits, and no source file can reference anything in.
+
+    Decided by NAME alone, and by every pack rather than the one that owns
+    the extension: a Swift project's web client still has a package-lock.json,
+    and `.json` or `.lock` belongs to no language. The match is on the exact
+    basename, so `locks/Cargo.lock.md` or a `package-lock.json.ts` is not one.
+    """
+    base = os.path.basename(path.replace("\\", "/"))
+    if base in _PACKLESS_GENERATED_FILES:
+        return True
+    lowered = base.lower()
+    return any(base in p.generated_files
+               or lowered.endswith(p.generated_suffixes)
+               for p in PACKS.values())
+
+
 def normalize_file(path: str, content: str) -> tuple[str, list[str]]:
     """Every pack's deterministic fix applied to one file: the new content
     and a note per change."""

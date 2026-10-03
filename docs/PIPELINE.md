@@ -702,7 +702,14 @@ before any render:
    this step accepts (DEV-843).
 3. Sections are filled in priority order — editable, then protected, then prior
    artifacts — each taking the smaller of its knob and what is left. A knob is
-   still a ceiling; it is no longer independent.
+   still a ceiling; it is no longer independent. Lockfiles and build output in
+   the protected section (`package-lock.json`, `Package.resolved`, `Cargo.lock`,
+   `*.min.js`; each language pack lists its own in `generated_files`) are taken
+   out before the sum. They declare nothing a role can use and are often the
+   largest file in the repository, so counting them would trigger step 4 and
+   route the prompt to the largest, slowest window for the sake of text nobody
+   reads. They stay protected, and the prompt still names them as off-limits.
+   A lockfile in the editable section is shown: the spec asked to change it.
 4. If any section would be cut, the rotation is tried first: a bigger window is
    always better than less context, so nothing is dropped while any candidate
    agent can hold the whole prompt. Only the architect and the reviewer are
