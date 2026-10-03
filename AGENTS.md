@@ -47,8 +47,10 @@ a Mac. It deploys there and nowhere else; see [docs/MAC_RUNNER.md](docs/MAC_RUNN
 ## How a change gets in
 
 1. **Merge through `bash scripts/merge_gate.sh <branch>`.** It merges into
-   `main` and runs ruff, mypy and pytest on the merged tree, then pushes. It
-   refuses a dirty tree. Never hand-type the three checks instead.
+   `main` in a temporary worktree, runs ruff, mypy and pytest on the merged
+   tree there, and only on green fast-forwards `main` and pushes. It refuses
+   only local changes to files the merge would overwrite. Never hand-type the
+   three checks instead.
 2. **The suite is green with no `--deselect`.** A red test is real until
    proven otherwise.
 3. **Measure a guard change on the spec archive before shipping it.**
