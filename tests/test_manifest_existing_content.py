@@ -26,6 +26,7 @@ from coding_model_autonomous import settings
 from coding_model_autonomous.context import SpecContext
 from coding_model_autonomous.executor import (
     ManifestEntry,
+    PER_FILE_EDIT_MODE_INSTRUCTIONS,
     build_per_file_message,
 )
 
@@ -79,7 +80,11 @@ def test_edit_mode_prompt_asks_for_edit_blocks():
     system, user = _texts(build_per_file_message(
         "spec", "design", ENTRIES, ENTRIES[0], "none",
         existing_content=GAME, edit_mode=True))
-    assert "SEARCH/REPLACE" in system
+    # The edit rules ride the user message: the system prompt opens every
+    # per-file call and must not change with the target (see
+    # test_per_file_prompt_prefix.py).
+    assert PER_FILE_EDIT_MODE_INSTRUCTIONS in user
+    assert "SEARCH/REPLACE" not in system
     assert "### game.js" in user            # the required header, spelled out
     assert "Do NOT emit a <<<FILE:" in user
     assert GAME.strip() in user             # the content is still shown

@@ -206,6 +206,17 @@ carrying any *unattributed* error widen it immediately. The upstream route in
 diagram 6 exists for the same problem one level up, where widening the retry
 cannot help because the defect is in the design.
 
+A per-file prompt is laid out for the model server's prompt cache, which reuses
+only the longest common prefix of the previous prompt. Everything that is the
+same for every file of an attempt comes first — clarifications, approval
+conditions, spec, design, manifest, protected reference files — and everything
+that changes per call comes after it: the summary of files already written
+(append-only, so it too is shared up to its newest entry), the target, its
+current content, the edit rules, feedback. The system prompt is the same for
+every file. A per-call detail placed ahead of the reference block makes every
+file re-evaluate the whole prompt, which on a large protected tree is minutes
+per file.
+
 `AUTONOMOUS_IMPLEMENTER_MODE` forces `single` or `manifest` if you need to pin
 it; the default (`auto`) takes manifest mode when the design enumerates
 `AUTONOMOUS_MANIFEST_FILE_THRESHOLD` (8) or more files — or 8 or more declared
