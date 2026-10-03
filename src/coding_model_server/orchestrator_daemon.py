@@ -3865,6 +3865,18 @@ def _pre_gate_build_check(db: Database, spec: Spec, task, spec_dir: Path,
             if test_runner.is_runner_unreachable(build_output):
                 if _requeue_for_unreachable_runner(db, spec, task):
                     return BuildCheck(requeued=True)
+            # DEV-921: the runner can answer while its VM layer never ran the
+            # code — a guest that did not come up, a failed sync. That output
+            # is a no-verdict here exactly as it is on the build-failure path
+            # and the reviewer's (DEV-705, DEV-816): nothing was compiled, so
+            # it must not reach a code_review gate.
+            vm_failure = classify_test_run(
+                build_output, role="implementer", passed=False,
+                build_reason=None, unreachable=False)
+            if (vm_failure is not None
+                    and vm_failure.cls is FailureClass.SANDBOX_PROVISIONING):
+                _dispose(db, spec, task, vm_failure)
+                return BuildCheck(requeued=True)
     return BuildCheck(build_reason, build_output, build_passed, build_framework,
                       blocking_warnings, test_split, ts_for_build)
 
