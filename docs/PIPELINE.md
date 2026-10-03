@@ -539,10 +539,16 @@ table to read first when a run ends somewhere surprising.
 `MAX_RETRIES` bounds how many implementer attempts there are; the rotation
 decides who makes each one. Attempt 0 goes to the architect's pick. Every
 later attempt walks a fixed chain, `retry_policy._IMPLEMENTER_ROTATION`:
-`implementer`, `glimmer_implementer`, `moe_implementer`, `fast_implementer`,
-`deep_implementer` (DEV-821). `deep_implementer` is last because it is the
-window fallback: its 256K window is the only one some self-target prompts
-fit, so the fit check still reaches it when nothing else holds the prompt.
+`implementer`, `fast_implementer`, `moe_implementer`, `glimmer_implementer`,
+`deep_implementer`. The chain is ordered by what an attempt costs, cheapest
+first: the walk is failure-triggered, so every slot ahead of the one that
+delivers is paid in full. `implementer` averages 165 s a call at 64 tok/s;
+`moe_implementer` decodes at 6.6 to 9 tok/s; `glimmer_implementer` averages
+1,041 s a call at 11 tok/s, and about 93 of its 251 minutes went to attempts
+that then failed. `deep_implementer` is last for a different reason (DEV-821):
+it is the window fallback. Its 256K window is the only one some self-target
+prompts fit, so the fit check still reaches it when nothing else holds the
+prompt.
 
 ```mermaid
 sequenceDiagram
@@ -585,10 +591,10 @@ order, so the tier decides the whole sequence. A retry's index is its
 
 | Attempt-0 agent | How it is chosen | Attempts 1 to 4 |
 |---|---|---|
-| `implementer` | tier `medium` or `high`, or no `complexity.json` | glimmer, moe, fast, deep |
-| `fast_implementer` | tier `low` | implementer, glimmer, moe, deep |
-| `moe_implementer` | tier `extreme` | implementer, glimmer, fast, deep |
-| `deep_implementer` | only when the architect recommends it by name | implementer, glimmer, moe, fast |
+| `implementer` | tier `medium` or `high`, or no `complexity.json` | fast, moe, glimmer, deep |
+| `fast_implementer` | tier `low` | implementer, moe, glimmer, deep |
+| `moe_implementer` | tier `extreme` | implementer, fast, glimmer, deep |
+| `deep_implementer` | only when the architect recommends it by name | implementer, fast, moe, glimmer |
 
 `glimmer_implementer` is retry-only: it is in the chain but not in
 `TIER_TO_IMPLEMENTER` or `ALLOWED_IMPLEMENTER_AGENTS`, so it never makes
