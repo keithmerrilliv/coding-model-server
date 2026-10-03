@@ -1,6 +1,8 @@
 # Changelog
 
-## v0.6.1 — unreleased
+## v0.6.1 — 2026-10-03
+
+The serving-and-stability patch release ([DEV-922](https://keith-merrill4.atlassian.net/browse/DEV-922)): `llama-server` moves to v0.5.0, and the faults the Ubuntu 26.04 upgrade and a week of boots exposed are fixed.
 
 ### Shipped
 
