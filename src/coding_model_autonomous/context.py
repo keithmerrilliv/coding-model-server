@@ -64,6 +64,7 @@ from typing import Any, Callable, Iterable, Optional
 
 from . import languages, test_runner
 from .models import ArtifactKind
+from .workspace import read_bytes_nofollow, symlink_in_path
 
 logger = logging.getLogger("orchestrator.context")
 
@@ -1203,6 +1204,12 @@ def prior_artifacts(db: Any, spec_id: str, spec_dir: Path, *,
     in the reviewer prompt (DEV-143). Rows are created_at-ordered; the
     latest per path wins. Binary deliverables get a placeholder so the path
     still appears in the prompt without a UTF-8 crash.
+
+    A symlink is never read through. The tests run with the workspace
+    writable, so an artifact (or a directory above it) can come back as a
+    link to any file the daemon can read, and this content goes straight into
+    a model prompt. The reviewer is told the path is a link instead — that is
+    a finding, not a file.
     """
     wanted = set(roles) if roles else None
     latest_by_path: dict[str, Any] = {}
@@ -1212,11 +1219,16 @@ def prior_artifacts(db: Any, spec_id: str, spec_dir: Path, *,
         latest_by_path[art.path] = art
     out: list[tuple[str, str]] = []
     for art in latest_by_path.values():
+        link = symlink_in_path(spec_dir, art.path)
+        if link is not None:
+            out.append((art.path, f"[`{link}` is a symbolic link — not read; "
+                                  f"an artifact must be a regular file]"))
+            continue
         fpath = spec_dir / art.path
-        if not fpath.exists():
+        if not fpath.is_file():
             continue
         try:
-            content = fpath.read_text()
+            content = read_bytes_nofollow(fpath).decode()
         except UnicodeDecodeError:
             content = (f"[binary file, {fpath.stat().st_size} bytes — "
                        f"reviewer cannot inspect content]")

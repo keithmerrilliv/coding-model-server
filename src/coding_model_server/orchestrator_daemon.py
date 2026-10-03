@@ -148,7 +148,7 @@ from coding_model_autonomous._http import (
 from coding_model_autonomous.settings import MAX_RETRIES
 from coding_model_autonomous.workspace import (
     ACTION_RENAMED, ATTEMPT_ROLES, REFUSALS, ArtifactLedger,
-    artifact_path,
+    artifact_path, read_bytes_nofollow, symlink_in_path,
 )
 from coding_model_autonomous import outcome as _outcome
 from coding_model_autonomous import diagnostics as _diagnostics
@@ -1472,6 +1472,7 @@ def _deliver_completed_spec(db: Database, spec: Spec) -> None:
         spec.id, spec.title, spec_dir, code_paths,
         repo_name=strategy.get("repo"),
         protected_paths=strategy.get("protected_paths") or [],
+        tested_hashes=_recorded_artifact_hashes(db, spec.id),
     )
     log = logger.info if result.status == "pushed" else logger.warning
     log("spec %s: delivery %s — %s", spec.id, result.status, result.detail)
@@ -1486,6 +1487,29 @@ def _deliver_completed_spec(db: Database, spec: Spec) -> None:
                        spec.id, e)
     _anomaly(db, spec, None, "delivery", status=result.status, branch=result.branch,
              detail=result.detail[:500])
+
+
+def _recorded_artifact_hashes(db: Database, spec_id: str) -> "dict | None":
+    """What the spec's most recent passing build check verified (path →
+    sha256), read from that check's event; None when no check recorded one.
+
+    The same map is written to tested_manifest.json in the workspace, but the
+    workspace is writable by the code the check runs and the events table is
+    not, so this is the copy delivery compares against. A read error
+    propagates: delivering unverified because the record could not be read
+    would be the silent pass this record exists to prevent.
+    """
+    for ev in db.list_events_by_kind(spec_id=spec_id, kind=EventKind.TEST_RAN,
+                                     limit=-1):
+        try:
+            payload = json.loads(ev.payload_json or "{}")
+        except (TypeError, ValueError):
+            continue
+        if (isinstance(payload, dict)
+                and payload.get("phase") == "pre_gate_build_check"
+                and isinstance(payload.get("artifact_hashes"), dict)):
+            return payload["artifact_hashes"]
+    return None
 
 
 def _spec_language(spec: Spec) -> "str | None":
@@ -3692,18 +3716,37 @@ def _record_tested_manifest(spec_dir: Path, files: "list[tuple[str, str]]",
     intended to write. Files listed but absent on disk are skipped. Never
     raises out of the daemon loop; failures are logged loudly.
 
+    Nothing here follows a symlink. The check that just passed ran with the
+    workspace writable, so the code under test may have left a link where an
+    artifact or the manifest itself was: hashing through one would vouch for
+    a file outside the workspace, and writing through one would overwrite it.
+    A linked artifact is left out of the record, which delivery then refuses
+    as unverified.
+
     Authored by run 21 (spec_04658e97, synthesis from deep_implementer
     attempts); hand-landed after the run failed on unappliable edits.
     """
     try:
         artifact_hashes: dict = {}
         for rel_path, _ in files:
+            link = symlink_in_path(spec_dir, rel_path)
+            if link is not None:
+                logger.error("spec dir %s: %s is a symbolic link after the "
+                             "build check — %s is not recorded as tested",
+                             spec_dir, link, rel_path)
+                continue
             file_path = spec_dir / rel_path
-            if file_path.exists():
+            if file_path.is_file():
                 artifact_hashes[rel_path] = hashlib.sha256(
-                    file_path.read_bytes()).hexdigest()
-        manifest_path = spec_dir / "tested_manifest.json"
-        manifest_path.write_text(json.dumps(artifact_hashes, indent=2))
+                    read_bytes_nofollow(file_path)).hexdigest()
+        manifest_path = spec_dir / delivery.TESTED_MANIFEST
+        if manifest_path.is_symlink():
+            manifest_path.unlink()
+        fd = os.open(manifest_path,
+                     os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW,
+                     0o644)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(json.dumps(artifact_hashes, indent=2))
         payload["artifact_hashes"] = artifact_hashes
     except Exception:
         logger.error("spec dir %s: tested-manifest recording failed",

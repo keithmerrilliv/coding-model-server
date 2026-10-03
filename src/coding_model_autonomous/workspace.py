@@ -59,8 +59,67 @@ from .plan_paths import is_placeholder
 logger = logging.getLogger("orchestrator.workspace")
 
 
+def is_git_control_path(rel_path: str) -> bool:
+    """True when any component of *rel_path* names git's control directory.
+
+    Delivery copies artifacts into a clone of the target repository, where a
+    file under ``.git/`` is not content but configuration: ``.git/config``
+    can name a command (``core.fsmonitor``, an alias, a hook path) that git
+    then runs as the daemon user, outside the test sandbox. Artifact paths
+    are chosen by a model, so the name is refused wherever a path is taken.
+
+    Matched the way git itself matches it on the filesystems that fold names:
+    case-insensitively, ignoring the trailing dots and spaces NTFS drops, and
+    including NTFS's short name ``GIT~1`` — the checkout that receives the
+    branch may be on one of those even though this host is not.
+
+    Only the directory is control. ``.gitignore``, ``.gitattributes``,
+    ``.gitmodules`` and ``.github/`` are ordinary tracked content: none of
+    them can make git execute anything without configuration that lives in
+    ``.git/config`` or the user's own config, and they reach the operator as
+    a reviewable diff on the pipeline branch.
+    """
+    for part in rel_path.replace("\\", "/").split("/"):
+        folded = part.rstrip(". ").lower()
+        if folded in (".git", "git~1"):
+            return True
+    return False
+
+
+def symlink_in_path(spec_dir: Path, rel_path: str) -> "str | None":
+    """The first component of *rel_path* under *spec_dir* that is a symlink
+    (as a spec-relative path), or None when every existing component is real.
+
+    The test sandbox binds the workspace read-write, so code under test can
+    replace an artifact — or a directory above it — with a link to anything
+    the daemon can read. Whoever reads an artifact on the daemon's behalf
+    (hashing, the reviewer prompt, delivery) asks this first and treats a
+    link as a refusal, never as the file it points at.
+    """
+    current = spec_dir
+    walked: list[str] = []
+    for part in PurePosixPath(rel_path).parts:
+        current = current / part
+        walked.append(part)
+        if os.path.islink(current):
+            return "/".join(walked)
+    return None
+
+
+def read_bytes_nofollow(path: Path) -> bytes:
+    """Read *path* refusing a symlink at the final component (OSError/ELOOP).
+
+    The check in :func:`symlink_in_path` and the read are two system calls;
+    O_NOFOLLOW makes the read itself refuse a link swapped in between them.
+    """
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as fh:
+        return fh.read()
+
+
 def artifact_path(spec_dir: Path, rel_path: str) -> Path:
-    """Resolve a spec-relative artifact path, rejecting traversal.
+    """Resolve a spec-relative artifact path, rejecting traversal and git's
+    control directory (see :func:`is_git_control_path`).
 
     Strips leading ``/`` so models can't write absolute paths (Python's
     ``Path / "/abs"`` would discard the left operand). Then resolves
@@ -82,6 +141,11 @@ def artifact_path(spec_dir: Path, rel_path: str) -> Path:
     abs_path = (spec_dir / rel_path).resolve()
     if not abs_path.is_relative_to(spec_root):
         raise ValueError(f"Path traversal rejected: {rel_path}")
+    # Both spellings: the path as asked for, and what it resolves to — a
+    # directory link inside the workspace must not smuggle the name past.
+    if is_git_control_path(rel_path) or is_git_control_path(
+            abs_path.relative_to(spec_root).as_posix()):
+        raise ValueError(f"git control path rejected: {rel_path}")
     return abs_path
 
 
@@ -149,7 +213,9 @@ REFUSED_COLLISION = "refused_collision"
 REFUSED_EMPTYING = "refused_emptying"
 REFUSED_SHRINK = "refused_shrink"
 REFUSED_PLACEHOLDER = "refused_placeholder"
-REFUSALS = (REFUSED_COLLISION, REFUSED_EMPTYING, REFUSED_SHRINK, REFUSED_PLACEHOLDER)
+REFUSED_GIT_CONTROL = "refused_git_control"
+REFUSALS = (REFUSED_COLLISION, REFUSED_EMPTYING, REFUSED_SHRINK, REFUSED_PLACEHOLDER,
+            REFUSED_GIT_CONTROL)
 _LANDED = (ACTION_WRITTEN, ACTION_RENAMED, ACTION_RESTORED)
 
 # Placeholder path detection constants and predicate.
@@ -282,6 +348,9 @@ class WriteOutcome:
         if self.action == REFUSED_PLACEHOLDER:
             return (f"`{self.requested}` is not a file path — REFUSED "
                     f"({self.detail})")
+        if self.action == REFUSED_GIT_CONTROL:
+            return (f"`{self.requested}` is inside git's control directory — "
+                    f"REFUSED ({self.detail})")
         if self.action == REFUSED_COLLISION:
             # The reason is the useful half and there are now three of them
             # (the refuse policy, an occupied containment path, and DEV-738's
@@ -468,6 +537,15 @@ class ArtifactLedger:
                 rel_path, None, REFUSED_PLACEHOLDER, role,
                 prior_role, detail="a placeholder from the prompt's "
                                    "format examples, not a file")
+
+        # 0b. git's control directory — refused here, as a recorded outcome
+        # the role is told about, so artifact_path's ValueError below stays
+        # the backstop rather than the thing that ends the pass.
+        if outcome is None and is_git_control_path(rel_path):
+            outcome = WriteOutcome(
+                rel_path, None, REFUSED_GIT_CONTROL, role, prior_role,
+                detail="`.git/` holds repository configuration, never a "
+                       "deliverable file")
 
         # 1. collision — someone else's work is at this path.
         if outcome is None and prior is not None and prior.role != role \
