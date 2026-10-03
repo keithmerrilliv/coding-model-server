@@ -27,6 +27,7 @@ together.
 
 | Release | Date | Theme |
 |---|---|---|
+| **v0.6.1** | 2026-10-03 | **Serving and stability.** `llama-server` moves to upstream v0.5.0, the server survives a bad boot, and a VM that never ran the code can no longer reach a review gate. |
 | **v0.6.0** | 2026-09-29 | **Layering.** Imports point one way, each decision has one home, and language-specific logic sits behind one interface. The roster is what telemetry says is used. |
 | **v0.5.0** | 2026-09-27 | **Honest guards.** A guard reports what it observed and names a cause only when it has isolated one. Runs 56–68 all reached release approval, and LLab (Objective-C and C++) joined Electric Sheep and Centipede as a third target. |
 | **v0.4.0** | 2026-09-22 | **The Swift loop.** The implementer loop learns the compiler's shape: host-side Swift prechecks, a diagnostic-to-fix table in retry prompts, retrieval measured on the role that writes the code. |
