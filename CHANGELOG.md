@@ -9,6 +9,15 @@
   - `scripts/benchmark_roster_builds.py` measures every roster model on two builds with the exact argv production passes.
   - Glimmer's harmony tool-call 502 (DEV-727, DEV-747) did not reproduce on v0.4.1 or v0.5.0 (0 of 16), but `glimmer_implementer` returned an empty answer on 4 of 4 implementer calls, which DEV-747 still owes.
 - [DEV-901](https://keith-merrill4.atlassian.net/browse/DEV-901): `scripts/replay_synthesis.py` replays every archived synthesis through any roster agent, offline, on scratch copies of the workspace and the task database as they stood when synthesis started, and scores the output with the pipeline's own tests, pinned to the commit the run used. The incumbent passes on all 8 reproducible specs that ended done. It is the instrument for the synthesizer-model eval (DEV-902).
+- [DEV-918](https://keith-merrill4.atlassian.net/browse/DEV-918): the server survives a bad boot. Two outages were in the journal: RAG was lost for a whole process lifetime whenever the network was late at boot (six times in five days), and the Apple Deep Docs MCP had failed on every start since the Ubuntu 26.04 upgrade stranded its Python 3.12 venv, with nothing in the log saying why.
+  - The embedding model loads from the local cache first, so only a never-downloaded model needs the network.
+  - A failed memory init retries with backoff (30 s doubling to 600 s) instead of leaving RAG off until a restart.
+  - The Deep Docs service is kept when its first start fails; every request already retries the start, so it recovers without a restart instead of answering 503.
+  - The MCP child's stderr goes to `tools/appledeepdoc-mcp.stderr.log`, and a failed handshake logs its tail.
+  - `scripts/update_deep_docs_mcp.sh` installs the declared dependencies; `pip install -e` is refused by current hatchling for that layout.
+- [DEV-917](https://keith-merrill4.atlassian.net/browse/DEV-917): the seccomp filter no longer puts apt's Python packages ahead of the venv's. It falls back to `/usr/lib/python3/dist-packages` for the apt-only `seccomp` binding and inserted that directory at the front of `sys.path` for the life of the process, so every later import in the orchestrator preferred apt's copy. After the 26.04 upgrade that served an older `regex` to `transformers`, whose version check failed and turned three tests red on main. The directory is now appended.
+- [DEV-915](https://keith-merrill4.atlassian.net/browse/DEV-915): two tests that read `HEAD` skip, with the reason, where the repository is not a git checkout. A self-target spec runs the existing tests inside a sandbox built from a git archive, so both failed on every attempt whatever the attempt wrote; `spec_c52a95f8` (DEV-681) was charged for one twice and ended terminal. In a real checkout all 46 tests in those files still run.
+- `pyproject.toml` carries the release's version again. It had said 0.5.0 since that release, through the v0.6.0 tag.
 
 ## v0.6.0 — 2026-09-29
 
