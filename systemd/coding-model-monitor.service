@@ -16,7 +16,7 @@ Type=simple
 #     as root to grant: setfacl -m u:youruser:r /sys/class/powercap/intel-rapl:0/energy_uj)
 User=youruser
 WorkingDirectory=/home/youruser/Dev/coding-model-server
-ExecStart=/usr/bin/python3 /home/youruser/Dev/coding-model-server/scripts/monitor_resources.py
+ExecStart=/home/youruser/Dev/coding-model-server/venv/bin/python /home/youruser/Dev/coding-model-server/scripts/monitor_resources.py
 Restart=always
 RestartSec=10
 

@@ -21,6 +21,7 @@ import requests as http_requests
 from requests.adapters import HTTPAdapter
 from fastapi import HTTPException
 
+from coding_model_server import nvml as gpu_nvml
 from coding_model_server.config import Config
 
 
@@ -219,7 +220,7 @@ class LlamaServerManager:
         # pre-flight check before a swap so we can refuse instead of crashing.
         self._measured_vram_delta_mib: Dict[str, int] = {}
         # Consecutive InsufficientVramError refusals per agent. The recorded
-        # delta is measured from two nvidia-smi readings tens of seconds
+        # delta is measured from two free-VRAM readings tens of seconds
         # apart on a desktop GPU (Xorg/browser also allocate), so it can be
         # inflated past any achievable free value — and it only refreshes on
         # a SUCCESSFUL load, which the refusal itself prevents: a permanent
@@ -830,38 +831,23 @@ class LlamaServerManager:
         """Total VRAM (device 0), cached — it never changes at runtime."""
         if self._gpu_total_mib_cache is not None:
             return self._gpu_total_mib_cache
-        try:
-            result = subprocess.run(
-                ["nvidia-smi", "--query-gpu=memory.total",
-                 "--format=csv,noheader,nounits"],
-                capture_output=True, text=True, timeout=2,
-            )
-            if result.returncode != 0:
-                return None
-            self._gpu_total_mib_cache = int(result.stdout.strip().splitlines()[0])
-        except (OSError, ValueError, subprocess.TimeoutExpired, IndexError):
+        mem = gpu_nvml.memory_mib()
+        if mem is None:
             return None
+        self._gpu_total_mib_cache = mem[1]
         return self._gpu_total_mib_cache
 
     def _gpu_free_mib(self) -> Optional[int]:
-        """Query free VRAM (device 0) via nvidia-smi. Returns None on failure.
+        """Free VRAM (device 0) in MiB via NVML, or None when unreadable.
 
-        Cheap call (~30 ms). Used by the swap-VRAM-release wait below; we
-        deliberately don't hold a long-running NVML handle because the
-        watchdog/teardown threads need this to be reentrant-safe and the
-        cost is negligible.
+        Microseconds per call on the process-wide handle in
+        coding_model_server.nvml, which is thread-safe, so the watchdog,
+        teardown and request threads can all ask without coordination.
+        The release wait below polls this at 5 Hz; as a subprocess that
+        was up to 40 fresh driver sessions per swap (DEV-925).
         """
-        try:
-            result = subprocess.run(
-                ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
-                capture_output=True, text=True, timeout=2,
-            )
-            if result.returncode != 0:
-                return None
-            first_line = result.stdout.strip().split("\n")[0].strip()
-            return int(first_line)
-        except (FileNotFoundError, ValueError, subprocess.TimeoutExpired):
-            return None
+        mem = gpu_nvml.memory_mib()
+        return None if mem is None else mem[0]
 
     def _wait_for_vram_release(self, *, max_wait: float = 8.0, stable_for: float = 0.6) -> None:
         """Block until free VRAM has stabilized after a model teardown.
@@ -875,7 +861,7 @@ class LlamaServerManager:
         (Coder-30B-A3B, 4.7 GiB compute buffer) swap, with the new process
         exiting on cudaMalloc failure 0.5-1s into startup.
 
-        Strategy: poll nvidia-smi until two consecutive readings agree
+        Strategy: poll free VRAM until two consecutive readings agree
         within ~50 MiB for at least ``stable_for`` seconds. That's the
         signal that the kernel has finished its async free work. Bounded
         by ``max_wait`` so a stuck driver can't hang the swap forever.
@@ -887,8 +873,8 @@ class LlamaServerManager:
         while time.time() < deadline:
             free_mib = self._gpu_free_mib()
             if free_mib is None:
-                # nvidia-smi unavailable — fall back to a fixed sleep so the
-                # swap still gets *some* breathing room.
+                # GPU unreadable — fall back to a fixed sleep so the swap
+                # still gets *some* breathing room.
                 time.sleep(2.0)
                 return
 
@@ -1030,11 +1016,11 @@ class LlamaServerManager:
             return
         free = self._gpu_free_mib()
         if free is None:
-            return  # nvidia-smi unavailable — proceed and hope for the best
+            return  # GPU unreadable — proceed and hope for the best
 
         if free < recorded:
             # DEV-156: an inflated record (another process allocated between
-            # the two nvidia-smi readings) refuses FOREVER, because only a
+            # the two free-VRAM readings) refuses FOREVER, because only a
             # successful load refreshes it. Three consecutive refusals mark
             # the record suspect: clear it and let this load attempt
             # re-measure instead of staying bricked until a daemon restart.

@@ -24,7 +24,7 @@ Run Python scripts from the repo root with `venv/bin/python scripts/<name>`.
 | `install_llama_server.sh <build/bin> [--execute]` | Installs a llama.cpp build into `tools/` (which production loads) with a rollback copy: repoints every versioned-library symlink, then checks with `ldd` and a sha that the new libraries are the ones that load, and rolls back by itself if not. Refuses while a model is loaded or a spec is mid-generation. `--rollback` restores the newest backup. Dry run by default. |
 | `env_keys.sh [file]` | Lists the keys an `.env` sets, with value lengths only, never values. |
 | `enable_rapl_reading.sh` | Lets the resource monitor read CPU package power (needs sudo once). |
-| `monitor_resources.py` | GPU, CPU and power sampler behind `coding-model-monitor.service`. |
+| `monitor_resources.py` | GPU, CPU and power sampler behind `coding-model-monitor.service`. GPU power comes from NVML, so the unit must run the project venv (where `nvidia-ml-py` is installed), not the system interpreter. |
 | `serve_dashboard.py` | Static server for the built dashboard (`dashboard/dist`); behind `coding-model-dashboard.service`. |
 
 ## Pipeline analysis
