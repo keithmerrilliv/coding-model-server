@@ -152,6 +152,7 @@ from coding_model_autonomous.workspace import (
     artifact_path, read_bytes_nofollow, symlink_in_path,
 )
 from coding_model_autonomous import outcome as _outcome
+from coding_model_autonomous import plan_criteria as _plan_criteria
 from coding_model_autonomous import diagnostics as _diagnostics
 from coding_model_autonomous import context as _context
 from coding_model_autonomous.test_strategy import (  # DEV-837: moved out
@@ -596,13 +597,30 @@ def _resolve_plan_phase_paths(
     return yaml_text, problems
 
 
+_TEST_STRATEGY_GUIDANCE = (
+    "The plan's `test_strategy` cannot be dispatched as written. This was "
+    "caught automatically before review, so no reviewer has seen it yet.\n\n"
+    "{bullets}\n\n"
+    "Re-emit the plan with these as structured keys under `test_strategy`. "
+    "Keep whatever prose you have in `notes` — it is useful to the "
+    "implementer — but the values must also exist as keys, because the "
+    "runner dispatch is built from the keys and `notes` is never parsed.\n"
+)
+
+
 def _reject_plan_for_validation(db: Database, spec: Spec, problems: list[str],
-                                yaml_text: str) -> bool:
+                                yaml_text: str, *,
+                                guidance: "str | None" = None) -> bool:
     """Bounce an invalid plan back to the planner. True if the round was issued.
 
     Uses the same channel a human rejection uses — an approved CLARIFICATION
     gate carrying the feedback, then PENDING_PLAN — so the planner sees it as
     a normal revision round and no operator attention is consumed.
+
+    ``guidance`` is the paragraph that tells the planner what kind of fix the
+    problems need; it defaults to the test_strategy one (DEV-426). A check
+    with a different remedy (DEV-483's criteria) passes its own, so the
+    planner is not told to move an acceptance criterion under test_strategy.
     """
     prior = sum(1 for g in db.list_gates_for_spec(spec.id, GateType.CLARIFICATION)
                 if (g.prompt_md or "").startswith(_AUTO_PLAN_REJECT_MARKER))
@@ -613,16 +631,12 @@ def _reject_plan_for_validation(db: Database, spec: Spec, problems: list[str],
         return False
 
     bullets = "\n".join(f"- {p}" for p in problems)
-    notes = (
-        "## Plan rejection feedback\n\n"
-        "The plan's `test_strategy` cannot be dispatched as written. This was "
-        "caught automatically before review, so no reviewer has seen it yet.\n\n"
-        f"{bullets}\n\n"
-        "Re-emit the plan with these as structured keys under `test_strategy`. "
-        "Keep whatever prose you have in `notes` — it is useful to the "
-        "implementer — but the values must also exist as keys, because the "
-        "runner dispatch is built from the keys and `notes` is never parsed.\n"
-    )
+    if guidance is None:
+        body = _TEST_STRATEGY_GUIDANCE.format(bullets=bullets)
+    else:
+        body = (f"{guidance} This was caught automatically before review, so "
+                f"no reviewer has seen it yet.\n\n{bullets}\n")
+    notes = "## Plan rejection feedback\n\n" + body
     gate = db.create_gate(
         spec_id=spec.id,
         gate_type=GateType.CLARIFICATION,
@@ -924,6 +938,17 @@ def _accept_plan(db: Database, spec: Spec, spec_dir, result: PlannerYaml) -> Non
     problems = _validate_test_strategy(yaml_text, spec_md)
     if problems:
         _reject_plan_for_validation(db, spec, problems, yaml_text)
+        return
+
+    # DEV-483: a criterion the harness cannot decide fails every implementation,
+    # and only after design, implementation and a Mac dispatch. Two plans asked
+    # for a pre-fix run, a `git status` listing and an exact warning count; each
+    # was researched, approved, and impossible. Bounce it here, with the
+    # criterion quoted and the single-run alternative, before a reviewer reads it.
+    criteria_problems = _plan_criteria.unevaluable_criteria(yaml_text)
+    if criteria_problems:
+        _reject_plan_for_validation(db, spec, criteria_problems, yaml_text,
+                                    guidance=_plan_criteria.REJECTION_GUIDANCE)
         return
 
     # DEV-601: the planner's phase paths are free text and nothing checked them
