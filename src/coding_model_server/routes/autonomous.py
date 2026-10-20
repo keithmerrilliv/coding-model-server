@@ -11,7 +11,9 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 
 from coding_model_server.runtime import get_autonomous_db, verify_admin_key
+from coding_model_autonomous import delivery
 from coding_model_autonomous.db import GateAlreadyDecidedError, SpecAlreadyTerminal
+from coding_model_autonomous.models import SpecStatus
 from coding_model_autonomous.models import (
     CancelSpecRequest,
     GateRespondRequest,
@@ -107,6 +109,33 @@ def cancel_spec(spec_id: str, request: Optional[CancelSpecRequest] = None) -> di
         raise HTTPException(status_code=409, detail=str(e))
     logger.warning("Spec %s cancelled by operator: %s", spec_id, reason or "no reason")
     return summary
+
+
+@router.post("/v1/autonomous/specs/{spec_id}/redeliver",
+             dependencies=[Depends(verify_admin_key)])
+def redeliver_spec(spec_id: str) -> dict:
+    """Ask for a DONE spec's artifacts to be delivered again.
+
+    Delivery needs the orchestrator's environment (its remotes, its deploy
+    key), so this process does not run it: it records that delivery is owed
+    and the daemon delivers on its next tick, writing the outcome to the
+    spec's events and delivery_report.md as it does for any delivery.
+    ``queued`` is False when a delivery was already owed — the request is
+    then already being served and is not doubled.
+    """
+    db = get_autonomous_db()
+    spec = db.get_spec(spec_id)
+    if spec is None:
+        raise HTTPException(status_code=404, detail=f"spec {spec_id} not found")
+    if spec.status != SpecStatus.DONE:
+        raise HTTPException(
+            status_code=409,
+            detail=(f"spec {spec_id} is {spec.status.value}; only a DONE spec "
+                    f"has approved artifacts to deliver"))
+    queued = delivery.request_delivery(db, spec_id, "operator")
+    logger.info("Spec %s: redelivery %s by operator", spec_id,
+                "requested" if queued else "already owed when requested")
+    return {"spec_id": spec_id, "queued": queued}
 
 
 @router.get("/v1/autonomous/gates", dependencies=[Depends(verify_admin_key)])

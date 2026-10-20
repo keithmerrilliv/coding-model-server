@@ -10,6 +10,7 @@ Subcommands:
   gates [--spec <spec_id>]    List open review gates
   review <gate_id> ...        Approve or reject a gate
   events <spec_id>            Tail the event log for a spec
+  redeliver <spec_id>         Deliver a DONE spec's artifacts again
   logs <spec_id>              Alias for `events`
 """
 from __future__ import annotations
@@ -253,6 +254,19 @@ def cmd_cancel(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_redeliver(args: argparse.Namespace) -> int:
+    result = _request("POST", f"/v1/autonomous/specs/{args.spec_id}/redeliver")
+    if result["queued"]:
+        print(_color(f"redelivery of {result['spec_id']} requested", _C.BOLD))
+    else:
+        print(_color(f"a delivery of {result['spec_id']} is already owed — "
+                     f"not requested twice", _C.BOLD))
+    print(_color(f"  the orchestrator delivers on its next tick; the outcome is "
+                 f"the `delivery` row in `events {result['spec_id']}` and "
+                 f"delivery_report.md in the spec's workspace", _C.DIM))
+    return 0
+
+
 def cmd_swap_reset(args: argparse.Namespace) -> int:
     path = "/v1/admin/swap/reset" + ("?force=true" if args.force else "")
     result = _request("POST", path)
@@ -299,6 +313,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("spec_id")
     p.add_argument("--reason", help="why — recorded on the spec's events and its Jira epic")
     p.set_defaults(func=cmd_cancel)
+
+    p = sub.add_parser("redeliver",
+                       help="deliver a DONE spec's artifacts to its pipeline "
+                            "branch again")
+    p.add_argument("spec_id")
+    p.set_defaults(func=cmd_redeliver)
 
     p = sub.add_parser("swap-reset",
                        help="clear a wedged model swap on the server without a restart")

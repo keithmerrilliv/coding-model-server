@@ -59,7 +59,7 @@ def test_client_rejects_an_unknown_flag(tmp_path):
 # ── coding-model-autonomous ──────────────────────────────────────────────────
 
 SUBCOMMANDS = ("submit", "status", "gates", "review", "events", "cancel",
-               "swap-reset", "logs")
+               "redeliver", "swap-reset", "logs")
 
 
 def test_autonomous_help_lists_every_subcommand(tmp_path):
@@ -77,8 +77,8 @@ _SEP = "\n=== exit "
 def subcommand_helps(tmp_path_factory) -> dict:
     """Every subcommand's --help from ONE interpreter: {sub: (exit, stdout)}.
 
-    Eight launches cost the suite about a second; the parser is rebuilt per
-    call, so one process running them in turn sees what eight would."""
+    A launch each costs the suite about a second; the parser is rebuilt per
+    call, so one process running them in turn sees what separate ones would."""
     home = tmp_path_factory.mktemp("home")
     module, func = SCRIPTS["coding-model-autonomous"].split(":")
     launcher = (

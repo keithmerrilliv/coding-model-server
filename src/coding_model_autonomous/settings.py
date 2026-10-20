@@ -297,3 +297,11 @@ PROTECTED_FILES_MAX_CHARS = int(
 # less whenever the sum against the destination window demands it.
 PRIOR_ARTIFACTS_MAX_CHARS = int(
     os.getenv("AUTONOMOUS_PRIOR_ARTIFACTS_MAX_CHARS", "300000"))
+
+
+# How many times a delivery that was cut off before reaching any outcome (a
+# redeploy mid-push) is started again before the daemon records it as failed
+# and leaves it to `coding-model-autonomous redeliver`. A delivery that fails
+# on its own is never retried: this bounds only the interrupted case, so a
+# delivery that kills the daemon cannot do so on every start forever.
+DELIVERY_MAX_ATTEMPTS = int(os.getenv("AUTONOMOUS_DELIVERY_MAX_ATTEMPTS", "3"))

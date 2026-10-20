@@ -37,6 +37,7 @@ EXPECTED_PATHS = {
     "/v1/autonomous/gates/{gate_id}",
     "/v1/autonomous/gates/{gate_id}/respond",
     "/v1/autonomous/specs/{spec_id}/cancel",
+    "/v1/autonomous/specs/{spec_id}/redeliver",
     "/v1/admin/swap/reset",
     "/v1/admin/metrics",
     "/v1/admin/gpu_stats",

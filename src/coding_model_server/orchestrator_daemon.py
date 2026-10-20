@@ -41,6 +41,7 @@ import signal
 import threading
 import sys
 import time
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
@@ -1230,6 +1231,12 @@ def tick(db: Database, scheduler: "SpecScheduler | None" = None) -> None:
                 scheduler.submit(spec.id, label, _run_spec_pass,
                                  db, spec.id, status, label, processor,
                                  status_on_error)
+    # After the passes, so a spec that just finished inline has its outcome
+    # on record before anyone asks whether its delivery is still owed.
+    try:
+        _deliver_owed(db, scheduler)
+    except Exception:
+        logger.exception("owed-delivery check failed; continuing")
 
 
 def _run_spec_pass(db: Database, spec_id: str, status: SpecStatus,
@@ -1402,10 +1409,23 @@ def _process_executing(db: Database, spec: Spec) -> None:
         # comes AFTER the terminal transition and fails open: the run's
         # verification stands whether or not the last hop lands, and a
         # delivery wedge must never block the state machine.
+        #
+        # The debt is recorded BEFORE the transition: a push outlasts the
+        # shutdown grace many times over, and once the spec is DONE nothing
+        # in this function runs for it again. The record is what lets
+        # _deliver_owed finish a delivery a restart cut off. It is
+        # best-effort for the same fail-open reason — failing to write it
+        # must not keep a finished spec out of DONE.
         logger.info("spec %s: all tasks completed, marking DONE", spec.id)
+        try:
+            delivery.request_delivery(db, spec.id, "release")
+        except Exception:
+            logger.exception("spec %s: could not record that delivery is "
+                             "owed — an interrupted delivery will not be "
+                             "retried", spec.id)
         db.update_spec_status(spec.id, SpecStatus.DONE)
         try:
-            _deliver_completed_spec(db, spec)
+            _attempt_delivery(db, spec)
         except Exception:
             logger.exception("spec %s: delivery step crashed (spec stays "
                              "DONE; artifacts remain in the workspace)",
@@ -1474,10 +1494,20 @@ def _deliver_completed_spec(db: Database, spec: Spec) -> None:
         protected_paths=strategy.get("protected_paths") or [],
         tested_hashes=_recorded_artifact_hashes(db, spec.id),
     )
+    _record_delivery_outcome(db, spec, result, code_paths)
+
+
+def _record_delivery_outcome(db: Database, spec: Spec,
+                             result: "delivery.DeliveryResult",
+                             code_paths: "list[str]") -> None:
+    """Write a delivery's outcome where an operator looks for it: the log,
+    delivery_report.md, and the `delivery` event — which is also what settles
+    the debt (see delivery.delivery_debt), so every path that ends a delivery
+    ends here."""
     log = logger.info if result.status == "pushed" else logger.warning
     log("spec %s: delivery %s — %s", spec.id, result.status, result.detail)
     try:
-        ledger = ArtifactLedger.open(db, spec, spec_dir)
+        ledger = ArtifactLedger.open(db, spec, db.spec_dir(spec.id))
         sizes = ledger.size_block(code_paths,
                                   "Delivered files vs the repository version")
         ledger.note("delivery_report.md",
@@ -1485,8 +1515,129 @@ def _deliver_completed_spec(db: Database, spec: Spec) -> None:
     except OSError as e:
         logger.warning("spec %s: could not write delivery_report.md: %s",
                        spec.id, e)
-    _anomaly(db, spec, None, "delivery", status=result.status, branch=result.branch,
-             detail=result.detail[:500])
+    _anomaly(db, spec, None, delivery.OUTCOME_ROLE, status=result.status,
+             branch=result.branch, detail=result.detail[:500])
+
+
+def _attempt_delivery(db: Database, spec: Spec) -> None:
+    """Start one delivery of a DONE spec and see it to a recorded outcome.
+
+    The attempt is recorded before anything slow happens, so a process that
+    dies mid-push leaves an attempt with no outcome — which is how the next
+    start knows to try again, and how many times it already has. At the cap
+    the interruption itself becomes the outcome: something about this
+    delivery keeps outliving the daemon, and the operator is told instead of
+    the daemon trying on every start forever.
+
+    An exception is an outcome too (failed, with the exception as the
+    report), not an interruption: retrying a deterministic crash is the loop
+    the cap exists to prevent, and the operator can redeliver once it is
+    understood.
+    """
+    cap = settings.DELIVERY_MAX_ATTEMPTS
+    attempts = delivery.delivery_debt(db, spec.id).attempts
+    if attempts >= cap:
+        _record_delivery_outcome(db, spec, delivery.DeliveryResult(
+            "failed",
+            f"delivery was started {attempts} time(s) and interrupted each "
+            f"time before reaching an outcome "
+            f"(AUTONOMOUS_DELIVERY_MAX_ATTEMPTS={cap}) — not retried again. "
+            f"The artifacts remain in "
+            f"{db.spec_dir(spec.id)}; once the cause is understood, run "
+            f"`coding-model-autonomous redeliver {spec.id}`."), [])
+        return
+    _anomaly(db, spec, None, delivery.ATTEMPT_ROLE, attempt=attempts + 1,
+             max_attempts=cap)
+    try:
+        _deliver_completed_spec(db, spec)
+    except Exception as exc:
+        logger.exception("spec %s: delivery step crashed", spec.id)
+        _record_delivery_outcome(db, spec, delivery.DeliveryResult(
+            "failed",
+            f"delivery step crashed: {type(exc).__name__}: {exc}. The "
+            f"artifacts remain in {db.spec_dir(spec.id)}; run "
+            f"`coding-model-autonomous redeliver {spec.id}` to try again."), [])
+
+
+class _DeliveryWatch:
+    """Which specs might owe a delivery, as far as one Database's events have
+    been read. Tick-thread only, like the scheduler."""
+
+    def __init__(self) -> None:
+        self.cursor: "int | None" = None      # last event id examined
+        self.pending: set[str] = set()
+
+
+# Keyed by Database so the bookkeeping dies with it and two databases in one
+# process (the test suite) never read each other's cursor.
+_delivery_watches: "weakref.WeakKeyDictionary[Database, _DeliveryWatch]" = (
+    weakref.WeakKeyDictionary())
+
+_EVENT_BATCH = 500
+
+
+def _deliver_owed(db: Database, scheduler: "SpecScheduler | None" = None) -> None:
+    """Deliver every DONE spec whose delivery is owed (see delivery.py).
+
+    Two things leave a debt nothing else would collect: a restart that cut a
+    delivery off, and an operator's `redeliver`, which the API server records
+    in the database for this process to act on.
+
+    Finding them must cost nothing on an ordinary tick, so the DONE specs are
+    scanned once per process — the interrupted ones can only predate it — and
+    after that only events newer than the cursor are read. A candidate is
+    just a spec worth asking about: _run_owed_delivery asks the events again
+    before doing anything. With a scheduler the delivery goes through it
+    under the spec's id, so it can never overlap the pass that is delivering
+    the same spec right now; a refused submit simply stays pending.
+    """
+    watch = _delivery_watches.setdefault(db, _DeliveryWatch())
+    if watch.cursor is None:
+        newest = db.list_recent_events(limit=1)
+        watch.cursor = (newest[0].id or 0) if newest else 0
+        # list_specs' default window (the 100 newest): an interrupted
+        # delivery belongs to a spec that had only just finished.
+        for spec in db.list_specs(status=SpecStatus.DONE):
+            if delivery.delivery_debt(db, spec.id).owed:
+                watch.pending.add(spec.id)
+    else:
+        cursor: int = watch.cursor
+        while True:
+            batch = db.events_after(cursor, limit=_EVENT_BATCH)
+            for ev in batch:
+                if ev.id is not None:
+                    cursor = watch.cursor = ev.id
+                if (ev.kind == EventKind.AGENT_RAN and ev.spec_id
+                        and (ev.payload or {}).get("role") in (
+                            delivery.REQUESTED_ROLE, delivery.ATTEMPT_ROLE)):
+                    watch.pending.add(ev.spec_id)
+            if len(batch) < _EVENT_BATCH:
+                break
+    for spec_id in sorted(watch.pending):
+        if scheduler is None:
+            watch.pending.discard(spec_id)
+            _run_owed_delivery(db, spec_id)
+        elif scheduler.submit(spec_id, "delivery", _run_owed_delivery,
+                              db, spec_id):
+            watch.pending.discard(spec_id)
+
+
+def _run_owed_delivery(db: Database, spec_id: str) -> None:
+    """Deliver *spec_id* if it is DONE and still owes a delivery. Never
+    raises: this runs beside the state machine, not in it."""
+    try:
+        spec = db.get_spec(spec_id)
+        if spec is None or spec.status != SpecStatus.DONE:
+            return
+        if not delivery.delivery_debt(db, spec_id).owed:
+            return
+        logger.warning("spec %s: delivery is owed with no recorded outcome "
+                       "(interrupted, or redelivery requested) — delivering",
+                       spec_id)
+        _attempt_delivery(db, spec)
+    except Exception:
+        logger.exception("spec %s: owed delivery crashed (spec stays DONE; "
+                         "artifacts remain in the workspace)", spec_id)
 
 
 def _recorded_artifact_hashes(db: Database, spec_id: str) -> "dict | None":
