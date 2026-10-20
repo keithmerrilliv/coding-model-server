@@ -312,9 +312,20 @@ def _render_reference_files(reference_files: list[tuple[str, str]],
     # a section more than its knob when the window has room, and re-applying
     # the knob here would drop the file it just chose to include. The knob
     # survives only as the fallback for a caller that renders unbudgeted.
-    dropped: list[str] = list(omitted or [])
+    #
+    # Lockfiles and build output are a separate kind of not-shown: they are
+    # withheld whatever the budget (a 252K package-lock.json declares nothing
+    # a role can use), and the sentence that names them says so — "over the
+    # context budget" would invite the model to wish it had seen them. The
+    # allocator takes them out before it sums; the check is repeated on the
+    # files themselves so an unbudgeted caller withholds them too.
+    generated = [p for p in (omitted or []) if languages.is_machine_generated(p)]
+    dropped = [p for p in (omitted or []) if p not in generated]
     budget = float("inf") if omitted is not None else settings.PROTECTED_FILES_MAX_CHARS
     for path, content in reference_files:
+        if languages.is_machine_generated(path):
+            generated.append(path)
+            continue
         if len(content) > budget:
             dropped.append(path)
             continue
@@ -324,6 +335,13 @@ def _render_reference_files(reference_files: list[tuple[str, str]],
         out.append(
             "**Not shown** (over the context budget), but still off-limits and "
             "still compiled in: " + ", ".join(dropped) + "\n\n"
+        )
+    if generated:
+        out.append(
+            "**Not shown** (lockfiles and build output — written by tooling, "
+            "and declaring nothing your code can reference), but they exist "
+            "and are off-limits like the rest; do not emit, regenerate or "
+            "edit them: " + ", ".join(generated) + "\n\n"
         )
     return "".join(out)
 
@@ -1025,6 +1043,14 @@ def summarize_written_files(
     modest type easily reaches double figures, so a type with many members would
     truncate before its interface was fully described. `max_total_chars` remains
     the real bound on prompt growth.
+
+    The summary is append-only in *files*: one more file at the end of the list
+    leaves every byte already emitted in place and adds to the tail. A section
+    depends only on its own file and the sizes before it, and once the size cap
+    is reached nothing later is considered. The per-file prompt calls this with
+    a list that grows by one per call, so the model server re-evaluates only
+    the newest entry rather than the whole summary; sorting, re-ranking or
+    re-truncating earlier entries would break that.
     """
     if not files:
         return "(none yet — this is the first file)"
@@ -1109,16 +1135,20 @@ def build_per_file_message(
     if approval_conditions and approval_conditions.strip():
         parts.append(_render_approval_conditions(
             approval_conditions, approved="design", author="reviewer") + "\n")
+    # Everything from here to the reference block is identical for every call
+    # of one attempt, and everything after it changes per call. The order is
+    # that way round because llama-server reuses only the longest common
+    # PREFIX of the previous prompt: the first byte that differs costs a
+    # re-evaluation of everything behind it, and the reference block is
+    # routinely most of the prompt (~115k tokens and ~180 s of prefill per
+    # file when the target line sat ahead of it). Nothing that names the
+    # target, or grows as files are written, may go above the marker below.
     parts.extend([
         "## Specification\n\n", spec_md,
         "\n\n## Architecture Design\n\n", design_md,
         "\n\n## File Manifest (the full project)\n\n", manifest_block,
-        "\n\n## Files already written (their interfaces)\n\n", written_summary,
-        f"\n\n---\n\nWrite ONLY this one file now:\n\n"
-        f"**{target.path}** — {target.purpose}\n",
+        "\n\n",
     ])
-    if target.exports:
-        parts.append(f"\nExpected exports / contents: {target.exports}\n")
     # Protected files must reach the per-file path too. Each call here is
     # isolated — the model sees the manifest and interface summaries of what has
     # been written, but nothing about files the spec put off-limits, which are
@@ -1127,8 +1157,26 @@ def build_per_file_message(
     # the per-file implementer, which did not, declared `struct Field` in
     # World.swift and reproduced run 5's `invalid redeclaration of 'Field'`.
     if reference_files or omitted_reference:
-        parts.append("\n" + _render_reference_files(
+        parts.append(_render_reference_files(
             reference_files or [], omitted=omitted_reference))
+    # ── per-call content: nothing stable below this line ────────────────────
+    # The written-files summary leads the varying part because it is
+    # append-only (see summarize_written_files): consecutive calls still share
+    # it up to the newest entry.
+    parts.extend([
+        "## Files already written (their interfaces)\n\n", written_summary,
+        f"\n\n---\n\nWrite ONLY this one file now:\n\n"
+        f"**{target.path}** — {target.purpose}\n",
+    ])
+    if target.exports:
+        parts.append(f"\nExpected exports / contents: {target.exports}\n")
+    if edit_mode:
+        # In the user message rather than appended to the system prompt: the
+        # system message is the very start of the prompt, so a suffix present
+        # only for targets that already exist would end the shared prefix
+        # there, and every switch between an edited and a created file would
+        # re-evaluate the whole stable block above.
+        parts.append(PER_FILE_EDIT_MODE_INSTRUCTIONS)
     # Manifest mode writes one file per call, so unlike the single-call path it
     # needs only the target's own current content — which is exactly the file at
     # risk of being reconstructed (DEV-492).
@@ -1138,8 +1186,8 @@ def build_per_file_message(
                 "You are EDITING this file, not writing it from scratch. What "
                 "follows is its actual content in the repository. Do NOT "
                 "re-emit the file — emit anchored SEARCH/REPLACE edit blocks "
-                "against this exact text (see the edit-block rules in your "
-                "instructions), changing only what the design requires.\n\n"
+                "against this exact text (see the edit-block rules above), "
+                "changing only what the design requires.\n\n"
             )
         else:
             preamble = (
@@ -1172,14 +1220,12 @@ def build_per_file_message(
             f"{target.path}, introduced by a `### {target.path}` line. Do NOT "
             f"emit a <<<FILE: ...>>> whole-file block."
         )
-        system_prompt = PER_FILE_SYSTEM_PROMPT + PER_FILE_EDIT_MODE_INSTRUCTIONS
     else:
         parts.append(
             f"\nOutput exactly one <<<FILE: {target.path}>>> … <<<END_FILE>>> block."
         )
-        system_prompt = PER_FILE_SYSTEM_PROMPT
     return [
-        {"role": "system", "content": system_prompt},
+        {"role": "system", "content": PER_FILE_SYSTEM_PROMPT},
         {"role": "user", "content": "".join(parts)},
     ]
 

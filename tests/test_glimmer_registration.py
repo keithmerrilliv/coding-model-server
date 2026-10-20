@@ -60,11 +60,45 @@ def test_the_window_is_readable_so_the_fit_check_arms():
 
 # ── not routed ───────────────────────────────────────────────────────────────
 
-def test_the_implementer_arm_is_the_first_retry():
-    """DEV-821 (Keith, 2026-09-26) supersedes DEV-692 item 3's third place:
-    Glimmer is now directly behind `implementer`, so it takes retry 1. It still
-    separates the Qwen families, and it is still retry-only (the next test)."""
-    assert _IMPLEMENTER_ROTATION[:2] == ["implementer", "glimmer_implementer"]
+def test_the_rotation_is_ordered_by_what_an_attempt_costs():
+    """The walk is failure-triggered, so every slot ahead of the one that
+    delivers is paid in full — and Glimmer averages 1,041 s a call at 11 tok/s
+    against `implementer`'s 165 s at 64, with MiniMax at 6.6-9 tok/s between
+    them. The fast decoders therefore take the early retries and Glimmer the
+    last one before the window fallback. It is still retry-only (below)."""
+    assert _IMPLEMENTER_ROTATION == [
+        "implementer", "fast_implementer", "moe_implementer",
+        "glimmer_implementer", "deep_implementer"]
+
+
+def test_a_failed_first_attempt_is_retried_on_the_cheap_agents_first():
+    from coding_model_autonomous import retry_policy as rp
+    assert [rp._rotation_pick("implementer", n) for n in (1, 2, 3, 4)] == [
+        "fast_implementer", "moe_implementer", "glimmer_implementer",
+        "deep_implementer"]
+    # Whoever made attempt 0, Glimmer is never the first retry and deep is
+    # never ahead of it.
+    for first in ("fast_implementer", "moe_implementer"):
+        walk = [rp._rotation_pick(first, n) for n in (1, 2, 3, 4)]
+        assert walk[0] == "implementer"
+        assert walk[-2:] == ["glimmer_implementer", "deep_implementer"]
+
+
+def test_escalation_for_size_reaches_the_cheapest_window_that_fits():
+    """The rotation is also plan_dispatch's candidate order: a prompt too big
+    for the chosen agent goes to the first candidate that holds it. With the
+    live windows that is moe_implementer's 116K, ahead of anything slower."""
+    from coding_model_autonomous import context as ctx
+    windows = {a: int(Config.AGENTS[a]["model_config"]["n_ctx"])
+               for a in _IMPLEMENTER_ROTATION}
+    files = [(f"src/f{i}.py", "x" * 10_000) for i in range(24)]   # 80K tokens
+    alloc = ctx.plan_dispatch(
+        "spec_t", role="implementer", fixed_chars=0, completion_tokens=8_000,
+        agent="implementer", candidates=_IMPLEMENTER_ROTATION,
+        window_of=windows.get,
+        sections=[ctx.Section(ctx.SECTION_EDITABLE, files, 400_000)])
+    assert alloc.agent == "moe_implementer"
+    assert not alloc.dropped_any
 
 
 def test_deep_is_the_window_fallback_not_a_retry_slot():

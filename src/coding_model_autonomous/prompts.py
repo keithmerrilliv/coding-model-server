@@ -336,9 +336,12 @@ IMPLEMENTER_EDIT_MODE_INSTRUCTIONS = textwrap.dedent("""\
 # DEV-604: the per-file (manifest-mode) variant of the edit-mode instructions
 # above. Kept separate because the per-file prompt shows exactly one file under
 # a different heading than the single-call prompt, and the instructions must
-# name the heading the model actually sees. Appended to PER_FILE_SYSTEM_PROMPT
-# only when diff-based edits are on AND the target file already exists, so the
-# flag-off prompt stays byte-identical.
+# name the heading the model actually sees. Rendered only when diff-based edits
+# are on AND the target file already exists, so the flag-off prompt stays
+# byte-identical — and rendered into the USER message, after the target line,
+# not onto PER_FILE_SYSTEM_PROMPT: the system prompt opens every per-file call,
+# and a suffix that comes and goes with the target would end the prefix the
+# model server can reuse before the spec has even started.
 PER_FILE_EDIT_MODE_INSTRUCTIONS = textwrap.dedent("""\
 
     # Editing an existing file — READ THIS (overrides the whole-file output format)

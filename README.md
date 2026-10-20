@@ -252,8 +252,10 @@ a week is retired. DEV-839 retired eight that way (`reviewer`, `debugger`,
 with their model files. A new model joins as an agent entry, gets evaluated,
 and leaves the same way if it does not earn a slot.
 
-`glimmer_implementer` is the first Meta model the rotation has had, directly
-behind `implementer` (DEV-821). That membership is **retry-only** — it is deliberately absent from
+`glimmer_implementer` is the first Meta model the rotation has had. The
+rotation is ordered by what an attempt costs, and Glimmer averages 1,041 s a
+call, so it sits fourth: behind the fast decoders and MiniMax, ahead only of
+the `deep_implementer` window fallback (DEV-821). That membership is **retry-only** — it is deliberately absent from
 `ALLOWED_IMPLEMENTER_AGENTS` and the complexity-tier map, so neither an
 architect recommendation nor a tier default can put it on attempt 1. Attempt 1
 is the only attempt whose agent is chosen rather than rotated into, which makes

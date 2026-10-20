@@ -227,9 +227,10 @@ class TestRotateAmongFits:
         assert picks == ["moe_implementer", "deep_implementer", "moe_implementer", "deep_implementer"]
 
     def test_without_eligibility_the_rotation_is_unchanged(self):
-        # DEV-821: retry 1 after `implementer` is Glimmer, not deep.
-        assert rp._rotation_pick("implementer", 1) == "glimmer_implementer"
-        assert rp._rotation_pick("implementer", 1, eligible=None) == "glimmer_implementer"
+        # The chain is cheapest-first: retry 1 after `implementer` is the
+        # other fast decoder, not Glimmer (1,041 s a call) and not deep.
+        assert rp._rotation_pick("implementer", 1) == "fast_implementer"
+        assert rp._rotation_pick("implementer", 1, eligible=None) == "fast_implementer"
 
     def test_previous_prompt_tokens_reads_the_newest_implementer_generation(self, db, spec_task):
         spec, task = spec_task

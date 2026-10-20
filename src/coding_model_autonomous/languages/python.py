@@ -55,6 +55,11 @@ class PythonPack(LanguagePack):
     # A Python seam must import the code under test (DEV-661); Swift has
     # module-level visibility and no import in a seam.
     design_rules = frozenset({RULE_SEAM_IMPORTS})
+    # Resolver output. requirements.txt and pyproject.toml are NOT here: they
+    # are hand-written and say what the code may import.
+    generated_files = frozenset({
+        "poetry.lock", "uv.lock", "Pipfile.lock", "pdm.lock",
+    })
 
     def count_tests(self, source: str) -> int:
         return _count_pytest_tests(source)

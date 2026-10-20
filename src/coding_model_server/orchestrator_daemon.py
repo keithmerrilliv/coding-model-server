@@ -1801,7 +1801,7 @@ def _run_architect(db: Database, spec: Spec, task, spec_dir) -> None:  # noqa: C
         alloc.files(_context.SECTION_EDITABLE),
         alloc.files(_context.SECTION_PROTECTED),
         omitted_e=alloc.dropped(_context.SECTION_EDITABLE),
-        omitted_r=alloc.dropped(_context.SECTION_PROTECTED))
+        omitted_r=alloc.not_shown(_context.SECTION_PROTECTED))
 
     # Architect output is structured (<<<DESIGN>>> / <<<COMPLEXITY>>> blocks).
     # The model occasionally drifts and returns prose without the markers; one
@@ -2595,7 +2595,7 @@ def _generate_implementation(
     messages = _implementer_prompt(
         existing_files, alloc.files(_context.SECTION_PROTECTED),
         omitted_e=alloc.dropped(_context.SECTION_EDITABLE),
-        omitted_r=alloc.dropped(_context.SECTION_PROTECTED))
+        omitted_r=alloc.not_shown(_context.SECTION_PROTECTED))
     logger.info("spec %s: single-call implementer budget=%d tokens (~%d files)%s",
                 spec.id, impl_max_tokens, n_files,
                 " [diff-based edits]" if edit_mode else "")
@@ -3438,7 +3438,7 @@ def _generate_one_file(
         _note_reroute(db, spec, task, chosen_agent, file_alloc.agent)
     chosen_agent = file_alloc.agent
     reference_files = file_alloc.files(_context.SECTION_PROTECTED)
-    omitted_reference = file_alloc.dropped(_context.SECTION_PROTECTED)
+    omitted_reference = file_alloc.not_shown(_context.SECTION_PROTECTED)
 
     edit_errors = None
     for attempt in range(settings.PER_FILE_PARSE_RETRIES + 1):
@@ -6066,7 +6066,7 @@ def _run_synthesis(db: Database, spec: Spec, impl_task, spec_dir: Path,  # noqa:
         # one so synthesis is still a repair pass rather than a blind rewrite.
         kept = attempts[-1:]
     protected_files = synth_alloc.files(_context.SECTION_PROTECTED)
-    omitted_protected = synth_alloc.dropped(_context.SECTION_PROTECTED)
+    omitted_protected = synth_alloc.not_shown(_context.SECTION_PROTECTED)
 
     meta: dict = {}
     raw = None

@@ -199,19 +199,35 @@ def _select_implementer_agent(spec_dir) -> "str | None":
     return TIER_TO_IMPLEMENTER.get(tier)
 
 
-# Rotation chain for implementer retries. Ordered for vendor/family diversity:
-# Qwen3.6 → Qwen3-Coder-Next → Meta → MiniMax → Qwen3-Coder. GLM (Zhipu) was
-# removed 2026-06-07: as a reasoning model it burns the per-file/manifest budget
-# on reasoning (even with --reasoning-budget 0, which it ignores — see
-# config.py) and truncates without emitting usable code. See
-# project_implementer_rotation.md and project_glm_perfile_truncation.md.
+# Rotation chain for implementer retries, ORDERED BY WHAT AN ATTEMPT COSTS:
+# cheapest first, so the retries most specs need are the ones that take
+# minutes, and the slow models are reached only after the fast ones have
+# failed. A retry is far more often a second look with feedback than a problem
+# only one model can solve, and the walk is failure-triggered, so every slot
+# ahead of the one that delivers is paid in full. Measured from 2026-09-20:
 #
-# DEV-692 item 3, 2026-09-18 (Keith): glimmer_implementer joins directly behind
-# deep_implementer. It is the first Meta model the rotation has ever had, and
-# sitting third it separates the two Qwen families rather than adding a fourth
-# consecutive one.
+#   implementer          165 s per call, 64 tok/s decode
+#   fast_implementer     the roster's other fast decoder, same 64K window
+#   moe_implementer      6.6-9 tok/s decode
+#   glimmer_implementer  1,041 s per call, 11 tok/s; ~93 of its 251 minutes
+#                        went to attempts that then failed
+#   deep_implementer     last for a different reason — see the end of this
+#                        comment
 #
-# RETRY-ONLY, and deliberately so. Glimmer is in this list but NOT in
+# The chain still spans four model families (Qwen3.6, Qwen3-Coder, MiniMax,
+# Meta), which is what gets a spec out of one model's blind spot; the order
+# only decides which of them is tried while a failure is still cheap.
+#
+# The same list is the escalation order when a prompt does not fit the chosen
+# agent (context.plan_dispatch takes the first candidate that holds it), so
+# cheapest-first there means a prompt too big for the 64K agents lands on
+# moe_implementer's 116K before anything slower.
+#
+# GLM (Zhipu) is absent on purpose: as a reasoning model it burns the
+# per-file/manifest budget on reasoning (even with --reasoning-budget 0, which
+# it ignores) and truncates without emitting usable code.
+#
+# GLIMMER IS RETRY-ONLY, and deliberately so. It is in this list but NOT in
 # ALLOWED_IMPLEMENTER_AGENTS or TIER_TO_IMPLEMENTER, so no architect
 # recommendation and no complexity tier can put it on attempt 1. Attempt 1 is
 # the only attempt whose agent is chosen rather than rotated into, so it is the
@@ -228,15 +244,17 @@ def _select_implementer_agent(spec_dir) -> "str | None":
 # test_implementer_calls_are_single_turn pins that property — if the implementer
 # ever gains a tool loop, it fails, and this membership must be revisited before
 # the loop ships.
-# DEV-821 (Keith, 2026-09-26): deep_implementer is LAST — the window fallback,
-# not the first retry. From 2026-09-13 to 09-26 it made 38 attempts and
-# delivered none, 18 of them from the slot directly after `implementer`;
-# glimmer delivered 4 of 14 from later, harder slots (DEV-720). It stays in the
-# chain because its 256K window is the only one some self-target prompts fit,
-# and eligible_agents() still routes those to it (sole_fit).
+#
+# DEV-821: deep_implementer is LAST whatever its speed — the window fallback,
+# not a retry slot. From 2026-09-13 to 09-26 it made 38 attempts and delivered
+# none, 18 of them from the slot directly after `implementer`; glimmer
+# delivered 4 of 14 from later, harder slots (DEV-720), which is why glimmer
+# is slow-and-late rather than out. deep stays in the chain because its 256K
+# window is the only one some self-target prompts fit, and eligible_agents()
+# still routes those to it (sole_fit).
 _IMPLEMENTER_ROTATION = [
-    "implementer", "glimmer_implementer", "moe_implementer",
-    "fast_implementer", "deep_implementer",
+    "implementer", "fast_implementer", "moe_implementer",
+    "glimmer_implementer", "deep_implementer",
 ]
 
 

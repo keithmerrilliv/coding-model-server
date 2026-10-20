@@ -41,6 +41,15 @@ class LanguagePack:
     #: True when every file of a target shares one namespace, so two
     #: attempts' same-named files cannot both be kept in the workspace.
     shares_target_namespace: bool = False
+    #: Basenames of files this language's tooling writes and no person edits:
+    #: dependency lockfiles. They declare nothing source code can reference,
+    #: so a prompt names them and withholds their text
+    #: (``languages.is_machine_generated``). Generated SOURCE does not belong
+    #: here — a protobuf or codegen output declares types that are in scope,
+    #: and hiding it is how a role re-declares one.
+    generated_files: frozenset[str] = frozenset()
+    #: The same, for files recognised by how their name ends (``.min.js``).
+    generated_suffixes: tuple[str, ...] = ()
 
     def standing_rules(self, paths: list[str]) -> str:
         """A prompt section for a file set that includes this language."""

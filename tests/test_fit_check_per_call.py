@@ -77,7 +77,7 @@ def test_run61_as_it_was_now_picks_moe_not_deep():
 def test_an_eligible_initial_agent_keeps_the_old_offset():
     """Control: when attempt 0's agent still fits, retry 1 is the next one."""
     eligible = list(WINDOWS)
-    assert rp._rotation_pick("implementer", 1, eligible=eligible) == "glimmer_implementer"
+    assert rp._rotation_pick("implementer", 1, eligible=eligible) == "fast_implementer"
     assert rp._rotation_pick("fast_implementer", 1, eligible=eligible) == "implementer"
 
 

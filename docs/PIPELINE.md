@@ -206,6 +206,17 @@ carrying any *unattributed* error widen it immediately. The upstream route in
 diagram 6 exists for the same problem one level up, where widening the retry
 cannot help because the defect is in the design.
 
+A per-file prompt is laid out for the model server's prompt cache, which reuses
+only the longest common prefix of the previous prompt. Everything that is the
+same for every file of an attempt comes first — clarifications, approval
+conditions, spec, design, manifest, protected reference files — and everything
+that changes per call comes after it: the summary of files already written
+(append-only, so it too is shared up to its newest entry), the target, its
+current content, the edit rules, feedback. The system prompt is the same for
+every file. A per-call detail placed ahead of the reference block makes every
+file re-evaluate the whole prompt, which on a large protected tree is minutes
+per file.
+
 `AUTONOMOUS_IMPLEMENTER_MODE` forces `single` or `manifest` if you need to pin
 it; the default (`auto`) takes manifest mode when the design enumerates
 `AUTONOMOUS_MANIFEST_FILE_THRESHOLD` (8) or more files — or 8 or more declared
@@ -529,10 +540,16 @@ table to read first when a run ends somewhere surprising.
 `MAX_RETRIES` bounds how many implementer attempts there are; the rotation
 decides who makes each one. Attempt 0 goes to the architect's pick. Every
 later attempt walks a fixed chain, `retry_policy._IMPLEMENTER_ROTATION`:
-`implementer`, `glimmer_implementer`, `moe_implementer`, `fast_implementer`,
-`deep_implementer` (DEV-821). `deep_implementer` is last because it is the
-window fallback: its 256K window is the only one some self-target prompts
-fit, so the fit check still reaches it when nothing else holds the prompt.
+`implementer`, `fast_implementer`, `moe_implementer`, `glimmer_implementer`,
+`deep_implementer`. The chain is ordered by what an attempt costs, cheapest
+first: the walk is failure-triggered, so every slot ahead of the one that
+delivers is paid in full. `implementer` averages 165 s a call at 64 tok/s;
+`moe_implementer` decodes at 6.6 to 9 tok/s; `glimmer_implementer` averages
+1,041 s a call at 11 tok/s, and about 93 of its 251 minutes went to attempts
+that then failed. `deep_implementer` is last for a different reason (DEV-821):
+it is the window fallback. Its 256K window is the only one some self-target
+prompts fit, so the fit check still reaches it when nothing else holds the
+prompt.
 
 ```mermaid
 sequenceDiagram
@@ -575,10 +592,10 @@ order, so the tier decides the whole sequence. A retry's index is its
 
 | Attempt-0 agent | How it is chosen | Attempts 1 to 4 |
 |---|---|---|
-| `implementer` | tier `medium` or `high`, or no `complexity.json` | glimmer, moe, fast, deep |
-| `fast_implementer` | tier `low` | implementer, glimmer, moe, deep |
-| `moe_implementer` | tier `extreme` | implementer, glimmer, fast, deep |
-| `deep_implementer` | only when the architect recommends it by name | implementer, glimmer, moe, fast |
+| `implementer` | tier `medium` or `high`, or no `complexity.json` | fast, moe, glimmer, deep |
+| `fast_implementer` | tier `low` | implementer, moe, glimmer, deep |
+| `moe_implementer` | tier `extreme` | implementer, fast, glimmer, deep |
+| `deep_implementer` | only when the architect recommends it by name | implementer, fast, moe, glimmer |
 
 `glimmer_implementer` is retry-only: it is in the chain but not in
 `TIER_TO_IMPLEMENTER` or `ALLOWED_IMPLEMENTER_AGENTS`, so it never makes
@@ -692,7 +709,14 @@ before any render:
    this step accepts (DEV-843).
 3. Sections are filled in priority order — editable, then protected, then prior
    artifacts — each taking the smaller of its knob and what is left. A knob is
-   still a ceiling; it is no longer independent.
+   still a ceiling; it is no longer independent. Lockfiles and build output in
+   the protected section (`package-lock.json`, `Package.resolved`, `Cargo.lock`,
+   `*.min.js`; each language pack lists its own in `generated_files`) are taken
+   out before the sum. They declare nothing a role can use and are often the
+   largest file in the repository, so counting them would trigger step 4 and
+   route the prompt to the largest, slowest window for the sake of text nobody
+   reads. They stay protected, and the prompt still names them as off-limits.
+   A lockfile in the editable section is shown: the spec asked to change it.
 4. If any section would be cut, the rotation is tried first: a bigger window is
    always better than less context, so nothing is dropped while any candidate
    agent can hold the whole prompt. Only the architect and the reviewer are
