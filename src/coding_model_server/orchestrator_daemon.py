@@ -3815,6 +3815,11 @@ def _pre_gate_build_check(db: Database, spec: Spec, task, spec_dir: Path,
             test_split = test_runner.parse_test_split(build_output)
             if test_split is not None:
                 build_payload.update(test_split.payload())
+            # DEV-681: which repository state the overlay was built from, on the
+            # event a later query reads — not only in a journal line.
+            overlay_ref = test_runner.parse_overlay_ref(build_output)
+            if overlay_ref is not None:
+                build_payload.update(overlay_ref.payload())
             # DEV-602 split B: a passing check records exactly what it
             # verified, into the same payload this event carries. A failing
             # check records nothing and leaves any prior manifest untouched.

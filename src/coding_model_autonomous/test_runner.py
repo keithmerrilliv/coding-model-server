@@ -8,6 +8,7 @@ load_dotenv/basicConfig). It no longer depends on executor at all.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -627,6 +628,11 @@ def _materialize_local_repo_overlay(spec_dir: Path, repo: Optional[str]) -> Opti
         logger.warning("repo overlay built from the WORKING TREE by explicit "
                        "opt-in (AUTONOMOUS_OVERLAY_FROM_WORKING_TREE=1) — the "
                        "sandbox sees uncommitted edits (DEV-654)")
+        try:
+            sha, dirty = _src_tree_state(_SERVER_REPO_ROOT)
+        except Exception:
+            sha, dirty = "unknown", []
+        note_overlay_ref(overlay_src.parent, "working_tree", sha, dirty)
     else:
         try:
             _extract_committed_src(_SERVER_REPO_ROOT, overlay_src.parent)
@@ -638,6 +644,7 @@ def _materialize_local_repo_overlay(spec_dir: Path, repo: Optional[str]) -> Opti
                 shutil.rmtree(overlay_src)
             shutil.copytree(repo_src, overlay_src,
                             ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+            note_overlay_ref(overlay_src.parent, "fallback", "unknown", [])
         else:
             sha, dirty = _src_tree_state(_SERVER_REPO_ROOT)
             if dirty:
@@ -648,6 +655,7 @@ def _materialize_local_repo_overlay(spec_dir: Path, repo: Optional[str]) -> Opti
                     ", ".join(dirty[:6]) + (" …" if len(dirty) > 6 else ""))
             else:
                 logger.info("repo overlay built from HEAD %s (working tree clean)", sha)
+            note_overlay_ref(overlay_src.parent, "committed", sha, dirty)
     workspace_src = spec_dir / "src"
     if workspace_src.is_dir():
         for src_file in sorted(workspace_src.rglob("*")):
@@ -672,6 +680,13 @@ def _materialize_local_repo_overlay(spec_dir: Path, repo: Optional[str]) -> Opti
 EXISTING_TESTS_MODE_ENV = "AUTONOMOUS_SELF_TARGET_EXISTING_TESTS"
 EXISTING_TESTS_MODES = ("imports", "all", "off")
 EXISTING_TESTS_MARKER = "[self-target existing tests]"
+# DEV-681: which repository state a self-target sandbox overlay was built from,
+# carried as one header line of the test output and parsed onto TEST_RAN.
+OVERLAY_REF_MARKER = "[repo overlay]"
+OVERLAY_REF_FILE = "OVERLAY_REF.json"
+_OVERLAY_REF_RE = re.compile(
+    re.escape(OVERLAY_REF_MARKER)
+    + r" source=(?P<source>\w+) head=(?P<head>\S+) dirty=(?P<dirty>\d+)")
 _EXISTING_TESTS_HEADER_RE = re.compile(
     re.escape(EXISTING_TESTS_MARKER) + r" mode=(?P<mode>\w+) selected=(?P<n>\d+)")
 _TEST_FILE_RE = re.compile(r"(?:^|/)(?:test_[^/]*|[^/]*_test)\.py$")
@@ -981,6 +996,45 @@ class TestSplit:
                 "existing_failed": self.existing_failed_ids[:20]}
 
 
+@dataclass
+class OverlayRef:
+    """Which repository state a self-target sandbox overlay was built from (DEV-681)."""
+    source: str          # committed | working_tree | fallback
+    head: str            # short sha, or "unknown"
+    dirty: int           # uncommitted paths under src/ the sandbox did not see
+
+    def header(self) -> str:
+        return f"{OVERLAY_REF_MARKER} source={self.source} head={self.head} dirty={self.dirty}"
+
+    def payload(self) -> dict:
+        return {"overlay_source": self.source, "overlay_head": self.head,
+                "overlay_dirty": self.dirty}
+
+
+def note_overlay_ref(overlay_root: Path, source: str, head: str, dirty: list[str]) -> None:
+    """Record, inside the overlay directory, which repository state built it."""
+    overlay_root.mkdir(parents=True, exist_ok=True)
+    (overlay_root / OVERLAY_REF_FILE).write_text(
+        json.dumps({"source": source, "head": head, "dirty": dirty}, indent=2))
+
+
+def read_overlay_ref(overlay_root: Path) -> Optional[OverlayRef]:
+    """The note note_overlay_ref wrote, or None when it is missing or unreadable."""
+    try:
+        data = json.loads((overlay_root / OVERLAY_REF_FILE).read_text())
+        return OverlayRef(str(data["source"]), str(data["head"]), len(data["dirty"]))
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def parse_overlay_ref(output: str) -> Optional[OverlayRef]:
+    """The overlay header line of a test output, or None when there is none."""
+    m = _OVERLAY_REF_RE.search(output or "")
+    if m is None:
+        return None
+    return OverlayRef(m.group("source"), m.group("head"), int(m.group("dirty")))
+
+
 def parse_test_split(output: str) -> Optional[TestSplit]:
     """Split a self-target run's results into the spec's tests and the
     repository's, by the overlay path in each node id. None when the run
@@ -1032,6 +1086,7 @@ def _run_local_tests(spec_dir: Path, framework: str, timeout: int,
 
     extra_env: Optional[dict[str, str]] = None
     existing_header = ""
+    overlay_header = ""
     if framework == "jest":
         # The local binary, not `npx jest`: npx would try to FETCH jest when
         # it isn't installed, and the test sandbox has no network, so that
@@ -1117,6 +1172,11 @@ def _run_local_tests(spec_dir: Path, framework: str, timeout: int,
         overlay_src = _materialize_local_repo_overlay(spec_dir, repo)
         if overlay_src is not None:
             extra_env = {"PYTHONPATH": str(overlay_src)}
+            # Read now: select_existing_tests clears everything but src/
+            # under the overlay root, this note included (DEV-681).
+            ref = read_overlay_ref(overlay_src.parent)
+            if ref is not None:
+                overlay_header = ref.header()
             # DEV-675: the repository's own tests for the modules this
             # attempt edited run in the same invocation, as explicit paths.
             mode, selected = select_existing_tests(spec_dir, overlay_src.parent)
@@ -1147,8 +1207,9 @@ def _run_local_tests(spec_dir: Path, framework: str, timeout: int,
     # framework. Only _provision_node_modules above opens the network.
     passed, output = _run_confined(raw_cmd, spec_dir, timeout, what="tests",
                                    extra_env=extra_env)
-    if existing_header:
-        output = existing_header + "\n" + output
+    header = "\n".join(h for h in (existing_header, overlay_header) if h)
+    if header:
+        output = header + "\n" + output
     return passed, output
 
 

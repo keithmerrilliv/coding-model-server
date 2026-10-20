@@ -321,7 +321,9 @@ def test_selected_existing_tests_are_on_the_pytest_command_line(self_repo, spec_
     header, _, rest = output.partition("\n")
     assert header == (f"{tr.EXISTING_TESTS_MARKER} mode=imports selected=1 "
                       "for edited pkg.mod: tests/test_mod.py")
-    assert rest.startswith("tests/test_new.py::test_new PASSED")
+    overlay, _, body = rest.partition("\n")
+    assert overlay.startswith("[repo overlay] source=committed")
+    assert body.startswith("tests/test_new.py::test_new PASSED")
 
 
 def test_no_selection_keeps_the_directory_argument(self_repo, spec_dir, monkeypatch):
