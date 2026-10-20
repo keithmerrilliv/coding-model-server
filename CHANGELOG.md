@@ -5,6 +5,8 @@
 ### Shipped
 
 - [DEV-925](https://keith-merrill4.atlassian.net/browse/DEV-925): the dashboard's `GpuSampler` reads the GPU through NVML (`nvidia-ml-py`) in-process instead of forking `nvidia-smi` once a second. One of those ~86k daily forks panicked the host on 2026-10-19: a kernel double fault in the driver's ioctl path on NVIDIA 595.99.02-open and kernel 7.0.0-38, with the sampler's query on the command line, a day after the same query had segfaulted in userspace. A sample is now a handful of library calls on a handle held across ticks (~50 µs) and spawns nothing. The live-availability behaviour from DEV-432 is kept: a failed init or a lost handle drops it and retries every 30 s, so a late or reloaded driver still self-heals. A field the card does not support reads as `None`, as nvidia-smi's `[N/A]` did, and the P-state tile keeps its `P2` spelling. `nvidia-ml-py` is a new soft dependency; without it the panel reports unavailable.
+  - `llama_server` reads free and total VRAM through the new `coding_model_server.nvml` module, one process-wide handle behind a lock, instead of a `nvidia-smi` subprocess per reading. The post-teardown release wait polled that at 5 Hz, up to 40 fresh driver sessions per model swap.
+  - `scripts/monitor_resources.py` is NVML-only and re-attaches after a driver error instead of falling back to `nvidia-smi` for the rest of its life. It had been falling back on every start, because `coding-model-monitor.service` ran it with the system interpreter, where the bindings were never installed; the unit now runs the project venv.
 
 ## v0.6.1 — 2026-10-03
 

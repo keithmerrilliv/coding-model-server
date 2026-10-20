@@ -68,11 +68,25 @@ class TestVramRecord:
         assert "cross-process interference" in caplog.text
 
     def test_gpu_total_is_cached(self, mgr):
-        fake = mock.Mock(returncode=0, stdout="16384\n")
-        with mock.patch.object(subprocess, "run", return_value=fake) as run:
+        with mock.patch("coding_model_server.nvml.memory_mib",
+                        return_value=(12000, 16384)) as read:
             assert mgr._gpu_total_mib() == 16384
             assert mgr._gpu_total_mib() == 16384
-        assert run.call_count == 1, "total VRAM never changes; query once"
+        assert read.call_count == 1, "total VRAM never changes; query once"
+
+    def test_gpu_free_comes_from_nvml_not_a_subprocess(self, mgr):
+        """DEV-925: the 5 Hz release poll must never fork nvidia-smi."""
+        with mock.patch("coding_model_server.nvml.memory_mib",
+                        return_value=(12000, 16384)), \
+                mock.patch.object(subprocess, "run",
+                                  side_effect=AssertionError("forked")):
+            assert mgr._gpu_free_mib() == 12000
+            assert mgr._gpu_total_mib() == 16384
+
+    def test_gpu_unreadable_is_none(self, mgr):
+        with mock.patch("coding_model_server.nvml.memory_mib", return_value=None):
+            assert mgr._gpu_free_mib() is None
+            assert mgr._gpu_total_mib() is None
 
 
 # ── DEV-157: orphan reaping ──────────────────────────────────────────────────

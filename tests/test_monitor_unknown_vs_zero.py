@@ -59,17 +59,77 @@ class TestUnreadableIsNotZero:
         assert mon.get_cpu_energy() == 0
 
 
+class _FakeNvml:
+    """Enough of nvidia-ml-py for get_gpu_power; `mode` flips the driver."""
+
+    class NVMLError(Exception):
+        pass
+
+    def __init__(self, mode="up"):
+        self.mode = mode
+        self.inits = 0
+        self.shutdowns = 0
+
+    def _check(self):
+        if self.mode == "down":
+            raise self.NVMLError("Driver Not Loaded")
+
+    def nvmlInit(self):  # noqa: N802
+        self.inits += 1
+        self._check()
+
+    def nvmlShutdown(self):  # noqa: N802
+        self.shutdowns += 1
+
+    def nvmlDeviceGetHandleByIndex(self, i):  # noqa: N802
+        self._check()
+        return "gpu0"
+
+    def nvmlDeviceGetPowerUsage(self, h):  # noqa: N802
+        self._check()
+        return 97_400  # mW
+
+
+@pytest.fixture
+def nvml(mon):
+    fake = _FakeNvml()
+    mon.pynvml = fake
+    mon.HAS_PYNVML = True
+    mon._nvml_handle = None
+    return fake
+
+
 class TestGpuSensor:
-    def test_gpu_failure_is_unknown_not_zero(self, mon, monkeypatch):
-        monkeypatch.setattr(mon.subprocess, "check_output",
-                            lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError()))
-        mon._nvml_handle = None
+    def test_gpu_failure_is_unknown_not_zero(self, mon, nvml):
+        nvml.mode = "down"
         assert mon.get_gpu_power() is None
 
-    def test_gpu_value_passes_through(self, mon, monkeypatch):
-        monkeypatch.setattr(mon.subprocess, "check_output", lambda *a, **k: " 97.40 \n")
-        mon._nvml_handle = None
+    def test_gpu_value_passes_through(self, mon, nvml):
         assert mon.get_gpu_power() == pytest.approx(97.40)
+
+    def test_one_session_across_samples(self, mon, nvml):
+        """DEV-925: no per-sample process, and no per-sample nvmlInit either."""
+        assert not hasattr(mon, "subprocess")
+        for _ in range(20):
+            mon.get_gpu_power()
+        assert nvml.inits == 1
+
+    def test_driver_loss_is_retried_not_latched(self, mon, nvml):
+        assert mon.get_gpu_power() == pytest.approx(97.40)
+        nvml.mode = "down"
+        assert mon.get_gpu_power() is None
+        assert nvml.shutdowns >= 1, "a dead handle must be dropped"
+        nvml.mode = "up"
+        assert mon.get_gpu_power() == pytest.approx(97.40)
+        assert nvml.inits == 2
+
+    def test_missing_bindings_say_which_interpreter(self, mon, capsys):
+        """The unit ran the system python for months; the warning must point at
+        the venv rather than at the GPU."""
+        mon.HAS_PYNVML = False
+        mon._nvml_handle = None
+        assert mon.get_gpu_power() is None
+        assert "project venv" in capsys.readouterr().out
 
 
 class TestWarningIsOncePerFailure:

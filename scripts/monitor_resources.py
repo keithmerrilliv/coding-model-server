@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import time
-import subprocess
 import os
 import csv
 import shutil
@@ -28,7 +27,12 @@ INTERVAL = 5.0
 MAX_LOG_SIZE_MB = 10  # Rotate when log exceeds this size
 MAX_ROTATED_FILES = 3  # Keep this many rotated files
 
-# Module-level handle set by main() when pynvml is available
+# NVML device handle, opened on first use and held across samples. None
+# means "not attached": the next sample runs nvmlInit again, so a driver
+# that comes up late or is reloaded under the monitor heals on its own.
+# There is no nvidia-smi fallback: a subprocess per sample is a fresh
+# driver session each time, and one of those sessions panicked the host
+# (DEV-925). A GPU that NVML cannot read logs blank, like any other sensor.
 _nvml_handle = None
 
 # DEV-725: a sensor that cannot fail loudly writes its failure as a number.
@@ -63,28 +67,49 @@ def _sensor_ok(name: str) -> None:
         print(f"{name} is readable again", flush=True)
 
 
+def _nvml_attach():
+    """Return the device-0 handle, initialising NVML on first use."""
+    global _nvml_handle
+    if _nvml_handle is not None:
+        return _nvml_handle
+    if not HAS_PYNVML:
+        raise ImportError(
+            "nvidia-ml-py is not installed; run the monitor with the project venv")
+    try:
+        pynvml.nvmlInit()
+        _nvml_handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+    except pynvml.NVMLError:
+        _nvml_detach()
+        raise
+    return _nvml_handle
+
+
+def _nvml_detach():
+    global _nvml_handle
+    _nvml_handle = None
+    if not HAS_PYNVML:
+        return
+    try:
+        pynvml.nvmlShutdown()
+    except pynvml.NVMLError:
+        # Never initialised, or already torn down with the driver.
+        pass
+
+
 def get_gpu_power():
     """GPU power draw in watts, or None when the sensor cannot be read."""
-    if _nvml_handle is not None:
-        try:
-            power_mw = pynvml.nvmlDeviceGetPowerUsage(_nvml_handle)  # milliwatts
-            _sensor_ok("gpu")
-            return power_mw / 1000.0
-        except pynvml.NVMLError as e:
-            _sensor_failed("gpu", e)
-            return None
-    # Fallback: subprocess call to nvidia-smi
     try:
-        result = subprocess.check_output(
-            ["nvidia-smi", "--query-gpu=power.draw", "--format=csv,noheader,nounits"],
-            encoding="utf-8"
-        )
-        value = float(result.strip())
-        _sensor_ok("gpu")
-        return value
+        handle = _nvml_attach()
+        power_mw = pynvml.nvmlDeviceGetPowerUsage(handle)  # milliwatts
     except Exception as e:
+        # A read error means the driver went away under us; drop the handle
+        # so the next sample re-initialises instead of failing forever.
+        if HAS_PYNVML and isinstance(e, pynvml.NVMLError):
+            _nvml_detach()
         _sensor_failed("gpu", e)
         return None
+    _sensor_ok("gpu")
+    return power_mw / 1000.0
 
 
 def get_cpu_energy():
@@ -150,21 +175,7 @@ def rotate_log():
         print(f"Log rotation failed: {e}")
 
 def main():
-    global _nvml_handle
-
     init_log()
-
-    # Initialize pynvml for GPU power readings (avoids subprocess per sample)
-    if HAS_PYNVML:
-        try:
-            pynvml.nvmlInit()
-            _nvml_handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-            print("Using pynvml for GPU power monitoring")
-        except pynvml.NVMLError as e:
-            print(f"pynvml init failed ({e}), falling back to nvidia-smi")
-            _nvml_handle = None
-    else:
-        print("pynvml not installed, falling back to nvidia-smi subprocess")
 
     print(f"Monitoring started. Logging to {LOG_FILE}")
 
@@ -220,11 +231,7 @@ def main():
             sleep_time = max(0, INTERVAL - elapsed)
             time.sleep(sleep_time)
     finally:
-        if _nvml_handle is not None:
-            try:
-                pynvml.nvmlShutdown()
-            except pynvml.NVMLError:
-                pass
+        _nvml_detach()
 
 if __name__ == "__main__":
     main()
