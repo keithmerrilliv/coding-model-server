@@ -857,8 +857,18 @@ coding-model-autonomous status <spec_id>   # where it is now
 coding-model-autonomous events <spec_id>   # every transition, with payloads
 coding-model-autonomous gates              # what is waiting on you
 coding-model-autonomous cancel <spec_id> --reason "…"   # stop it (DEV-583)
+coding-model-autonomous redeliver <spec_id>   # deliver a DONE spec again
 coding-model-autonomous swap-reset         # clear a wedged model swap, no restart
 ```
+
+`redeliver` asks the daemon to deliver a DONE spec's artifacts again: after a
+delivery that failed or was skipped for a reason since fixed (a remote not
+configured, a rejected push). It records the request; the daemon delivers on
+its next tick and writes the outcome as the spec's `delivery` event and
+`delivery_report.md`. A delivery cut off by a restart needs no command: the
+daemon finds the attempt with no outcome when it starts and delivers again, up
+to `AUTONOMOUS_DELIVERY_MAX_ATTEMPTS` times. A delivery that *failed* is never
+retried on its own.
 
 `cancel` is the only sanctioned way to stop a run: it sets CANCELLED (which
 a pass still in flight cannot overwrite, DEV-567), cancels the open gates,

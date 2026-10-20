@@ -425,6 +425,7 @@ coding-model-autonomous gates                   # Review and approve gates
 coding-model-autonomous review <gate_id> --approve [--notes ...]
 coding-model-autonomous events <spec_id>        # Event log (alias: logs)
 coding-model-autonomous cancel <spec_id> --reason "…"   # Stop a run; open gates cancelled, reason recorded
+coding-model-autonomous redeliver <spec_id>     # Deliver a DONE spec's artifacts to its pipeline branch again
 coding-model-autonomous swap-reset              # Clear a wedged model swap without a restart
 ```
 

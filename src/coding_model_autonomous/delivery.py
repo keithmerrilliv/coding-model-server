@@ -33,8 +33,9 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
+from .models import EventKind
 from .workspace import is_git_control_path, read_bytes_nofollow, symlink_in_path
 
 logger = logging.getLogger("orchestrator")
@@ -340,6 +341,63 @@ class DeliveryResult:
     branch: Optional[str] = None
 
 
+# ── Delivery owed ────────────────────────────────────────────────────────────
+#
+# A push can take minutes and the daemon's shutdown grace is seconds, so a
+# delivery can be cut off with nothing to show for it — and a DONE spec is
+# never walked by the state machine again. Whether one is still owed is
+# therefore derived from the spec's own events, which survive the restart:
+#
+#   delivery_requested   someone asked: the release (written before the DONE
+#                        transition) or the operator's `redeliver`
+#   delivery_attempt     the daemon started one
+#   delivery             it reached an outcome: pushed, skipped or failed
+#
+# Delivery is owed while a request or an attempt is newer than the last
+# outcome. A failure is an outcome — it has a report, and retrying it would
+# loop — so only an attempt that left NO outcome is retried, and the attempts
+# since the last outcome are what the cap counts. All three ride AGENT_RAN
+# with `model_call: False`, the convention for records of what the daemon
+# itself did.
+REQUESTED_ROLE = "delivery_requested"
+ATTEMPT_ROLE = "delivery_attempt"
+OUTCOME_ROLE = "delivery"
+
+
+@dataclass(frozen=True)
+class DeliveryDebt:
+    owed: bool
+    attempts: int          # started since the last outcome
+
+
+def delivery_debt(db: Any, spec_id: str) -> DeliveryDebt:
+    """What the spec's events say about delivery since its last outcome."""
+    owed, attempts = False, 0
+    # Newest first; every row is read (a newest-N window would lose an old
+    # request behind a long tail of unrelated records).
+    for ev in db.list_events_by_kind(spec_id=spec_id, kind=EventKind.AGENT_RAN,
+                                     limit=-1):
+        role = (ev.payload or {}).get("role")
+        if role == OUTCOME_ROLE:
+            break
+        if role == ATTEMPT_ROLE:
+            owed, attempts = True, attempts + 1
+        elif role == REQUESTED_ROLE:
+            owed = True
+    return DeliveryDebt(owed, attempts)
+
+
+def request_delivery(db: Any, spec_id: str, trigger: str) -> bool:
+    """Record that delivery is owed for *spec_id*. False, and nothing
+    written, when it already is — one debt is delivered once."""
+    if delivery_debt(db, spec_id).owed:
+        return False
+    db.record_event(EventKind.AGENT_RAN, spec_id=spec_id,
+                    payload={"role": REQUESTED_ROLE, "model_call": False,
+                             "trigger": trigger})
+    return True
+
+
 def _delivery_key(repo_name: Optional[str]) -> str:
     """Deploy-key path for *repo_name* (DEV-574).
 
@@ -458,8 +516,10 @@ def deliver_spec(spec_id: str, spec_title: str, spec_dir: Path,
         return DeliveryResult(
             "skipped",
             f"no delivery remote configured for repo '{repo_name}' — set "
-            f'AUTONOMOUS_DELIVERY_REMOTES="{repo_name}=<git-url>" and the '
-            f"artifacts in {spec_dir} can be re-delivered")
+            f'AUTONOMOUS_DELIVERY_REMOTES="{repo_name}=<git-url>" in the '
+            f"orchestrator's environment, restart it, then run "
+            f"`coding-model-autonomous redeliver {spec_id}`; the artifacts "
+            f"remain in {spec_dir}")
 
     protected = set(protected_paths or [])
     deliverable = []

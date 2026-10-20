@@ -178,6 +178,7 @@ again can help (`docs/PIPELINE.md` sections 6 and 8):
 | `AUTONOMOUS_DELIVERY_REMOTES` | *(empty)* | `name=url` pairs, comma or whitespace separated, naming the remote each registered repo delivers to. Empty means delivery is skipped and nothing touches git. |
 | `AUTONOMOUS_DELIVERY_SSH_KEY` | *(empty)* | Deploy-key path used for every delivery push. Empty runs git with ambient SSH. |
 | `AUTONOMOUS_DELIVERY_SSH_KEY_<REPO>` | *(empty)* | Per-repository deploy key (GitHub binds a key to one repo): `<REPO>` is the repo name upper-cased with non-alphanumerics as `_`. Keep key files outside the config dir the unit marks inaccessible (DEV-597). |
+| `AUTONOMOUS_DELIVERY_MAX_ATTEMPTS` | `3` | How many times a delivery cut off before any outcome (a restart mid-push) is started again before it is recorded as failed. A delivery that fails on its own is never retried; `coding-model-autonomous redeliver <spec_id>` delivers on demand. |
 
 **Design review** (on by default — an extra review + revision loop between the
 architect and the implementer):
