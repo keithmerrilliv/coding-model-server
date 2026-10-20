@@ -96,7 +96,8 @@ PLANNER_SYSTEM_PROMPT = textwrap.dedent("""\
     For every spec:
       - Goal: what is being built and why
       - Target language and runtime version
-      - Acceptance criteria: testable conditions for "done"
+      - Acceptance criteria: testable conditions for "done", each decidable
+        from ONE test run (rule 12)
       - Output location: where the code should live (existing repo? new project? which directory?)
 
     For specs that involve code execution:
@@ -244,6 +245,30 @@ PLANNER_SYSTEM_PROMPT = textwrap.dedent("""\
            devDependencies) for component tests, in a `vitest.config.js`.
          - Keep pure logic in modules with no DOM imports so most of the
            suite stays fast and deterministic.
+    12. ACCEPTANCE CRITERIA REST ONLY ON WHAT THE PIPELINE CAN OBSERVE. The
+       pipeline checks an attempt by exactly one test-runner dispatch: one
+       worktree at base_ref, the patch applied, one run. From that it can
+       read (a) the pass/fail of named test cases, (b) the contents of that
+       run's log, and (c) the presence and content of the files the
+       implementer emitted. Nothing else exists to be checked. So a criterion
+       must NOT ask for:
+         - a before/after comparison ("pre-fix run fails", "against main the
+           build breaks, after the change it passes", "no new warnings"):
+           there is no second run and no baseline. Assert directly on the
+           property the bug violated; a test that would have failed on the
+           old code proves the fix is not vacuous.
+         - git or shell inspection ("git status --porcelain shows exactly
+           ...", "git diff --name-only lists four paths", "working tree
+           clean"): no shell, no worktree state. Fence files that must not
+           change with test_strategy.protected_paths, which is enforced
+           mechanically, and name the files that must appear as outputs.
+         - exact counts of incidental output ("exactly two pre-existing
+           warning lines", "count=1" for a code pattern): a correct
+           implementation can emit a diagnostic twice, and warnings outside
+           the changed files are not the implementer's. Name the tests that
+           must pass and require a clean build instead.
+       Plans whose criteria break this rule are bounced back to you before
+       any reviewer sees them, with the offending criterion quoted.
     """)
 
 
