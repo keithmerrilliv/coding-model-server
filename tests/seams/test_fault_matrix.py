@@ -959,11 +959,14 @@ class TestPromptBudget:
         assert call.model == "deep_implementer"
         assert "Not shown" not in call.messages[-1]["content"]
 
-    def test_a_prompt_no_window_holds_sheds_and_names_what_it_dropped(
+    def test_an_editable_file_no_window_holds_is_refused_naming_it(
             self, db, model, runner, monkeypatch):
         """900K chars is ~300K tokens — past the largest window even alone.
-        The section is droppable, so the prompt is trimmed rather than
-        refused, and the implementer is TOLD it did not see the file."""
+        This used to be trimmed with a "Not shown" line and the implementer
+        edited blind; run 37's architect did the same and shipped a design
+        missing a required edit. The file is the modification set, so the
+        prompt is refused before any call, parks as a no-verdict, and the
+        record names the file (DEV-927)."""
         monkeypatch.setattr(settings, "EXISTING_FILES_MAX_CHARS", 1_000_000)
         self._oversized_repo(runner, 900_000)
         spec = _impl_ready(db, model, runner)
@@ -972,11 +975,14 @@ class TestPromptBudget:
 
         out = drive(db, spec.id, model, approve_all, runner=runner)
 
-        assert out.status == SpecStatus.DONE
-        prompt = model.calls_for("implementer")[0].messages[-1]["content"]
-        assert "Not shown" in prompt and DAEMON_PATH in prompt
-        assert "Do not emit them" in prompt
-        assert "x" * 900_000 not in prompt
+        assert out.status is not SpecStatus.DONE
+        assert out.status is not SpecStatus.FAILED
+        assert model.calls_for("implementer") == []
+        classified = events(db, spec.id, EventKind.FAILURE_CLASSIFIED)
+        assert classified and classified[0]["cls"] == "prompt_too_large"
+        assert classified[0]["outcome"] == "no_verdict"
+        detail = " ".join(str(v) for v in classified[0].values())
+        assert DAEMON_PATH in detail and "must edit" in detail
 
     def test_a_prompt_nothing_can_hold_parks_without_a_model_call(
             self, db, model, runner):
