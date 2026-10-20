@@ -10,7 +10,7 @@ Run Python scripts from the repo root with `venv/bin/python scripts/<name>`.
 
 | Script | What it does |
 | --- | --- |
-| `merge_gate.sh <branch>` | The local merge gate: merges a branch into `main` and runs ruff, mypy and pytest on the **merged** tree, then pushes. Refuses a dirty tree. Excludes `network`-marked tests; CI runs them. |
+| `merge_gate.sh <branch>` | The local merge gate: merges a branch into `main` in a temporary worktree, runs ruff, mypy and pytest on the **merged** tree there, and on green fast-forwards `main` and pushes; the checkout the services import never holds an ungated merge. Refuses only local changes to files the merge would overwrite; untracked files do not block it. Excludes `network`-marked tests; CI runs them. |
 | `release_tag.sh vX.Y.Z [--execute]` | Dates the CHANGELOG heading, tags, pushes and creates the GitHub release. Dry run by default. Needs green CI on `HEAD` and a `## vX.Y.Z — unreleased` heading. |
 | `reconcile_tickets.py [--repo R]... [--strict] [--json]` | Reads Jira and git and reports the gap: tickets shipped on `origin/main` but not Done, tickets Done with no commit anywhere, tickets Done whose commit exists only on this host, and every branch, stash or dirty path this host has not pushed. Run it on each host; the last bucket is what the other hosts cannot see (DEV-804). |
 | `check_mermaid.mjs [repo]` | Parses every mermaid diagram in `README.md` and `docs/*.md`; exits 1 on a parse error. Uses the dashboard's mermaid (`cd dashboard && npm ci`). Run it after editing a diagram. |
