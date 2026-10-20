@@ -180,9 +180,9 @@ class TestPlanDispatch:
         assert not alloc.dropped_any
 
     def test_shedding_only_after_every_window_is_tried(self):
-        alloc = self._plan([_section("editable", chars=900_000, knob=900_000, files=90)])
+        alloc = self._plan([_section("protected", chars=900_000, knob=900_000, files=90)])
         assert alloc.agent == "big"            # the largest available
-        assert alloc.dropped("editable")
+        assert alloc.dropped("protected")
         assert alloc.fits
 
     def test_the_sum_is_journalled_on_every_dispatch(self, caplog):
@@ -203,7 +203,7 @@ class TestPlanDispatch:
     def test_an_unknown_candidate_never_wins_an_oversized_prompt(self):
         """An agent missing from the config estimates as unbounded, so it
         would win every oversized prompt for the worst possible reason."""
-        alloc = self._plan([_section("editable", chars=900_000, knob=900_000, files=90)],
+        alloc = self._plan([_section("protected", chars=900_000, knob=900_000, files=90)],
                            agent="small", candidates=("mystery", "big"))
         assert alloc.agent == "big"
 
@@ -228,12 +228,92 @@ class TestPlanDispatch:
         # "small" holds 10_000 tokens: 9_500 after headroom, less a 1_000
         # completion = 8_500 tokens = 25_500 chars of input. A 4_000-token
         # reasoning budget takes 12_000 of those chars away.
-        sections = [_section("editable", chars=60_000, knob=60_000, files=60)]
+        sections = [_section("protected", chars=60_000, knob=60_000, files=60)]
         without = self._plan(sections, agent="small", candidates=())
         with_think = self._plan(sections, agent="small", candidates=(),
                                 reserve=lambda a: 4_000)
-        assert without.sections["editable"].chars == 25_000   # 25 × 1_000
-        assert with_think.sections["editable"].chars == 13_000  # 13 × 1_000
+        assert without.sections["protected"].chars == 25_000   # 25 × 1_000
+        assert with_think.sections["protected"].chars == 13_000  # 13 × 1_000
+
+
+# ── DEV-927: the modification set outranks references, or the prompt is refused ──
+
+class TestEditableOutranksProtected:
+    windows = {"small": 10_000, "big": 200_000, None: None}
+
+    def _plan(self, sections, *, agent="big", candidates=(), fixed=0,
+              completion=1_000, role="architect"):
+        return ctx.plan_dispatch(
+            "spec_t", role=role, sections=sections, fixed_chars=fixed,
+            completion_tokens=completion, agent=agent, candidates=candidates,
+            window_of=self.windows.get)
+
+    def test_protected_yields_before_an_editable_file_is_dropped(self):
+        """Run 37's architect: a modest knob left the big editable file dropped
+        in pass one, pass two could only refill what protected had not taken,
+        and 243K chars of references were kept over the one file the design
+        had to change. "big" holds 190_000 tokens = 570_000 chars."""
+        sections = [
+            ctx.Section(ctx.SECTION_EDITABLE, _files(**{"daemon.py": 400_000}), 60_000),
+            ctx.Section(ctx.SECTION_PROTECTED,
+                        _files(**{"a.py": 150_000, "b.py": 150_000, "c.py": 100_000}),
+                        600_000),
+        ]
+        alloc = self._plan(sections)
+        assert alloc.files(ctx.SECTION_EDITABLE) == sections[0].files
+        assert not alloc.dropped(ctx.SECTION_EDITABLE)
+        # What is left after the editable file goes to references, by size.
+        assert [p for p, _ in alloc.files(ctx.SECTION_PROTECTED)] == ["a.py"]
+        assert set(alloc.dropped(ctx.SECTION_PROTECTED)) == {"b.py", "c.py"}
+        assert alloc.fits
+
+    def test_a_prompt_that_already_fits_is_not_rearranged(self):
+        sections = [
+            ctx.Section(ctx.SECTION_EDITABLE, _files(**{"e.py": 10_000}), 60_000),
+            ctx.Section(ctx.SECTION_PROTECTED, _files(**{"p.py": 10_000}), 60_000),
+        ]
+        alloc = self._plan(sections)
+        assert not alloc.dropped_any
+        assert alloc.sections[ctx.SECTION_PROTECTED].chars == 10_000
+
+    def test_an_editable_file_no_window_holds_is_refused_before_the_call(self):
+        """The ticket's case: a 356K-char file against a 131K window. Dropping
+        it designs around a file nobody can see; refusing names it."""
+        sections = [
+            ctx.Section(ctx.SECTION_EDITABLE,
+                        _files(**{"small.py": 1_000, "orchestrator_daemon.py": 900_000}),
+                        60_000),
+            ctx.Section(ctx.SECTION_PROTECTED, _files(**{"p.py": 50_000}), 60_000),
+        ]
+        with pytest.raises(ctx.EditableFileTooLarge) as e:
+            self._plan(sections)
+        msg = str(e.value)
+        assert "orchestrator_daemon.py" in msg and "small.py" not in msg
+        assert "must edit" in msg and "200000" in msg and "big" in msg
+        assert e.value.files == [("orchestrator_daemon.py", 300_000)]
+        assert isinstance(e.value, ctx.PromptTooLarge), "parks like any oversized prompt"
+
+    def test_the_refusal_comes_after_every_window_was_tried(self):
+        """Escalation first (DEV-624): a file too big for the chosen agent but
+        not for a candidate is served there, not refused."""
+        sections = [ctx.Section(ctx.SECTION_EDITABLE, _files(**{"e.py": 120_000}), 60_000)]
+        alloc = self._plan(sections, agent="small", candidates=("big",))
+        assert alloc.agent == "big" and not alloc.dropped_any
+        with pytest.raises(ctx.EditableFileTooLarge):
+            self._plan(sections, agent="small", candidates=())
+
+    def test_the_implementer_is_held_to_the_same_rule(self):
+        sections = [ctx.Section(ctx.SECTION_EDITABLE, _files(**{"e.py": 900_000}), 60_000)]
+        with pytest.raises(ctx.EditableFileTooLarge, match="implementer prompt"):
+            self._plan(sections, role="implementer", agent="small", candidates=("big",))
+
+    def test_a_dropped_reference_file_is_still_only_a_warning(self, caplog):
+        import logging
+        sections = [ctx.Section(ctx.SECTION_PROTECTED, _files(**{"p.py": 900_000}), 900_000)]
+        with caplog.at_level(logging.WARNING, logger="orchestrator.context"):
+            alloc = self._plan(sections)
+        assert alloc.dropped(ctx.SECTION_PROTECTED) == ["p.py"]
+        assert any("not shown" in r.getMessage() for r in caplog.records)
 
 
 # ── the wiring: knobs, windows, reserves ─────────────────────────────────────
@@ -263,7 +343,7 @@ class TestDaemonWiring:
         an operator raising the editable knob cannot buy the protected section
         room the window does not have."""
         sections = [
-            ctx.Section(ctx.SECTION_EDITABLE, _files(**{"a.py": 400_000}),
+            ctx.Section(ctx.SECTION_EDITABLE, _files(**{"a.py": 100_000}),
                         400_000),
             ctx.Section(ctx.SECTION_PROTECTED, _files(**{"p.py": 400_000}),
                         400_000),
@@ -272,6 +352,8 @@ class TestDaemonWiring:
                                  completion_tokens=16_000, agent="implementer",
                                  sections=sections)
         assert alloc.needed_tokens <= d._agent_ctx_limit("implementer")
+        assert not alloc.dropped(ctx.SECTION_EDITABLE)
+        assert alloc.dropped(ctx.SECTION_PROTECTED)
 
 
 # ── the render still says what it did not show ───────────────────────────────
@@ -325,3 +407,37 @@ class TestOmissionsReachThePrompt:
             out = ex._render_reference_files([("src/big.py", "z" * 10_000)])
         assert "z" * 10_000 not in out
         assert "src/big.py" in out
+
+
+# ── DEV-927: the refusal reaches the daemon's wrapper and parks ──────────────
+
+class TestEditableRefusalWiring:
+    def test_the_architect_wrapper_refuses_and_names_the_file(self):
+        """The architect has no candidates (which architect runs is an eval
+        decision), so a file its window cannot hold is refused here, before
+        the call, instead of being omitted from the design."""
+        sections = [
+            ctx.Section(ctx.SECTION_EDITABLE,
+                        _files(**{"src/coding_model_server/orchestrator_daemon.py": 900_000}),
+                        settings.EXISTING_FILES_MAX_CHARS),
+            ctx.Section(ctx.SECTION_PROTECTED, _files(**{"p.py": 50_000}),
+                        settings.PROTECTED_FILES_MAX_CHARS),
+        ]
+        with pytest.raises(ctx.EditableFileTooLarge) as e:
+            d._prompt_budget("spec_t", "architect", fixed_chars=20_000,
+                             completion_tokens=8_000,
+                             agent=settings.role_to_agent("architect"),
+                             sections=sections)
+        assert "orchestrator_daemon.py" in str(e.value)
+        assert "architect prompt" in str(e.value)
+
+    def test_the_refusal_parks_as_a_no_verdict_capped_at_one(self):
+        from coding_model_autonomous.outcome import (
+            FailureClass, Outcome, classify_exception)
+        exc = ctx.EditableFileTooLarge("architect", [("big.py", 300_000)], 131_072, "arch")
+        failure = classify_exception(exc, role="architect")
+        assert failure.cls is FailureClass.PROMPT_TOO_LARGE
+        assert failure.outcome is Outcome.NO_VERDICT
+        assert failure.rotate is False
+        assert failure.cap == 1
+        assert "big.py" in failure.detail

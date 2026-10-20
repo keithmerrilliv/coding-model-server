@@ -932,6 +932,33 @@ class PromptTooLarge(RuntimeError):
     it as a 413 (DEV-624's terminal failure mode)."""
 
 
+class EditableFileTooLarge(PromptTooLarge):
+    """A file the role must EDIT cannot be shown to any eligible window, even
+    with every protected file dropped (DEV-927).
+
+    The editable section is the declared modification set: a role that
+    cannot see what it must change cannot do the job, so this is not a
+    degraded prompt but no prompt at all. Run 37 designed around an unseen
+    daemon file, passed its own checks and reached a human gate missing a
+    required edit; the only thing that caught it was a human reading the
+    design against the spec. A subclass of PromptTooLarge so the existing
+    no-verdict parking applies: nothing has been spent, and no rotation can
+    help, because the largest window was already tried.
+    """
+
+    def __init__(self, role: str, files: list[tuple[str, int]],
+                 window_tokens: Optional[int], agent: Optional[str]) -> None:
+        self.files = files
+        listing = ", ".join(f"{path} (~{tokens} tok)" for path, tokens in files)
+        super().__init__(
+            f"the {role} prompt cannot show {len(files)} file(s) it must edit "
+            f"even with every protected file dropped — {listing} — against "
+            f"the largest eligible window {window_tokens or '?'} ({agent}); "
+            f"refusing before any model call rather than designing or "
+            f"editing around a file no role can see (DEV-927). Split the "
+            f"spec so the edit targets a smaller file, or raise the window.")
+
+
 @dataclass(frozen=True)
 class Section:
     """One droppable block of files, with the knob it prefers."""
@@ -1151,7 +1178,34 @@ def allocate(sections: Iterable[Section], *, fixed_chars: int,
             if gained > 0:
                 alloc.sections[section.name] = grown
                 left = max(0, left - gained)
+    # Third pass (DEV-927): priority is an ORDER, not a first-come share. The
+    # first two passes let a lower-priority section keep what it took before
+    # a higher one was found short: run 37's architect kept 243K chars of
+    # protected references while dropping the one file the design had to
+    # change. When any section still has drops and a later section holds
+    # content, refill in priority order from an empty window with no knobs:
+    # each section takes what it can of what is left, so the modification set
+    # is whole before a reference file is shown. The later sections get back
+    # whatever remains; a file that still does not fit after this could not
+    # fit with the window to itself.
+    if budget_chars >= 0 and _priority_inverted(sections, alloc):
+        left = budget_chars
+        for section in sections:
+            got = _fill(section, left)
+            got.withheld = withheld[section.name]
+            alloc.sections[section.name] = got
+            left = max(0, left - got.chars)
     return alloc
+
+
+def _priority_inverted(sections: list, alloc: "Allocation") -> bool:
+    """True when a section has dropped files while a lower-priority one has
+    content it could yield."""
+    for i, section in enumerate(sections):
+        if not alloc.sections[section.name].dropped:
+            continue
+        return any(alloc.sections[later.name].chars > 0 for later in sections[i + 1:])
+    return False
 
 
 def plan_dispatch(spec_id: str, *, role: str, sections: Iterable[Section],
@@ -1218,6 +1272,13 @@ def plan_dispatch(spec_id: str, *, role: str, sections: Iterable[Section],
         elif best is None:
             best = alloc
     assert best is not None  # chain is never empty
+    missing = best.dropped(SECTION_EDITABLE)
+    if missing:
+        sizes = {path: len(content) for sec in sections if sec.name == SECTION_EDITABLE
+                 for path, content in sec.files}
+        raise EditableFileTooLarge(
+            role, [(path, sizes.get(path, 0) // CHARS_PER_TOKEN) for path in missing],
+            best.window_tokens, best.agent)
     if not best.fits:
         raise PromptTooLarge(
             f"the {role} prompt needs ~{best.needed_tokens} tokens with every "
