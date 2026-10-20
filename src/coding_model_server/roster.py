@@ -528,13 +528,18 @@ _DENSE_27B = _create_model_config(
 # probe), under the ~1.4 GB reload floor and under the 714 MiB at which the
 # 3.6 SIGABRT'd in production; v0.4.x had measured it at 843. Same block
 # count and a smaller file than the 3.6, so the 3.6's rung is the obvious
-# match and gives the eval matched offload on both arms. Confirm free VRAM on
-# the first load; if it lands under ~900 MiB, raise n_cpu_ffn before judging.
+# match. Measured on v0.5.0, 2026-10-20, 65536 ctx Q4_0 KV, after a short
+# probe generation:
+#   ngl=46 (DEV-740 rung)       463 MiB free
+#   ngl=66, n_cpu_ffn=33        555 MiB free   (the 3.6 reads ~950 here)
+#   ngl=66, n_cpu_ffn=38        <- this config; see DEV-928 for the reading
+# The 3.8's footprint is ~400 MiB heavier than the 3.6's at the same rung,
+# so it pays five more blocks of FFN on the CPU for the reload floor.
 _DENSE_27B_38 = _create_model_config(
     'MODEL_PATH_27B_38',
     f'{_MODELS_ROOT}/unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q4_K_M.gguf',
     66, 65536, 2048,
-    n_cpu_ffn=33,
+    n_cpu_ffn=38,
     server_extra_args=['--jinja', '--reasoning-format', 'none', '--swa-full',
                        '--spec-type', 'draft-mtp', '--spec-draft-n-max', '2',
                        '--reasoning-budget', '4096'],
@@ -737,7 +742,7 @@ AGENTS = {
     # Eval-only (DEV-928): same prompt as dense_architect so the model and its
     # reasoning_effort are the only variables. Not in any rotation or default.
     'qwen38_architect': _create_agent_config(
-        'Architect — Qwen3.8-27B UD-Q4_K_M (27B dense + MTP, 64K Q4_0 ctx, ngl=66 n_cpu_ffn=33, reasoning_effort=medium, DEV-928 eval arm)',
+        'Architect — Qwen3.8-27B UD-Q4_K_M (27B dense + MTP, 64K Q4_0 ctx, ngl=66 n_cpu_ffn=38, reasoning_effort=medium, DEV-928 eval arm)',
         _ARCHITECT_SYSTEM_PROMPT,
         _DENSE_27B_38,
         executor=True,
