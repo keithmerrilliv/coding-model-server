@@ -98,6 +98,15 @@ MODELS = [
         "local_dir": os.path.join(BASE_DIR, "Qwen3.8-27B-GGUF"),
         "size": "~16.5 GB",
     },
+    # Official GGUF from ornith-ai, same 3B/35B shape as the implementer (DEV-929 eval arm).
+    {
+        "id": 10,
+        "name": "Ornith-1.5-35B-A3B Q4_K_M (3B/35B MoE, MIT, DEV-929 eval)",
+        "repo": "ornith-ai/Ornith-1.5-35B-A3B-GGUF",
+        "files": ["Ornith-1.5-35B-Q4_K_M.gguf"],
+        "local_dir": os.path.join(MODELS_ROOT, "ornith-ai", "Ornith-1.5-35B-A3B-GGUF"),
+        "size": "~21.7 GB",
+    },
 ]
 
 
