@@ -290,12 +290,25 @@ _MOE_122B = _create_model_config(
 # 09-28 llama-server build (v0.5.0) carries the arch. Licence is
 # qwen-community-1.0, not Apache: a repoint needs Keith's sign-off on that.
 #
-# Bring-up rung, unmeasured: all blocks on the GPU with the experts on the
-# CPU, the 122B's shape, at a 128K window and Q8_0 KV (the KV is 12 blocks
-# of 2 heads, so the window is cheap). Where llama.cpp puts the n-gram table
-# is the thing to read off the first load. MTP: the repo ships separate
-# draft files (MTP/*.gguf); not wired until draft-mtp for qwen4exp is
-# confirmed on v0.5.0, so speed here is a floor.
+# Rung: all blocks on the GPU with the experts on the CPU, the 122B's shape,
+# at a 128K window and Q8_0 KV (12 KV blocks of 2 heads, so the window is
+# cheap). Measured 2026-10-20 on v0.5.0: 12,267 MiB used, 3,572 MiB free
+# after a short generation, 111 GB mmapped from page cache in under a
+# minute; the native 256K window is affordable here. Decode 22 tok/s on the
+# reviewer eval against the 122B's 18. MTP: the repo ships separate draft
+# files (MTP/*.gguf); not wired until draft-mtp for qwen4exp is confirmed on
+# this build, so that speed is a floor.
+#
+# Known fault, open on DEV-930: with thinking on, the model sometimes emits
+# EOS inside its <think> block at 28-169 tokens, mid-word, and the server
+# returns a reasoning-only 502. It moved with the prompt and with
+# reasoning_effort in no monotone pattern (2 of 8 reviewer prompts in the
+# eval, 5 of 12 probe calls across medium/high/low/xhigh); with
+# enable_thinking=False it did not occur in 3 of 3. A natural stop in the
+# journal (truncated = 0), so the candidates are the llama.cpp build, the
+# template's think handling under --reasoning-format none, and
+# --reasoning-budget as a forced close. Nothing routes to these agents until
+# that is settled.
 _MOE_FLASHNEXT = _create_model_config(
     'MODEL_PATH_FLASHNEXT',
     f'{_MODELS_ROOT}/unsloth/Qwen3.8-Flash-Next-GGUF/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf',
