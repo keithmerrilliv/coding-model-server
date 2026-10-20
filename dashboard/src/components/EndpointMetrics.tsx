@@ -105,6 +105,13 @@ const EndpointRow: React.FC<{ ep: EndpointMetric }> = ({ ep }) => {
         {ep.subkey && <span className="endpoint-subkey">[{ep.subkey}]</span>}
         <span className="endpoint-meta">
           {ep.total_count.toLocaleString()} total · last {ep.last_seen_seconds_ago ?? '—'}s ago
+          {ep.in_flight > 0 && (
+            <span className="endpoint-inflight" title="requests started and not yet finished">
+              {' · '}
+              {ep.in_flight} in flight
+              {ep.in_flight_oldest_seconds != null && `, oldest ${Math.round(ep.in_flight_oldest_seconds)}s`}
+            </span>
+          )}
           {breakdownEntries.length > 0 && (
             <span className="endpoint-breakdown" title="cumulative non-2xx breakdown">
               {' · '}

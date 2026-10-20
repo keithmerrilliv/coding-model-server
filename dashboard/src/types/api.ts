@@ -117,6 +117,11 @@ export interface EndpointMetric {
   // entire endpoint lifetime (NOT windowed). Categories are stable
   // strings like "4xx_auth", "5xx_proxy_disconnected".
   error_breakdown: Record<string, number>;
+  // DEV-504: requests started and not yet finished. Recorded at request
+  // start, so a seven-minute generation shows as busy instead of the row
+  // vanishing at the idle cutoff.
+  in_flight: number;
+  in_flight_oldest_seconds: number | null;
 }
 
 export interface MetricsResponse {

@@ -104,6 +104,40 @@ class RequestMetricsCollector:
         self._error_breakdown: Dict[_EndpointKey, Dict[str, int]] = (
             defaultdict(lambda: defaultdict(int))
         )
+        # Requests that have started and not finished: token -> (key, started).
+        # Samples are recorded on completion, so without this a seven-minute
+        # generation contributed nothing until it returned and the endpoint
+        # fell off the panel at the five-minute mark — the machine read as idle
+        # precisely when it was working hardest (DEV-504).
+        self._in_flight: Dict[int, Tuple[_EndpointKey, float]] = {}
+        self._next_token = 0
+
+    def begin(self, method: str, path: str,
+              subkey: Optional[str] = None) -> int:
+        """Mark a request as started; returns a token for :meth:`end`."""
+        with self._lock:
+            self._next_token += 1
+            token = self._next_token
+            self._in_flight[token] = ((method, path, subkey), time.time())
+            return token
+
+    def retag(self, token: int, *, path: Optional[str] = None,
+              subkey: Optional[str] = None) -> None:
+        """Refine an in-flight request's key once the handler knows more (the
+        matched route template, the agent). Unknown tokens are ignored."""
+        with self._lock:
+            entry = self._in_flight.get(token)
+            if entry is None:
+                return
+            (method, old_path, old_sub), started = entry
+            self._in_flight[token] = (
+                (method, path or old_path, subkey if subkey is not None else old_sub),
+                started)
+
+    def end(self, token: int) -> None:
+        """The request finished, however it finished. Idempotent."""
+        with self._lock:
+            self._in_flight.pop(token, None)
 
     def record(self, method: str, path: str, subkey: Optional[str],
                duration_ms: float, status: int,
@@ -135,10 +169,16 @@ class RequestMetricsCollector:
         out: List[dict] = []
         evict: List[_EndpointKey] = []
         with self._lock:
+            # In-flight requests per endpoint: a count and the oldest start.
+            # An endpoint with one is busy, not idle, whatever its ring says.
+            in_flight: Dict[_EndpointKey, List[float]] = defaultdict(list)
+            for key, started in self._in_flight.values():
+                in_flight[key].append(started)
             for key, ring in self._rings.items():
                 samples_in_window = [s for s in ring if s[0] >= cutoff]
                 last_seen = self._last_seen.get(key, 0.0)
-                if not samples_in_window and last_seen < idle_drop:
+                busy = in_flight.pop(key, [])
+                if not samples_in_window and last_seen < idle_drop and not busy:
                     evict.append(key)
                     continue
                 method, path, subkey = key
@@ -154,6 +194,26 @@ class RequestMetricsCollector:
                     "window_count": len(samples_in_window),
                     "buckets": _build_buckets(samples_in_window, now, window_seconds),
                     "error_breakdown": breakdown,
+                    "in_flight": len(busy),
+                    "in_flight_oldest_seconds": (
+                        round(now - min(busy), 1) if busy else None),
+                })
+            # Endpoints generating right now that have never completed a
+            # request this process (the first long call after a restart): a
+            # row with no samples yet, so the panel still says "working".
+            for key, busy in in_flight.items():
+                method, path, subkey = key
+                out.append({
+                    "method": method,
+                    "path": path,
+                    "subkey": subkey,
+                    "total_count": self._totals.get(key, 0),
+                    "last_seen_seconds_ago": None,
+                    "window_count": 0,
+                    "buckets": _build_buckets([], now, window_seconds),
+                    "error_breakdown": dict(self._error_breakdown.get(key, {})),
+                    "in_flight": len(busy),
+                    "in_flight_oldest_seconds": round(now - min(busy), 1),
                 })
             # Evict idle keys so unbounded 404 / scanner traffic can't grow
             # the dicts forever. Done inside the same lock as the iteration
@@ -163,7 +223,9 @@ class RequestMetricsCollector:
                 self._totals.pop(key, None)
                 self._last_seen.pop(key, None)
                 self._error_breakdown.pop(key, None)
+        # Busy rows first, then most recently seen.
         out.sort(key=lambda e: (
+            0 if e["in_flight"] else 1,
             e["last_seen_seconds_ago"]
             if e["last_seen_seconds_ago"] is not None else 1e9
         ))
