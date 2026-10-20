@@ -29,6 +29,9 @@ dependencies = [
     # degrades to simple chunking when it is absent.
     "tree_sitter_languages; python_version < '3.13'",
     "ddgs>=9.10.0",
+    # Soft: the dashboard GPU panel reads the GPU through NVML in-process;
+    # without it GpuSampler reports the GPU as unavailable.
+    "nvidia-ml-py>=12.0",
     "pyyaml>=6.0",
     # Soft: orchestrator falls back to FakeJiraClient if missing.
     "atlassian-python-api>=4.0.0",

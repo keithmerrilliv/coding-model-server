@@ -4,8 +4,9 @@ Two collectors:
   - RequestMetricsCollector: HTTP middleware feeds it (method, path,
     optional subkey, duration, status). Bucketed snapshots feed live
     sparklines on the dashboard.
-  - GpuSampler: 1 Hz background thread, shells out to nvidia-smi, keeps
-    a rolling buffer of GPU utilisation/VRAM/power/clocks/temp.
+  - GpuSampler: 1 Hz background thread, reads the GPU in-process through
+    NVML (nvidia-ml-py), keeps a rolling buffer of GPU utilisation/VRAM/
+    power/clocks/temp.
     Availability is derived from whether sampling currently works, not
     probed once at startup — see the note on _loop (DEV-432).
 
@@ -18,12 +19,18 @@ from __future__ import annotations
 
 import logging
 import os
-import subprocess
 import threading
 import time
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 from typing import Deque, Dict, List, Optional, Tuple
+
+# Soft dependency: a host without the bindings (or without an NVIDIA GPU at
+# all) still serves every other metric; GpuSampler just reports unavailable.
+try:
+    import pynvml
+except ImportError:  # pragma: no cover - the test suite patches this instead
+    pynvml = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -34,9 +41,9 @@ _PER_ENDPOINT_RING_SIZE = 600
 # 1-Hz GPU samples. 120 = 2 min of history (we render the last 60).
 _GPU_RING_SIZE = 120
 
-# Cadence while nvidia-smi is not answering. The sampler keeps retrying
-# rather than latching off (DEV-432), but a host with no GPU at all
-# shouldn't fork a doomed subprocess every second forever.
+# Cadence while NVML is not answering (no driver yet, no GPU, no bindings).
+# The sampler keeps retrying rather than latching off (DEV-432), but a host
+# with no GPU at all shouldn't call nvmlInit every second forever.
 _GPU_RETRY_INTERVAL_S = 30.0
 
 # Recent retrieval outcomes kept for the dashboard's RAG panel. Small: this is
@@ -215,22 +222,40 @@ def _percentile(sorted_values: List[float], q: float) -> Optional[float]:
     return round(sorted_values[lo] * (1 - frac) + sorted_values[hi] * frac, 1)
 
 
-_GPU_QUERY_FIELDS = (
-    "utilization.gpu",
-    "utilization.memory",
-    "memory.used",
-    "memory.total",
-    "power.draw",
-    "power.limit",
-    "clocks.gr",
-    "clocks.mem",
-    "temperature.gpu",
-    "pstate",
-)
+_MIB = 1024 ** 2
+
+
+def _nvml_optional(read):
+    """Run one NVML getter, mapping "not supported on this card" to None.
+
+    That is the one NVML error that describes the GPU rather than the
+    driver's health, so it must not count as a failed sample: nvidia-smi
+    prints "[N/A]" for the same case and the dashboard already renders None.
+    Every other NVMLError propagates to _sample_once, which reads it as the
+    driver having gone away.
+    """
+    try:
+        return read()
+    except pynvml.NVMLError_NotSupported:
+        return None
+
+
+def _pstate_label(state: int) -> Optional[str]:
+    """NVML reports an integer; the dashboard tile shows nvidia-smi's "P2"."""
+    if state == pynvml.NVML_PSTATE_UNKNOWN:
+        return None
+    return f"P{int(state)}"
 
 
 class GpuSampler:
-    """1-Hz nvidia-smi sampler with a ring-buffered history."""
+    """1-Hz NVML sampler with a ring-buffered history.
+
+    Reads go through nvidia-ml-py in-process, never a ``nvidia-smi``
+    subprocess. At 1 Hz a subprocess is ~86k fork+exec+driver sessions a
+    day, and one of them took the host down with a kernel double fault in
+    the driver's ioctl path (DEV-925). An NVML read on an already-open
+    handle costs microseconds and spawns nothing.
+    """
 
     def __init__(self, interval_s: float = 1.0) -> None:
         self._interval = interval_s
@@ -241,6 +266,10 @@ class GpuSampler:
         # Set by the sampler thread on its first successful read. Starting
         # False means the panel says "unavailable" for at most one tick.
         self._available = False
+        # NVML device handle, held while the library is initialised. None
+        # means "not attached", and the next tick runs nvmlInit again; that
+        # retry is what lets a late or reloaded driver self-heal (DEV-432).
+        self._handle = None
         # Cached per-process; the GPU power cap doesn't change.
         self._static_power_limit: Optional[float] = None
         self._static_vram_total: Optional[float] = None
@@ -259,18 +288,19 @@ class GpuSampler:
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=2.0)
+        self._detach()
 
     def _loop(self) -> None:
         """Sample until stopped, treating availability as a live property.
 
-        This used to be gated on a single nvidia-smi probe taken in
-        __init__, so a server that started before the nvidia driver
-        finished initialising latched "unavailable" for its whole
-        lifetime and only a restart brought GPU stats back (DEV-432).
-        Deriving it from the sample itself self-heals a boot race within
-        one tick, and equally covers the driver being reloaded under a
-        long-running server. Transitions are logged; steady state is not,
-        so a GPU-less host doesn't spam the log every retry.
+        Availability used to be gated on a single probe taken in __init__,
+        so a server that started before the nvidia driver finished
+        initialising latched "unavailable" for its whole lifetime and only
+        a restart brought GPU stats back (DEV-432). Deriving it from the
+        sample itself self-heals a boot race within one tick, and equally
+        covers the driver being reloaded under a long-running server.
+        Transitions are logged; steady state is not, so a GPU-less host
+        doesn't spam the log every retry.
         """
         first_tick = True
         while not self._stop.is_set():
@@ -279,7 +309,7 @@ class GpuSampler:
                 with self._lock:
                     self._ring.append(sample)
                 if not self._available:
-                    logger.info("GpuSampler: nvidia-smi responding, GPU stats enabled")
+                    logger.info("GpuSampler: NVML responding, GPU stats enabled")
                     self._available = True
                 wait = self._interval
             else:
@@ -288,56 +318,75 @@ class GpuSampler:
                 # False -> False and would log nothing at all.
                 if self._available or first_tick:
                     logger.warning(
-                        "GpuSampler: nvidia-smi not responding, GPU stats "
-                        "unavailable (retrying every %.0fs)", _GPU_RETRY_INTERVAL_S)
+                        "GpuSampler: NVML not responding (no driver, no GPU, "
+                        "or nvidia-ml-py missing), GPU stats unavailable "
+                        "(retrying every %.0fs)", _GPU_RETRY_INTERVAL_S)
                     self._available = False
                 wait = max(self._interval, _GPU_RETRY_INTERVAL_S)
             first_tick = False
             self._stop.wait(wait)
 
-    def _sample_once(self) -> Optional[dict]:
+    def _attach(self) -> bool:
+        """Initialise NVML and take the device-0 handle.
+
+        False when the bindings are missing or the driver isn't up; the
+        caller backs off and tries again. Single-GPU rig: multi-GPU support
+        would enumerate handles here.
+        """
+        if pynvml is None:
+            return False
         try:
-            out = subprocess.run(
-                [
-                    "nvidia-smi",
-                    f"--query-gpu={','.join(_GPU_QUERY_FIELDS)}",
-                    "--format=csv,noheader,nounits",
-                ],
-                capture_output=True, text=True, timeout=2.0, check=True,
-            ).stdout.strip()
-        except (FileNotFoundError, subprocess.CalledProcessError,
-                subprocess.TimeoutExpired, OSError) as e:
-            logger.debug("nvidia-smi sample failed: %s", e)
-            return None
-        # Single-GPU rig — first row is the only row. Multi-GPU support
-        # would enumerate rows here.
-        first_row = out.splitlines()[0] if out else ""
-        cells = [c.strip() for c in first_row.split(",")]
-        if len(cells) != len(_GPU_QUERY_FIELDS):
-            logger.debug("Unexpected nvidia-smi output: %r", first_row)
-            return None
+            pynvml.nvmlInit()
+            self._handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+        except (pynvml.NVMLError, OSError) as e:
+            logger.debug("NVML init failed: %s", e)
+            self._detach()
+            return False
+        return True
 
-        def _f(s: str) -> Optional[float]:
-            # nvidia-smi emits "[N/A]" for unsupported metrics on some
-            # cards — coerce to None so the JSON stays clean.
-            try:
-                return float(s)
-            except ValueError:
-                return None
+    def _detach(self) -> None:
+        self._handle = None
+        if pynvml is None:
+            return
+        try:
+            pynvml.nvmlShutdown()
+        except (pynvml.NVMLError, OSError):
+            # Never initialised, or already torn down with the driver.
+            pass
 
-        sample = {
-            "t": datetime.now(timezone.utc).isoformat(),
-            "util_gpu": _f(cells[0]),
-            "util_mem": _f(cells[1]),
-            "vram_used_mib": _f(cells[2]),
-            "vram_total_mib": _f(cells[3]),
-            "power_w": _f(cells[4]),
-            "power_limit_w": _f(cells[5]),
-            "clock_gr_mhz": _f(cells[6]),
-            "clock_mem_mhz": _f(cells[7]),
-            "temp_c": _f(cells[8]),
-            "pstate": cells[9] or None,
-        }
+    def _sample_once(self) -> Optional[dict]:
+        if self._handle is None and not self._attach():
+            return None
+        h = self._handle
+        try:
+            util = pynvml.nvmlDeviceGetUtilizationRates(h)
+            mem = pynvml.nvmlDeviceGetMemoryInfo(h)
+            sample = {
+                "t": datetime.now(timezone.utc).isoformat(),
+                "util_gpu": float(util.gpu),
+                "util_mem": float(util.memory),
+                "vram_used_mib": float(mem.used // _MIB),
+                "vram_total_mib": float(mem.total // _MIB),
+                "power_w": _nvml_optional(
+                    lambda: pynvml.nvmlDeviceGetPowerUsage(h) / 1000.0),
+                "power_limit_w": _nvml_optional(
+                    lambda: pynvml.nvmlDeviceGetEnforcedPowerLimit(h) / 1000.0),
+                "clock_gr_mhz": _nvml_optional(lambda: float(
+                    pynvml.nvmlDeviceGetClockInfo(h, pynvml.NVML_CLOCK_GRAPHICS))),
+                "clock_mem_mhz": _nvml_optional(lambda: float(
+                    pynvml.nvmlDeviceGetClockInfo(h, pynvml.NVML_CLOCK_MEM))),
+                "temp_c": _nvml_optional(lambda: float(
+                    pynvml.nvmlDeviceGetTemperature(h, pynvml.NVML_TEMPERATURE_GPU))),
+                "pstate": _nvml_optional(
+                    lambda: _pstate_label(pynvml.nvmlDeviceGetPerformanceState(h))),
+            }
+        except (pynvml.NVMLError, OSError) as e:
+            # The driver went away under us (reload, GPU lost). Drop the
+            # handle so the next tick re-initialises instead of failing on
+            # a stale one forever.
+            logger.debug("NVML sample failed: %s", e)
+            self._detach()
+            return None
         if self._static_power_limit is None and sample["power_limit_w"]:
             self._static_power_limit = sample["power_limit_w"]
         if self._static_vram_total is None and sample["vram_total_mib"]:
