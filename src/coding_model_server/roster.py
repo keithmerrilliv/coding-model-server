@@ -498,15 +498,21 @@ _DENSE_27B = _create_model_config(
 # Every prior arm ran the template default (xhigh), and DEV-616 recorded what
 # that buys on a 27B: unbounded rumination, then tool-call stubs once
 # --reasoning-budget bites. The budget stays so a failure is visible rather
-# than an empty answer. Rung is DEV-740's (46/65536, 843 MiB free at the time;
-# ngl=48 was 369 free and ngl=50 failed to create the MTP context) — measured
-# on v0.4.x, so confirm free VRAM on the first v0.5.0 load before trusting it.
-# No DEV-744-style n_cpu_ffn rung exists for this model yet; the eval compares
-# quality, and DEV-740 found decode indistinguishable at matched rungs.
+# than an empty answer.
+#
+# Rung: the incumbent's DEV-744 shape (ngl=66 covers all 65 blocks plus
+# output, --n-cpu-ffn 33 carries the whole offload), not DEV-740's ngl=46.
+# On llama-server v0.5.0 the ngl=46 rung loaded at 463 MiB free (2026-10-20
+# probe), under the ~1.4 GB reload floor and under the 714 MiB at which the
+# 3.6 SIGABRT'd in production; v0.4.x had measured it at 843. Same block
+# count and a smaller file than the 3.6, so the 3.6's rung is the obvious
+# match and gives the eval matched offload on both arms. Confirm free VRAM on
+# the first load; if it lands under ~900 MiB, raise n_cpu_ffn before judging.
 _DENSE_27B_38 = _create_model_config(
     'MODEL_PATH_27B_38',
     f'{_MODELS_ROOT}/unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q4_K_M.gguf',
-    46, 65536, 2048,
+    66, 65536, 2048,
+    n_cpu_ffn=33,
     server_extra_args=['--jinja', '--reasoning-format', 'none', '--swa-full',
                        '--spec-type', 'draft-mtp', '--spec-draft-n-max', '2',
                        '--reasoning-budget', '4096'],
@@ -691,7 +697,7 @@ AGENTS = {
     # Eval-only (DEV-928): same prompt as dense_architect so the model and its
     # reasoning_effort are the only variables. Not in any rotation or default.
     'qwen38_architect': _create_agent_config(
-        'Architect — Qwen3.8-27B UD-Q4_K_M (27B dense + MTP, 64K Q4_0 ctx, ngl=46, reasoning_effort=medium, DEV-928 eval arm)',
+        'Architect — Qwen3.8-27B UD-Q4_K_M (27B dense + MTP, 64K Q4_0 ctx, ngl=66 n_cpu_ffn=33, reasoning_effort=medium, DEV-928 eval arm)',
         _ARCHITECT_SYSTEM_PROMPT,
         _DENSE_27B_38,
         executor=True,
