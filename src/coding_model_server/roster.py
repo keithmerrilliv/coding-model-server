@@ -469,6 +469,32 @@ _DENSE_27B = _create_model_config(
     n_ubatch=2048,
 )
 
+# QWEN3.8-27B UD-Q4_K_M (DEV-928) — the fourth challenge for the architect
+# slot, eval-only. Same qwen35 hybrid arch and block count as _DENSE_27B, MTP
+# head embedded in the GGUF (nextn_predict_layers=1), so the draft-mtp wiring
+# is identical. Three earlier challenges (DEV-615, DEV-702) ended 3-3 / 5-1 /
+# 3-3 against dense_architect and DEV-839 retired the agent on telemetry.
+#
+# What this arm changes: reasoning_effort=medium through the chat template.
+# Every prior arm ran the template default (xhigh), and DEV-616 recorded what
+# that buys on a 27B: unbounded rumination, then tool-call stubs once
+# --reasoning-budget bites. The budget stays so a failure is visible rather
+# than an empty answer. Rung is DEV-740's (46/65536, 843 MiB free at the time;
+# ngl=48 was 369 free and ngl=50 failed to create the MTP context) — measured
+# on v0.4.x, so confirm free VRAM on the first v0.5.0 load before trusting it.
+# No DEV-744-style n_cpu_ffn rung exists for this model yet; the eval compares
+# quality, and DEV-740 found decode indistinguishable at matched rungs.
+_DENSE_27B_38 = _create_model_config(
+    'MODEL_PATH_27B_38',
+    f'{_MODELS_ROOT}/unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q4_K_M.gguf',
+    46, 65536, 2048,
+    server_extra_args=['--jinja', '--reasoning-format', 'none', '--swa-full',
+                       '--spec-type', 'draft-mtp', '--spec-draft-n-max', '2',
+                       '--reasoning-budget', '4096'],
+    type_k=2, type_v=2,
+    n_ubatch=2048,
+)
+
 # MUSE-GLIMMER-30B UD-Q4_K_XL (DEV-692) — Meta's open-weight distill of the
 # HOSTED Muse Spark 1.1. Spark itself is not wirable here: every agent in this
 # server is a local llama-server GGUF and there is no remote-provider path.
@@ -635,6 +661,15 @@ AGENTS = {
         _ARCHITECT_SYSTEM_PROMPT,
         _DENSE_27B,
         executor=True
+    ),
+    # Eval-only (DEV-928): same prompt as dense_architect so the model and its
+    # reasoning_effort are the only variables. Not in any rotation or default.
+    'qwen38_architect': _create_agent_config(
+        'Architect — Qwen3.8-27B UD-Q4_K_M (27B dense + MTP, 64K Q4_0 ctx, ngl=46, reasoning_effort=medium, DEV-928 eval arm)',
+        _ARCHITECT_SYSTEM_PROMPT,
+        _DENSE_27B_38,
+        executor=True,
+        chat_template_kwargs={'reasoning_effort': 'medium'},
     ),
     # ── Muse-Glimmer (DEV-692) ──
     # Retry-only: in _IMPLEMENTER_ROTATION, but not in
