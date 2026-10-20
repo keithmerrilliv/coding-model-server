@@ -107,6 +107,15 @@ MODELS = [
         "local_dir": os.path.join(MODELS_ROOT, "ornith-ai", "Ornith-1.5-35B-A3B-GGUF"),
         "size": "~21.7 GB",
     },
+    # Four shards plus the separate MTP draft files (DEV-930 eval arm).
+    {
+        "id": 11,
+        "name": "Qwen3.8-Flash-Next UD-Q4_K_XL (6B/125B+51B MoE, qwen-community, DEV-930 eval)",
+        "repo": "unsloth/Qwen3.8-Flash-Next-GGUF",
+        "pattern": ["UD-Q4_K_XL/*", "MTP/*Q8_0.gguf", "MTP/*Q4_K_M.gguf", "mtp-Qwen3.8-Flash-Next-Q8_0.gguf"],
+        "local_dir": os.path.join(BASE_DIR, "Qwen3.8-Flash-Next-GGUF"),
+        "size": "~120 GB",
+    },
 ]
 
 

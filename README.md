@@ -234,6 +234,7 @@ for method, prefill figures, and the caveat about raw-vs-proxy numbers).
 | `glimmer_implementer` | Retry-only implementation | Muse-Glimmer-30B UD-Q4_K_XL | 3B/30B | 64K | Q4_0 | ngl 40, `--swa-full` | 13.2 § |
 | `qwen38_architect` | Eval arm only (DEV-928, not in any rotation) | Qwen3.8-27B UD-Q4_K_M (dense) | 27B dense | 64K | Q4_0 | ngl 66, n_cpu_ffn 33, MTP speculative decode, `reasoning_effort=medium` | — |
 | `ornith` | Eval arm only (DEV-929, not in any rotation) | Ornith-1.5-35B-A3B Q4_K_M | 3B/35B | 64K | Q8_0 | ngl 41, n_cpu_moe 20 | — |
+| `flashnext_reviewer`, `flashnext_architect` | Eval arms only (DEV-930, not in any rotation) | Qwen3.8-Flash-Next UD-Q4_K_XL | 6B/125B + 51B n-gram | 128K | Q8_0 | ngl 49, cpu_moe, `reasoning_effort=medium` | — |
 
 † Measured 2026-09-19 through the managed path on a 53,333-token architect
 prompt ([DEV-744](https://keith-merrill4.atlassian.net/browse/DEV-744)); the old

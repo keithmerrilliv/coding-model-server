@@ -282,6 +282,28 @@ _MOE_122B = _create_model_config(
     cpu_moe=True, n_ubatch=3072,
 )
 
+# QWEN3.8-FLASH-NEXT UD-Q4_K_XL (DEV-930) — eval-only challenger to the 122B
+# rung above, for the reviewer and the planner. 125B MoE (512 experts, 10
+# used, 640-wide) plus a 51B n-gram embedding table, 6B active per token;
+# arch qwen4exp, 48 blocks, full_attention_interval=4 so 12 blocks keep a KV
+# cache (2 KV heads) and 36 hold DeltaNet state; 262144 native context. The
+# 09-28 llama-server build (v0.5.0) carries the arch. Licence is
+# qwen-community-1.0, not Apache: a repoint needs Keith's sign-off on that.
+#
+# Bring-up rung, unmeasured: all blocks on the GPU with the experts on the
+# CPU, the 122B's shape, at a 128K window and Q8_0 KV (the KV is 12 blocks
+# of 2 heads, so the window is cheap). Where llama.cpp puts the n-gram table
+# is the thing to read off the first load. MTP: the repo ships separate
+# draft files (MTP/*.gguf); not wired until draft-mtp for qwen4exp is
+# confirmed on v0.5.0, so speed here is a floor.
+_MOE_FLASHNEXT = _create_model_config(
+    'MODEL_PATH_FLASHNEXT',
+    f'{_MODELS_ROOT}/unsloth/Qwen3.8-Flash-Next-GGUF/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf',
+    49, 131072, 2048,
+    server_extra_args=['--jinja', '--reasoning-format', 'none', '--swa-full'],
+    cpu_moe=True, n_ubatch=2048,
+)
+
 # ── Qwen3.6 family (replaces Qwen3.5-35B implementer + 122B/397B architects) ──
 
 # Qwen3.6-35B-A3B UD-Q4_K_M — direct successor to Qwen3.5-35B-A3B (same
@@ -680,6 +702,24 @@ AGENTS = {
         _SYNTHESIZER_SYSTEM_PROMPT,
         _MOE_122B,
         executor=True
+    ),
+    # Eval-only (DEV-930): the 122B rung's challenger, under the reviewer's
+    # prompt and under the architect's (the planner regime is single-turn
+    # on that prompt). reasoning_effort=medium as in DEV-928: the 3.8 line
+    # overthinks at the template default. Not in any rotation or default.
+    'flashnext_reviewer': _create_agent_config(
+        'Reviewer — Qwen3.8-Flash-Next UD-Q4_K_XL (6B/125B+51B MoE, 128K ctx Q8_0, ngl=49 cpu_moe, reasoning_effort=medium, DEV-930 eval arm)',
+        _REVIEWER_SYSTEM_PROMPT,
+        _MOE_FLASHNEXT,
+        executor=True,
+        chat_template_kwargs={'reasoning_effort': 'medium'},
+    ),
+    'flashnext_architect': _create_agent_config(
+        'Architect — Qwen3.8-Flash-Next UD-Q4_K_XL (6B/125B+51B MoE, 128K ctx Q8_0, ngl=49 cpu_moe, reasoning_effort=medium, DEV-930 eval arm)',
+        _ARCHITECT_SYSTEM_PROMPT,
+        _MOE_FLASHNEXT,
+        executor=True,
+        chat_template_kwargs={'reasoning_effort': 'medium'},
     ),
     'moe_implementer': _create_agent_config(
         'Implementer — MiniMax M2.5 Q4_K_M (10B/230B MoE, 116K ctx Q4_0, ngl=62 cpu_moe)',
