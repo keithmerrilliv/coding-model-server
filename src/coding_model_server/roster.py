@@ -366,6 +366,25 @@ _MOE_35B = _create_model_config(
     repeat_penalty=1.05,
 )
 
+# ORNITH-1.5-35B-A3B Q4_K_M (DEV-929) — eval-only challenger to `implementer`.
+# Official GGUF from ornith-ai (MIT), arch qwen35moe: the same 3B/35B shape
+# as _MOE_35B (40 blocks, 256 experts / 8 active), so it takes the incumbent's
+# rung unchanged and the model is the only variable in the A/B. Ornith-1.0 was
+# retired on the DEV-90 eval (a wash, edge to implementer; note above); 1.5
+# claims a far wider gap and gets the same blind, Claude-judged test. If the
+# load lands under the ~1.4 GB reload floor on v0.5.0, re-sweep n_cpu_moe
+# before judging anything.
+_MOE_ORNITH = _create_model_config(
+    'MODEL_PATH_ORNITH',
+    f'{_MODELS_ROOT}/ornith-ai/Ornith-1.5-35B-A3B-GGUF/Ornith-1.5-35B-Q4_K_M.gguf',
+    41, 65536, 4608,
+    server_extra_args=['--jinja', '--reasoning-format', 'none', '--swa-full'],
+    type_k=8, type_v=8,
+    cpu_moe=True, n_cpu_moe=20, n_ubatch=4608,
+    repeat_penalty=1.05,
+)
+
+# Ornith-1.5 is back ON EVAL as _MOE_ORNITH below (DEV-929). The 1.0 record:
 # Retired 2026-07-14: _MOE_ORNITH (Ornith-1.0-35B Q4_K_M, DeepReinforce, MIT)
 # backed an `ornith` agent added ON EVAL in DEV-88 to test the lab's self-
 # reported SWE-bench 75.6 / Terminal-Bench 64.2 claims against `implementer`.
@@ -611,8 +630,15 @@ AGENTS = {
         _MOE_35B,
         executor=True
     ),
-    # `ornith` retired 2026-07-14 after losing the DEV-90 eval to `implementer`
-    # (a wash, edge to implementer). See the _MOE_ORNITH retirement note above.
+    # Eval-only (DEV-929): same prompt and executor wiring as `implementer`,
+    # deliberately, so the model is the only variable. Ornith-1.0 lost the
+    # DEV-90 eval; this is the 1.5 release. Not in any rotation or default.
+    'ornith': _create_agent_config(
+        'Implementer — Ornith-1.5-35B-A3B Q4_K_M (3B/35B MoE, 64K ctx Q8_0, ngl=41 n_cpu_moe=20, DEV-929 eval arm)',
+        _IMPLEMENTER_SYSTEM_PROMPT,
+        _MOE_ORNITH,
+        executor=True
+    ),
     'deep_implementer': _create_agent_config(
         'Implementer — Coder-Next Q8_0 (3B/80B MoE, 256K ctx Q8_0, ngl=48 cpu_moe, deep reasoning)',
         _IMPLEMENTER_SYSTEM_PROMPT,
