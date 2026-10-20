@@ -232,6 +232,11 @@ async def metrics_middleware(request: Request, call_next):
         response.headers["X-Request-ID"] = req_id
         return response
     start = time.perf_counter()
+    # DEV-504: the request exists for the panel from its first instant, not
+    # from its completion. The route template is only known after routing, so
+    # the token starts on the literal path and is retagged below.
+    token = request_metrics.begin(request.method, path)
+    request.state.metrics_token = token
     try:
         response = await call_next(request)
         status = response.status_code
@@ -243,6 +248,7 @@ async def metrics_middleware(request: Request, call_next):
         route_path = getattr(route, "path", path) if route else path
         subkey = getattr(request.state, "metric_subkey", None)
         category = getattr(request.state, "error_category", None)
+        request_metrics.end(token)
         request_metrics.record(
             request.method, route_path, subkey, duration_ms, 500, category
         )
@@ -261,9 +267,14 @@ async def metrics_middleware(request: Request, call_next):
     # chunks would be filed as 200 successes (DEV-168). The stream teardown
     # records the real sample instead; see routes/chat.py.
     if not getattr(request.state, "defer_metrics", False):
+        request_metrics.end(token)
         request_metrics.record(
             request.method, route_path, subkey, duration_ms, status, category
         )
+    else:
+        # Still generating: the stream's teardown ends the in-flight marker
+        # along with recording the sample. Until then the row says so.
+        request_metrics.retag(token, path=route_path, subkey=subkey)
     response.headers["X-Request-ID"] = req_id
     return response
 

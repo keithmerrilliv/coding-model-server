@@ -412,6 +412,10 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
     # split per-endpoint KPIs by agent (architect vs reviewer vs … all
     # have very different latency profiles; one averaged line is useless).
     raw_request.state.metric_subkey = request.model
+    # DEV-504: the in-flight row carries the agent from the first instant.
+    _token = getattr(raw_request.state, "metrics_token", None)
+    if _token is not None:
+        request_metrics.retag(_token, subkey=request.model)
     req_id = getattr(raw_request.state, "req_id", "req_unknown")
 
     # Backpressure: reject early if we're already at capacity. Done before
@@ -597,6 +601,8 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
                 # The real sample: full generation duration, and a 502 when
                 # the stream carried an in-band error frame.
                 try:
+                    if _token is not None:
+                        request_metrics.end(_token)
                     request_metrics.record(
                         "POST", "/v1/chat/completions", request.model,
                         (time.perf_counter() - stream_started) * 1000.0,
