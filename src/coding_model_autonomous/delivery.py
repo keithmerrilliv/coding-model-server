@@ -35,6 +35,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from .workspace import is_git_control_path, read_bytes_nofollow, symlink_in_path
+
 logger = logging.getLogger("orchestrator")
 
 BRANCH_PREFIX = "pipeline/"
@@ -171,42 +173,82 @@ def _base_from_context(spec_dir: Path) -> "tuple[str | None, dict[str, str]]":
     return sha, files
 
 
-def verify_tested_manifest(spec_dir: Path,
-                           deliverable: "list[str]") -> "tuple[bool, str]":
+def verify_tested_manifest(spec_dir: Path, deliverable: "list[str]",
+                           recorded: "dict | None" = None,
+                           shipped: "dict[str, str] | None" = None,
+                           ) -> "tuple[bool, str]":
     """Refuse to ship bytes the build check never verified (DEV-602 split C).
 
-    Split B records `tested_manifest.json` (workspace-relative path → sha256
-    of on-disk bytes) at the passing pre-gate build check. Run 17 shipped
-    files that were not the files the check had tested; delivery compared
-    nothing. This is the compare step, factored out so tests exercise it
-    without a git remote.
+    Split B records what a passing pre-gate build check verified (workspace-
+    relative path → sha256 of on-disk bytes) twice: in `tested_manifest.json`
+    in the workspace, and in that check's event payload. Run 17 shipped files
+    that were not the files the check had tested; delivery compared nothing.
+    This is the compare step, factored out so tests exercise it without a git
+    remote.
 
-    Returns (ok, detail). An ABSENT manifest is (True, "") — pre-split-B
-    workspaces deliver exactly as before. A present manifest is compared
-    against the shipping set: any hash mismatch, manifest path missing from
-    the shipping set, or shipped file absent from the manifest is a
-    divergence, and the detail lists every divergent path with its tested
-    and shipped hashes (or "missing"). An unreadable manifest also refuses —
-    it is corruption of exactly the record this check depends on.
+    *recorded* is the event's copy, and when the caller has it, it is the one
+    compared against: the workspace is writable by the code under test, so the
+    file there can be rewritten or deleted to match swapped artifacts, and the
+    database cannot. The workspace file must still be present and a regular
+    file — its absence after a check recorded one means something modified
+    the workspace behind the pipeline, which is itself a reason not to ship.
+
+    With no *recorded* copy (no check ever recorded one, or a caller without
+    a database) the workspace file is the record: ABSENT is (True, "") and
+    delivery proceeds exactly as it did before manifests existed; present, it
+    is compared.
+
+    Returns (ok, detail). Any hash mismatch, manifest path missing from the
+    shipping set, or shipped file absent from the manifest is a divergence,
+    and the detail lists every divergent path with its tested and shipped
+    hashes (or "missing"). An unreadable manifest also refuses — it is
+    corruption of exactly the record this check depends on. Symlinks are
+    never followed: neither the manifest nor an artifact, since a link's
+    target is not what the check hashed.
+
+    *shipped* (path → sha256) lets a caller that has already read the bytes
+    it is about to ship have exactly those bytes compared.
     """
     manifest_path = spec_dir / TESTED_MANIFEST
-    if not manifest_path.is_file():
-        return True, ""
-    try:
-        tested = json.loads(manifest_path.read_text())
-        if not isinstance(tested, dict):
-            raise ValueError(f"manifest is {type(tested).__name__}, not a dict")
-    except Exception as e:
+    if os.path.islink(manifest_path):
         return False, (
-            f"REFUSED — {TESTED_MANIFEST} exists but cannot be read "
-            f"({e}); it is the record of what the build check verified, "
-            f"so nothing was pushed (DEV-602)")
+            f"REFUSED — {TESTED_MANIFEST} is a symbolic link; it is the "
+            f"record of what the build check verified and is never read "
+            f"through a link, so nothing was pushed (DEV-602)")
+    if recorded is not None:
+        if not manifest_path.is_file():
+            return False, (
+                f"REFUSED — {TESTED_MANIFEST} is missing, but the build check "
+                f"recorded one for this spec; the workspace was modified "
+                f"after the check, so nothing was pushed (DEV-602)")
+        tested, source = recorded, "the build check's recorded hashes"
+    else:
+        if not manifest_path.is_file():
+            return True, ""
+        try:
+            tested = json.loads(read_bytes_nofollow(manifest_path))
+            if not isinstance(tested, dict):
+                raise ValueError(
+                    f"manifest is {type(tested).__name__}, not a dict")
+        except Exception as e:
+            return False, (
+                f"REFUSED — {TESTED_MANIFEST} exists but cannot be read "
+                f"({e}); it is the record of what the build check verified, "
+                f"so nothing was pushed (DEV-602)")
+        source = TESTED_MANIFEST
 
-    shipped: dict[str, str] = {}
-    for rel in deliverable:
-        f = spec_dir / rel
-        if f.is_file():
-            shipped[rel] = hashlib.sha256(f.read_bytes()).hexdigest()
+    if shipped is None:
+        shipped = {}
+        for rel in deliverable:
+            link = symlink_in_path(spec_dir, rel)
+            if link is not None:
+                return False, (
+                    f"REFUSED — {rel}: `{link}` is a symbolic link in the "
+                    f"workspace; nothing was pushed")
+            f = spec_dir / rel
+            if f.is_file():
+                shipped[rel] = hashlib.sha256(
+                    read_bytes_nofollow(f)).hexdigest()
 
     divergent: list[str] = []
     for rel in sorted(set(tested) | set(shipped)):
@@ -219,8 +261,64 @@ def verify_tested_manifest(spec_dir: Path,
             "REFUSED — tested-manifest divergence; nothing was pushed.\n"
             "The build check verified different bytes than this delivery "
             "would ship (DEV-602):\n" + "\n".join(divergent))
-    return True, (f"{len(shipped)} file(s) verified against "
-                  f"{TESTED_MANIFEST}")
+    return True, f"{len(shipped)} file(s) verified against {source}"
+
+
+def unsafe_artifact_reason(spec_dir: Path, rel: str) -> "str | None":
+    """Why *rel* must not be copied out of the workspace, or None.
+
+    An artifact path is chosen by a model and the file at it can be replaced
+    by the code under test (the sandbox binds the workspace read-write), so
+    both are checked at the last moment before they leave the machine:
+
+      * the path must be a plain relative one — no absolute path, no `..`;
+      * no component may be git's control directory: a `.git/config` copied
+        into the clone is configuration git then acts on (`core.fsmonitor`
+        names a command run by the very next `git add`);
+      * the source, and every directory above it inside the workspace, must
+        not be a symlink — delivery would otherwise push whatever the link
+        points at (a deploy key, /proc/self/environ).
+
+    `.gitmodules`, `.gitattributes` and `.gitignore` are deliberately NOT
+    refused. They are ordinary tracked content that a legitimate change may
+    need to touch, and none of them executes anything in the delivery clone:
+    a filter or diff driver named in `.gitattributes` only runs if a
+    `filter.<name>.*` command is configured, and configuration lives in
+    `.git/config` (refused above) or the daemon user's own config (trusted);
+    `.gitmodules` cannot carry an `update = !command` (git only honours that
+    from config) and nothing delivery runs — add, commit, push — fetches a
+    submodule. What they say reaches the operator as a diff on the pipeline
+    branch, to be reviewed like the code beside it.
+    """
+    posix = rel.replace("\\", "/")
+    if posix.startswith("/") or re.match(r"^[A-Za-z]:", posix):
+        return "absolute path"
+    if ".." in posix.split("/"):
+        return "path contains `..`"
+    if is_git_control_path(rel):
+        return "path is inside git's control directory"
+    link = symlink_in_path(spec_dir, rel)
+    if link is not None:
+        return f"`{link}` is a symbolic link in the workspace"
+    return None
+
+
+def _destination_refusal(repo: Path, rel: str) -> "str | None":
+    """Why writing *rel* into the clone would land somewhere else, or None.
+
+    The clone is the target repository's content, which can itself hold
+    tracked symlinks: a link `docs -> ../..` or `meta -> .git` turns an
+    innocent-looking `docs/x` or `meta/config` into a write outside the
+    clone or into its configuration. Resolved, the destination must still be
+    inside the clone and outside `.git`.
+    """
+    root = repo.resolve()
+    dst = (repo / rel).resolve()
+    if not dst.is_relative_to(root):
+        return "resolves outside the clone"
+    if is_git_control_path(dst.relative_to(root).as_posix()):
+        return "resolves into the clone's git control directory"
+    return None
 
 
 def delivery_remotes() -> dict[str, str]:
@@ -295,6 +393,18 @@ def _check_delivery_credentials(key: str) -> Optional[str]:
     return None
 
 
+# Every git command delivery runs gets these, so nothing in the tree it is
+# operating on can make git run a program. `core.fsmonitor` names a command
+# git executes on any index refresh (status, add, diff), and hooks fire on
+# commit and push; both are read from the repository's own config, which is
+# exactly the file a planted `.git/config` would be. The path checks in
+# deliver_spec keep such a file from being written at all — this is the second
+# lock, for the case where one is missed. A command-line -c outranks every
+# config file. (`core.sshCommand` needs no entry: GIT_SSH_COMMAND, set below
+# whenever a key is configured, takes precedence over it.)
+_GIT_HARDENING = ("-c", "core.fsmonitor=", "-c", "core.hooksPath=/dev/null")
+
+
 def _git(cwd, *args, timeout: int = 120, key: str = ""):
     env = os.environ.copy()
     # DEV-574: the daemon's systemd context has no SSH agent, and the user
@@ -312,8 +422,9 @@ def _git(cwd, *args, timeout: int = 120, key: str = ""):
             f"ssh -i {kp} -o IdentitiesOnly=yes -o BatchMode=yes "
             f"-o UserKnownHostsFile={_known_hosts_for(kp)} "
             f"-o StrictHostKeyChecking=yes")
-    return subprocess.run(["git", *args], cwd=str(cwd), capture_output=True,
-                          text=True, timeout=timeout, env=env)
+    return subprocess.run(["git", *_GIT_HARDENING, *args], cwd=str(cwd),
+                          capture_output=True, text=True, timeout=timeout,
+                          env=env)
 
 
 def _err_tail(proc, limit: int = 400) -> str:
@@ -324,13 +435,18 @@ def _err_tail(proc, limit: int = 400) -> str:
 
 def deliver_spec(spec_id: str, spec_title: str, spec_dir: Path,
                  code_paths: "list[str]", repo_name: Optional[str],
-                 protected_paths: "list[str]") -> DeliveryResult:
+                 protected_paths: "list[str]",
+                 tested_hashes: "dict | None" = None) -> DeliveryResult:
     """Apply the spec's code artifacts to a pipeline branch and push it.
 
     `code_paths` are repo-relative artifact paths; only files that exist in
     the spec workspace and are not protected are delivered. Protected paths
     are excluded unconditionally — the runner discards writes to them during
     the run, so delivering one would ship content no test ever saw.
+
+    `tested_hashes` is the database's copy of what the last passing build
+    check verified (see verify_tested_manifest); None when no check recorded
+    one.
     """
     if not repo_name:
         return DeliveryResult(
@@ -347,11 +463,24 @@ def deliver_spec(spec_id: str, spec_title: str, spec_dir: Path,
 
     protected = set(protected_paths or [])
     deliverable = []
+    unsafe: list[str] = []
     for rel in dict.fromkeys(code_paths):  # dedupe, keep order
         if rel in protected:
             continue
-        if (spec_dir / rel).is_file():
+        why = unsafe_artifact_reason(spec_dir, rel)
+        if why:
+            unsafe.append(f"  {rel}: {why}")
+        elif (spec_dir / rel).is_file():
             deliverable.append(rel)
+    if unsafe:
+        # One bad path refuses the whole delivery: it means either a model
+        # chose a path no deliverable has, or the workspace was rewritten
+        # behind the pipeline — neither is a state to ship the rest from.
+        return DeliveryResult(
+            "failed",
+            "REFUSED — unsafe artifact path; nothing was copied and nothing "
+            "was pushed.\n" + "\n".join(unsafe) + "\nThe workspace copy is "
+            f"unchanged: {spec_dir}")
     if not deliverable:
         return DeliveryResult(
             "skipped", "no deliverable code artifact exists on disk "
@@ -361,7 +490,20 @@ def deliver_spec(spec_id: str, spec_title: str, spec_dir: Path,
     # needs no network, and a divergent set must never get as far as a
     # remote. verified_note is empty when no manifest exists (pre-split-B
     # workspaces keep today's behavior and today's report, byte-identical).
-    verified_ok, verified_note = verify_tested_manifest(spec_dir, deliverable)
+    # The bytes are read ONCE, here, without following a link: what is hashed
+    # against the manifest is then exactly what is written into the clone.
+    payloads: dict[str, bytes] = {}
+    for rel in deliverable:
+        try:
+            payloads[rel] = read_bytes_nofollow(spec_dir / rel)
+        except OSError as e:
+            return DeliveryResult(
+                "failed", f"REFUSED — could not read {rel} from the "
+                          f"workspace ({e}); nothing was pushed")
+    verified_ok, verified_note = verify_tested_manifest(
+        spec_dir, deliverable, tested_hashes,
+        shipped={rel: hashlib.sha256(data).hexdigest()
+                 for rel, data in payloads.items()})
     if not verified_ok:
         return DeliveryResult("failed", verified_note)
 
@@ -378,6 +520,8 @@ def deliver_spec(spec_id: str, spec_title: str, spec_dir: Path,
             return DeliveryResult(
                 "failed", f"clone of {url} failed: {_err_tail(clone)}")
         repo = Path(tmp) / "repo"
+        # Not checked: an empty remote has no HEAD to parse and is still a
+        # legitimate delivery target ("unknown" then says so in the report).
         head_res = _git(repo, "rev-parse", "HEAD")
         head = (getattr(head_res, "stdout", "") or "").strip() or "unknown"
         base_sha, base_files = _base_from_context(spec_dir)
@@ -399,13 +543,38 @@ def deliver_spec(spec_id: str, spec_title: str, spec_dir: Path,
             logger.warning("could not write %s: %s", DELIVERY_BASE, e)
         if stale:
             return DeliveryResult("failed", stale)
-        _git(repo, "checkout", "-b", branch)
+        checkout = _git(repo, "checkout", "-b", branch)
+        if checkout.returncode != 0:
+            return DeliveryResult(
+                "failed", f"creating branch {branch} failed: "
+                          f"{_err_tail(checkout)}")
+        # Every destination is judged before the first byte is written, so a
+        # refusal leaves the clone untouched.
+        misplaced = [f"  {rel}: {why}" for rel in deliverable
+                     if (why := _destination_refusal(repo, rel))]
+        if misplaced:
+            return DeliveryResult(
+                "failed",
+                "REFUSED — an artifact's destination is not a plain file "
+                "inside the clone; nothing was copied and nothing was "
+                "pushed.\n" + "\n".join(misplaced))
         for rel in deliverable:
             dst = repo / rel
             dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(spec_dir / rel, dst)
-        _git(repo, "add", "-A")
-        if _git(repo, "diff", "--cached", "--quiet").returncode == 0:
+            dst.write_bytes(payloads[rel])
+        add = _git(repo, "add", "-A")
+        if add.returncode != 0:
+            return DeliveryResult(
+                "failed", f"staging the artifacts failed: {_err_tail(add)}")
+        # `diff --quiet` answers with its exit status: 0 nothing staged, 1
+        # something staged. Anything else is git failing, which must not be
+        # read as either answer.
+        staged = _git(repo, "diff", "--cached", "--quiet")
+        if staged.returncode not in (0, 1):
+            return DeliveryResult(
+                "failed", f"could not compare the artifacts with the default "
+                          f"branch: {_err_tail(staged)}")
+        if staged.returncode == 0:
             return DeliveryResult(
                 "skipped", "the target repo's default branch already contains "
                            "every artifact byte-for-byte — nothing to deliver")
