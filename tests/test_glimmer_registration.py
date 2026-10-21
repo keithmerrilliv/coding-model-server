@@ -67,19 +67,19 @@ def test_the_rotation_is_ordered_by_what_an_attempt_costs():
     them. The fast decoders therefore take the early retries and Glimmer the
     last one before the window fallback. It is still retry-only (below)."""
     assert _IMPLEMENTER_ROTATION == [
-        "implementer", "fast_implementer", "moe_implementer",
+        "implementer", "fast_implementer", "ornith", "moe_implementer",
         "glimmer_implementer", "deep_implementer"]
 
 
 def test_a_failed_first_attempt_is_retried_on_the_cheap_agents_first():
     from coding_model_autonomous import retry_policy as rp
-    assert [rp._rotation_pick("implementer", n) for n in (1, 2, 3, 4)] == [
-        "fast_implementer", "moe_implementer", "glimmer_implementer",
+    assert [rp._rotation_pick("implementer", n) for n in (1, 2, 3, 4, 5)] == [
+        "fast_implementer", "ornith", "moe_implementer", "glimmer_implementer",
         "deep_implementer"]
     # Whoever made attempt 0, Glimmer is never the first retry and deep is
     # never ahead of it.
     for first in ("fast_implementer", "moe_implementer"):
-        walk = [rp._rotation_pick(first, n) for n in (1, 2, 3, 4)]
+        walk = [rp._rotation_pick(first, n) for n in (1, 2, 3, 4, 5)]
         assert walk[0] == "implementer"
         assert walk[-2:] == ["glimmer_implementer", "deep_implementer"]
 
