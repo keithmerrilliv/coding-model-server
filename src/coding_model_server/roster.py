@@ -58,7 +58,8 @@ _MODELS_ROOT = os.getenv(
 def _create_model_config(path_env, path_default, n_gpu_layers, n_ctx=32768, n_batch=2048,
                          server_extra_args=None, logit_bias=None, type_k=8, type_v=8,
                          repeat_penalty=1.15, repeat_last_n=256, cpu_moe=False,
-                         n_cpu_moe=None, n_cpu_ffn=None, n_ubatch=512, draft=None):
+                         n_cpu_moe=None, n_cpu_ffn=None, n_ubatch=512, draft=None,
+                         escape_in_prompt=None):
     """Helper function to create standardized model configurations.
 
     Args:
@@ -105,6 +106,10 @@ def _create_model_config(path_env, path_default, n_gpu_layers, n_ctx=32768, n_ba
         config['server_extra_args'] = server_extra_args
     if logit_bias is not None:
         config['logit_bias'] = logit_bias
+    if escape_in_prompt:
+        # {literal: replacement} applied to every message's text before the
+        # request leaves the server (DEV-934).
+        config['escape_in_prompt'] = dict(escape_in_prompt)
     if draft is not None:
         config['draft'] = draft
     return config
@@ -319,13 +324,17 @@ _MOE_122B = _create_model_config(
 # USER_DEFINED token whatever parse_special says, v0.5.0 and v0.7.0 each
 # fail 6 of 15 diagnostic calls in different cells, de-fanging the input
 # rescued 3 of 4, and thinking off never failed. Nothing routes to these
-# agents until DEV-934's payload escape and thinking-off fallback are in.
+# agents until DEV-934's evals read clean with both mitigations as served:
+# escape_in_prompt below rewrites the two tags in every prompt (3 of 4 in
+# the think-tag test against 0 of 4 verbatim), and the server retries a
+# reasoning-only completion once with enable_thinking off (6 of 6).
 _MOE_FLASHNEXT = _create_model_config(
     'MODEL_PATH_FLASHNEXT',
     f'{_MODELS_ROOT}/unsloth/Qwen3.8-Flash-Next-GGUF/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf',
     49, 131072, 2048,
     server_extra_args=['--jinja', '--reasoning-format', 'none', '--swa-full'],
     cpu_moe=True, n_ubatch=2048,
+    escape_in_prompt={'<think>': '< think >', '</think>': '< /think >'},
 )
 
 # ── Qwen3.6 family (replaces Qwen3.5-35B implementer + 122B/397B architects) ──

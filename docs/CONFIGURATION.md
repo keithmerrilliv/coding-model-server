@@ -393,6 +393,7 @@ _MY_MODEL = _create_model_config(
     n_cpu_moe=None,                  # Keep only the first N layers' experts on CPU
     server_extra_args=None,          # Extra llama-server flags (list of strings)
     logit_bias=None,                 # Token bans: [[token_id, -100.0], ...]
+    escape_in_prompt=None,           # {literal: replacement} rewritten in every prompt message (DEV-934)
     draft=None,                      # Speculative-decode draft model (dict)
 )
 ```
