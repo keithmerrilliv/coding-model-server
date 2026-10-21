@@ -47,7 +47,7 @@ whatever `.env.example` happens to ship.
 | `LLAMA_ORPHAN_SLOT_REAP_S` | `120` | How long an in-flight reservation with no proxy executing behind it may persist before the swap guard reaps it as a leak (a request abandoned by a cancelled spec, DEV-582). Real work is never reaped. `coding-model-autonomous swap-reset` does it on demand (DEV-583). |
 | `MODEL_N_THREADS` | `24` | CPU threads for token generation (physical cores) |
 | `MODEL_N_THREADS_BATCH` | `32` | CPU threads for prompt prefill (all threads incl. HT) |
-| `MODEL_PATH_*` | *(per-config)* | Override a model's GGUF path. One var per model config: `MODEL_PATH_35B`, `MODEL_PATH_27B`, `MODEL_PATH_30B_FAST`, `MODEL_PATH_80B_Q8`, `MODEL_PATH_122B`, `MODEL_PATH_230B`, `MODEL_PATH_MUSE_GLIMMER_30B`. |
+| `MODEL_PATH_*` | *(per-config)* | Override a model's GGUF path. One var per model config: `MODEL_PATH_35B`, `MODEL_PATH_27B`, `MODEL_PATH_30B_FAST`, `MODEL_PATH_80B_Q8`, `MODEL_PATH_FLASHNEXT`, `MODEL_PATH_230B`, `MODEL_PATH_MUSE_GLIMMER_30B`. |
 
 `n_ctx`, `n_batch`, `n_ubatch`, `ngl` and the KV types are **not** env-tunable —
 they are literals in each model config (see [Per-Model Configuration](#per-model-configuration)),
@@ -87,8 +87,8 @@ because every one of them is a VRAM-budget decision that has been measured.
 | `AUTONOMOUS_ARCHITECT_AGENT` | `dense_architect` | Agent for the design phase. Production `.env` sets `qwen38_architect` (DEV-928, 2026-10-21); the planner stays on the default (DEV-735). |
 | `AUTONOMOUS_ARCHITECT_TOOLS` | `1` | Let the architect read repository files it was not served, with `<<<READ_FILE>>>` (DEV-714). Read-only, at most 3 rounds, capped by whatever the prompt budget leaves free. Set `0` to withdraw the offer. |
 | `AUTONOMOUS_IMPLEMENTER_AGENT` | `implementer` | First-attempt implementer only when the architect makes **no** recommendation; in practice the recommendation wins (33 of 33 first picks from 2026-09-13 to 09-26). Do not set it to `deep_implementer`: it is the rotation's window fallback, not a first pick (DEV-821). |
-| `AUTONOMOUS_REVIEWER_AGENT` | `deep_reviewer` | Reviewer agent. |
-| `AUTONOMOUS_SYNTHESIS_AGENT` | `synthesizer` | Agent for synthesis and its repair round. Its own roster entry, on the same model as `deep_reviewer` today (DEV-900). |
+| `AUTONOMOUS_REVIEWER_AGENT` | `deep_reviewer` | Reviewer agent. The entry is served by Qwen3.8-Flash-Next since DEV-935 (2026-10-21). |
+| `AUTONOMOUS_SYNTHESIS_AGENT` | `synthesizer` | Agent for synthesis and its repair round. Its own roster entry, on the same model as `deep_reviewer` (DEV-900), so a repoint of one is a deliberate repoint of both. |
 | `AUTONOMOUS_PLANNER_TIMEOUT` | `900` | Seconds. Must be ≤ `LLAMA_SERVER_REQUEST_TIMEOUT`. |
 | `AUTONOMOUS_ARCHITECT_TIMEOUT` | `2700` | Seconds. |
 | `AUTONOMOUS_IMPLEMENTER_TIMEOUT` | `1800` | Seconds. |
