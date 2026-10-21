@@ -84,7 +84,7 @@ because every one of them is a VRAM-budget decision that has been measured.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `AUTONOMOUS_PLANNER_AGENT` | `dense_architect` | Agent that runs the spec → YAML planner step. |
-| `AUTONOMOUS_ARCHITECT_AGENT` | `dense_architect` | Agent for the design phase. |
+| `AUTONOMOUS_ARCHITECT_AGENT` | `dense_architect` | Agent for the design phase. Production `.env` sets `qwen38_architect` (DEV-928, 2026-10-21); the planner stays on the default (DEV-735). |
 | `AUTONOMOUS_ARCHITECT_TOOLS` | `1` | Let the architect read repository files it was not served, with `<<<READ_FILE>>>` (DEV-714). Read-only, at most 3 rounds, capped by whatever the prompt budget leaves free. Set `0` to withdraw the offer. |
 | `AUTONOMOUS_IMPLEMENTER_AGENT` | `implementer` | First-attempt implementer only when the architect makes **no** recommendation; in practice the recommendation wins (33 of 33 first picks from 2026-09-13 to 09-26). Do not set it to `deep_implementer`: it is the rotation's window fallback, not a first pick (DEV-821). |
 | `AUTONOMOUS_REVIEWER_AGENT` | `deep_reviewer` | Reviewer agent. |

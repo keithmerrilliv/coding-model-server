@@ -523,13 +523,15 @@ _DENSE_27B = _create_model_config(
     n_ubatch=2048,
 )
 
-# QWEN3.8-27B UD-Q4_K_M (DEV-928) — the fourth challenge for the architect
-# slot, eval-only. Same qwen35 hybrid arch and block count as _DENSE_27B, MTP
+# QWEN3.8-27B UD-Q4_K_M (DEV-928) — the production architect since
+# 2026-10-21, the planner stays _DENSE_27B (DEV-735). Same qwen35 hybrid arch and block count as _DENSE_27B, MTP
 # head embedded in the GGUF (nextn_predict_layers=1), so the draft-mtp wiring
 # is identical. Three earlier challenges (DEV-615, DEV-702) ended 3-3 / 5-1 /
-# 3-3 against dense_architect and DEV-839 retired the agent on telemetry.
+# 3-3 against dense_architect and DEV-839 retired the agent on telemetry;
+# the fourth, at reasoning_effort=medium, won 4-2 with no ties at cost
+# parity (DEV-928), and Keith moved the design phase onto it.
 #
-# What this arm changes: reasoning_effort=medium through the chat template.
+# What this config changes: reasoning_effort=medium through the chat template.
 # Every prior arm ran the template default (xhigh), and DEV-616 recorded what
 # that buys on a 27B: unbounded rumination, then tool-call stubs once
 # --reasoning-budget bites. The budget stays so a failure is visible rather
@@ -545,7 +547,7 @@ _DENSE_27B = _create_model_config(
 # probe generation:
 #   ngl=46 (DEV-740 rung)       463 MiB free
 #   ngl=66, n_cpu_ffn=33        555 MiB free   (the 3.6 reads ~950 here)
-#   ngl=66, n_cpu_ffn=38        <- this config; see DEV-928 for the reading
+#   ngl=66, n_cpu_ffn=38      1,273 MiB free   <- this config
 # The 3.8's footprint is ~400 MiB heavier than the 3.6's at the same rung,
 # so it pays five more blocks of FFN on the CPU for the reload floor.
 _DENSE_27B_38 = _create_model_config(
@@ -747,15 +749,16 @@ AGENTS = {
     ),
     # ── Qwen3.6 agents (replaced retired Qwen3.5 architect tier) ──
     'dense_architect': _create_agent_config(
-        'Architect — Qwen3.6-27B MTP Q4_K_M (27B dense, 64K Q4_0 ctx, ngl=46 + MTP spec-decode, default planner + interactive architect — the `architect` alias)',
+        'Architect — Qwen3.6-27B MTP Q4_K_M (27B dense, 64K Q4_0 ctx, ngl=46 + MTP spec-decode, default planner + interactive `architect` alias; the design phase moved to qwen38_architect in DEV-928)',
         _ARCHITECT_SYSTEM_PROMPT,
         _DENSE_27B,
         executor=True
     ),
-    # Eval-only (DEV-928): same prompt as dense_architect so the model and its
-    # reasoning_effort are the only variables. Not in any rotation or default.
+    # The design-phase architect (AUTONOMOUS_ARCHITECT_AGENT in production .env,
+    # DEV-928). Same prompt as dense_architect: the model and its reasoning_effort
+    # are the only differences, so the planner and the architect read one rulebook.
     'qwen38_architect': _create_agent_config(
-        'Architect — Qwen3.8-27B UD-Q4_K_M (27B dense + MTP, 64K Q4_0 ctx, ngl=66 n_cpu_ffn=38, reasoning_effort=medium, DEV-928 eval arm)',
+        'Architect — Qwen3.8-27B UD-Q4_K_M (27B dense + MTP, 64K Q4_0 ctx, ngl=66 n_cpu_ffn=38, reasoning_effort=medium, the design-phase architect since DEV-928)',
         _ARCHITECT_SYSTEM_PROMPT,
         _DENSE_27B_38,
         executor=True,
