@@ -229,10 +229,10 @@ for method, prefill figures, and the caveat about raw-vs-proxy numbers).
 | `fast_implementer` | Fast implementation | Qwen3-Coder-30B Q4_K_M | 3B/30B | 64K | Q8_0 | ngl 49, n_cpu_moe 26 | 58.2 |
 | `deep_reviewer` | Reviewer | Qwen3.5-122B-A10B Q4_K_M | 10B/122B | 256K | Q8_0 | ngl 49, cpu_moe | 20.0 |
 | `synthesizer` | Synthesis and its repair round | Qwen3.5-122B-A10B Q4_K_M (shares `deep_reviewer`'s process) | 10B/122B | 256K | Q8_0 | ngl 49, cpu_moe | 20.0 |
-| `dense_architect` | Planner + architect (interactive `architect` alias) | Qwen3.6-27B MTP Q4_K_M (dense) | 27B dense | 64K | Q4_0 | ngl 66, **n_cpu_ffn 33**, MTP speculative decode | 17.4 † |
+| `dense_architect` | Planner (interactive `architect` alias) | Qwen3.6-27B MTP Q4_K_M (dense) | 27B dense | 64K | Q4_0 | ngl 66, **n_cpu_ffn 33**, MTP speculative decode | 17.4 † |
 | `moe_implementer` | Implementation | MiniMax M2.5 Q4_K_M | 10B/230B | 116K | Q4_0 | ngl 62, cpu_moe | 11.2 |
 | `glimmer_implementer` | Retry-only implementation | Muse-Glimmer-30B UD-Q4_K_XL | 3B/30B | 64K | Q4_0 | ngl 40, `--swa-full` | 13.2 § |
-| `qwen38_architect` | Eval arm only (DEV-928, not in any rotation) | Qwen3.8-27B UD-Q4_K_M (dense) | 27B dense | 64K | Q4_0 | ngl 66, n_cpu_ffn 38, MTP speculative decode, `reasoning_effort=medium` | — |
+| `qwen38_architect` | Architect, the design phase (DEV-928) | Qwen3.8-27B UD-Q4_K_M (dense) | 27B dense | 64K | Q4_0 | ngl 66, n_cpu_ffn 38, MTP speculative decode, `reasoning_effort=medium` | — |
 | `ornith` | Eval arm only (DEV-929, not in any rotation) | Ornith-1.5-35B-A3B Q4_K_M | 3B/35B | 64K | Q8_0 | ngl 41, n_cpu_moe 20 | — |
 | `flashnext_reviewer`, `flashnext_architect` | Eval arms only (DEV-930, not in any rotation) | Qwen3.8-Flash-Next UD-Q4_K_XL | 6B/125B + 51B n-gram | 128K | Q8_0 | ngl 49, cpu_moe, `reasoning_effort=medium` | — |
 
@@ -432,7 +432,7 @@ coding-model-autonomous redeliver <spec_id>     # Deliver a DONE spec's artifact
 coding-model-autonomous swap-reset              # Clear a wedged model swap without a restart
 ```
 
-**Pipeline:** Planner (`dense_architect`) → *plan approval gate* → Architect →
+**Pipeline:** Planner (`dense_architect`) → *plan approval gate* → Architect (`qwen38_architect`) →
 *design review gate* → Implementer → *code review gate* → Reviewer + tests →
 *release gate* → DONE. A planner that needs more information opens a
 *clarification* gate instead of guessing.
