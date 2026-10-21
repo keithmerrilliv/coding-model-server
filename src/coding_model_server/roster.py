@@ -28,20 +28,23 @@ from .agent_prompts import (
 #   ornith           72.7 / 69.5   1307    (v0.5.0: 69.1 / 66.2  1343)
 #   deep_implementer 25.9 / 25.9   5512    (v0.5.0: 25.8 / 25.3  5172)
 #   fast_implementer 63.3 / 48.3   1311    (v0.5.0: 59.2 / 46.4  1311)
-#   deep_reviewer    20.6 / 19.6   2554    (v0.5.0: 19.8 / 18.9  2422)
-#   flashnext        24.4 /  --    4674    (v0.5.0: 21.6 / 21.7  3582)
+#   122B (retired)   20.6 / 19.6   2554    (v0.5.0: 19.8 / 18.9  2422)
+#   deep_reviewer    24.4 /  --    4674    (v0.5.0: 21.6 / 21.7  3582)
 #   moe_implementer  12.0 / 10.3   1304    (v0.5.0: 11.1 /  9.7  1400)
 #   dense_architect  24.3 / 17.9    432    (v0.5.0: 23.6 / 17.9   460)
 #   qwen38_architect 20.5 / 16.0   1202    (v0.5.0: 20.0 / 15.5  1270)
 #   glimmer          13.8 / 11.8   1259    (v0.5.0: 13.4 / 11.5  1314)
 # Decode is level or up to 8% faster and prefill up 2-15% on the GPU-resident
 # configs. Memory moved both ways: the cpu_moe rungs with experts in host RAM
-# got lighter (deep_implementer 340 MiB, deep_reviewer 132, flashnext 1,092)
+# got lighter (deep_implementer 340 MiB, the 122B 132, flashnext 1,092)
 # and the GPU-resident configs 28-96 MiB heavier. dense_architect has the
 # least headroom. Greedy output differs from v0.5.0 on seven configs and
 # matches on three (fast_implementer, moe_implementer, glimmer). flashnext's
 # long-prompt decode on v0.7.0 returned no tokens on the raw /completion
-# bench (a 22K-token source file as the prompt); DEV-934 owns that.
+# bench (a 22K-token source file as the prompt), a bench-without-template
+# artefact: through the chat path it matched the 122B's wall at depth
+# (DEV-934). The 122B row is Qwen3.5-122B, retired by DEV-935; flashnext
+# serves deep_reviewer and synthesizer since then.
 
 
 # Root for model weights. Every model config also has its own MODEL_PATH_*
@@ -274,60 +277,41 @@ _MOE_230B = _create_model_config(
     cpu_moe=True,
 )
 
-# ── Qwen3.5 family (deep_reviewer still uses 122B) ──
+# ── Qwen3.8-Flash-Next: the reviewer rung (deep_reviewer, synthesizer) ──
 
-# Qwen3.5-122B-A10B Q4_K_M — mid-tier MoE (10B active, 76.5 GB, 3 shards).
-# Retained for `deep_reviewer` only.
+# QWEN3.8-FLASH-NEXT UD-Q4_K_XL — the reviewer rung since DEV-935 (2026-10-21),
+# replacing Qwen3.5-122B-A10B Q4_K_M, which it beat 4-1-1 (DEV-930) and
+# 5-2-1 of 8 with every task judged (DEV-934) on the blind reviewer eval, at
+# about twice the tokens and 1.6x the wall per review; Keith took quality
+# over cost. 125B MoE (512 experts, 10 used, 640-wide) plus a 51B n-gram
+# embedding table, 6B active per token; arch qwen4exp, 48 blocks,
+# full_attention_interval=4 so 12 blocks keep a KV cache (2 KV heads) and 36
+# hold DeltaNet state; 262144 native context. Served by llama-server v0.7.0,
+# which carries the upstream qwen4exp fix (#29751) and its MTP (#29761).
+# Licence is qwen-community-1.0, not Apache; Keith accepted it 2026-10-21 for
+# this non-commercial use.
 #
-# Migrated 2026-04-28 from llama_cpp (ngl=9, 65K, no cpu_moe) to
-# llama_server + cpu_moe at native 256K context. The previous layout
-# offloaded 9 full layers (incl. 256 dense experts each) to GPU but only
-# 8 experts were active per token, wasting GPU bandwidth. With cpu_moe,
-# attention sublayers go on GPU and ALL experts stay on CPU, reading only
-# the 8 active experts per layer per token. Decode is bandwidth-bound on
-# 10B active params at Q4_K_M ≈ 6 GB/token; DDR5-5600 dual-channel ≈ 90
-# GB/s gives a ~15 tok/s ceiling, vs the ~6 tok/s we measured under the
-# old layout. Architecture: 48 transformer blocks, 3072 dim, 32 attn /
-# 2 KV heads (aggressive GQA → tiny KV cache), 256 experts × 1024 FFN.
-_MOE_122B = _create_model_config(
-    'MODEL_PATH_122B',
-    f'{_MODELS_ROOT}/unsloth/Qwen3.5-122B-A10B-GGUF/Q4_K_M/Qwen3.5-122B-A10B-Q4_K_M-00001-of-00003.gguf',
-    49, 262144, 4096,
-    server_extra_args=['--jinja', '--reasoning-format', 'none', '--swa-full'],
-    cpu_moe=True, n_ubatch=3072,
-)
-
-# QWEN3.8-FLASH-NEXT UD-Q4_K_XL (DEV-930) — eval-only challenger to the 122B
-# rung above, for the reviewer and the planner. 125B MoE (512 experts, 10
-# used, 640-wide) plus a 51B n-gram embedding table, 6B active per token;
-# arch qwen4exp, 48 blocks, full_attention_interval=4 so 12 blocks keep a KV
-# cache (2 KV heads) and 36 hold DeltaNet state; 262144 native context. The
-# llama-server has carried the arch since v0.5.0; v0.7.0 adds the upstream
-# qwen4exp fix (#29751) and its MTP (#29761). Licence is qwen-community-1.0,
-# not Apache; Keith accepted it 2026-10-21 for this non-commercial use.
+# Rung: all blocks on the GPU with the experts on the CPU, at a 128K window
+# and Q8_0 KV (12 KV blocks of 2 heads, so the window is cheap). Measured
+# 2026-10-21 on v0.7.0: 11,166 MiB used, 4,674 free after a short generation
+# (v0.5.0: 12,267 used, 3,572 free), 111 GB mmapped from page cache in under
+# a minute, 24.4 tok/s on the short prompt against the 122B's 20.6, and the
+# same wall at depth through the chat path (76 s vs 72 s on a 25K-token
+# prompt). The native 256K window is affordable here if a prompt ever needs
+# it. MTP: the repo ships separate draft files (MTP/*.gguf); not wired until
+# draft-mtp for qwen4exp is confirmed on this build, so that speed is a floor.
 #
-# Rung: all blocks on the GPU with the experts on the CPU, the 122B's shape,
-# at a 128K window and Q8_0 KV (12 KV blocks of 2 heads, so the window is
-# cheap). Measured 2026-10-20 on v0.5.0: 12,267 MiB used, 3,572 MiB free
-# after a short generation (v0.7.0, 2026-10-21: 11,166 used, 4,674 free,
-# 24.4 tok/s on the short prompt), 111 GB mmapped from page cache in under a
-# minute; the native 256K window is affordable here. Decode 22 tok/s on the
-# reviewer eval against the 122B's 18. MTP: the repo ships separate draft
-# files (MTP/*.gguf); not wired until draft-mtp for qwen4exp is confirmed on
-# this build, so that speed is a floor.
-#
-# Known fault, DEV-930 (cause found 2026-10-21; mitigations are DEV-934):
-# with thinking on, the model emits EOS inside its <think> block when it is
-# about to write a think-tag token as quoted text, so only prompts that
-# mention <think> or </think> trigger it (2 of the 8 reviewer eval tasks;
-# this repo's own source would). The Qwen tokenizer makes each tag one
-# USER_DEFINED token whatever parse_special says, v0.5.0 and v0.7.0 each
-# fail 6 of 15 diagnostic calls in different cells, de-fanging the input
-# rescued 3 of 4, and thinking off never failed. Nothing routes to these
-# agents until DEV-934's evals read clean with both mitigations as served:
-# escape_in_prompt below rewrites the two tags in every prompt (3 of 4 in
-# the think-tag test against 0 of 4 verbatim), and the server retries a
-# reasoning-only completion once with enable_thinking off (6 of 6).
+# Known fault, DEV-930 (cause found 2026-10-21; mitigations DEV-934): with
+# thinking on, the model emits EOS inside its <think> block when it is about
+# to write a think-tag token as quoted text, so only prompts that mention
+# <think> or </think> trigger it (this repo's own source does). The Qwen
+# tokenizer makes each tag one USER_DEFINED token whatever parse_special
+# says; v0.5.0 and v0.7.0 each failed 6 of 15 diagnostic calls in different
+# cells, de-fanging the input rescued 3 of 4, and thinking off never failed.
+# Both mitigations serve: escape_in_prompt below rewrites the two tags in
+# every prompt, and the server retries a reasoning-only completion once with
+# enable_thinking off (llama_server.proxy_sync). The DEV-934 eval ran 8 of 8
+# with neither a 502 nor a fallback.
 _MOE_FLASHNEXT = _create_model_config(
     'MODEL_PATH_FLASHNEXT',
     f'{_MODELS_ROOT}/unsloth/Qwen3.8-Flash-Next-GGUF/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf',
@@ -735,38 +719,25 @@ AGENTS = {
     # and `--model architect` still resolve; it just isn't separately listed in
     # /v1/models. Restore a distinct entry here if the interactive architect ever
     # needs to diverge (different model, prompt, or context) from the planner.
+    # Reviewer rung (DEV-935). reasoning_effort=medium as in DEV-928 and the
+    # DEV-930/934 eval arm: the 3.8 line overthinks at the template default.
     'deep_reviewer': _create_agent_config(
-        'Reviewer — Qwen3.5-122B Q4_K_M (10B/122B MoE, 256K ctx Q8_0, ngl=49 cpu_moe ub=3072, deep judgment)',
-        _REVIEWER_SYSTEM_PROMPT,
-        _MOE_122B,
-        executor=True
-    ),
-    # Synthesis and its repair round (DEV-406) have their own entry so that a
-    # reviewer repoint does not silently change the synthesizer, and usage
-    # telemetry can tell the two roles apart (DEV-900). It shares _MOE_122B
-    # with deep_reviewer, so both run in one llama-server child and a switch
-    # between them is no swap. The model was chosen for its size and 256K
-    # context, not measured for this job; DEV-902's replay eval decides it.
-    'synthesizer': _create_agent_config(
-        'Synthesizer — Qwen3.5-122B Q4_K_M (10B/122B MoE, 256K ctx Q8_0, ngl=49 cpu_moe ub=3072, same model as deep_reviewer)',
-        _SYNTHESIZER_SYSTEM_PROMPT,
-        _MOE_122B,
-        executor=True
-    ),
-    # Eval-only (DEV-930): the 122B rung's challenger, under the reviewer's
-    # prompt and under the architect's (the planner regime is single-turn
-    # on that prompt). reasoning_effort=medium as in DEV-928: the 3.8 line
-    # overthinks at the template default. Not in any rotation or default.
-    'flashnext_reviewer': _create_agent_config(
-        'Reviewer — Qwen3.8-Flash-Next UD-Q4_K_XL (6B/125B+51B MoE, 128K ctx Q8_0, ngl=49 cpu_moe, reasoning_effort=medium, DEV-930 eval arm)',
+        'Reviewer — Qwen3.8-Flash-Next UD-Q4_K_XL (6B/125B+51B MoE, 128K ctx Q8_0, ngl=49 cpu_moe, reasoning_effort=medium, deep judgment)',
         _REVIEWER_SYSTEM_PROMPT,
         _MOE_FLASHNEXT,
         executor=True,
         chat_template_kwargs={'reasoning_effort': 'medium'},
     ),
-    'flashnext_architect': _create_agent_config(
-        'Architect — Qwen3.8-Flash-Next UD-Q4_K_XL (6B/125B+51B MoE, 128K ctx Q8_0, ngl=49 cpu_moe, reasoning_effort=medium, DEV-930 eval arm)',
-        _ARCHITECT_SYSTEM_PROMPT,
+    # Synthesis and its repair round (DEV-406) have their own entry so that a
+    # reviewer repoint does not silently change the synthesizer, and usage
+    # telemetry can tell the two roles apart (DEV-900). It shares
+    # _MOE_FLASHNEXT with deep_reviewer, so both run in one llama-server
+    # child and a switch between them is no swap. It moved with the reviewer
+    # (DEV-935) on a synthesis-shaped parse check, not a replay eval;
+    # DEV-902's replay eval still decides the slot on its own merits.
+    'synthesizer': _create_agent_config(
+        'Synthesizer — Qwen3.8-Flash-Next UD-Q4_K_XL (6B/125B+51B MoE, 128K ctx Q8_0, ngl=49 cpu_moe, reasoning_effort=medium, same model as deep_reviewer)',
+        _SYNTHESIZER_SYSTEM_PROMPT,
         _MOE_FLASHNEXT,
         executor=True,
         chat_template_kwargs={'reasoning_effort': 'medium'},

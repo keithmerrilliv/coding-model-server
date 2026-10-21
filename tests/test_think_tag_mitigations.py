@@ -111,6 +111,6 @@ def test_a_second_reasoning_only_pass_is_the_502(mgr):
 
 def test_flash_next_lists_the_two_tags():
     from coding_model_server.roster import AGENTS
-    for name in ("flashnext_reviewer", "flashnext_architect"):
+    for name in ("deep_reviewer", "synthesizer"):
         assert AGENTS[name]["model_config"]["escape_in_prompt"] == ESCAPES
-    assert "escape_in_prompt" not in AGENTS["deep_reviewer"]["model_config"]
+    assert "escape_in_prompt" not in AGENTS["implementer"]["model_config"]

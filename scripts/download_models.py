@@ -29,14 +29,6 @@ MODELS = [
         "size": "~22 GB",
     },
     {
-        "id": 2,
-        "name": "Qwen3.5-122B-A10B Q4_K_M (3 shards)",
-        "repo": "unsloth/Qwen3.5-122B-A10B-GGUF",
-        "pattern": "Q4_K_M/*",
-        "local_dir": os.path.join(BASE_DIR, "Qwen3.5-122B-A10B-GGUF"),
-        "size": "~76.5 GB",
-    },
-    {
         "id": 3,
         "name": "Qwen3.5-397B-A17B IQ1_M (4 shards)",
         "repo": "unsloth/Qwen3.5-397B-A17B-GGUF",
@@ -77,7 +69,7 @@ MODELS = [
         "size": "~16.8 GB",
     },
     # Official GGUF from the lab, not an Unsloth requant — hence its own org dir.
-    # arch is qwen35moe, which build 5343f45 already speaks (same as the 122B).
+    # arch is qwen35moe, which build 5343f45 already speaks.
     # No longer wired to an agent: the `ornith` agent was retired 2026-07-14 after
     # losing the DEV-90 eval to `implementer`. Kept fetchable so DEV-98 (a Claude-
     # judged re-eval) can restore the config and re-run without re-hunting the repo.
@@ -107,10 +99,10 @@ MODELS = [
         "local_dir": os.path.join(MODELS_ROOT, "ornith-ai", "Ornith-1.5-35B-A3B-GGUF"),
         "size": "~21.7 GB",
     },
-    # Four shards plus the separate MTP draft files (DEV-930 eval arm).
+    # Four shards plus the separate MTP draft files. The reviewer rung since DEV-935.
     {
         "id": 11,
-        "name": "Qwen3.8-Flash-Next UD-Q4_K_XL (6B/125B+51B MoE, qwen-community, DEV-930 eval)",
+        "name": "Qwen3.8-Flash-Next UD-Q4_K_XL (6B/125B+51B MoE, qwen-community; deep_reviewer, synthesizer)",
         "repo": "unsloth/Qwen3.8-Flash-Next-GGUF",
         "pattern": ["UD-Q4_K_XL/*", "MTP/*Q8_0.gguf", "MTP/*Q4_K_M.gguf", "mtp-Qwen3.8-Flash-Next-Q8_0.gguf"],
         "local_dir": os.path.join(BASE_DIR, "Qwen3.8-Flash-Next-GGUF"),
