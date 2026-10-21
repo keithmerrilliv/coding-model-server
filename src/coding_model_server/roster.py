@@ -413,7 +413,13 @@ _MOE_ORNITH = _create_model_config(
     'MODEL_PATH_ORNITH',
     f'{_MODELS_ROOT}/ornith-ai/Ornith-1.5-35B-A3B-GGUF/Ornith-1.5-35B-Q4_K_M.gguf',
     41, 65536, 4608,
-    server_extra_args=['--jinja', '--reasoning-format', 'none', '--swa-full'],
+    # --reasoning-budget (DEV-931): the 1.5's template has no reasoning_effort,
+    # only enable_thinking, and on DEV-929's moe_offload task it reasoned to the
+    # 8,000-token cap four times running at temp 0 with an identical tail, so
+    # the request was a 502 (DEV-617). The forced </think> at 4096 is DEV-616's
+    # treatment of the 3.8; the daemon's allocator reserves the figure.
+    server_extra_args=['--jinja', '--reasoning-format', 'none', '--swa-full',
+                       '--reasoning-budget', '4096'],
     type_k=8, type_v=8,
     cpu_moe=True, n_cpu_moe=20, n_ubatch=4608,
     repeat_penalty=1.05,

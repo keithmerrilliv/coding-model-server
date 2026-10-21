@@ -233,7 +233,7 @@ for method, prefill figures, and the caveat about raw-vs-proxy numbers).
 | `moe_implementer` | Implementation | MiniMax M2.5 Q4_K_M | 10B/230B | 116K | Q4_0 | ngl 62, cpu_moe | 11.2 |
 | `glimmer_implementer` | Retry-only implementation | Muse-Glimmer-30B UD-Q4_K_XL | 3B/30B | 64K | Q4_0 | ngl 40, `--swa-full` | 13.2 § |
 | `qwen38_architect` | Architect, the design phase (DEV-928) | Qwen3.8-27B UD-Q4_K_M (dense) | 27B dense | 64K | Q4_0 | ngl 66, n_cpu_ffn 38, MTP speculative decode, `reasoning_effort=medium` | — |
-| `ornith` | Eval arm only (DEV-929, not in any rotation) | Ornith-1.5-35B-A3B Q4_K_M | 3B/35B | 64K | Q8_0 | ngl 41, n_cpu_moe 20 | — |
+| `ornith` | Eval arm only (DEV-929, not in any rotation) | Ornith-1.5-35B-A3B Q4_K_M | 3B/35B | 64K | Q8_0 | ngl 41, n_cpu_moe 20, `--reasoning-budget 4096` (DEV-931) | — |
 | `flashnext_reviewer`, `flashnext_architect` | Eval arms only (DEV-930, not in any rotation) | Qwen3.8-Flash-Next UD-Q4_K_XL | 6B/125B + 51B n-gram | 128K | Q8_0 | ngl 49, cpu_moe, `reasoning_effort=medium` | — |
 
 † Measured 2026-09-19 through the managed path on a 53,333-token architect
