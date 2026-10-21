@@ -28,6 +28,7 @@ from .prompts import (
 )
 from . import languages
 from .citations import render_cited_diagnostics
+from .apply_edits import describe_duplicated_regions
 
 
 logger = logging.getLogger("orchestrator.executor")
@@ -715,6 +716,14 @@ def _render_existing_files(existing_files: list[tuple[str, str]],
             continue
         budget -= len(content)
         out.append(f"### {path}\n\n````\n{content}\n````\n\n")
+        dup = describe_duplicated_regions(content) if edit_mode else ""
+        if dup:
+            out.append(
+                f"**Repeated text in `{path}`** — a SEARCH that falls inside "
+                "one of these regions matches every copy and is refused, and "
+                "adding more surrounding lines cannot help while the whole "
+                "region is repeated. Anchor on a line only one copy has:\n"
+                f"{dup}\n\n")
     if dropped:
         out.append(
             "**Not shown** (over the context budget): "
