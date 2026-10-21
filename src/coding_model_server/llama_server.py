@@ -209,6 +209,9 @@ class LlamaServerManager:
         # decides if proxy_stream must withhold tokens. Read from /props at load.
         # True until proven otherwise — see _probe_expects_thinking.
         self.current_expects_thinking: bool = True
+        # DEV-934: the loaded template takes enable_thinking, so a reasoning-only
+        # completion can be retried once with thinking off.
+        self.current_thinking_toggle: bool = False
         # Tuple of fields that must match for the running child to be reused.
         # Path equality alone isn't enough — two agents can serve one GGUF
         # with different n_ctx or n_ubatch, so a path-only check would let the second
@@ -612,6 +615,7 @@ class LlamaServerManager:
         caps = props.get('chat_template_caps')
         template = template if isinstance(template, str) else ''
         caps = caps if isinstance(caps, dict) else {}
+        self.current_thinking_toggle = 'enable_thinking' in template
         expects = ('<think>' in template) or bool(caps.get('supports_preserve_reasoning'))
         logger.info(
             "chat template %s reasoning — streaming is %s",
@@ -1553,6 +1557,22 @@ class LlamaServerManager:
                                parallel_tool_calls: Optional[bool],
                                chat_template_kwargs: Optional[Dict[str, Any]] = None) -> dict:
         mc = model_config or {}
+        # DEV-934: a model whose tokenizer turns certain text into control
+        # tokens wherever it appears (Qwen's <think> and </think> are single
+        # user-defined tokens with or without special parsing) can stop dead
+        # when it later quotes that text. The roster lists what to rewrite,
+        # per model, and the rewrite keeps the text readable. Copies, never
+        # mutates, the caller's messages.
+        escapes = mc.get('escape_in_prompt') or {}
+        if escapes:
+            def _escaped(m):
+                content = m.get("content")
+                if not isinstance(content, str):
+                    return m
+                for literal, safe in escapes.items():
+                    content = content.replace(literal, safe)
+                return {**m, "content": content}
+            openai_messages = [_escaped(m) for m in openai_messages]
         payload = {
             "messages": openai_messages,
             "max_tokens": max_tokens,
@@ -1787,51 +1807,80 @@ class LlamaServerManager:
             if not reserved:
                 self._active_requests += 1
         try:
-            resp = self._post_with_recovery(
-                url, payload, stream=False,
-                model_config=model_config, rid=rid,
-            )
-            if resp.status_code != 200:
-                logger.error(
-                    "[%s] llama-server returned %d: %s",
-                    rid, resp.status_code, resp.text,
+            attempt_kwargs = chat_template_kwargs
+            fallback_used = False
+            while True:
+                resp = self._post_with_recovery(
+                    url, payload, stream=False,
+                    model_config=model_config, rid=rid,
                 )
-                raise HTTPException(
-                    status_code=502,
-                    detail=f"upstream inference error (request_id={rid})",
-                )
+                if resp.status_code != 200:
+                    logger.error(
+                        "[%s] llama-server returned %d: %s",
+                        rid, resp.status_code, resp.text,
+                    )
+                    raise HTTPException(
+                        status_code=502,
+                        detail=f"upstream inference error (request_id={rid})",
+                    )
 
-            self._confirm_restore()
-            result = resp.json()
-            message = result["choices"][0].get("message", {})
-            text = message.get("content") or ""
-            finish_reason = result["choices"][0].get("finish_reason", "stop")
-            if (self.current_expects_thinking and finish_reason == "length"
-                    and '</think>' not in text):
-                # Truncated while still thinking: the whole body is raw
-                # reasoning. An orphan-template model emits no literal tags
-                # in this state, so strip_thinking would pass every char
-                # through — including tool markers the client executes for
-                # real (DEV-119).
-                logger.warning(
-                    "[%s] response hit max_tokens mid-reasoning — suppressing "
-                    "%d chars of unterminated thinking", rid, len(text),
-                )
-                text = ""
-            else:
-                text = strip_thinking(text)
-            tool_calls = message.get("tool_calls")
-            usage = dict(result.get("usage") or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
-            # DEV-760: the reasoning/visible split, so a budget spent thinking
-            # is a query rather than a journal read. Reasoning arrives either
-            # as a separate field (--reasoning-format deepseek) or inline and
-            # stripped above; both count.
-            raw_content = message.get("content") or ""
-            usage["reasoning_chars"] = (len(message.get("reasoning_content") or "")
-                                        + max(0, len(raw_content) - len(text)))
-            usage["visible_chars"] = len(text)
-            _reject_reasoning_only_completion(
-                text, tool_calls, usage, raw_content, rid)
+                self._confirm_restore()
+                result = resp.json()
+                message = result["choices"][0].get("message", {})
+                text = message.get("content") or ""
+                finish_reason = result["choices"][0].get("finish_reason", "stop")
+                if (self.current_expects_thinking and finish_reason == "length"
+                        and '</think>' not in text):
+                    # Truncated while still thinking: the whole body is raw
+                    # reasoning. An orphan-template model emits no literal tags
+                    # in this state, so strip_thinking would pass every char
+                    # through — including tool markers the client executes for
+                    # real (DEV-119).
+                    logger.warning(
+                        "[%s] response hit max_tokens mid-reasoning — suppressing "
+                        "%d chars of unterminated thinking", rid, len(text),
+                    )
+                    text = ""
+                else:
+                    text = strip_thinking(text)
+                tool_calls = message.get("tool_calls")
+                usage = dict(result.get("usage") or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
+                # DEV-760: the reasoning/visible split, so a budget spent thinking
+                # is a query rather than a journal read. Reasoning arrives either
+                # as a separate field (--reasoning-format deepseek) or inline and
+                # stripped above; both count.
+                raw_content = message.get("content") or ""
+                usage["reasoning_chars"] = (len(message.get("reasoning_content") or "")
+                                            + max(0, len(raw_content) - len(text)))
+                usage["visible_chars"] = len(text)
+                try:
+                    _reject_reasoning_only_completion(
+                        text, tool_calls, usage, raw_content, rid)
+                except HTTPException:
+                    if fallback_used or not self._thinking_fallback_applies(
+                            model_config, attempt_kwargs):
+                        raise
+                    # DEV-934: a retry that changes something (DEV-631). The
+                    # model spent its budget inside the think block, or stopped
+                    # dead in it; with thinking off the same prompt answers.
+                    # Thinking-on stays the policy: this fires per call, after
+                    # the failure, and the usage says it happened.
+                    logger.warning(
+                        "[%s] reasoning-only response from a template with "
+                        "enable_thinking — retrying once with thinking off "
+                        "(DEV-934)", rid)
+                    attempt_kwargs = {**(attempt_kwargs or {}),
+                                      'enable_thinking': False}
+                    payload = self._build_request_payload(
+                        openai_messages, max_tokens, temperature, False,
+                        model_config, tools, tool_choice, parallel_tool_calls,
+                        attempt_kwargs,
+                    )
+                    fallback_used = True
+                    continue
+                if fallback_used:
+                    usage["thinking_fallback"] = 1
+                break
 
             with self.lock:
                 self.last_request_time = time.time()
@@ -1844,6 +1893,18 @@ class LlamaServerManager:
                     self._live_proxies -= 1
                 if not reserved:
                     self._active_requests -= 1
+
+    def _thinking_fallback_applies(self, model_config: Optional[dict],
+                                   chat_template_kwargs: Optional[Dict[str, Any]]) -> bool:
+        """Can a reasoning-only completion be retried with thinking off?
+
+        Only when the loaded template takes enable_thinking and this call did
+        not already turn it off; a model with no toggle has nothing to retry
+        with, and a second identical call would be the same 502 (DEV-631).
+        """
+        if not self.current_thinking_toggle:
+            return False
+        return (chat_template_kwargs or {}).get('enable_thinking') is not False
 
     @staticmethod
     def _build_openai_messages(messages: List, system_prompt: str) -> List[dict]:

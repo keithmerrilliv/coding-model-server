@@ -189,7 +189,9 @@ def build_completion_response(model_id: str, text: str, usage: Dict[str, int],
     # DEV-760: how much of the completion was reasoning versus visible answer,
     # in characters (the server has no tokenizer for the split). Absent when a
     # backend did not measure it, so a missing number never reads as zero.
-    for key in ("reasoning_chars", "visible_chars"):
+    # thinking_fallback (DEV-934): 1 when the answer came from the thinking-off
+    # retry after a reasoning-only first pass; absent otherwise.
+    for key in ("reasoning_chars", "visible_chars", "thinking_fallback"):
         if isinstance(usage.get(key), int):
             out_usage[key] = usage[key]
     return {
