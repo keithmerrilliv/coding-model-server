@@ -343,7 +343,10 @@ async def verify_runner_key(
         if Config.ALLOW_UNAUTH:
             return
         raise HTTPException(500, "runner misconfigured: CODING_MODEL_RUNNER_API_KEY is empty")
-    if not x_runner_key or not hmac.compare_digest(x_runner_key, Config.API_KEY):
+    # Bytes, not str: compare_digest raises TypeError on a non-ASCII str.
+    if not x_runner_key or not hmac.compare_digest(
+        x_runner_key.encode("utf-8"), Config.API_KEY.encode("utf-8")
+    ):
         # A rejection used to leave no trace at all: 747 of them accumulated
         # over nine days, invisible on both sides, because the client swallows
         # a non-200 into a soft "problems" entry (DEV-620) and the server said

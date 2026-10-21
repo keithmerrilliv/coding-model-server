@@ -119,6 +119,15 @@ def test_key_mode_accepts_admin_header_and_bearer():
         _verify(_request_from("192.0.2.13"), authorization="Bearer sekrit")
 
 
+def test_key_mode_non_ascii_key_is_a_401_not_a_typeerror():
+    # hmac.compare_digest raises TypeError on a non-ASCII str, which would
+    # surface as a 500 on the unauthenticated path.
+    with _patch_key("sekrit"):
+        with pytest.raises(HTTPException) as exc:
+            _verify(_request_from("192.0.2.13"), x_admin_key="s\u00e9krit")
+        assert exc.value.status_code == 401
+
+
 def test_key_mode_rejects_wrong_or_missing_key():
     with _patch_key("sekrit"):
         for kwargs in (
