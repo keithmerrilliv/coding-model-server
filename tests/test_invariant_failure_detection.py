@@ -91,6 +91,51 @@ class TestCoarseKey:
         assert coarse_key(odd) == "build_failure|build_check|Thing.swift|x"   # DEV-783: + message
 
 
+class TestCoarseKeyOnSwiftTest:
+    """DEV-819: on swift_test the detail is the bare SwiftCompile line, so the
+    message and file have to come from the first located diagnostic of the
+    output the detail was drawn from."""
+
+    FILE = "Tests/CentipedeCoreTests/BoardSnapshotTests.swift"
+    WT = "/Users/km4/x/worktrees/spec_130f84de-ab6f04d4/"
+    HEAD = ("error: SwiftCompile normal arm64 " + WT + FILE +
+            " failed with a nonzero exit code. Command line: cd /Users/km4\n")
+    # Run 52, retry 3 and retry 4: unrelated defects in one file.
+    RETRY3 = (HEAD + "macro expansion #require:1:1: error: call can throw but is "
+              "not marked with 'try'\n`- " + WT + FILE +
+              ":73:70: note: expanded code originates here\nerror: Build failed\n")
+    RETRY4 = (HEAD + WT + FILE + ":80:12: error: value of type 'Game' has no "
+              "member 'playerPosition'\nerror: Build failed\n")
+
+    @staticmethod
+    def _classify(output):
+        from coding_model_autonomous import diagnostics as dg
+        from coding_model_autonomous.outcome import classify_test_run
+        return classify_test_run(
+            output, role="implementer", passed=False, unreachable=False,
+            build_reason=dg.detect_build_failure(output, "swift_test", False))
+
+    def test_run_52s_two_unrelated_errors_in_one_file_get_two_keys(self):
+        a, b = self._classify(self.RETRY3), self._classify(self.RETRY4)
+        assert a.detail == b.detail                       # the bare line: why it collapsed
+        assert coarse_key(a) != coarse_key(b)
+        assert coarse_key(a) == (
+            f"build_failure|build_check|{self.FILE}|call can throw but is not marked with 'try'")
+        assert coarse_key(b).endswith(f"{self.FILE}|value of type 'game' has no member 'playerposition'")
+
+    def test_the_same_error_twice_is_still_one_key(self):
+        again = self.RETRY4.replace(":80:12:", ":91:12:")   # the line moved, the defect did not
+        assert coarse_key(self._classify(self.RETRY4)) == coarse_key(self._classify(again))
+
+    def test_a_first_line_that_is_already_located_keeps_its_key(self):
+        out = ("/Users/km4/Library/Caches/coding-model-runner/worktrees/spec_c1e1c9ac-277805d1/"
+               "Sources/CentipedeCore/Game.swift:27:14: error: value of type 'Game' has no member 'nextExtraLifeAt'\n")
+        f = self._classify(out)
+        legacy = Failure(FailureClass.BUILD_FAILURE, "implementer", "build_check",
+                         f.detail, phase=f.phase)          # no located diagnostic attached
+        assert coarse_key(f) == coarse_key(legacy)
+
+
 class TestAttemptAgent:
     def test_reads_the_rotations_pick_off_the_generation_event(self, db, spec_task):
         spec, task = spec_task
