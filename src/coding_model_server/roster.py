@@ -16,23 +16,32 @@ from .agent_prompts import (
 )
 
 
-# llama-server v0.5.0 (patched for upstream #27792, DEV-852) serves every config
-# below. Each was measured on v0.4.1 and v0.5.0 back to back, on the argv
-# LlamaServerManager builds, with the desktop holding 921 MiB (the free-MiB
-# figures in the per-config notes were taken on other builds and other desktop
-# sizes: read them as deltas, not absolutes). Decode tok/s, short (116-token)
-# prompt / ~22K-token prompt, then MiB free after load:
-#   implementer      69.8 / 65.9    823    (v0.4.1: 70.9 / 66.9   827)
-#   deep_implementer 23.2 / 22.5   5285    (v0.4.1: 23.3 / 22.8  5541)
-#   fast_implementer 52.8 / 41.2   1559    (v0.4.1: 53.6 / 41.6  1557)
-#   deep_reviewer    17.0 / 16.0   2635    (v0.4.1: 17.7 / 16.9  2593)
-#   moe_implementer   9.9 /  8.8   1650    (v0.4.1: 10.2 /  9.0  1615)
-#   dense_architect  20.5 / 15.8    710    (identical to v0.4.1)
-#   glimmer          11.2 /  9.9   1573    (identical to v0.4.1)
-# Speed is within run-to-run noise and prefill within 1%. Only deep_implementer
-# moved in memory (256 MiB more). Greedy output differs from v0.4.1 on the five
-# MoE configs and matches on the two dense ones. dense_architect has the least
-# headroom of the seven.
+# llama-server v0.7.0 (upstream 620d222, no local patch: #29941 and #29953
+# carry the MUL_MAT_ID padding fix that DEV-852 patched locally on v0.4.1 and
+# v0.5.0) serves every config below. Each was measured on v0.5.0 and v0.7.0
+# back to back on 2026-10-21 (DEV-933), on the argv LlamaServerManager builds,
+# with the desktop holding 1,108 MiB (the free-MiB figures in the per-config
+# notes were taken on other builds and other desktop sizes: read them as
+# deltas, not absolutes). Decode tok/s, short (116-token) prompt / ~22K-token
+# prompt, then MiB free after load:
+#   implementer      81.6 / 74.6    649    (v0.5.0: 80.2 / 74.5   717)
+#   ornith           72.7 / 69.5   1307    (v0.5.0: 69.1 / 66.2  1343)
+#   deep_implementer 25.9 / 25.9   5512    (v0.5.0: 25.8 / 25.3  5172)
+#   fast_implementer 63.3 / 48.3   1311    (v0.5.0: 59.2 / 46.4  1311)
+#   deep_reviewer    20.6 / 19.6   2554    (v0.5.0: 19.8 / 18.9  2422)
+#   flashnext        24.4 /  --    4674    (v0.5.0: 21.6 / 21.7  3582)
+#   moe_implementer  12.0 / 10.3   1304    (v0.5.0: 11.1 /  9.7  1400)
+#   dense_architect  24.3 / 17.9    432    (v0.5.0: 23.6 / 17.9   460)
+#   qwen38_architect 20.5 / 16.0   1202    (v0.5.0: 20.0 / 15.5  1270)
+#   glimmer          13.8 / 11.8   1259    (v0.5.0: 13.4 / 11.5  1314)
+# Decode is level or up to 8% faster and prefill up 2-15% on the GPU-resident
+# configs. Memory moved both ways: the cpu_moe rungs with experts in host RAM
+# got lighter (deep_implementer 340 MiB, deep_reviewer 132, flashnext 1,092)
+# and the GPU-resident configs 28-96 MiB heavier. dense_architect has the
+# least headroom. Greedy output differs from v0.5.0 on seven configs and
+# matches on three (fast_implementer, moe_implementer, glimmer). flashnext's
+# long-prompt decode on v0.7.0 returned no tokens on the raw /completion
+# bench (a 22K-token source file as the prompt); DEV-934 owns that.
 
 
 # Root for model weights. Every model config also has its own MODEL_PATH_*
@@ -174,7 +183,8 @@ _MOE_30B_FAST = _create_model_config(
 # NEXT: Qwen3-Coder-Next-Q8_0 (80B MoE with 3B active params)
 # Very smart but runs mostly on system RAM (slow). Native 256k context enabled.
 # ngl=48 (--cpu-moe): 8,304 MiB free. All 48 attention layers on GPU.
-# v0.5.0 needs 256 MiB more than v0.4.1 for this config (5,285 vs 5,541 free).
+# v0.7.0 frees 340 MiB against v0.5.0 for this config (5,512 vs 5,172 free,
+# 2026-10-21); v0.5.0 had needed 256 MiB more than v0.4.1.
 # --swa-full enables prompt cache reuse (avoids full re-prefill each turn).
 # n_batch/n_ubatch=4096 for faster prefill (8 GB headroom supports large batches).
 _MOE_80B_Q8 = _create_model_config(
@@ -287,28 +297,29 @@ _MOE_122B = _create_model_config(
 # used, 640-wide) plus a 51B n-gram embedding table, 6B active per token;
 # arch qwen4exp, 48 blocks, full_attention_interval=4 so 12 blocks keep a KV
 # cache (2 KV heads) and 36 hold DeltaNet state; 262144 native context. The
-# 09-28 llama-server build (v0.5.0) carries the arch. Licence is
-# qwen-community-1.0, not Apache: a repoint needs Keith's sign-off on that.
+# llama-server has carried the arch since v0.5.0; v0.7.0 adds the upstream
+# qwen4exp fix (#29751) and its MTP (#29761). Licence is qwen-community-1.0,
+# not Apache; Keith accepted it 2026-10-21 for this non-commercial use.
 #
 # Rung: all blocks on the GPU with the experts on the CPU, the 122B's shape,
 # at a 128K window and Q8_0 KV (12 KV blocks of 2 heads, so the window is
 # cheap). Measured 2026-10-20 on v0.5.0: 12,267 MiB used, 3,572 MiB free
-# after a short generation, 111 GB mmapped from page cache in under a
+# after a short generation (v0.7.0, 2026-10-21: 11,166 used, 4,674 free,
+# 24.4 tok/s on the short prompt), 111 GB mmapped from page cache in under a
 # minute; the native 256K window is affordable here. Decode 22 tok/s on the
 # reviewer eval against the 122B's 18. MTP: the repo ships separate draft
 # files (MTP/*.gguf); not wired until draft-mtp for qwen4exp is confirmed on
 # this build, so that speed is a floor.
 #
-# Known fault, open on DEV-930: with thinking on, the model sometimes emits
-# EOS inside its <think> block at 28-169 tokens, mid-word, and the server
-# returns a reasoning-only 502. It moved with the prompt and with
-# reasoning_effort in no monotone pattern (2 of 8 reviewer prompts in the
-# eval, 5 of 12 probe calls across medium/high/low/xhigh); with
-# enable_thinking=False it did not occur in 3 of 3. A natural stop in the
-# journal (truncated = 0), so the candidates are the llama.cpp build, the
-# template's think handling under --reasoning-format none, and
-# --reasoning-budget as a forced close. Nothing routes to these agents until
-# that is settled.
+# Known fault, DEV-930 (cause found 2026-10-21; mitigations are DEV-934):
+# with thinking on, the model emits EOS inside its <think> block when it is
+# about to write a think-tag token as quoted text, so only prompts that
+# mention <think> or </think> trigger it (2 of the 8 reviewer eval tasks;
+# this repo's own source would). The Qwen tokenizer makes each tag one
+# USER_DEFINED token whatever parse_special says, v0.5.0 and v0.7.0 each
+# fail 6 of 15 diagnostic calls in different cells, de-fanging the input
+# rescued 3 of 4, and thinking off never failed. Nothing routes to these
+# agents until DEV-934's payload escape and thinking-off fallback are in.
 _MOE_FLASHNEXT = _create_model_config(
     'MODEL_PATH_FLASHNEXT',
     f'{_MODELS_ROOT}/unsloth/Qwen3.8-Flash-Next-GGUF/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf',
@@ -554,6 +565,7 @@ _DENSE_27B = _create_model_config(
 #   ngl=46 (DEV-740 rung)       463 MiB free
 #   ngl=66, n_cpu_ffn=33        555 MiB free   (the 3.6 reads ~950 here)
 #   ngl=66, n_cpu_ffn=38      1,273 MiB free   <- this config
+#   (v0.7.0, 2026-10-21, desktop 1,108: 1,202 free, 68 MiB heavier)
 # The 3.8's footprint is ~400 MiB heavier than the 3.6's at the same rung,
 # so it pays five more blocks of FFN on the CPU for the reload floor.
 _DENSE_27B_38 = _create_model_config(
