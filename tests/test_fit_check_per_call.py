@@ -12,7 +12,7 @@ from coding_model_autonomous import executor
 from coding_model_autonomous import retry_policy as rp
 from coding_model_autonomous.models import EventKind
 
-WINDOWS = {"implementer": 65536, "glimmer_implementer": 65536,
+WINDOWS = {"implementer": 65536, "glimmer_implementer": 65536, "ornith": 65536,
            "moe_implementer": 118784, "fast_implementer": 65536,
            "deep_implementer": 262144}
 COMPLETION = 16000

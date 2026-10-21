@@ -208,6 +208,10 @@ def _select_implementer_agent(spec_dir) -> "str | None":
 #
 #   implementer          165 s per call, 64 tok/s decode
 #   fast_implementer     the roster's other fast decoder, same 64K window
+#   ornith               65 tok/s decode but ~1.6x the implementer's tokens
+#                        per task (DEV-931), so ~250 s per call: a second
+#                        training lineage on the same 35B-A3B shape, served
+#                        with a 4096-token reasoning budget
 #   moe_implementer      6.6-9 tok/s decode
 #   glimmer_implementer  1,041 s per call, 11 tok/s; ~93 of its 251 minutes
 #                        went to attempts that then failed
@@ -227,12 +231,15 @@ def _select_implementer_agent(spec_dir) -> "str | None":
 # per-file/manifest budget on reasoning (even with --reasoning-budget 0, which
 # it ignores) and truncates without emitting usable code.
 #
-# GLIMMER IS RETRY-ONLY, and deliberately so. It is in this list but NOT in
-# ALLOWED_IMPLEMENTER_AGENTS or TIER_TO_IMPLEMENTER, so no architect
-# recommendation and no complexity tier can put it on attempt 1. Attempt 1 is
-# the only attempt whose agent is chosen rather than rotated into, so it is the
-# only one comparable across runs (DEV-431); keeping Glimmer off it leaves that
-# comparison intact while the model earns its record on retries.
+# GLIMMER AND ORNITH ARE RETRY-ONLY, and deliberately so. They are in this
+# list but NOT in ALLOWED_IMPLEMENTER_AGENTS or TIER_TO_IMPLEMENTER, so no
+# architect recommendation and no complexity tier can put them on attempt 1.
+# Attempt 1 is the only attempt whose agent is chosen rather than rotated
+# into, so it is the only one comparable across runs (DEV-431); keeping them
+# off it leaves that comparison intact while each model earns its record on
+# retries. Ornith entered 2026-10-21 on DEV-931's 4-3-1 over the incumbent
+# with 8/8 answered, a margin inside the judge's noise on an 8-task set and a
+# 57% token premium: evidence for a retry slot, not for attempt 1.
 #
 # WHY THIS IS SAFE DESPITE DEV-727. Glimmer 500s inside llama-server whenever it
 # emits a tool call in harmony recipient syntax (`to=<<<MARKER>>>`), which it
@@ -253,7 +260,7 @@ def _select_implementer_agent(spec_dir) -> "str | None":
 # window is the only one some self-target prompts fit, and eligible_agents()
 # still routes those to it (sole_fit).
 _IMPLEMENTER_ROTATION = [
-    "implementer", "fast_implementer", "moe_implementer",
+    "implementer", "fast_implementer", "ornith", "moe_implementer",
     "glimmer_implementer", "deep_implementer",
 ]
 

@@ -687,8 +687,11 @@ AGENTS = {
     # Eval-only (DEV-929): same prompt and executor wiring as `implementer`,
     # deliberately, so the model is the only variable. Ornith-1.0 lost the
     # DEV-90 eval; this is the 1.5 release. Not in any rotation or default.
+    # Retry-only (DEV-931): in _IMPLEMENTER_ROTATION after fast_implementer,
+    # not in ALLOWED_IMPLEMENTER_AGENTS or TIER_TO_IMPLEMENTER; retry_policy
+    # says why. Being in AGENTS arms the DEV-676 window fit check for it.
     'ornith': _create_agent_config(
-        'Implementer — Ornith-1.5-35B-A3B Q4_K_M (3B/35B MoE, 64K ctx Q8_0, ngl=41 n_cpu_moe=20, DEV-929 eval arm)',
+        'Implementer — Ornith-1.5-35B-A3B Q4_K_M (3B/35B MoE, 64K ctx Q8_0, ngl=41 n_cpu_moe=20, --reasoning-budget 4096, retry-only since DEV-931)',
         _IMPLEMENTER_SYSTEM_PROMPT,
         _MOE_ORNITH,
         executor=True
