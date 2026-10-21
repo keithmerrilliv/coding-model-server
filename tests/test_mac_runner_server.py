@@ -137,6 +137,15 @@ def test_bad_key_is_rejected(client):
     assert resp.status_code == 401
 
 
+def test_non_ascii_key_is_rejected_not_a_500(client):
+    resp = client.post(
+        "/v1/run_tests",
+        headers={"X-Runner-Key": "t\u00e9st-key".encode("utf-8")},
+        json={"spec_id": "s1", "repo": "proj", "framework": "swift_test"},
+    )
+    assert resp.status_code == 401
+
+
 # ── DEV-126: LLM-authored builds run confined ────────────────────────────────
 
 def _capture_cmd(monkeypatch):

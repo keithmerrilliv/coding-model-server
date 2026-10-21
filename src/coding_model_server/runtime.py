@@ -119,7 +119,11 @@ async def verify_admin_key(
         scheme, _, token = authorization.partition(' ')
         if scheme.lower() == 'bearer' and token:
             candidate = token.strip()
-    if not candidate or not hmac.compare_digest(candidate, Config.ADMIN_API_KEY):
+    # Bytes, not str: compare_digest raises TypeError on a non-ASCII str, which
+    # would turn a bad key into a 500.
+    if not candidate or not hmac.compare_digest(
+        candidate.encode("utf-8"), Config.ADMIN_API_KEY.encode("utf-8")
+    ):
         raise HTTPException(status_code=401, detail="Invalid or missing admin API key")
 
 
