@@ -204,6 +204,11 @@ class Failure:
     phase: str = ""              # free text for the event (e.g. "existing_fetch")
     charge_role: str = ""        # verdict: whose budget pays (defaults to role)
     extra: dict = field(default_factory=dict)
+    # (path, message) of the first located compiler error in the output the
+    # detail was drawn from. The detail is one truncated line and, on
+    # swift_test, that line is the bare "SwiftCompile ... failed", so the
+    # identity of a build failure cannot be read back out of it.
+    located: Optional[tuple] = None
 
     @property
     def outcome(self) -> Outcome:
@@ -441,8 +446,10 @@ def classify_test_run(output: str, *, role: str, passed: bool,
                                f"the sandbox cannot import the repository's own "
                                f"package {top!r}: {build_reason}", phase=phase,
                                extra={"module": m.group(1)})
+        first = next(iter(_diagnostics.located_diagnostics(output or "")), None)
         return Failure(FailureClass.BUILD_FAILURE, role, "build_check",
-                       build_reason, feedback=feedback, phase=phase)
+                       build_reason, feedback=feedback, phase=phase,
+                       located=(first.path, first.message) if first else None)
     if not passed:
         return Failure(FailureClass.TESTS_FAILED, role, "tests",
                        (output or "").strip().splitlines()[-1] if output else "tests failed",
@@ -666,7 +673,11 @@ _diagnostic_identity = _diagnostics.diagnostic_identity
 
 def coarse_key(failure: Failure) -> str:
     """Identity of a failure for invariance detection: class | phase | path,
-    plus the compiler's message for a build failure (DEV-783).
+    plus the compiler's message for a build failure (DEV-783). A build
+    failure that carries its first located diagnostic keys on that diagnostic's
+    file and message; the detail's first line stands in only when it does not
+    (swift_test's is the bare "SwiftCompile ... failed", the same for every
+    error in a file).
 
     The path is repository-relative (`repo_relative`): run 31's first Mac
     build failure keyed on `…/worktrees/spec_c1e1c9ac-277805d1/Sources/…`,
@@ -674,13 +685,17 @@ def coarse_key(failure: Failure) -> str:
     failures on the Mac runner never matched and the invariance hand-off
     was unreachable there (DEV-672).
     """
-    m = _KEY_PATH_RE.search(failure.detail or "")
-    path = repo_relative(m.group(1)) if m else ""
+    build = failure.cls is FailureClass.BUILD_FAILURE
+    located = failure.located if build else None
+    if located:
+        path, msg = repo_relative(located[0]), _diagnostics.normalise_message(located[1])
+    else:
+        m = _KEY_PATH_RE.search(failure.detail or "")
+        path = repo_relative(m.group(1)) if m else ""
+        msg = _diagnostic_identity(failure.detail) if build else ""
     key = f"{failure.cls.value}|{failure.phase}|{path}"
-    if failure.cls is FailureClass.BUILD_FAILURE:
-        msg = _diagnostic_identity(failure.detail)
-        if msg:
-            key += f"|{msg}"
+    if msg:
+        key += f"|{msg}"
     return key
 
 

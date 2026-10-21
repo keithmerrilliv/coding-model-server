@@ -350,12 +350,16 @@ KEY_PATH_RE = re.compile(r"((?:[\w.+-]+/)+[\w.+-]+\.[A-Za-z0-9]+)")
 DIAG_MESSAGE_RE = re.compile(r":\d+:\d+:\s*(?:error|warning):\s*(.+)$")
 
 
+def normalise_message(msg: str) -> str:
+    """A compiler message reduced to what identifies it."""
+    return " ".join(msg.lower().split())[:160]
+
+
 def diagnostic_identity(detail: str) -> str:
     """The first compiler message in *detail*, normalised, or ""."""
     first = (detail or "").strip().splitlines()[0] if (detail or "").strip() else ""
     m = DIAG_MESSAGE_RE.search(first)
-    msg = m.group(1) if m else ""
-    return " ".join(msg.lower().split())[:160]
+    return normalise_message(m.group(1) if m else "")
 
 
 # DEV-764/767: the `path:line` citations a build reported, for the repair
