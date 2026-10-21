@@ -203,6 +203,84 @@ def _describe_ambiguity(content_lines: list[str], starts: list[int]) -> str:
     return text
 
 
+# A run of this many consecutive lines, repeated byte-for-byte, is a region a
+# SEARCH cannot address without a line only one copy has. Shorter repeats are
+# ordinary boilerplate and the match ladder's context lines disambiguate them.
+# Eight lines flags 3.7% of this repository's code files; six flagged 9%, mostly
+# incidental `try:`/`with` blocks.
+_DUP_MIN_LINES = 8
+# Fewer significant characters than this and the run is brace and blank-line
+# scaffolding, which says nothing about where an edit belongs.
+_DUP_MIN_CHARS = 160
+_DUP_MAX_REPORTED = 3
+
+
+def duplicated_regions(content: str) -> list[tuple[int, list[int], str]]:
+    """Regions of *content* that occur more than once, longest first.
+
+    Each is ``(length_in_lines, [1-based start line of every copy], first
+    line)``. At most ``_DUP_MAX_REPORTED``, none overlapping a longer one.
+    Run 47's `Coordinator` class was duplicated under `#if os(macOS)` and
+    `#elseif os(iOS)`; two attempts were spent on a SEARCH that matched both
+    copies before anything told the model the copies existed (DEV-763).
+    """
+    lines = [ln.rstrip() for ln in content.split("\n")]
+    n = len(lines)
+    if n < 2 * _DUP_MIN_LINES:
+        return []
+
+    def significant(i: int) -> int:
+        return sum(len(ln.strip()) for ln in lines[i:i + _DUP_MIN_LINES])
+
+    windows: dict[tuple, list[int]] = {}
+    for i in range(n - _DUP_MIN_LINES + 1):
+        if significant(i) >= _DUP_MIN_CHARS:
+            windows.setdefault(tuple(lines[i:i + _DUP_MIN_LINES]), []).append(i)
+
+    found: list[tuple[int, list[int], str]] = []
+    for starts in windows.values():
+        # Copies closer than one window are a repeating pattern (a table of
+        # similar rows), not a duplicated region.
+        if len(starts) < 2 or min(b - a for a, b in zip(starts, starts[1:])) < _DUP_MIN_LINES:
+            continue
+        length = _DUP_MIN_LINES
+        # Grow the region while every copy continues identically; stop at the
+        # file end and before a copy would run into the next one.
+        gap = min(b - a for a, b in zip(starts, starts[1:]))
+        while (length < gap
+               and all(s + length < n for s in starts)
+               and len({lines[s + length] for s in starts}) == 1):
+            length += 1
+        found.append((length, starts, lines[starts[0]].strip()))
+
+    found.sort(key=lambda r: (-r[0], r[1][0]))
+    chosen: list[tuple[int, list[int], str]] = []
+    covered: list[tuple[int, int]] = []
+    for length, starts, first in found:
+        spans = [(s, s + length) for s in starts]
+        if any(a < d and c < b for a, b in spans for c, d in covered):
+            continue                      # a window of a region already reported
+        covered.extend(spans)
+        chosen.append((length, [s + 1 for s in starts], first))
+        if len(chosen) == _DUP_MAX_REPORTED:
+            break
+    return chosen
+
+
+def describe_duplicated_regions(content: str) -> str:
+    """One bullet per duplicated region, or "" when the file has none."""
+    regions = duplicated_regions(content)
+    if not regions:
+        return ""
+    lines = content.split("\n")
+    out = []
+    for length, starts, first in regions:
+        out.append(
+            f"- {length} lines beginning `{first[:70]}` appear {len(starts)}x"
+            + _describe_ambiguity(lines, [s - 1 for s in starts]))
+    return "\n".join(out)
+
+
 def _snippet(text: str, max_lines: int = 4) -> str:
     """A short, indented preview of a SEARCH body for diagnostics."""
     lines = text.splitlines()
