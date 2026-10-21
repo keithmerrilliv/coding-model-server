@@ -239,3 +239,51 @@ export interface RagStatsResponse {
   hit_rate: number | null;
   recent: RagEvent[];
 }
+
+// Video (GoPro) pipeline snapshot (DEV-401). Mirrors the JSON that
+// ~/Dev/video-pipeline writes, plus `active`/`stale_seconds`, which the server
+// derives from the process table and the file's age.
+export type VideoJobStatus =
+  'pending' | 'running' | 'done' | 'failed' | 'skipped' | 'passthrough';
+
+export interface VideoJob {
+  key: string;
+  source_dir: string;
+  recording: string;
+  chapters: number;
+  input_bytes: number;
+  duration_s: number | null;
+  status: VideoJobStatus;
+  stage: '' | 'merge' | 'verify' | 'transcode';
+  progress: number;
+  speed: number | null;
+  output: string | null;
+  output_bytes: number | null;
+  started_at: number | null;
+  finished_at: number | null;
+  note: string;
+}
+
+export interface VideoEvent {
+  t: number;
+  level: 'info' | 'error';
+  message: string;
+}
+
+export type VideoPipelineResponse =
+  | { available: false; reason: string }
+  | {
+      available: true;
+      active: boolean;
+      stale_seconds: number;
+      run_id: string;
+      started_at: number;
+      finished_at: number | null;
+      root: string;
+      out_root: string;
+      transcode: 'hevc' | 'av1' | null;
+      dry_run: boolean;
+      summary: { counts: Partial<Record<VideoJobStatus, number>>; input_bytes: number; output_bytes: number };
+      jobs: VideoJob[];
+      events: VideoEvent[];
+    };
