@@ -161,12 +161,24 @@ export interface HostSample {
   load1: number | null;
   load5: number | null;
   load15: number | null;
+  /** Host memory from /proc/meminfo, MiB. All null when it was unreadable. */
+  mem_total_mib: number | null;
+  mem_available_mib: number | null;
+  /** MemTotal − MemAvailable: page cache is NOT counted as used. */
+  mem_used_mib: number | null;
+  /** Cached + Buffers. On this host the mmapped model weights live here. */
+  mem_cached_mib: number | null;
+  mem_dirty_mib: number | null;
+  swap_total_mib: number | null;
+  swap_used_mib: number | null;
 }
 
 export interface HostStatsResponse {
   available: boolean;
   interval_s: number;
   cpu_count: number | null;
+  /** Last MemTotal read, for the memory axis. Null until a sample has read it. */
+  mem_total_mib: number | null;
   /** False when the RAPL counter is root-only, which is the default. */
   cpu_power_available: boolean;
   /** Why power is missing, shown to the reader instead of a fake number. */
