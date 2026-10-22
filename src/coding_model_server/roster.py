@@ -24,7 +24,7 @@ from .agent_prompts import (
 # notes were taken on other builds and other desktop sizes: read them as
 # deltas, not absolutes). Decode tok/s, short (116-token) prompt / ~22K-token
 # prompt, then MiB free after load:
-#   implementer      81.6 / 74.6    649    (v0.5.0: 80.2 / 74.5   717)
+#   implementer      81.6 / 74.6    649    (v0.5.0: 80.2 / 74.5   717)  n_cpu_moe 20; 22 since DEV-940
 #   ornith           72.7 / 69.5   1307    (v0.5.0: 69.1 / 66.2  1343)
 #   deep_implementer 25.9 / 25.9   5512    (v0.5.0: 25.8 / 25.3  5172)
 #   fast_implementer 63.3 / 48.3   1311    (v0.5.0: 59.2 / 46.4  1311)
@@ -395,13 +395,34 @@ _MOE_FLASHNEXT = _create_model_config(
 # today's numbers the old guard would NOT have refused the reload, so that
 # note's account of the brick does not reproduce as written. The brick was
 # real (see DEV-94); the free-VRAM figure attached to it was not reliable.
+#
+# CHANGED TO 22 (2026-10-22, DEV-940). The 1,842 MiB free of the 07-14 sweep
+# was gone: on llama-server v0.7.0 with the desktop holding ~1,170 MiB
+# (Sunshine, a Chrome GPU process, the compositor) the rung at 20 measured
+# 497 and 584 MiB free after load on two spawns, under or at the 500 MiB
+# _VRAM_MARGIN_MIB that admits a RELOAD, which is the DEV-742 brick one
+# desktop process away. Levers measured standalone the same night, same
+# session, production argv, 64K window, free MiB after load / decode tok/s
+# short / ~22K / prefill tok/s long:
+#   ub 4608, moe 20 (was)   584   76.9 / 72.5 / 3,520
+#   ub 4096, moe 20         736   78.2 / 72.2 / 3,101   (ubatch buys 152, not
+#                                                        the ~830 the 05-04 note
+#                                                        extrapolated; -12% prefill)
+#   ub 4608, moe 21       1,048   75.5 / 70.7 / 3,437
+#   ub 4608, moe 22       1,512   73.6 / 68.6 / 3,389   <- now
+#   ub 4096, moe 21       1,200   75.2 / 70.8 / 3,156
+# 22 is the one lever that clears the ~1,400 MiB swap floor on its own, at
+# about 5% decode. 21 would do for the reload margin alone; the floor is the
+# swap-time OOM (spec_fa78ca9c), so it wins. A larger window (DEV-937, 96K)
+# was measured the same night and declined: 812 free at Q8_0 KV at this
+# setting, and the 64K agents fit two thirds of implementer prompts as is.
 _MOE_35B = _create_model_config(
     'MODEL_PATH_35B',
     f'{_MODELS_ROOT}/unsloth/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf',
     41, 65536, 4608,
     server_extra_args=['--jinja', '--reasoning-format', 'none', '--swa-full'],
     type_k=8, type_v=8,
-    cpu_moe=True, n_cpu_moe=20, n_ubatch=4608,
+    cpu_moe=True, n_cpu_moe=22, n_ubatch=4608,
     repeat_penalty=1.05,
 )
 
