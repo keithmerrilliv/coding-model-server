@@ -143,6 +143,7 @@ class EditFailure:
     block: int
     reason: str      # "not_found" | "ambiguous" | "empty_search" | "no_base"
                      # | "malformed" | "placeholder_path" (DEV-690)
+                     # | "mislabelled_marker" (DEV-938)
     search: str
     detail: str      # the same human-readable text that appears in ``errors``
 
@@ -296,6 +297,11 @@ def _snippet(text: str, max_lines: int = 4) -> str:
 # "Edit 1." labels. Only a trailing parenthetical, and only when what is left
 # is a file the caller knows exists.
 _HEADER_LABEL_RE = re.compile(r"^(.*\S)[ \t]+\([^()]*\)$")
+# DEV-938: the label can also follow the path after a dash or a colon, as in
+# `README.md — Edit 1 (replace the bullet)`, the shape spec_c3f76d6f's
+# implementer copied from the spec's own prose. A path has no whitespace, so
+# the first whitespace-delimited token is the only candidate.
+_LABEL_SPLIT_RE = re.compile(r"[ \t]+(?:[—–:-][ \t]*)?|[ \t]*:[ \t]+")
 
 
 def _known_path(path: str, known_paths: "set[str] | None") -> str:
@@ -304,7 +310,15 @@ def _known_path(path: str, known_paths: "set[str] | None") -> str:
     m = _HEADER_LABEL_RE.match(path)
     if m and m.group(1) in known_paths:
         return m.group(1)
+    head = _LABEL_SPLIT_RE.split(path, maxsplit=1)[0].strip().strip("`")
+    if head and head in known_paths:
+        return head
     return path
+
+
+def _looks_like_a_label(path: str) -> bool:
+    """A marker that carries prose after the path, not a path at all."""
+    return bool(re.search(r"\s", path.strip()))
 
 
 def parse_edit_blocks(text: str,
@@ -388,7 +402,8 @@ def parse_edit_blocks(text: str,
         else:
             fm = _FILE_OPEN_RE.match(line)
             if fm:
-                current_path = fm.group(1).strip().strip("`").lstrip("/").strip()
+                current_path = _known_path(
+                    fm.group(1).strip().strip("`").lstrip("/").strip(), known_paths)
             elif _FILE_CLOSE_RE.match(line):
                 # The FILE block is over; a later stray block must not be
                 # attributed to it.
@@ -781,6 +796,29 @@ def resolve_edits(
                     path=fe.path, block=0, reason="placeholder_path",
                     search=fe.blocks[0].search if fe.blocks else "",
                     detail=detail))
+                continue
+            # DEV-938: a "path" with whitespace in it is a marker that carries a
+            # label the model copied from the spec, not a file. Telling it to
+            # emit that name whole coaxes a junk path into the tree (which the
+            # delivery would then push); say what the marker must be instead.
+            if _looks_like_a_label(fe.path):
+                head = _LABEL_SPLIT_RE.split(fe.path, maxsplit=1)[0].strip().strip("`")
+                detail = (
+                    f"`{fe.path}` is not a file path: a FILE marker or `###` "
+                    "header must carry the bare path and nothing else. "
+                    + (f"These SEARCH/REPLACE blocks belong under "
+                       f"<<<FILE: {head}>>>; re-emit them there. "
+                       if head and head in existing else
+                       f"`{head}` was not shown to you: if it is a planned NEW "
+                       f"file, emit it whole as <<<FILE: {head}>>>; otherwise "
+                       "re-emit the blocks under the bare path of the file they "
+                       "edit. ")
+                    + "Do NOT emit a whole file at the labelled name: a path "
+                    "with whitespace is refused when written.")
+                errors.append(detail)
+                failures.append(EditFailure(
+                    path=fe.path, block=0, reason="mislabelled_marker",
+                    search=fe.blocks[0].search if fe.blocks else "", detail=detail))
                 continue
             # Otherwise the model emitted edit blocks for a file we never showed
             # it — there is no base content to apply against. Never invent one.
