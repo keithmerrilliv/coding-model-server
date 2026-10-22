@@ -122,3 +122,64 @@ class TestSnapshotContract:
     def test_reports_the_thread_count(self, sampler):
         assert sampler.snapshot()["cpu_count"] is None or \
             sampler.snapshot()["cpu_count"] > 0
+
+
+MEMINFO = """MemTotal:       193166928 kB
+MemFree:        11396528 kB
+MemAvailable:   183935088 kB
+Buffers:          152312 kB
+Cached:         172262292 kB
+SwapCached:        12345 kB
+Dirty:          27387932 kB
+Shmem:            895192 kB
+SwapTotal:       8388604 kB
+SwapFree:          85420 kB
+"""
+
+
+class TestMemory:
+    """DEV-939: host memory from /proc/meminfo, with page cache its own number.
+
+    Used is total minus MemAvailable, never minus MemFree: the mmapped model
+    weights live in the page cache, so MemFree is near zero whenever a model
+    has been touched and would read as a full machine."""
+
+    def _point_at(self, monkeypatch, tmp_path, text):
+        f = tmp_path / "meminfo"
+        f.write_text(text)
+        monkeypatch.setattr("coding_model_server.metrics._MEMINFO_PATH", str(f))
+
+    def test_fields_are_mib_from_kb(self, sampler, tmp_path, monkeypatch):
+        self._point_at(monkeypatch, tmp_path, MEMINFO)
+        s = sampler._sample_once()
+        assert s["mem_total_mib"] == 193166928 // 1024
+        assert s["mem_available_mib"] == 183935088 // 1024
+        assert s["mem_cached_mib"] == 172262292 // 1024 + 152312 // 1024
+        assert s["mem_dirty_mib"] == 27387932 // 1024
+        assert s["swap_total_mib"] == 8388604 // 1024
+        assert s["swap_used_mib"] == 8388604 // 1024 - 85420 // 1024
+
+    def test_used_is_total_minus_available_not_minus_free(self, sampler, tmp_path, monkeypatch):
+        self._point_at(monkeypatch, tmp_path, MEMINFO)
+        s = sampler._sample_once()
+        assert s["mem_used_mib"] == 193166928 // 1024 - 183935088 // 1024
+        assert s["mem_used_mib"] < 193166928 // 1024 - 11396528 // 1024
+
+    def test_unreadable_meminfo_is_null_not_zero(self, sampler, monkeypatch):
+        monkeypatch.setattr("coding_model_server.metrics._MEMINFO_PATH", "/nonexistent/meminfo")
+        s = sampler._sample_once()
+        for key in ("mem_total_mib", "mem_available_mib", "mem_used_mib",
+                    "mem_cached_mib", "mem_dirty_mib", "swap_total_mib", "swap_used_mib"):
+            assert s[key] is None, key
+        # The rest of the sample is unaffected.
+        assert "util_cpu" in s and "load1" in s
+
+    def test_incomplete_meminfo_is_null(self, sampler, tmp_path, monkeypatch):
+        self._point_at(monkeypatch, tmp_path, "MemTotal:  100 kB\nMemFree:  50 kB\n")
+        assert sampler._sample_once()["mem_total_mib"] is None
+
+    def test_snapshot_carries_total_for_the_axis(self, sampler, tmp_path, monkeypatch):
+        assert sampler.snapshot()["mem_total_mib"] is None
+        self._point_at(monkeypatch, tmp_path, MEMINFO)
+        sampler._ring.append(sampler._sample_once())
+        assert sampler.snapshot()["mem_total_mib"] == 193166928 // 1024
