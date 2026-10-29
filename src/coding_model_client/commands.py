@@ -65,10 +65,10 @@ def handle_user_command(user_input, history, model, agent_theme):  # noqa: C901
 
         print_colored(f"\n{COLORS['BOLD']}AGENT SHORTCUTS:{COLORS['ENDC']}", COLORS['BLUE'])
         print("  @<agent_name> [msg]  - Switch agent and optionally send message in one go")
-        print("                         Example: @architect Design a Metal 4 renderer")
+        print("                         Example: @dense_architect Design a Metal 4 renderer")
         print("                         Example: @deep_reviewer Why is this kernel crashing?")
         print("  MULTI-AGENT:         - You can use multiple @ mentions in one prompt!")
-        print("                         Example: @architect Design X then @implementer build it.")
+        print("                         Example: @dense_architect Design X then @implementer build it.")
 
         print_colored(f"\n{COLORS['BOLD']}AVAILABLE AGENTS:{COLORS['ENDC']}", COLORS['BLUE'])
         # Group agents by role parsed from description ("<Role> — <details>").

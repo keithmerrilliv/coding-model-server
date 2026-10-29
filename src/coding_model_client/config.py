@@ -126,7 +126,7 @@ THEME_STYLES = {
     "implementer":       {"color": COLORS['GREEN'],   "icon": "\U0001f4bb", "prompt": "Implementer"},
     "deep_implementer":  {"color": COLORS['GREEN'],   "icon": "\U0001f9e0", "prompt": "Deep Impl"},
     "fast_implementer":  {"color": COLORS['GREEN'],   "icon": "\u23e9",     "prompt": "Fast Impl"},
-    "architect":         {"color": COLORS['HEADER'],  "icon": "\U0001f3d7\ufe0f", "prompt": "Architect"},
+    "qwen38_architect":  {"color": COLORS['HEADER'],  "icon": "\U0001f3d7\ufe0f", "prompt": "Architect"},
     "moe_implementer":   {"color": COLORS['GREEN'],   "icon": "\U0001f319", "prompt": "MoE Impl"},
     "dense_architect":     {"color": COLORS['HEADER'],  "icon": "\U0001f3af", "prompt": "Dense Arch"},
     # DEV-154: these two existed in the server registry but not here, so
