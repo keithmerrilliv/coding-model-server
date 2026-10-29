@@ -98,6 +98,44 @@ class RunnerOutage(RuntimeError):
 
 # ── candidate derivation ─────────────────────────────────────────────────────
 
+# A fenced code block (``` or ~~~, CommonMark's fence rules) quotes text: a
+# table row inside one is an example the spec is showing, not a row it
+# declares (DEV-894). The three table parsers below read the spec with every
+# fenced line blanked; blanking rather than deleting keeps line numbers put.
+_FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+
+
+def _without_fenced_blocks(spec_md: str) -> str:
+    """``spec_md`` with every line of every fenced code block made empty.
+
+    A fence opens on a line indented at most three spaces that starts with
+    three or more backticks or tildes (a backtick fence's info string may not
+    contain a backtick). It closes on a line indented at most three spaces
+    holding only the same character, at least as many times, and optional
+    trailing whitespace. A fence that never closes runs to the end.
+    """
+    out: list[str] = []
+    fence = ""
+    for line in spec_md.splitlines(keepends=True):
+        body = line.rstrip("\r\n")
+        ending = line[len(body):]
+        if not fence:
+            m = _FENCE_OPEN.match(body)
+            if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
+                fence = m.group(1)
+                out.append(ending)
+            else:
+                out.append(line)
+            continue
+        stripped = body.lstrip(" ").rstrip()
+        if (len(body) - len(body.lstrip(" ")) <= 3
+                and len(stripped) >= len(fence)
+                and stripped == fence[0] * len(stripped)):
+            fence = ""
+        out.append(ending)
+    return "".join(out)
+
+
 # A change-surface row whose second column marks the path as modified.
 _CHANGE_SURFACE_ROW = re.compile(
     r"^\|\s*`?([^`|]+?)`?\s*\|\s*(?:\*\*)?(modif\w*)\b",
@@ -117,6 +155,7 @@ def declared_modifications(spec_md: str) -> list[str]:
     """Paths a spec's change-surface table marks as modified, not created."""
     if not spec_md:
         return []
+    spec_md = _without_fenced_blocks(spec_md)
     return [
         m.group(1).strip()
         for m in _CHANGE_SURFACE_ROW.finditer(spec_md)
@@ -129,7 +168,7 @@ def change_surface_path_rows(spec_md: str) -> list[str]:
     if not spec_md:
         return []
     seen: dict[str, None] = {}
-    for m in _TABLE_PATH_ROW.finditer(spec_md):
+    for m in _TABLE_PATH_ROW.finditer(_without_fenced_blocks(spec_md)):
         p = m.group(1).strip()
         if p and p.lower() != "path" and ("/" in p or "." in p):
             seen.setdefault(p)
@@ -182,7 +221,7 @@ def change_surface(spec_md: str) -> ChangeSurface:
     this wraps them with the one fact they could not express.
     """
     md = spec_md or ""
-    return ChangeSurface(rows=len(_ANY_TABLE_ROW.findall(md)),
+    return ChangeSurface(rows=len(_ANY_TABLE_ROW.findall(_without_fenced_blocks(md))),
                          declared=declared_modifications(md),
                          paths=change_surface_path_rows(md))
 
