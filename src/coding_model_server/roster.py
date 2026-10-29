@@ -733,12 +733,6 @@ AGENTS = {
         _MOE_30B_FAST,
         executor=True
     ),
-    # NB: `architect` (the interactive role) is no longer a standalone entry —
-    # DEV-99 repointed it at Qwen3.6-27B, making it identical to dense_architect,
-    # so DEV-101 folded it into an alias (see AGENT_ALIASES below). `@architect`
-    # and `--model architect` still resolve; it just isn't separately listed in
-    # /v1/models. Restore a distinct entry here if the interactive architect ever
-    # needs to diverge (different model, prompt, or context) from the planner.
     # Reviewer rung (DEV-935). reasoning_effort=medium as in DEV-928 and the
     # DEV-930/934 eval arm: the 3.8 line overthinks at the template default.
     'deep_reviewer': _create_agent_config(
@@ -770,7 +764,7 @@ AGENTS = {
     ),
     # ── Qwen3.6 agents (replaced retired Qwen3.5 architect tier) ──
     'dense_architect': _create_agent_config(
-        'Architect — Qwen3.6-27B MTP Q4_K_M (27B dense, 64K Q4_0 ctx, ngl=66 n_cpu_ffn=33 + MTP spec-decode, default planner + interactive `architect` alias; the design phase moved to qwen38_architect in DEV-928)',
+        'Architect — Qwen3.6-27B MTP Q4_K_M (27B dense, 64K Q4_0 ctx, ngl=66 n_cpu_ffn=33 + MTP spec-decode, default planner; the design phase moved to qwen38_architect in DEV-928)',
         _ARCHITECT_SYSTEM_PROMPT,
         _DENSE_27B,
         executor=True
@@ -800,10 +794,8 @@ AGENTS = {
 }
 
 # Names that resolve to an agent on lookup; not listed in /v1/models.
-# scripts/agent_usage.py reports which are still requested (DEV-839).
-AGENT_ALIASES = {
-    # `architect` = the interactive architect role. Folded into dense_architect
-    # in DEV-101 once DEV-99 made them the same model+prompt. Not listed in
-    # /v1/models, but still resolves for @-mentions and --model architect.
-    'architect':       'dense_architect',
-}
+# scripts/agent_usage.py reports which are still requested (DEV-839), and an
+# alias nothing requests is retired. Deliberately no `architect`: two agents
+# play that role (dense_architect plans, qwen38_architect designs), so a bare
+# `architect` would pick one of them silently.
+AGENT_ALIASES: dict[str, str] = {}

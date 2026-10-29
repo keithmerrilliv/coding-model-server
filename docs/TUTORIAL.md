@@ -149,7 +149,7 @@ export CODING_MODEL_SERVER_IP=192.168.1.100  # Your server's IP
 
 ```bash
 ./bin/start-client.sh                    # or: coding-model-client
-./bin/start-client.sh --model architect  # Specific agent
+./bin/start-client.sh --model dense_architect  # Specific agent
 ./bin/start-client.sh --name my-project  # Named session
 ```
 
@@ -169,7 +169,7 @@ You (implementer) > Write a Python function to sort a list of dicts by a key
 # 3. Run it via <<<REMOTE_EXEC>>> to verify
 # 4. Report results
 
-You (implementer) > @architect Design a REST API for a todo app
+You (implementer) > @dense_architect Design a REST API for a todo app
 
 # Switches to architect agent and sends the message
 ```
@@ -177,7 +177,7 @@ You (implementer) > @architect Design a REST API for a todo app
 ### 2.4 Multi-Agent Workflows
 
 ```
-You (implementer) > @architect Design a URL shortener then @implementer build it
+You (implementer) > @dense_architect Design a URL shortener then @implementer build it
 
 # Architect designs, then implementer receives the design and codes it
 ```
@@ -328,9 +328,9 @@ the supervisor feature (DEV-839, DEV-895); their rows stay as measured.
 
 `supervisor` and `dense_architect` share one model (Qwen3.6-27B); their 11.4 vs
 10.8 is run-to-run noise, not a real difference. Same for the two MiniMax roles.
-`architect` has no row of its own because it is now an alias for
-`dense_architect`: the Coder-480B config it used to name (222 tok/s prefill,
-6.3 decode) was retired by DEV-99 and can no longer be selected.
+`architect` has no row of its own: the Coder-480B config it used to name
+(222 tok/s prefill, 6.3 decode) was retired by DEV-99, and the name itself is
+no longer an agent (DEV-945).
 
 `glimmer_architect` / `glimmer_implementer` (Muse-Glimmer-30B, DEV-692) have no
 row either. Their number — 13.2 decode at ngl 40 `--swa-full`, 64K Q4_0 KV —

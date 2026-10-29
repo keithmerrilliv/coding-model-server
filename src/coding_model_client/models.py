@@ -57,10 +57,9 @@ def resolve_agent(name):
     """Map a legacy alias to its canonical agent name (Config.AGENT_ALIASES).
 
     /v1/models lists only canonical names, so AGENT_THEMES never contains
-    aliases. The server resolves aliases for request.model, but the client
-    validated the raw name — so `@architect` and `--model architect` were
-    rejected and fell back to implementer, contradicting the documented aliases.
-    Resolve here so they work interactively too. Only resolves to an agent the
+    aliases. The server resolves aliases for request.model; resolving here too
+    keeps `@name` and `--model name` from rejecting an alias the server would
+    accept and falling back to implementer. Only resolves to an agent the
     server actually offers; an unknown name is returned unchanged for the
     caller's own existence check.
     """
