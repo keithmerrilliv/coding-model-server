@@ -229,7 +229,7 @@ for method, prefill figures, and the caveat about raw-vs-proxy numbers).
 | `fast_implementer` | Fast implementation | Qwen3-Coder-30B Q4_K_M | 3B/30B | 64K | Q8_0 | ngl 49, n_cpu_moe 26 | 58.2 |
 | `deep_reviewer` | Reviewer (DEV-935) | Qwen3.8-Flash-Next UD-Q4_K_XL | 6B/125B + 51B n-gram | 128K | Q8_0 | ngl 49, cpu_moe, `reasoning_effort=medium` | 24.4 ‡ |
 | `synthesizer` | Synthesis and its repair round | Qwen3.8-Flash-Next UD-Q4_K_XL (shares `deep_reviewer`'s process) | 6B/125B + 51B n-gram | 128K | Q8_0 | ngl 49, cpu_moe, `reasoning_effort=medium` | 24.4 ‡ |
-| `dense_architect` | Planner (interactive `architect` alias) | Qwen3.6-27B MTP Q4_K_M (dense) | 27B dense | 64K | Q4_0 | ngl 66, **n_cpu_ffn 33**, MTP speculative decode | 17.4 † |
+| `dense_architect` | Planner | Qwen3.6-27B MTP Q4_K_M (dense) | 27B dense | 64K | Q4_0 | ngl 66, **n_cpu_ffn 33**, MTP speculative decode | 17.4 † |
 | `moe_implementer` | Implementation | MiniMax M2.5 Q4_K_M | 10B/230B | 116K | Q4_0 | ngl 62, cpu_moe | 11.2 |
 | `glimmer_implementer` | Retry-only implementation | Muse-Glimmer-30B UD-Q4_K_XL | 3B/30B | 64K | Q4_0 | ngl 40, `--swa-full` | 13.2 § |
 | `qwen38_architect` | Architect, the design phase (DEV-928) | Qwen3.8-27B UD-Q4_K_M (dense) | 27B dense | 64K | Q4_0 | ngl 66, n_cpu_ffn 38, MTP speculative decode, `reasoning_effort=medium` | 20.5 ‡ |
@@ -289,12 +289,13 @@ per-config comments in `roster.py`, which record the measurements. KV-cache pref
 KV-quant noise produces diffuse quality degradation that is harder to manage
 than a smaller context.
 
-**One alias** resolves server-side (`Config.AGENT_ALIASES`):
-`architect` → `dense_architect`. The API's `request.model` and the `.env`
-`AUTONOMOUS_*_AGENT` settings accept it, though it isn't listed in
-`/v1/models`; the six model-versioned aliases had no requests and were retired
-with DEV-839. The interactive client
-(`--model`, `/agent`, `@name`) currently needs the canonical name.
+**No aliases.** `Config.AGENT_ALIASES` can map an extra name to an agent for
+`request.model`, the `.env` `AUTONOMOUS_*_AGENT` settings and the client's
+`--model` / `@name`, and `scripts/agent_usage.py` reports whether each is still
+requested. It is empty: an alias nobody requests is retired (the six
+model-versioned ones with DEV-839, `architect` with DEV-945), and `architect`
+in particular would be ambiguous, since `dense_architect` plans and
+`qwen38_architect` designs. Use the canonical name.
 
 ## Client Commands
 
