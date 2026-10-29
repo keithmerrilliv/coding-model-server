@@ -16,6 +16,7 @@ its ticket is Done. `docs/specs/` holds only live work.
 | `dev641_trailing_newline.md` | self | DEV-641 Done |
 | `dev643_design_file_count.md` | self | DEV-643 Done |
 | `dogfood_dev420.md` | self | DEV-420 Done |
+| `dev921_vm_failure_build_check_requeue.md` | self | DEV-921: the revision written after spec_fa57f216 failed; the fix was hand-delivered as `c6a4799` (v0.6.1), and the spec's new test file is on `main` unchanged |
 
 To revive one, move it back with `git mv` and re-verify every quoted anchor
 against the target's current `main` first. Anchors in these files were written
