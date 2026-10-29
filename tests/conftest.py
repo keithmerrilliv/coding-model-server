@@ -28,9 +28,25 @@ if _ROOT not in sys.path:
 os.environ.setdefault("CODING_MODEL_ALLOW_UNAUTH", "1")
 
 
+import atexit  # noqa: E402
+import shutil  # noqa: E402
 import socket  # noqa: E402
+import sqlite3  # noqa: E402
+import tempfile  # noqa: E402
 
 import pytest  # noqa: E402
+
+# db.py resolves Database()'s default paths from these two variables at import,
+# falling back to var/tasks_db under the checkout — the database the live
+# pipeline runs on. Any test that reaches a default Database() (/health does,
+# through runtime.get_autonomous_db) would open it whenever the suite runs from
+# the main checkout, holding its locks while the daemon writes. Pin both to a
+# scratch directory per process (each xdist worker imports this file), and
+# override rather than setdefault: an inherited live path is the case to defeat.
+_TASKS_SCRATCH = tempfile.mkdtemp(prefix="cms-tests-tasks-")
+atexit.register(shutil.rmtree, _TASKS_SCRATCH, ignore_errors=True)
+os.environ["CODING_MODEL_TASKS_DB"] = os.path.join(_TASKS_SCRATCH, "tasks.sqlite")
+os.environ["CODING_MODEL_TASKS_WORKSPACE"] = os.path.join(_TASKS_SCRATCH, "specs")
 
 # On zooshly 127.0.0.1:5050 is the reverse tunnel to the live Mac runner, and
 # test_runner defaults MAC_RUNNER_URL to it. A test that drives the daemon
@@ -80,16 +96,64 @@ def _guarded_connect(self, address):
 
 socket.socket.connect = _guarded_connect
 
+# The pin above covers every default path; this covers a test that names the
+# live database outright. Like the socket guard it records the attempt and
+# fails the test at teardown, because the store's one known caller in a test
+# (/health) swallows every exception it raises.
+_LIVE_DB_DIR = os.path.realpath(os.path.join(_ROOT, "var", "tasks_db"))
+_live_db_opens: list = []
+_real_sqlite_connect = sqlite3.connect
+
+
+def _sqlite_target(database) -> str:
+    """The resolved file *database* names, or "" when it names none."""
+    try:
+        name = os.fspath(database)
+    except TypeError:
+        return ""
+    if isinstance(name, bytes):
+        name = os.fsdecode(name)
+    if name.startswith("file:"):
+        name = name[len("file:"):].split("?", 1)[0]
+    if not name or name == ":memory:":
+        return ""
+    return os.path.realpath(name)
+
+
+def _guarded_sqlite_connect(database, *args, **kwargs):
+    target = _sqlite_target(database)
+    if target == _LIVE_DB_DIR or target.startswith(_LIVE_DB_DIR + os.sep):
+        _live_db_opens.append(target)
+        raise LiveServiceBlocked(
+            f"tests must not open the live task database at {target}")
+    return _real_sqlite_connect(database, *args, **kwargs)
+
+
+sqlite3.connect = _guarded_sqlite_connect
+
 
 @pytest.fixture(autouse=True)
 def _no_live_services():
     _live_connects.clear()
+    _live_db_opens.clear()
     yield
     if _live_connects:
         what, fix = _LIVE_PORTS[_live_connects[0][1]]
         pytest.fail(
             f"this test opened a connection to {what} ({_live_connects[0]}); "
             f"{fix}", pytrace=False)
+    if _live_db_opens:
+        pytest.fail(
+            f"this test opened the live task database ({_live_db_opens[0]}); "
+            f"use the db fixture, or pass Database a path under tmp_path",
+            pytrace=False)
+
+
+@pytest.fixture
+def live_db_opens():
+    """The live-database opens recorded so far in this test. A test of the
+    guard itself asserts on it, then clears it so teardown stays quiet."""
+    return _live_db_opens
 
 
 # ── shared harnesses ─────────────────────────────────────────────────────────
