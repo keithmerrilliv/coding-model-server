@@ -540,11 +540,12 @@ table to read first when a run ends somewhere surprising.
 `MAX_RETRIES` bounds how many implementer attempts there are; the rotation
 decides who makes each one. Attempt 0 goes to the architect's pick. Every
 later attempt walks a fixed chain, `retry_policy._IMPLEMENTER_ROTATION`:
-`implementer`, `fast_implementer`, `moe_implementer`, `glimmer_implementer`,
-`deep_implementer`. The chain is ordered by what an attempt costs, cheapest
-first: the walk is failure-triggered, so every slot ahead of the one that
-delivers is paid in full. `implementer` averages 165 s a call at 64 tok/s;
-`moe_implementer` decodes at 6.6 to 9 tok/s; `glimmer_implementer` averages
+`implementer`, `fast_implementer`, `ornith`, `moe_implementer`,
+`glimmer_implementer`, `deep_implementer`. The chain is ordered by what an
+attempt costs, cheapest first: the walk is failure-triggered, so every slot
+ahead of the one that delivers is paid in full. `implementer` averages 165 s a
+call at 64 tok/s; `ornith` about 250 s at 65 tok/s, because it spends 1.6×
+the tokens (DEV-931); `moe_implementer` decodes at 6.6 to 9 tok/s; `glimmer_implementer` averages
 1,041 s a call at 11 tok/s, and about 93 of its 251 minutes went to attempts
 that then failed. `deep_implementer` is last for a different reason (DEV-821):
 it is the window fallback. Its 256K window is the only one some self-target
@@ -588,18 +589,21 @@ sequenceDiagram
 
 The chain always starts from the attempt-0 agent and continues in chain
 order, so the tier decides the whole sequence. A retry's index is its
-`retry_count` plus `k`; attempt 5 wraps to the first agent again.
+`retry_count` plus `k`; attempt 6 wraps to the first agent again.
 
-| Attempt-0 agent | How it is chosen | Attempts 1 to 4 |
+| Attempt-0 agent | How it is chosen | Attempts 1 to 5 |
 |---|---|---|
-| `implementer` | tier `medium` or `high`, or no `complexity.json` | fast, moe, glimmer, deep |
-| `fast_implementer` | tier `low` | implementer, moe, glimmer, deep |
-| `moe_implementer` | tier `extreme` | implementer, fast, glimmer, deep |
-| `deep_implementer` | only when the architect recommends it by name | implementer, fast, moe, glimmer |
+| `implementer` | tier `medium` or `high`, or no `complexity.json` | fast, ornith, moe, glimmer, deep |
+| `fast_implementer` | tier `low` | implementer, ornith, moe, glimmer, deep |
+| `moe_implementer` | tier `extreme` | implementer, fast, ornith, glimmer, deep |
+| `deep_implementer` | only when the architect recommends it by name | implementer, fast, ornith, moe, glimmer |
 
-`glimmer_implementer` is retry-only: it is in the chain but not in
-`TIER_TO_IMPLEMENTER` or `ALLOWED_IMPLEMENTER_AGENTS`, so it never makes
-attempt 0. When the eligible set drops the attempt-0 agent, the offset counts
+`ornith` and `glimmer_implementer` are retry-only: they are in the chain but
+not in `TIER_TO_IMPLEMENTER` or `ALLOWED_IMPLEMENTER_AGENTS`, so neither makes
+attempt 0, and `ornith` is never reached before attempt 2. The three 64K
+agents (`implementer`, `fast_implementer`, `ornith`) hold a prompt of about
+30K tokens once the completion reserve is counted, so a larger prompt's
+retries skip them. When the eligible set drops the attempt-0 agent, the offset counts
 from the first eligible agent instead (DEV-823). With one eligible agent the
 assignment is `sole_fit`, and diagram 6's invariance edge treats a repeat on
 it as final.
