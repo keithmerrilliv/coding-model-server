@@ -705,14 +705,13 @@ _MUSE_GLIMMER_30B = _create_model_config(
 # 'executor': True means few-shot + fallback extraction are enabled.
 AGENTS = {
     'implementer': _create_agent_config(
-        'Implementer — Qwen3.6-35B-A3B UD-Q4_K_M (3B/35B MoE, 64K ctx Q8_0, ngl=41 n_cpu_moe=20, default)',
+        'Implementer — Qwen3.6-35B-A3B UD-Q4_K_M (3B/35B MoE, 64K ctx Q8_0, ngl=41 n_cpu_moe=22, default)',
         _IMPLEMENTER_SYSTEM_PROMPT,
         _MOE_35B,
         executor=True
     ),
-    # Eval-only (DEV-929): same prompt and executor wiring as `implementer`,
-    # deliberately, so the model is the only variable. Ornith-1.0 lost the
-    # DEV-90 eval; this is the 1.5 release. Not in any rotation or default.
+    # Same prompt and executor wiring as `implementer`, deliberately, so the
+    # model was the only variable in DEV-929's eval (Ornith-1.0 lost DEV-90's).
     # Retry-only (DEV-931): in _IMPLEMENTER_ROTATION after fast_implementer,
     # not in ALLOWED_IMPLEMENTER_AGENTS or TIER_TO_IMPLEMENTER; retry_policy
     # says why. Being in AGENTS arms the DEV-676 window fit check for it.
@@ -771,7 +770,7 @@ AGENTS = {
     ),
     # ── Qwen3.6 agents (replaced retired Qwen3.5 architect tier) ──
     'dense_architect': _create_agent_config(
-        'Architect — Qwen3.6-27B MTP Q4_K_M (27B dense, 64K Q4_0 ctx, ngl=46 + MTP spec-decode, default planner + interactive `architect` alias; the design phase moved to qwen38_architect in DEV-928)',
+        'Architect — Qwen3.6-27B MTP Q4_K_M (27B dense, 64K Q4_0 ctx, ngl=66 n_cpu_ffn=33 + MTP spec-decode, default planner + interactive `architect` alias; the design phase moved to qwen38_architect in DEV-928)',
         _ARCHITECT_SYSTEM_PROMPT,
         _DENSE_27B,
         executor=True
@@ -793,7 +792,7 @@ AGENTS = {
     # DEV-676 window fit check for it: _agent_ctx_limit reads n_ctx off the
     # agent's model config.
     'glimmer_implementer': _create_agent_config(
-        'Implementer — Muse-Glimmer-30B UD-Q4_K_XL (Meta, 64K Q4_0 ctx, ngl=40 --swa-full, DEV-692 eval arm)',
+        'Implementer — Muse-Glimmer-30B UD-Q4_K_XL (Meta, 64K Q4_0 ctx, ngl=40 --swa-full, retry-only since DEV-692)',
         _IMPLEMENTER_SYSTEM_PROMPT,
         _MUSE_GLIMMER_30B,
         executor=True

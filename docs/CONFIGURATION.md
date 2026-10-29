@@ -417,7 +417,7 @@ This is why Nemotron can run at ngl=52/52 with 1M context on an RTX 5080.
 layers' experts stay on CPU; the rest ride on the GPU. Lower N = more experts on
 GPU = faster decode, bounded by VRAM (the KV cache competes for the same space).
 It overrides `cpu_moe` when set. The three agents tuned this way
-(`implementer` N=20, `fast_implementer` N=26, `native_implementer` N=20) each
+(`implementer` N=22, `fast_implementer` N=26, `ornith` N=20) each
 traded context for decode throughput; the comment above each config records the
 sweep that produced the number.
 
@@ -464,7 +464,8 @@ For an RTX 5080 (16,303 MiB):
   the margin logs a warning and proceeds. It used to be a hard floor, and a
   config tuned so tight that it cleared the first load but not a reload bricked
   the server after the idle watchdog reaped the child — that happened at
-  `implementer` `n_cpu_moe=18` and is why it now sits at 20. See
+  `implementer` `n_cpu_moe=18` and is why it moved to 20; DEV-940 moved it to
+  22 for the swap cushion. See
   [SERVING.md](SERVING.md).
 - Leave ~**1.4 GB** free in practice: that is the observed floor for a
   *model swap* (the incoming child allocates before the outgoing one has fully

@@ -232,8 +232,8 @@ for method, prefill figures, and the caveat about raw-vs-proxy numbers).
 | `dense_architect` | Planner (interactive `architect` alias) | Qwen3.6-27B MTP Q4_K_M (dense) | 27B dense | 64K | Q4_0 | ngl 66, **n_cpu_ffn 33**, MTP speculative decode | 17.4 † |
 | `moe_implementer` | Implementation | MiniMax M2.5 Q4_K_M | 10B/230B | 116K | Q4_0 | ngl 62, cpu_moe | 11.2 |
 | `glimmer_implementer` | Retry-only implementation | Muse-Glimmer-30B UD-Q4_K_XL | 3B/30B | 64K | Q4_0 | ngl 40, `--swa-full` | 13.2 § |
-| `qwen38_architect` | Architect, the design phase (DEV-928) | Qwen3.8-27B UD-Q4_K_M (dense) | 27B dense | 64K | Q4_0 | ngl 66, n_cpu_ffn 38, MTP speculative decode, `reasoning_effort=medium` | — |
-| `ornith` | Retry-only implementation (DEV-931) | Ornith-1.5-35B-A3B Q4_K_M | 3B/35B | 64K | Q8_0 | ngl 41, n_cpu_moe 20, `--reasoning-budget 4096` (DEV-931) | — |
+| `qwen38_architect` | Architect, the design phase (DEV-928) | Qwen3.8-27B UD-Q4_K_M (dense) | 27B dense | 64K | Q4_0 | ngl 66, n_cpu_ffn 38, MTP speculative decode, `reasoning_effort=medium` | 20.5 ‡ |
+| `ornith` | Retry-only implementation (DEV-931) | Ornith-1.5-35B-A3B Q4_K_M | 3B/35B | 64K | Q8_0 | ngl 41, n_cpu_moe 20, `--reasoning-budget 4096` (DEV-931) | 72.7 ‡ |
 
 † Measured 2026-09-19 through the managed path on a 53,333-token architect
 prompt ([DEV-744](https://keith-merrill4.atlassian.net/browse/DEV-744)); the old
@@ -255,13 +255,15 @@ daemon would dispatch to; an agent nothing wires and nothing has requested for
 a week is retired. DEV-839 retired eight that way (`reviewer`, `debugger`,
 `moe_architect`, `brainstorm`, `native_implementer`, and the eval arms
 `dense_architect_nothink`, `qwen38_architect` and `glimmer_architect`), along
-with their model files. A new model joins as an agent entry, gets evaluated,
+with their model files. `qwen38_architect` came back as an eval arm at
+`reasoning_effort=medium` and won the design phase (DEV-928). A new model joins as an agent entry, gets evaluated,
 and leaves the same way if it does not earn a slot.
 
 `glimmer_implementer` is the first Meta model the rotation has had. The
 rotation is ordered by what an attempt costs, and Glimmer averages 1,041 s a
-call, so it sits fourth: behind the fast decoders and MiniMax, ahead only of
-the `deep_implementer` window fallback (DEV-821). That membership is **retry-only** — it is deliberately absent from
+call, so it sits fifth: behind the fast decoders, `ornith` and MiniMax, ahead
+only of the `deep_implementer` window fallback (DEV-821). `ornith` joined the
+same way (DEV-931). That membership is **retry-only** — it is deliberately absent from
 `ALLOWED_IMPLEMENTER_AGENTS` and the complexity-tier map, so neither an
 architect recommendation nor a tier default can put it on attempt 1. Attempt 1
 is the only attempt whose agent is chosen rather than rotated into, which makes
