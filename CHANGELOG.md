@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.7.0 — unreleased
+## v0.7.0 — 2026-10-30
 
 The roster and serving release ([DEV-944](https://keith-merrill4.atlassian.net/browse/DEV-944)): the reviewer rung moves to Qwen3.8-Flash-Next, the design phase to Qwen3.8-27B, `llama-server` to upstream v0.7.0 with the local patch retired, and `ornith` joins the implementer rotation. Each repoint rests on a blind, counterbalanced eval. Around them, delivery refuses the paths out of the test sandbox, a delivery the daemon owes survives a restart, and the plan gate refuses acceptance criteria no run can decide.
 
