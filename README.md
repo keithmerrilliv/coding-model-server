@@ -27,6 +27,7 @@ together.
 
 | Release | Date | Theme |
 |---|---|---|
+| **v0.7.0** | 2026-10-30 | **Roster and serving.** The reviewer moves to Qwen3.8-Flash-Next, the design phase to Qwen3.8-27B and `llama-server` to upstream v0.7.0, each on a blind eval; `ornith` joins the implementer rotation, and the plan gate refuses acceptance criteria no run can decide. |
 | **v0.6.1** | 2026-10-03 | **Serving and stability.** `llama-server` moves to upstream v0.5.0, the server survives a bad boot, and a VM that never ran the code can no longer reach a review gate. |
 | **v0.6.0** | 2026-09-29 | **Layering.** Imports point one way, each decision has one home, and language-specific logic sits behind one interface. The roster is what telemetry says is used. |
 | **v0.5.0** | 2026-09-27 | **Honest guards.** A guard reports what it observed and names a cause only when it has isolated one. Runs 56–68 all reached release approval, and LLab (Objective-C and C++) joined Electric Sheep and Centipede as a third target. |
