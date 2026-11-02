@@ -16,7 +16,11 @@
 # --dry-run  run the checks on the merged tree, then discard the merge.
 # --no-push  merge on green but do not push.
 #
-# Exit codes: 0 merged (or dry-run green), 1 gate red, 2 refused.
+# A push goes to origin and, when this checkout has a `pipeline` remote (the
+# local mirror), to that too.
+#
+# Exit codes: 0 merged (or dry-run green), 1 gate red or a push failed,
+# 2 refused.
 set -u
 
 DRY_RUN=0
@@ -316,5 +320,15 @@ git update-ref -d "$PARK_REF" 2>/dev/null
 echo "MERGED: $(git log -1 --format='%h %s' "$NEW")"
 if [ "$PUSH" -eq 1 ]; then
   git push --quiet origin main && echo "PUSHED origin/main" || { echo "push failed — main is merged locally" >&2; exit 1; }
+  # The `pipeline` remote is the local mirror self-target delivery pushes to
+  # (DEV-913), and the copy that gets backed up. A gate run from a clone whose
+  # origin is GitHub alone would otherwise never move it (DEV-949). A checkout
+  # without the remote has no mirror to keep, so that is a note, not a failure.
+  if git remote get-url pipeline >/dev/null 2>&1; then
+    git push --quiet pipeline main && echo "PUSHED pipeline/main" \
+      || { echo "MIRROR PUSH FAILED — main is merged and on origin; retry with: git push pipeline main" >&2; exit 1; }
+  else
+    echo "  no pipeline remote here: the local mirror was not updated" >&2
+  fi
 fi
 exit 0

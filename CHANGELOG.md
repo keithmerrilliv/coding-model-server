@@ -5,6 +5,8 @@
 ### Shipped
 
 - [DEV-401](https://keith-merrill4.atlassian.net/browse/DEV-401): the dashboard has a Video page for the GoPro consolidation pipeline (`~/Dev/video-pipeline`, a separate program). It shows the run's counts, input and output size, the running recording's stage and speed, an estimate of time remaining, a per-recording table and the event log, beside the existing GPU panel. The server's only part is `GET /v1/admin/video_pipeline`, which reads the pipeline's atomic JSON snapshot; whether a run is live comes from the process table, not the file, so a SIGKILLed run reads as stopped, not running. The estimate counts the transcode that follows a merge, because a job's progress restarts at each stage and would otherwise run backwards.
+- [DEV-949](https://keith-merrill4.atlassian.net/browse/DEV-949): `scripts/merge_gate.sh` pushes `main` to the `pipeline` remote (the local mirror self-target delivery uses) as well as to `origin`, when the checkout has one. Gates run from per-task clones whose `origin` is GitHub alone, so the mirror had fallen 22 commits and two release tags behind. A failed mirror push exits 1 and says `main` is already on origin; a checkout with no `pipeline` remote gets a note and a clean exit.
+- [DEV-948](https://keith-merrill4.atlassian.net/browse/DEV-948): the monthly Deep Docs MCP update runs again. `scripts/update_deep_docs_mcp.sh` fell back to the placeholder `/home/youruser/Dev/coding-model-server` when `REPO` was unset, and the installed unit never sets it, so every scheduled run aborted on a checkout that does not exist (the last successful update was 2026-08-04). `REPO` now defaults to the script's parent directory.
 
 ## v0.7.0 — 2026-10-30
 

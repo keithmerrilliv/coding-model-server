@@ -448,3 +448,64 @@ def test_live_only_state_the_suite_reads_is_visible_to_pytest(repo, tmp_path):
     # Removing the worktree must not follow the link into the archive.
     assert design.read_text() == "archived design\n"
     repo.assert_no_worktree_left()
+
+
+def _bare_remote(repo: Repo, tmp_path: Path, name: str) -> Path:
+    bare = tmp_path / f"{name}.git"
+    repo.git("init", "--quiet", "--bare", "-b", "main", str(bare))
+    repo.git("remote", "add", name, str(bare))
+    repo.git("push", "--quiet", name, "main")
+    return bare
+
+
+def test_green_gate_pushes_main_to_the_pipeline_mirror_too(repo, tmp_path):
+    """DEV-949: gates run from clones whose origin is GitHub alone, so the
+    local mirror (the `pipeline` remote) only moved when someone pushed it by
+    hand, and fell 22 commits behind."""
+    origin = _bare_remote(repo, tmp_path, "origin")
+    mirror = _bare_remote(repo, tmp_path, "pipeline")
+    repo.branch("feature", {"app.py": "print('v2')\n"})
+
+    done = repo.gate("feature")
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "PUSHED origin/main" in done.stdout
+    assert "PUSHED pipeline/main" in done.stdout
+    main = repo.git("rev-parse", "main")
+    assert repo.git("rev-parse", "main", cwd=origin) == main
+    assert repo.git("rev-parse", "main", cwd=mirror) == main
+
+
+def test_without_a_pipeline_remote_the_gate_notes_it_and_succeeds(repo, tmp_path):
+    """A public checkout has no mirror; that must not fail the merge."""
+    _bare_remote(repo, tmp_path, "origin")
+    repo.branch("feature", {"app.py": "print('v2')\n"})
+
+    done = repo.gate("feature")
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "PUSHED origin/main" in done.stdout
+    assert "no pipeline remote" in done.stderr
+
+
+def test_a_failed_mirror_push_is_loud_and_leaves_origin_pushed(repo, tmp_path):
+    origin = _bare_remote(repo, tmp_path, "origin")
+    repo.git("remote", "add", "pipeline", str(tmp_path / "missing.git"))
+    repo.branch("feature", {"app.py": "print('v2')\n"})
+
+    done = repo.gate("feature")
+
+    assert done.returncode == 1
+    assert "MIRROR PUSH FAILED" in done.stderr
+    assert repo.git("rev-parse", "main", cwd=origin) == repo.git("rev-parse", "main")
+
+
+def test_no_push_leaves_the_mirror_alone(repo, tmp_path):
+    mirror = _bare_remote(repo, tmp_path, "pipeline")
+    before = repo.git("rev-parse", "main", cwd=mirror)
+    repo.branch("feature", {"app.py": "print('v2')\n"})
+
+    done = repo.gate("--no-push", "feature")
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert repo.git("rev-parse", "main", cwd=mirror) == before
