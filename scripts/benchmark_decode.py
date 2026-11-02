@@ -96,7 +96,7 @@ def probe_stream(server, headers, agent, max_tokens, temperature):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("-a", "--agent", default="architect")
+    ap.add_argument("-a", "--agent", default="dense_architect")
     ap.add_argument("--max-tokens", type=int, default=200)
     ap.add_argument("--reps", type=int, default=3, help="median is reported")
     ap.add_argument("--server", default="http://127.0.0.1:5000")

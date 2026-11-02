@@ -556,12 +556,18 @@ _HOST_RING_SIZE = 120
 # Package-domain RAPL counter. Root-only by default since the PLATYPUS
 # mitigation (CVE-2020-8694); scripts/enable_rapl_reading.sh grants it to one
 # group and states the trade.
+# Memory comes from /proc/meminfo, which needs no privilege. The path is a
+# module constant so a test can point it at a fixture or at nothing.
+_MEMINFO_PATH = "/proc/meminfo"
+_MEMINFO_KEYS = ("MemTotal", "MemAvailable", "MemFree", "Buffers", "Cached",
+                 "Dirty", "SwapTotal", "SwapFree")
 _RAPL_PATH = os.getenv("CODING_MODEL_POWERCAP_PATH",
                        "/sys/class/powercap/intel-rapl:0/energy_uj")
 
 
 class HostSampler:
-    """1-Hz CPU utilization and CPU package power, ring-buffered (DEV-726).
+    """1-Hz CPU utilization, host memory and CPU package power, ring-buffered
+    (DEV-726; memory since DEV-939).
 
     Sits beside GpuSampler and mirrors its shape so the dashboard polls both
     the same way. The GPU has had a panel for months; the CPU has had none,
@@ -578,6 +584,14 @@ class HostSampler:
     working when power does not. Utilization present with power absent is the
     expected state on an unprivileged host, and the API says so explicitly
     rather than leaving the panel to guess.
+
+    Memory comes from /proc/meminfo. "Used" is MemTotal minus MemAvailable,
+    not minus MemFree: on this host the mmapped model weights live in the
+    page cache (Flash-Next alone is 111 GB of it), so MemFree is near zero
+    whenever a model has been touched and says nothing about pressure.
+    Page cache is reported on its own because it IS the working set here;
+    whether two rungs can both stay cached is the question the panel exists
+    to answer. An unreadable /proc/meminfo leaves every memory field null.
     """
 
     def __init__(self, interval_s: float = 1.0) -> None:
@@ -592,6 +606,8 @@ class HostSampler:
         # reading succeeds.
         self._power_error: Optional[str] = None
         self._cpu_count = os.cpu_count()
+        # Last MemTotal read, for the panel's axis; None until a sample reads.
+        self._mem_total_mib: Optional[int] = None
 
     # ── sensors ─────────────────────────────────────────────────────────
 
@@ -606,6 +622,23 @@ class HostSampler:
                         return sum(v) - idle, sum(v)
         except (OSError, ValueError) as e:
             logger.debug("cpu utilization sample failed: %s", e)
+        return None
+
+    def _read_meminfo(self) -> Optional[dict]:
+        """MiB per key of _MEMINFO_KEYS, or None when the file is unreadable
+        or missing a key. /proc/meminfo is in kB."""
+        try:
+            found: Dict[str, int] = {}
+            with open(_MEMINFO_PATH) as f:
+                for line in f:
+                    key, _, rest = line.partition(":")
+                    if key in _MEMINFO_KEYS:
+                        found[key] = int(rest.split()[0]) // 1024
+            if all(k in found for k in _MEMINFO_KEYS):
+                return found
+            logger.debug("meminfo sample incomplete: %s", sorted(found))
+        except (OSError, ValueError, IndexError) as e:
+            logger.debug("meminfo sample failed: %s", e)
         return None
 
     def _read_energy_uj(self) -> Optional[int]:
@@ -650,6 +683,19 @@ class HostSampler:
         except OSError:
             load1 = load5 = load15 = None
 
+        mem = self._read_meminfo()
+        if mem is not None:
+            self._mem_total_mib = mem["MemTotal"]
+        memory = {
+            "mem_total_mib": mem["MemTotal"] if mem else None,
+            "mem_available_mib": mem["MemAvailable"] if mem else None,
+            "mem_used_mib": mem["MemTotal"] - mem["MemAvailable"] if mem else None,
+            "mem_cached_mib": mem["Cached"] + mem["Buffers"] if mem else None,
+            "mem_dirty_mib": mem["Dirty"] if mem else None,
+            "swap_total_mib": mem["SwapTotal"] if mem else None,
+            "swap_used_mib": mem["SwapTotal"] - mem["SwapFree"] if mem else None,
+        }
+
         return {
             "t": datetime.now(timezone.utc).isoformat(),
             "util_cpu": util,
@@ -657,6 +703,7 @@ class HostSampler:
             "load1": load1,
             "load5": load5,
             "load15": load15,
+            **memory,
         }
 
     # ── lifecycle, mirroring GpuSampler ─────────────────────────────────
@@ -711,6 +758,7 @@ class HostSampler:
             "available": bool(self._ring),
             "interval_s": self._interval,
             "cpu_count": self._cpu_count,
+            "mem_total_mib": self._mem_total_mib,
             # The panel needs BOTH of these: "no power number" and "why".
             "cpu_power_available": self._power_error is None,
             "cpu_power_error": self._power_error,

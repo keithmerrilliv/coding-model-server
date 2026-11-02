@@ -26,6 +26,25 @@ REAL_BAD = [
     "if Task.isCancelled { break } count=1",
 ]
 
+# Verbatim from later archived plans, each one asking for a second run or a git
+# listing; the narrowed patterns must still catch them (DEV-943).
+ARCHIVE_BAD = [
+    # spec_1b927743 A5
+    "Against main, test target fails to compile due to missing symbols; after change "
+    "it builds and passes.",
+    # spec_1b927743 A9a
+    "git diff --name-only lists exactly the four specified files; project.pbxproj is untouched.",
+    # spec_beb39733 A4 (spec_4f01a833 and spec_e257f925 carry the same criterion)
+    "The new test file lives at ElectricSheepTests/<name>.swift (no SPM-style paths), and "
+    "the suite's reported test count STRICTLY EXCEEDS the pre-change count. A run executing "
+    "only pre-existing tests must read as failure of this criterion.",
+    # spec_5aeaaad8
+    "A unit test constructs known logits/top-k, applies corrupt+softmax, asserts non-top-k "
+    "probs < 1e-6 and top-k sum ~1.0. Test must fail against main and pass after fix; "
+    "report explicitly states this.",
+    "Build succeeds for the macOS target with no new warnings.",
+]
+
 BENIGN = [
     "maskPreservesIndices() and maskSuppressesNonTopK(k:) pass in RestrictedSamplingTests",
     "The test target builds with zero errors",
@@ -35,6 +54,16 @@ BENIGN = [
     "All existing tests in ForcingStrategyTests continue to pass",
     "Warnings in the changed files are zero",
     "The diff to Package.swift is limited to the new test target",  # 'diff' as a noun, not git
+    # DEV-943: three criteria of DONE specs the first patterns bounced.
+    # spec_e6dcee50: "prefix" is a string, not a pre-fix run.
+    "T7: with_import_root_hint on BUILD_FAILURE with NUMPY_OUT leaves feedback unchanged "
+    "(no src. prefix match)",
+    # spec_0c2093f3: a count inside a value tuple, asserted by a test.
+    "That geometry drawRange start=0 count=0 (empty)",
+    # spec_a0305340: "before/after" names a function's two inputs.
+    "New tests in tests/test_count_test_declarations.py cover criteria 2-5 including "
+    "identical before/after returning empty dict; at least 8 test functions; no hard-coded "
+    "total assertions",
 ]
 
 
@@ -57,6 +86,12 @@ class TestReplay:
         assert "before/after" in problems[0] and "Instead," in problems[0]
         assert "git or worktree" in problems[2] and "protected_paths" in problems[2]
         assert "incidental output" in problems[4] and "name the test cases" in problems[4]
+
+    def test_every_later_archived_true_case_is_still_flagged(self):
+        problems = pc.unevaluable_criteria(_plan(ARCHIVE_BAD))
+        assert len(problems) == len(ARCHIVE_BAD)
+        for i, text in enumerate(ARCHIVE_BAD, start=1):
+            assert any(f"criterion {i} " in p for p in problems), text
 
     def test_one_reason_per_criterion(self):
         """criterion 3 hits both the git and the exact-count shape; the planner

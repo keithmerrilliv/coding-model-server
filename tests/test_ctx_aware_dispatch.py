@@ -25,8 +25,10 @@ def test_known_agent_limits_come_from_config():
     assert d._agent_ctx_limit("deep_implementer") == 262144
 
 
-def test_alias_resolves_before_lookup():
-    assert d._agent_ctx_limit("architect") == d._agent_ctx_limit("dense_architect")
+def test_alias_resolves_before_lookup(monkeypatch):
+    from coding_model_server.config import Config
+    monkeypatch.setitem(Config.AGENT_ALIASES, "legacy_planner", "dense_architect")
+    assert d._agent_ctx_limit("legacy_planner") == d._agent_ctx_limit("dense_architect")
 
 
 def test_unknown_agent_is_none():

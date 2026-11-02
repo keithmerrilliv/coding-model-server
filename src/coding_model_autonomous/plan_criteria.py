@@ -33,11 +33,15 @@ _SHAPES: list[tuple[str, list[re.Pattern[str]], str, str]] = [
     (
         "a before/after comparison",
         [re.compile(p, re.IGNORECASE) for p in (
-            r"\bpre-?fix\b",
+            # Never the unhyphenated word: "prefix" names a string, not a run.
+            r"\bpre[- ]fix\b",
             r"\bpre-?change\b",
             r"\bpre-?patch\b",
             r"\bbefore (?:the|this|any|my|our) (?:change|fix|patch)\b",
-            r"\bbefore/after\b",
+            # Only a before/after of a run; "identical before/after" also names
+            # a function's two inputs.
+            r"\bbefore/after (?:the |this )?(?:runs?|builds?|tests?|test runs?|counts?|"
+            r"comparison|change|fix|patch)\b",
             r"\bagainst main\b",
             r"\bon (?:unpatched|unmodified) main\b",
             r"\bwithout (?:the|this) (?:fix|change|patch)\b",
@@ -72,7 +76,9 @@ _SHAPES: list[tuple[str, list[re.Pattern[str]], str, str]] = [
         [re.compile(p, re.IGNORECASE) for p in (
             r"\bexactly (?:\d+|one|two|three|four|five|no|zero) (?:pre-existing |existing |incidental |other )?"
             r"(?:warnings?|diagnostics?|deprecations?)(?: lines?)?\b",
-            r"\bcount\s*=\s*\d+\b",
+            # Not a field of a value tuple such as "start=0 count=0", where the
+            # count is a property a test can assert, not a tally of output.
+            r"(?<!\d\s)\bcount\s*=\s*\d+\b",
             r"\boccurs? exactly (?:\d+|once|twice)\b",
             r"\bexactly (?:\d+|one|two|three) (?:occurrences?|matches|instances?) of\b",
         )],

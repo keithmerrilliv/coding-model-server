@@ -457,14 +457,75 @@ def test_labelled_headers_edit_the_file_they_name():
     assert res.files == [("Gen/LSystem.cpp", "int a = 10;\nint b = 20;\n")]
 
 
-def test_a_label_on_an_unknown_path_is_still_a_new_file():
+def test_a_label_on_an_unknown_path_names_the_bare_path_to_emit():
+    """DEV-938 narrows DEV-842's note: the labelled name is never the file to
+    emit. A planned new file is emitted whole at its bare path."""
     edit_text = ("### Gen/Other.cpp (Edit 1)\n"
                  "<<<<<<< SEARCH\nx\n=======\ny\n>>>>>>> REPLACE\n")
     res = resolve_edits(whole_files=[], edit_text=edit_text, existing=_EXISTING)
-    assert len(res.errors) == 1 and "NEW file" in res.errors[0]
+    assert len(res.errors) == 1
+    assert "<<<FILE: Gen/Other.cpp>>>" in res.errors[0]
+    assert "<<<FILE: Gen/Other.cpp (Edit 1)>>>" not in res.errors[0]
+    assert res.failures[0].reason == "mislabelled_marker"
 
 
 def test_without_known_paths_the_header_is_read_as_written():
     parsed = parse_edit_blocks(
         "### a.cpp (Edit 1)\n<<<<<<< SEARCH\nx\n=======\ny\n>>>>>>> REPLACE\n")
     assert [fe.path for fe in parsed.files] == ["a.cpp (Edit 1)"]
+
+
+# ── DEV-938: a dashed label after the path is still that path ────────────────
+# spec_c3f76d6f's implementer wrote `<<<FILE: README.md — Edit 1 (replace
+# Metal4Renderer bullet)>>>` around a SEARCH/REPLACE block, copying the spec's
+# own prose into the marker. The applier called that a NEW file and told the
+# model to emit it whole at that name; the next attempt could have written a
+# junk path that delivery would then push.
+
+_README = {"README.md": "- old bullet\n\nnot built yet\n"}
+_DASHED = (
+    "<<<FILE: README.md — Edit 1 (replace Metal4Renderer bullet)>>>\n"
+    "<<<<<<< SEARCH\n- old bullet\n=======\n- new bullet\n>>>>>>> REPLACE\n"
+    "<<<END_FILE>>>\n"
+    "<<<FILE: README.md — Edit 2 (replace last line)>>>\n"
+    "<<<<<<< SEARCH\nnot built yet\n=======\n## Run the app\n>>>>>>> REPLACE\n"
+    "<<<END_FILE>>>\n")
+
+
+def test_a_dashed_label_in_a_file_marker_edits_the_file_it_names():
+    res = resolve_edits(whole_files=[], edit_text=_DASHED, existing=_README)
+    assert res.errors == []
+    assert res.files == [("README.md", "- new bullet\n\n## Run the app\n")]
+
+
+def test_a_dashed_label_in_a_header_edits_the_file_it_names():
+    edit_text = ("### README.md - Edit 1\n"
+                 "<<<<<<< SEARCH\n- old bullet\n=======\n- new bullet\n>>>>>>> REPLACE\n")
+    res = resolve_edits(whole_files=[], edit_text=edit_text, existing=_README)
+    assert res.errors == []
+    assert res.files[0][0] == "README.md"
+
+
+def test_a_colon_label_edits_the_file_it_names():
+    edit_text = ("### README.md: first edit\n"
+                 "<<<<<<< SEARCH\n- old bullet\n=======\n- new bullet\n>>>>>>> REPLACE\n")
+    res = resolve_edits(whole_files=[], edit_text=edit_text, existing=_README)
+    assert res.errors == [] and res.files[0][0] == "README.md"
+
+
+def test_a_labelled_marker_on_an_unknown_file_is_not_called_a_new_file():
+    edit_text = ("<<<FILE: docs/GUIDE.md — Edit 1>>>\n"
+                 "<<<<<<< SEARCH\nx\n=======\ny\n>>>>>>> REPLACE\n<<<END_FILE>>>\n")
+    res = resolve_edits(whole_files=[], edit_text=edit_text, existing=_README)
+    assert [f.reason for f in res.failures] == ["mislabelled_marker"]
+    joined = " ".join(res.errors)
+    assert "EMIT WHOLE" not in joined and "not a file path" in joined
+    assert "docs/GUIDE.md" not in dict(res.files)
+
+
+def test_a_clean_unknown_path_still_gets_emit_whole():
+    edit_text = ("### docs/GUIDE.md\n"
+                 "<<<<<<< SEARCH\nx\n=======\ny\n>>>>>>> REPLACE\n")
+    res = resolve_edits(whole_files=[], edit_text=edit_text, existing=_README)
+    assert [f.reason for f in res.failures] == ["no_base"]
+    assert "EMIT WHOLE" in res.errors[0]

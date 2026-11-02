@@ -61,7 +61,6 @@ class Config:
     _MOE_30B_FAST = _roster._MOE_30B_FAST
     _MOE_80B_Q8 = _roster._MOE_80B_Q8
     _MOE_230B = _roster._MOE_230B
-    _MOE_122B = _roster._MOE_122B
     _MOE_35B = _roster._MOE_35B
     _DENSE_27B = _roster._DENSE_27B
     _MUSE_GLIMMER_30B = _roster._MUSE_GLIMMER_30B

@@ -27,6 +27,7 @@ together.
 
 | Release | Date | Theme |
 |---|---|---|
+| **v0.7.0** | 2026-10-30 | **Roster and serving.** The reviewer moves to Qwen3.8-Flash-Next, the design phase to Qwen3.8-27B and `llama-server` to upstream v0.7.0, each on a blind eval; `ornith` joins the implementer rotation, and the plan gate refuses acceptance criteria no run can decide. |
 | **v0.6.1** | 2026-10-03 | **Serving and stability.** `llama-server` moves to upstream v0.5.0, the server survives a bad boot, and a VM that never ran the code can no longer reach a review gate. |
 | **v0.6.0** | 2026-09-29 | **Layering.** Imports point one way, each decision has one home, and language-specific logic sits behind one interface. The roster is what telemetry says is used. |
 | **v0.5.0** | 2026-09-27 | **Honest guards.** A guard reports what it observed and names a cause only when it has isolated one. Runs 56–68 all reached release approval, and LLab (Objective-C and C++) joined Electric Sheep and Centipede as a third target. |
@@ -224,17 +225,16 @@ for method, prefill figures, and the caveat about raw-vs-proxy numbers).
 
 | Agent | Role | Model | Active/Total | Context | KV | GPU offload | Decode tok/s |
 |-------|------|-------|--------------|---------|-----|-------------|-----:|
-| `implementer` | Default implementation | Qwen3.6-35B-A3B UD-Q4_K_M | 3B/35B | 64K | Q8_0 | ngl 41, n_cpu_moe 20 | 75.5 |
+| `implementer` | Default implementation | Qwen3.6-35B-A3B UD-Q4_K_M | 3B/35B | 64K | Q8_0 | ngl 41, n_cpu_moe 22 (DEV-940) | 73.6 ‡ |
 | `deep_implementer` | Deep reasoning | Qwen3-Coder-Next Q8_0 | 3B/80B | 256K | Q8_0 | ngl 48, cpu_moe | 26.9 |
 | `fast_implementer` | Fast implementation | Qwen3-Coder-30B Q4_K_M | 3B/30B | 64K | Q8_0 | ngl 49, n_cpu_moe 26 | 58.2 |
-| `deep_reviewer` | Reviewer | Qwen3.5-122B-A10B Q4_K_M | 10B/122B | 256K | Q8_0 | ngl 49, cpu_moe | 20.0 |
-| `synthesizer` | Synthesis and its repair round | Qwen3.5-122B-A10B Q4_K_M (shares `deep_reviewer`'s process) | 10B/122B | 256K | Q8_0 | ngl 49, cpu_moe | 20.0 |
-| `dense_architect` | Planner (interactive `architect` alias) | Qwen3.6-27B MTP Q4_K_M (dense) | 27B dense | 64K | Q4_0 | ngl 66, **n_cpu_ffn 33**, MTP speculative decode | 17.4 † |
+| `deep_reviewer` | Reviewer (DEV-935) | Qwen3.8-Flash-Next UD-Q4_K_XL | 6B/125B + 51B n-gram | 128K | Q8_0 | ngl 49, cpu_moe, `reasoning_effort=medium` | 24.4 ‡ |
+| `synthesizer` | Synthesis and its repair round | Qwen3.8-Flash-Next UD-Q4_K_XL (shares `deep_reviewer`'s process) | 6B/125B + 51B n-gram | 128K | Q8_0 | ngl 49, cpu_moe, `reasoning_effort=medium` | 24.4 ‡ |
+| `dense_architect` | Planner | Qwen3.6-27B MTP Q4_K_M (dense) | 27B dense | 64K | Q4_0 | ngl 66, **n_cpu_ffn 33**, MTP speculative decode | 17.4 † |
 | `moe_implementer` | Implementation | MiniMax M2.5 Q4_K_M | 10B/230B | 116K | Q4_0 | ngl 62, cpu_moe | 11.2 |
 | `glimmer_implementer` | Retry-only implementation | Muse-Glimmer-30B UD-Q4_K_XL | 3B/30B | 64K | Q4_0 | ngl 40, `--swa-full` | 13.2 § |
-| `qwen38_architect` | Architect, the design phase (DEV-928) | Qwen3.8-27B UD-Q4_K_M (dense) | 27B dense | 64K | Q4_0 | ngl 66, n_cpu_ffn 38, MTP speculative decode, `reasoning_effort=medium` | — |
-| `ornith` | Retry-only implementation (DEV-931) | Ornith-1.5-35B-A3B Q4_K_M | 3B/35B | 64K | Q8_0 | ngl 41, n_cpu_moe 20, `--reasoning-budget 4096` (DEV-931) | — |
-| `flashnext_reviewer`, `flashnext_architect` | Eval arms only (DEV-930, not in any rotation) | Qwen3.8-Flash-Next UD-Q4_K_XL | 6B/125B + 51B n-gram | 128K | Q8_0 | ngl 49, cpu_moe, `reasoning_effort=medium` | — |
+| `qwen38_architect` | Architect, the design phase (DEV-928) | Qwen3.8-27B UD-Q4_K_M (dense) | 27B dense | 64K | Q4_0 | ngl 66, n_cpu_ffn 38, MTP speculative decode, `reasoning_effort=medium` | 20.5 ‡ |
+| `ornith` | Retry-only implementation (DEV-931) | Ornith-1.5-35B-A3B Q4_K_M | 3B/35B | 64K | Q8_0 | ngl 41, n_cpu_moe 20, `--reasoning-budget 4096` (DEV-931) | 72.7 ‡ |
 
 † Measured 2026-09-19 through the managed path on a 53,333-token architect
 prompt ([DEV-744](https://keith-merrill4.atlassian.net/browse/DEV-744)); the old
@@ -246,19 +246,25 @@ comparable to it — re-measuring the roster on one basis is
 § From the DEV-727 re-sweep, which drove llama-server directly rather than
 through the proxy, so it reads a little high against the other rows.
 
+‡ Short-prompt decode on llama-server v0.7.0 (DEV-933 benchmark, 2026-10-21);
+the 122B it replaced read 20.6 on the same bench. Through the chat path the
+two matched on wall at depth (DEV-934).
+
 **The roster is what the telemetry says is used.** `scripts/agent_usage.py`
 reads every request the server logged, the pipeline's own events, and what the
 daemon would dispatch to; an agent nothing wires and nothing has requested for
 a week is retired. DEV-839 retired eight that way (`reviewer`, `debugger`,
 `moe_architect`, `brainstorm`, `native_implementer`, and the eval arms
 `dense_architect_nothink`, `qwen38_architect` and `glimmer_architect`), along
-with their model files. A new model joins as an agent entry, gets evaluated,
+with their model files. `qwen38_architect` came back as an eval arm at
+`reasoning_effort=medium` and won the design phase (DEV-928). A new model joins as an agent entry, gets evaluated,
 and leaves the same way if it does not earn a slot.
 
 `glimmer_implementer` is the first Meta model the rotation has had. The
 rotation is ordered by what an attempt costs, and Glimmer averages 1,041 s a
-call, so it sits fourth: behind the fast decoders and MiniMax, ahead only of
-the `deep_implementer` window fallback (DEV-821). That membership is **retry-only** — it is deliberately absent from
+call, so it sits fifth: behind the fast decoders, `ornith` and MiniMax, ahead
+only of the `deep_implementer` window fallback (DEV-821). `ornith` joined the
+same way (DEV-931). That membership is **retry-only** — it is deliberately absent from
 `ALLOWED_IMPLEMENTER_AGENTS` and the complexity-tier map, so neither an
 architect recommendation nor a tier default can put it on attempt 1. Attempt 1
 is the only attempt whose agent is chosen rather than rotated into, which makes
@@ -284,12 +290,13 @@ per-config comments in `roster.py`, which record the measurements. KV-cache pref
 KV-quant noise produces diffuse quality degradation that is harder to manage
 than a smaller context.
 
-**One alias** resolves server-side (`Config.AGENT_ALIASES`):
-`architect` → `dense_architect`. The API's `request.model` and the `.env`
-`AUTONOMOUS_*_AGENT` settings accept it, though it isn't listed in
-`/v1/models`; the six model-versioned aliases had no requests and were retired
-with DEV-839. The interactive client
-(`--model`, `/agent`, `@name`) currently needs the canonical name.
+**No aliases.** `Config.AGENT_ALIASES` can map an extra name to an agent for
+`request.model`, the `.env` `AUTONOMOUS_*_AGENT` settings and the client's
+`--model` / `@name`, and `scripts/agent_usage.py` reports whether each is still
+requested. It is empty: an alias nobody requests is retired (the six
+model-versioned ones with DEV-839, `architect` with DEV-945), and `architect`
+in particular would be ambiguous, since `dense_architect` plans and
+`qwen38_architect` designs. Use the canonical name.
 
 ## Client Commands
 

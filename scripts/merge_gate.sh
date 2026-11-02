@@ -38,6 +38,17 @@ PY="$ROOT/venv/bin/python"
 
 [ -n "$BRANCH" ] || { echo "usage: $0 [--dry-run] [--no-push] <branch>" >&2; exit 2; }
 [ "$BRANCH" != "main" ] || { echo "refused: the branch to merge cannot be main" >&2; exit 2; }
+# DEV-913: self-target delivery pushes pipeline/<spec_id> to the local mirror
+# (the `pipeline` remote), never to GitHub, so a delivered branch is fetched
+# from there the first time it is gated.
+case "$BRANCH" in
+  pipeline/*)
+    if ! git rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null \
+        && git remote get-url pipeline >/dev/null 2>&1; then
+      git fetch --quiet pipeline "refs/heads/$BRANCH:refs/heads/$BRANCH" \
+        || { echo "refused: could not fetch $BRANCH from the pipeline remote" >&2; exit 2; }
+    fi ;;
+esac
 git rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null \
   || { echo "refused: no local branch named $BRANCH" >&2; exit 2; }
 [ -x "$PY" ] || { echo "refused: $PY is not executable" >&2; exit 2; }
