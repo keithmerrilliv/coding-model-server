@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Shipped
+
+- [DEV-401](https://keith-merrill4.atlassian.net/browse/DEV-401): the dashboard has a Video page for the GoPro consolidation pipeline (`~/Dev/video-pipeline`, a separate program). It shows the run's counts, input and output size, the running recording's stage and speed, an estimate of time remaining, a per-recording table and the event log, beside the existing GPU panel. The server's only part is `GET /v1/admin/video_pipeline`, which reads the pipeline's atomic JSON snapshot; whether a run is live comes from the process table, not the file, so a SIGKILLed run reads as stopped, not running. The estimate counts the transcode that follows a merge, because a job's progress restarts at each stage and would otherwise run backwards.
+
 ## v0.7.0 — 2026-10-30
 
 The roster and serving release ([DEV-944](https://keith-merrill4.atlassian.net/browse/DEV-944)): the reviewer rung moves to Qwen3.8-Flash-Next, the design phase to Qwen3.8-27B, `llama-server` to upstream v0.7.0 with the local patch retired, and `ornith` joins the implementer rotation. Each repoint rests on a blind, counterbalanced eval. Around them, delivery refuses the paths out of the test sandbox, a delivery the daemon owes survives a restart, and the plan gate refuses acceptance criteria no run can decide.

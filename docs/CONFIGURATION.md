@@ -268,6 +268,11 @@ gives an interactive session more room when you are working the board by hand.
 | `CODING_MODEL_DASHBOARD_PORT` | `3001` | Port. (Vite's dev server uses 3000.) |
 | `CODING_MODEL_DASHBOARD_ROOT` | `<repo>/dashboard/dist` | Directory served. Must contain a built SPA (`npm run build`). |
 
+### Video pipeline (`GET /v1/admin/video_pipeline`)
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `VIDEO_PIPELINE_STATE_DIR` | `~/.local/state/video-pipeline` | Directory holding `state.json`, the snapshot `~/Dev/video-pipeline` writes and the dashboard's Video page reads. Set it the same for the pipeline and the server, or the page reports "no state file". |
+
 ### Mac runner (`mac_runner/`, runs on macOS)
 
 Variables loaded from `~/.config/coding-model-runner/.env`.

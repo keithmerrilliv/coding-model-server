@@ -27,7 +27,7 @@ from coding_model_server.logging_filters import (
 from coding_model_server.mcp_service import AppleDeepDocsService
 from coding_model_server.memory_service import MemoryService
 from coding_model_server.metrics import gpu_sampler, host_sampler, request_metrics
-from coding_model_server.routes import admin, autonomous, chat, meta, memory
+from coding_model_server.routes import admin, autonomous, chat, meta, memory, video_pipeline
 from coding_model_server.web_search_service import WebSearchService
 
 # Configure logging
@@ -322,6 +322,7 @@ app.include_router(meta.router)
 app.include_router(memory.router)
 app.include_router(autonomous.router)
 app.include_router(admin.router)
+app.include_router(video_pipeline.router)
 app.include_router(chat.router)
 
 

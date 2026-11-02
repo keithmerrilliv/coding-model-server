@@ -9,6 +9,7 @@ import type { HostStatsResponse,
   GpuStatsResponse,
   ActiveModelResponse,
   RagStatsResponse,
+  VideoPipelineResponse,
 } from '../types/api';
 
 // API host defaults to the same host that served the dashboard, on port 5000.
@@ -96,4 +97,8 @@ export async function fetchActiveModel(): Promise<ApiResponse<ActiveModelRespons
 }
 export async function fetchRagStats(limit = 20): Promise<ApiResponse<RagStatsResponse>> {
   return request<RagStatsResponse>(`/v1/admin/rag_stats?limit=${limit}`);
+}
+
+export async function fetchVideoPipeline(): Promise<ApiResponse<VideoPipelineResponse>> {
+  return request<VideoPipelineResponse>('/v1/admin/video_pipeline');
 }

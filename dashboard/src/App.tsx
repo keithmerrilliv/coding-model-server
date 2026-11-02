@@ -11,6 +11,7 @@ import EndpointMetrics from './components/EndpointMetrics';
 import HostTelemetry from './components/HostTelemetry';
 import ActiveModelCard from './components/ActiveModelCard';
 import CurrentExecutionCard from './components/CurrentExecutionCard';
+import VideoPipeline from './components/VideoPipeline';
 
 const AuthGuard: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { adminKey } = useAuth();
@@ -86,6 +87,7 @@ const AppContent: React.FC = () => {
           <NavLink to="/" end>Overview</NavLink>
           <NavLink to="/metrics">Metrics</NavLink>
           <NavLink to="/specs">Specs</NavLink>
+          <NavLink to="/video">Video</NavLink>
         </nav>
       )}
       <main className="app-main">
@@ -93,6 +95,7 @@ const AppContent: React.FC = () => {
           <Route path="/" element={<AuthGuard><Overview /></AuthGuard>} />
           <Route path="/metrics" element={<AuthGuard><MetricsPage /></AuthGuard>} />
           <Route path="/specs" element={<AuthGuard><SpecsTable /></AuthGuard>} />
+          <Route path="/video" element={<AuthGuard><VideoPipeline /></AuthGuard>} />
           <Route path="/specs/:id" element={<AuthGuard><SpecDetail /></AuthGuard>} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
