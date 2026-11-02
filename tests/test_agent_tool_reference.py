@@ -95,6 +95,42 @@ class TestUpdaterIsWiredUp:
         assert "reset --hard" in body, "no rollback path"
         assert "--ff-only" in body, "a diverging upstream must not be merged unattended"
 
+    def test_updater_finds_the_repo_it_lives_in(self, tmp_path):
+        """DEV-948: the unit sets no REPO, so the script must locate the repo
+        itself. A copy in a scratch tree with no MCP checkout logs its refusal
+        under that tree's var/, naming that tree's tools/ path; it stops before
+        reading a key or calling the server."""
+        import os
+        import pathlib
+        import shutil
+        import subprocess
+        root = pathlib.Path(__file__).resolve().parents[1]
+        repo = tmp_path / "checkout"
+        (repo / "scripts").mkdir(parents=True)
+        script = repo / "scripts" / "update_deep_docs_mcp.sh"
+        shutil.copy2(root / "scripts" / "update_deep_docs_mcp.sh", script)
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("REPO", "MCP_UPDATE_STATE_DIR")}
+        proc = subprocess.run(["bash", str(script)], env=env, cwd=tmp_path,
+                              capture_output=True, text=True, timeout=30)
+        assert proc.returncode == 2
+        log = (repo / "var" / "mcp_update" / "update.log").read_text()
+        assert f"{repo}/tools/appledeepdoc-mcp is not a git checkout" in log
+
+    def test_no_script_falls_back_to_the_placeholder_home(self):
+        """DEV-948: /home/youruser is rewritten only in installed systemd
+        templates, so a script default pointing there fails on every host."""
+        import pathlib
+        root = pathlib.Path(__file__).resolve().parents[1]
+        offenders = [
+            str(p.relative_to(root))
+            for p in (root / "scripts").rglob("*")
+            if p.is_file() and "archive" not in p.parts
+            and p.suffix in (".sh", ".py")
+            and ":-/home/youruser" in p.read_text(errors="replace")
+        ]
+        assert offenders == []
+
     def test_timers_do_not_collide(self):
         """The docs refresh runs Sun 02:00 for hours; this must not overlap."""
         import pathlib
